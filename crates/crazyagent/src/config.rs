@@ -2,7 +2,7 @@ use crate::protocol::{ConfigId, CredentialRef};
 use crate::routing::{ApprovalMode, ResourceBudget, RoutingPolicy, SchedulingPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +22,8 @@ pub struct Settings {
         skip_serializing_if = "crate::memory::KnowledgePolicy::is_default"
     )]
     pub knowledge: crate::memory::KnowledgePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_access: Option<ModelAccess>,
 }
 
 impl Default for Settings {
@@ -36,6 +38,133 @@ impl Default for Settings {
             revoked_destinations: vec![],
             routing: RoutingPolicy::default(),
             knowledge: crate::memory::KnowledgePolicy::default(),
+            model_access: None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelAccess {
+    pub accounts: Vec<CredentialRef>,
+    pub connections: Vec<ModelConnection>,
+    pub pools: Vec<AccountPool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConnection {
+    pub id: CredentialRef,
+    pub provider: CredentialRef,
+    pub harness: CredentialRef,
+    pub protocol: CredentialRef,
+    pub account_ref: CredentialRef,
+    pub endpoint: ModelEndpoint,
+    pub model: ModelReference,
+    pub auth: ModelAuthentication,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelReference {
+    pub id: String,
+    pub author: CredentialRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelEndpoint {
+    Http { url: String },
+    Native {},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelAuthentication {
+    None {},
+    ApiKey { credential_ref: CredentialRef },
+    Oauth { credential_ref: CredentialRef },
+    NativeManaged { profile_ref: CredentialRef },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountPool {
+    pub id: CredentialRef,
+    pub members: Vec<CredentialRef>,
+    pub projects: Vec<CredentialRef>,
+    pub roles: Vec<CredentialRef>,
+    pub fallback_allowed: bool,
+}
+
+impl ModelAccess {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !bounded_unique_refs(&self.accounts, false)
+            || self.connections.len() > 64
+            || self.pools.len() > 64
+        {
+            return Err(ConfigError("invalid_model_access".into()));
+        }
+        let connections: BTreeSet<_> = self.connections.iter().map(|c| &c.id).collect();
+        let pools: BTreeSet<_> = self.pools.iter().map(|p| &p.id).collect();
+        if connections.len() != self.connections.len()
+            || pools.len() != self.pools.len()
+            || self.connections.iter().any(|connection| {
+                !self.accounts.contains(&connection.account_ref)
+                    || connection.model.id.is_empty()
+                    || connection.model.id.len() > 256
+                    || !connection
+                        .model
+                        .id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte))
+                    || !connection
+                        .endpoint
+                        .valid_for(&connection.protocol, &connection.auth)
+            })
+            || self.pools.iter().any(|pool| {
+                !bounded_unique_refs(&pool.members, true)
+                    || !bounded_unique_refs(&pool.projects, true)
+                    || !bounded_unique_refs(&pool.roles, true)
+                    || pool.members.iter().any(|id| !connections.contains(id))
+            })
+        {
+            return Err(ConfigError("invalid_model_access".into()));
+        }
+        Ok(())
+    }
+}
+
+fn bounded_unique_refs(values: &[CredentialRef], required: bool) -> bool {
+    values.len() <= 64
+        && (!required || !values.is_empty())
+        && values.iter().collect::<BTreeSet<_>>().len() == values.len()
+}
+
+impl ModelEndpoint {
+    fn valid_for(&self, protocol: &CredentialRef, auth: &ModelAuthentication) -> bool {
+        match self {
+            Self::Native {} => protocol.as_str() == "native",
+            Self::Http { url: value } => {
+                if protocol.as_str() == "native"
+                    || matches!(auth, ModelAuthentication::NativeManaged { .. })
+                    || value.len() > 2048
+                    || !value.contains("://")
+                    || value
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+                {
+                    return false;
+                }
+                url::Url::parse(value).is_ok_and(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        && url.has_host()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                })
+            }
         }
     }
 }
@@ -81,11 +210,18 @@ pub struct EffectiveConfig {
 impl EffectiveConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_settings(&self.settings)?;
-        let legacy = self.descriptors.len() == 7;
-        let knowledge = self.descriptors.len() != 7 && self.descriptors.len() != 17;
-        let defaults = setting_values(&Settings::default(), !legacy, knowledge);
-        let values = setting_values(&self.settings, !legacy, knowledge);
-        if (legacy && !self.settings.routing.is_default())
+        let routing = self
+            .descriptors
+            .keys()
+            .any(|name| name.starts_with("routing."));
+        let knowledge = self
+            .descriptors
+            .keys()
+            .any(|name| name.starts_with("knowledge."));
+        let model_access = self.settings.model_access.is_some();
+        let defaults = setting_values(&Settings::default(), routing, knowledge, model_access);
+        let values = setting_values(&self.settings, routing, knowledge, model_access);
+        if (!routing && !self.settings.routing.is_default())
             || (!knowledge && !self.settings.knowledge.is_default())
             || self.descriptors.len() != values.len()
             || self.descriptors.iter().any(|(name, descriptor)| {
@@ -130,6 +266,7 @@ struct ConfigFile {
     revoked_destinations: Option<Vec<CredentialRef>>,
     routing: Option<RoutingFile>,
     knowledge: Option<KnowledgeFile>,
+    model_access: Option<ModelAccess>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -165,6 +302,9 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
     let mut origins = BTreeMap::new();
     for (path, origin) in [(global, Origin::Global), (project, Origin::Project)] {
         let file = read_config(path)?;
+        if origin == Origin::Project && file.model_access.is_some() {
+            return Err(ConfigError("model_access_requires_global_scope".into()));
+        }
         if origin == Origin::Project
             && file
                 .routing
@@ -179,8 +319,9 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
     }
     validate_settings(&settings)?;
     let knowledge = origins.keys().any(|name| name.starts_with("knowledge."));
-    let defaults = setting_values(&Settings::default(), true, knowledge);
-    let values = setting_values(&settings, true, knowledge);
+    let model_access = settings.model_access.is_some();
+    let defaults = setting_values(&Settings::default(), true, knowledge, model_access);
+    let values = setting_values(&settings, true, knowledge, model_access);
     let descriptors = values
         .iter()
         .map(|(name, value)| {
@@ -193,7 +334,7 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
             let effect_timing = match name.as_str() {
                 "revoked_destinations" => EffectTiming::Immediate,
                 "routing.global_capacity" | "routing.scheduling" => EffectTiming::Immediate,
-                "allowed_destinations" => EffectTiming::NewTask,
+                "allowed_destinations" | "model_access" => EffectTiming::NewTask,
                 n if n.starts_with("routing.") => EffectTiming::NewTask,
                 "knowledge.processing_destinations" => EffectTiming::Immediate,
                 n if n.starts_with("knowledge.") => EffectTiming::NewTask,
@@ -213,7 +354,10 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
         })
         .collect();
     assert!(origins.len() <= values.len());
-    assert_eq!(values.len(), if knowledge { 25 } else { 17 });
+    assert_eq!(
+        values.len(),
+        17 + 8 * usize::from(knowledge) + usize::from(model_access)
+    );
     from_settings(settings, descriptors)
 }
 
@@ -238,7 +382,8 @@ fn read_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     if bytes.len() > 65536 {
         return Err(ConfigError("configuration exceeds 64 KiB".into()));
     }
-    let config: ConfigFile = toml::from_str(&bytes).map_err(|e| ConfigError(e.to_string()))?;
+    let config: ConfigFile =
+        toml::from_str(&bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
     if config.version.is_some_and(|v| v != 1) {
         return Err(ConfigError("unsupported config version".into()));
     }
@@ -267,6 +412,10 @@ fn apply_file(
         bulk_queue_capacity,
         allowed_destinations
     );
+    if let Some(model_access) = file.model_access {
+        settings.model_access = Some(model_access);
+        origins.insert("model_access".into(), origin.clone());
+    }
     if let Some(revocations) = file.revoked_destinations {
         for destination in revocations {
             if !settings.revoked_destinations.contains(&destination) {
@@ -319,6 +468,7 @@ fn setting_values(
     settings: &Settings,
     include_routing: bool,
     include_knowledge: bool,
+    include_model_access: bool,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut values = serde_json::to_value(settings)
         .unwrap()
@@ -327,6 +477,13 @@ fn setting_values(
         .clone();
     values.remove("routing");
     values.remove("knowledge");
+    values.remove("model_access");
+    if include_model_access {
+        values.insert(
+            "model_access".into(),
+            serde_json::to_value(&settings.model_access).unwrap(),
+        );
+    }
     if include_routing {
         let routing = serde_json::to_value(&settings.routing).unwrap();
         for (name, value) in routing.as_object().unwrap() {
@@ -345,6 +502,9 @@ fn setting_values(
 pub fn validate_settings(settings: &Settings) -> Result<(), ConfigError> {
     settings.routing.validate().map_err(ConfigError)?;
     settings.knowledge.validate().map_err(ConfigError)?;
+    if let Some(model_access) = &settings.model_access {
+        model_access.validate()?;
+    }
     if !(1..=1024).contains(&settings.queue_capacity)
         || !(1..=128).contains(&settings.clients_max)
         || !(10..=30000).contains(&settings.timeout_ms)
@@ -369,7 +529,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 25);
+    assert!(descriptors.len() <= 25 + usize::from(settings.model_access.is_some()));
     Ok(EffectiveConfig {
         id,
         settings,
