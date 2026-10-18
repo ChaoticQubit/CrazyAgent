@@ -2,7 +2,7 @@
 
 ## Current authority
 
-Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-062 govern the current implementation phase. Later explicit owner instructions take precedence.
+Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-070 govern the current implementation phase and scoped authorizations. Later explicit owner instructions take precedence.
 
 The owner explicitly selected leader-coordinated subagent implementation in visible Herdr panes, one writer per isolated Git worktree. Do not substitute invisible background agents or several writers in one checkout.
 
@@ -30,7 +30,17 @@ Use Rust runtime assertions for internal invariants that the test can trip. Vali
 
 Run `make check` for the available workspace suite. It checks formatting and lint, tests, builds and tests again; failures propagate. The foundation starts with no application tests, and this is not evidence of implemented behavior.
 
-## Boundaries
+## Development principles from workflow research
+
+1. Measure accepted outcomes. For each slice, name the user-visible behavior, acceptance criteria and smallest real check before coding. Record verified outcomes, human intervention, recovery failures, elapsed time and resource or token use when measured. Agent count, code volume and a green command with zero relevant tests are not completion metrics.
+2. Compose the smallest working parts. Prefer the existing implementation, standard library and approved dependencies before writing a new component. Keep harness integration narrow and preserve Rust ownership of policy and durable state. Do not fork or port a harness until a demonstrated requirement cannot be met through its supported interface.
+3. Separate reasoning from execution authority. Agents may propose plans and tool actions; deterministic engine rules admit destinations, credentials, worktrees, resources and effects. Keep credentials and protected engine/verifier state outside worker authority. A terminal, worktree, permission prompt or saved conversation alone proves no isolation or live-worker recovery guarantee.
+4. Define verification before delegated work. Preserve human-approved acceptance baselines and independent code and test-integrity checks. Bind results to the actual source and configuration tested. Retain failures, interrupted attempts and unavailable prerequisites; never let a coding worker weaken the check that decides its own completion.
+5. Bound parallel capacity deliberately. Use named resource ownership, bounded queues, explicit CPU, memory, process, time, output, retry and spending limits, plus cancellation and cleanup evidence where applicable. Treat extra workers and remote execution as capacity decisions. Measure behavior before claiming a performance or reliability gain.
+
+DEC-070 applies these principles to our own development and product acceptance. Symvibe is a competitor and interaction reference. fx is a future harness candidate; Vercel Sandbox is a future optional execution backend. Preserve the accepted V1 scope and existing local execution work. Additional harnesses, sandbox choices and competitor features require their own qualified slices when scheduled. Research findings describe documented behavior, not a demonstrated advantage of CrazyAgent.
+
+## Execution boundaries
 
 Keep secrets out of source, commands, environment, logs and reports. Store only profile/credential references. Do not install tools, modify global configuration, connect accounts or spend against a new provider/destination without the required authorization.
 
