@@ -206,7 +206,14 @@ fn verify_endpoint(path: &Path) -> Result<(), EngineError> {
 }
 
 fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
-    if stream.peer_cred().map_err(io_error)?.uid() != rustix::process::getuid().as_raw() {
+    #[cfg(target_os = "macos")]
+    let uid = nix::unistd::getpeereid(stream)
+        .map_err(io_error)?
+        .0
+        .as_raw();
+    #[cfg(not(target_os = "macos"))]
+    let uid = stream.peer_cred().map_err(io_error)?.uid();
+    if uid != rustix::process::getuid().as_raw() {
         return Err(EngineError("peer_owner_mismatch".into()));
     }
     Ok(())
@@ -439,6 +446,22 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn peer_without_kernel_credentials_is_rejected() {
+        let socket = nix::sys::socket::socket(
+            nix::sys::socket::AddressFamily::Unix,
+            nix::sys::socket::SockType::Stream,
+            nix::sys::socket::SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        let stream = std::os::unix::net::UnixStream::from(socket);
+        stream.set_nonblocking(true).unwrap();
+        let stream = UnixStream::from_std(stream).unwrap();
+        assert!(verify_peer(&stream).is_err());
+    }
 
     #[test]
     #[should_panic]

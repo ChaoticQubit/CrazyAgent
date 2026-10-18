@@ -87,6 +87,54 @@ async fn endpoint_rejects_insecure_and_preexisting_paths() {
 }
 
 #[tokio::test]
+async fn complete_request_commits_when_peer_disconnects_before_accept() {
+    let root = root();
+    let cfg = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let db_path = root.path().join("db");
+    let engine = Arc::new(Engine::open(&db_path, cfg.clone()).await.unwrap());
+    let path = root.path().join("engine.sock");
+    let server = Server::bind(&path, engine.clone(), &cfg).unwrap();
+    let mut operation = request("disconnected-before-accept");
+    operation.command = Command::CreateProject {
+        project_id: ProjectId::new("disconnected-project").unwrap(),
+        spec: ProjectSpec {
+            name: "Disconnected request".into(),
+            repositories: vec![],
+        },
+    };
+    let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    stream
+        .write_all(&encode_frame(&operation).unwrap())
+        .await
+        .unwrap();
+    drop(stream);
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(server.run(stopped));
+    let db =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut committed = false;
+    for _ in 0..100 {
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM operations WHERE id=?1",
+                [operation.request_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if count == 1 {
+            committed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop.send(()).unwrap();
+    running.await.unwrap().unwrap();
+    engine.close().await.unwrap();
+    assert!(committed);
+}
+
+#[tokio::test]
 async fn socket_capacity_and_malformed_frames_fail_without_success() {
     let root = root();
     let g = root.path().join("g");
