@@ -12,6 +12,7 @@ use std::process::ExitCode;
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME\n\
+crazyagent tui SOCKET\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -37,6 +38,29 @@ fn main() -> ExitCode {
     if args == ["--version"] {
         println!("crazyagent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if args == ["tui", "--help"] {
+        println!("crazyagent tui SOCKET");
+        return ExitCode::SUCCESS;
+    }
+    if args.first().is_some_and(|arg| arg == "tui") {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent tui SOCKET".to_owned())
+        } else {
+            crazyagent::engine::Client::new(
+                Path::new(&args[1]).to_path_buf(),
+                std::time::Duration::from_secs(1),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|client| crazyagent::tui::run_tui(client).map_err(|e| e.to_string()))
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
