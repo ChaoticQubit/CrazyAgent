@@ -18,6 +18,8 @@ The owner explicitly deferred code and security reviews for this development pha
 
 ## Implementation and testing
 
+Maintain docs/implementation-decisions.md under DEC-067. Record high-level and function-level choices with stable IMP IDs, alternatives, pros/cons, costs, real verification and revisit conditions. Each production function must map to relevant decisions; common decisions may cover several symbols. Record new choices durably as they are made in the worker's own .local-state/implementation-decisions.md, and have the leader consolidate them into the tracked log before task integration. Label retrospective inferences. One named writer owns the shared log at a time.
+
 Use engineering-principles, the owner's minimum-working-code ladder, tiger-style and TDD. The review portions of skills are overridden by DEC-061 during this phase.
 
 Write the missing-behavior test, observe the intended failure, implement the minimum behavior, build and rerun tests. No mocks at any level. Use real production functions and real filesystem/process/database/native systems. Temporary real files and synthetic input data are permitted; fabricated provider/engine replies are not runtime evidence.
