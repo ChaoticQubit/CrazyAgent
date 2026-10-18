@@ -12,7 +12,7 @@ Artifact paths must stay inside the designated evidence directory after resolvin
 
 | Capability | Required proof | Current status |
 |---|---|---|
-| Confinement | Permitted candidate writes succeed; forbidden host/trusted writes, symlink escapes and network actions fail; child restrictions and resource limits are measured | Unavailable; actual filesystem/network probes pass, but resource controls, engine endpoint denial and default writable exceptions remain unqualified. See [native boundary results](native-boundary-results.md) |
+| Confinement | Permitted candidate writes succeed; forbidden host/trusted writes, symlink escapes and network actions fail; child restrictions and resource limits are measured | Unavailable; actual filesystem/network and worker/descendant engine-denial probes pass, but complete resource controls and default writable exceptions remain unqualified. See [native boundary results](native-boundary-results.md) |
 | Live recovery | The original live worker survives an engine-only crash and reattaches without duplicate dispatch | Unavailable; runner implementation and native evidence are pending |
 | Native authentication | The chosen account/API/local-endpoint mode works inside the admitted profile without exposing credentials | Unavailable; no provider authentication qualification has run |
 | Native child control | Stable child identity, state, targeted cancellation and recovery work through the chosen native harness | Unavailable; adapter implementation and native evidence are pending |

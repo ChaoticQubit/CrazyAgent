@@ -1,6 +1,20 @@
 # Native execution boundary results
 
-Date: October 17, 2026. Status: probe implementation verified; complete confinement unavailable. Task 2 is not fully complete. Source: worker `808f108`, integrated as `381d6d6`.
+Date: October 18, 2026. Status: filesystem/network and actual worker/descendant engine-denial subsets verified; complete confinement unavailable. Task 2 is not fully complete.
+
+## Current worker-to-engine evidence
+
+Source worker `71e9ce7`, integrated as `a88573d`, adds a real disposable engine process and uses the existing protocol, private Unix socket and SQLite state. The leader-native focused run passed. Both unconfined worker and child successfully wrote candidate data, read and wrote synthetic protected state, sent SIGCONT to the owned engine, connected to its socket and submitted real project-control operations. The same operations under sandbox-runtime 0.0.80 retained candidate writes and returned EPERM for protected reads/writes, signals, socket contact and control requests in both worker and child. Host-side persisted project IDs contained only the host and two unconfined positive-control IDs. The fixture engine was reaped, with no unrelated process signaling.
+
+The focused run retained raw observations and policy in `/private/tmp/crazyagent-web-LdBt4Z`. Its `engine-boundary-evidence/confined-evidence.json` SHA-256 is `bd761695fe77447b1b68431c4c7cb4efca86b2433da7cb0e45316f191a8d0cbd`. The leader log is `.worktrees/worker-engine-boundary/.local-state/native-leader-engine-boundary.log`. Earlier outer-sandbox startup failures remain explicit infrastructure failures.
+
+The integrated native make check passed formatting, strict Clippy, 50 real tests, build and the same 50 tests again, with zero failures or ignored tests. Log `.local-state/integrated-engine-boundary-check.log` SHA-256 is `e6d7a23ce16dc4673a6022461d43ffced59cdf102b0cc3c780e376180184a27d`. IMP-046 through IMP-049 retain function decisions, fixture lifecycle and actual native results.
+
+The tested engine-denial subset does not prove every host path, every process-control operation, an aggregate CPU budget, memory/PID enforcement or runtime default write exceptions. Complete native admission remains unavailable. The early rejected-admission checkpoint in [the forecast](forecast.md) remains historical and is not rewritten into a pass.
+
+## Original filesystem and resource evidence
+
+Date: October 17, 2026. Source: worker `808f108`, integrated as `381d6d6`. The original observations and failed attempts below remain retained.
 
 ## Tested runtime and scope
 

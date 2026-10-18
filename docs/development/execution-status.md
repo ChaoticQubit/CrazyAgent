@@ -1,8 +1,14 @@
 # CrazyAgent execution status
 
-Date: October 17, 2026.
+Date: October 18, 2026.
 
-Authority: DEC-060 through DEC-064. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
+Authority: DEC-060 through DEC-070. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
+
+## Current native-boundary checkpoint
+
+Source a88573d integrates the actual worker-to-engine proof from worker 71e9ce7. Host and unconfined worker/child positive controls succeeded; sandboxed worker and child candidate writes succeeded while protected state read/write, engine signaling, socket contact and actual control requests returned EPERM. The complete integrated native gate passed 50 tests, build and 50 tests again, with zero failed or ignored tests. Exact artifacts and limits are in docs/qualification/native-boundary-results.md and IMP-046 through IMP-049. Resource limits and runtime default write exceptions remain unqualified; no native execution profile is admitted.
+
+Task 6 remains active in isolated w11:p3. The existing accepted plan continues; the earlier rejected-admission forecast is retained in docs/qualification/forecast.md. Reviews remain deferred under DEC-061.
 
 ## Current checkpoint after research
 
