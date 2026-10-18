@@ -10,5 +10,6 @@ pub mod protocol;
 pub mod qualification;
 pub mod routing;
 pub mod storage;
+pub mod tui;
 pub mod verification;
 pub mod worktrees;
