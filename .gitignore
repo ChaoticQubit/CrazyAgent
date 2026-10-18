@@ -1,0 +1,15 @@
+graphify-out
+.worktrees/
+.superpowers/
+.local-state/
+target/
+node_modules/
+dist/
+.DS_Store
+.env*
+.credentials*
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
