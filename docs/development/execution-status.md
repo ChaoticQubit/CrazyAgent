@@ -2,9 +2,17 @@
 
 Date: October 18, 2026.
 
-Authority: DEC-060 through DEC-070. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
+Authority: DEC-060 through DEC-071. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
 
-## Current ownership checkpoint
+## Current coordination checkpoint
+
+Source 19dacd7 integrates Task 7 authority core from frozen worker 82951c6. Native make check passed formatting, strict lint, 90 tests, offline build and the same 90 tests again, zero failures or ignored tests. All seven source hashes match the tested worktree. IMP-061 through IMP-070 preserve architecture, every production function, configuration compatibility, test evidence and limits. The retained gate log is .worktrees/coordination/.local-state/task-07-leader-native-check-03.log, SHA-256 7f897c309937ea5d2009b999ac4ea3062588aa5d856deb60d5a69f4e7ff08ee4.
+
+The core now persists typed plans, owner approval, bounded all-role reservations, deterministic allocation policy, scoped mailbox history and revocation. Planning holds are not native dispatch or completed work. Production routing refuses unqualified native targets, and authenticated native peer delivery, live child control, recovery and quiescence remain open. All downstream runtime and client release gates remain required.
+
+Task 8, scoped knowledge, managed assets and the human inbox, is next under IMP-060 after the coordination writer releases shared core files. The DEC-071 containment helper has eighteen passing leader-native local tests, including actual engine/SQLite controls and exact owned-socket cleanup. Its single bounded Docker experiment failed the first case's loopback-only topology expectation and stopped after one container, with cleanup confirmed and host state unchanged. Four later cases remain unexecuted; no automatic retry or runtime adoption followed. See docs/qualification/linux-containment-results.md and IMP-071 through IMP-079. Historical checkpoint sections below retain their original sequence and are superseded by this section where status differs. Reviews remain deferred under DEC-061.
+
+## Earlier ownership checkpoint
 
 Source c0a3731 integrates Task 6 ownership core from worker 84de215. The complete native make check passed 65 tests, build and 65 tests again, zero failed or ignored. It exercises actual Git repositories, SQLite reservations, concurrent ownership, preserved tracked/untracked bytes, hostile repository settings and interrupted allocation reconciliation. Source decisions and exact limits are in IMP-050 through IMP-056. Lease release stays unavailable until qualified native writer/descendant quiescence exists. Unsupported repository forms and initial fixed size limits are explicit, not silent compatibility promises. Full native profile admission and downstream V1 integration remain open.
 
