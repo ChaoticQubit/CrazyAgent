@@ -468,3 +468,33 @@ Commit handoff: scoped git add failed because the workspace sandbox denied creat
 The unchanged native `make check` exited 0 in the owner-authorized local-probe environment. Formatting, strict Clippy, 17 library tests, 5 filesystem/network boundary tests, 3 CLI tests and 1 resource-observation test passed; build and the complete same suites passed again. No tests were ignored. Raw output is retained at `.worktrees/execution-boundary/.local-state/leader-native-check.log`. This supersedes the earlier workspace-sandbox EPERM as the final execution result, without erasing that historical infrastructure failure.
 
 A source/document consistency check found 22/22 Rust production definitions across `isolation.rs` and `crazyagent-boundary-child.rs` mapped to the decision index above. Fixed embedded JavaScript probe functions and callbacks are mapped separately. These checks establish implementation behavior and documentation coverage, not a completed security/code review or a fully admitted native profile. The resource controller, engine-endpoint denial and default writable exceptions remain explicit gaps. DEC-069 authorizes the bounded Docker replacement prototype documented in `docs/qualification/resource-boundary-proposal.md`; permanent runtime adoption remains undecided.
+
+## IMP-027: Reuse the Docker CLI for an isolated qualification experiment
+
+Date: October 17, 2026. Status: selected before implementation. Task: DEC-069 resource-boundary prototype. Scope: development-only qualification script, real integration check, project-local Docker client configuration and immutable image.
+
+Goal and constraints: collect real cgroup evidence with the smallest existing toolchain, preserve the owner's exact experiment caps and leave unrelated Docker workloads untouched. The Rust application engine remains the product implementation.
+
+Decision and rationale: use the installed Docker CLI with the verified local Unix endpoint and an empty project-local Docker configuration. This avoids user credential helpers during anonymous official-image acquisition. The acquired image identity and platform match the approved immutable Linux arm64 manifest. Use existing Python standard-library tooling only to supervise this development experiment, retain bounded artifacts and drive real checks; do not add Python as a product runtime dependency or introduce a Docker SDK.
+
+Each disposable container has a unique experiment label and name. Verify its image, labels and enforced configuration before starting. Run one at a time with the approved caps, no network, read-only root, dropped capabilities, no-new-privileges, an unprivileged user and no host mounts or socket access. Cleanup may target only identity-checked containers from this experiment. A 15-second external execution deadline and bounded output apply even when expected memory/PID exhaustion occurs. Preserve postmortem state and counters before removal.
+
+Alternatives and costs: a new Rust Docker SDK adds dependencies and API surface before selecting a product runtime. Shell pipelines provide less precise identity/deadline/error handling. Reusing an existing application container risks unrelated work and loses clean provenance. A short Python qualification tool costs a separate development command and must be replaced or explicitly retained if a production backend is later adopted.
+
+Acceptance and verification: test before implementation, use actual Docker/SQLite-independent local systems with no mocks or skipped tests, demonstrate successful positive controls, memory OOM, PID exhaustion and CPU throttling, and verify no experiment containers remain. Report CPU rate separately from aggregate CPU time; retain missing native/full-boundary requirements. Source, tests and function rationale are integrated only after the actual bounded command passes.
+
+Risks and revisit: Docker daemon access itself is privileged developer authority and must never be forwarded into a coding sandbox. This probe does not qualify the Docker API as a product control plane, repository mount safety, native authentication, recovery or full isolation. Permanent runtime adoption remains an owner decision after evidence.
+
+## IMP-028: Qualify RCLI's persistent host contract before claiming native leadership
+
+Date: October 17, 2026. Status: source-grounded qualification direction; implementation pending. Task: Task 3 preparation. Scope: pinned RCLI CLI, AgentController assembly, JsonEventStream and provider factory.
+
+Goal and constraints: reuse the selected open-source harness for central leadership while keeping Rust policy authoritative and preserving the original live worker across an engine-only restart. No account/provider calls or source execution are authorized by source inspection.
+
+Decision and rationale: treat the observed one-turn CLI and JSON event output as insufficient for persistent host qualification. Trace and reuse the actual controller/tool/context components through a dedicated host entrypoint if the constructors permit it, then qualify bounded input, permissions, cancellation and reconnect against the original process. Keep its stream-local sequence separate from the engine's durable cursor. Retain observable provider events without claiming hidden reasoning. Exact inspected source points and remaining tests are recorded in `docs/qualification/rcli-host-readiness.md`.
+
+Alternatives and costs: repeated one-shot CLI launches are simple but do not meet live identity/recovery. Reimplementing the complete agent loop in Rust duplicates a selected upstream harness and its maintenance. A dedicated host entrypoint adds a small maintained integration surface whose actual assembly and dependency closure still need verification; source construction alone is not a successful native test.
+
+Acceptance and verification: inspect the pinned production closure and startup effects before execution, then pass two actual turns, permission round trip, original-process reconnect, cancellation and logging-failure checks under an admitted profile and separately approved account/budget. Do not infer Claude Code/Codex subscription compatibility from the observed Backboard/BYOK provider factory.
+
+Risks and revisit: RCLI declares no public exports map and its controller assembly includes multiple supporting services. Trace those constructors before choosing the smallest host composition; forecast additional work if it cannot meet the accepted contract. Permanent execution runtime and native account authority remain unresolved. No new runtime dependency or source fork is shipped by this preparation decision.
