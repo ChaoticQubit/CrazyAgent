@@ -4,7 +4,11 @@ Date: October 18, 2026.
 
 Authority: DEC-060 through DEC-070. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
 
-## Current native-boundary checkpoint
+## Current ownership checkpoint
+
+Source c0a3731 integrates Task 6 ownership core from worker 84de215. The complete native make check passed 65 tests, build and 65 tests again, zero failed or ignored. It exercises actual Git repositories, SQLite reservations, concurrent ownership, preserved tracked/untracked bytes, hostile repository settings and interrupted allocation reconciliation. Source decisions and exact limits are in IMP-050 through IMP-056. Lease release stays unavailable until qualified native writer/descendant quiescence exists. Unsupported repository forms and initial fixed size limits are explicit, not silent compatibility promises. Full native profile admission and downstream V1 integration remain open.
+
+## Earlier native-boundary checkpoint
 
 Source a88573d integrates the actual worker-to-engine proof from worker 71e9ce7. Host and unconfined worker/child positive controls succeeded; sandboxed worker and child candidate writes succeeded while protected state read/write, engine signaling, socket contact and actual control requests returned EPERM. The complete integrated native gate passed 50 tests, build and 50 tests again, with zero failed or ignored tests. Exact artifacts and limits are in docs/qualification/native-boundary-results.md and IMP-046 through IMP-049. Resource limits and runtime default write exceptions remain unqualified; no native execution profile is admitted.
 
