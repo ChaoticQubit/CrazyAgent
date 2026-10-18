@@ -29,6 +29,8 @@ pub struct WorkItem {
     pub session_id: SessionId,
     pub role: Role,
     pub native_descendant: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_ref: Option<CredentialRef>,
     pub route: RouteRequest,
 }
 
@@ -463,6 +465,19 @@ fn propose(
     }) {
         return rejected("route_account_denied");
     }
+    for item in &plan.tasks {
+        if let Some(pool_ref) = &item.pool_ref
+            && let Err(error) = crate::routing::validate_pool_scope(
+                &pinned,
+                pool_ref,
+                &plan.scope.project_id,
+                &item.role,
+                &item.route.account_ref,
+            )
+        {
+            return rejected(error.0);
+        }
+    }
     let automatic = plan.authority == PlanAuthority::ConfiguredAutonomy;
     if automatic && pinned.settings.routing.approval_mode != ApprovalMode::BoundedAutomatic {
         return rejected("human_approval_required");
@@ -691,6 +706,17 @@ fn route_item(
     let mut pinned = pinned_config(tx, &state.plan.config_id)?;
     pinned.settings.allowed_destinations = state.plan.scope.allowed_destinations.clone();
     pinned.settings.revoked_destinations = config.settings.revoked_destinations.clone();
+    if let Some(pool_ref) = &item.pool_ref
+        && let Err(error) = crate::routing::validate_pool_scope(
+            &pinned,
+            pool_ref,
+            &state.plan.scope.project_id,
+            &item.role,
+            &item.route.account_ref,
+        )
+    {
+        return rejected(error.0);
+    }
     match crate::routing::route(&item.route, &pinned) {
         Ok(decision) => Ok(Outcome::Route { decision }),
         Err(error) => rejected(error.0),
@@ -879,6 +905,7 @@ mod tests {
             session_id: SessionId::new("worker").unwrap(),
             role: Role::Worker,
             native_descendant: None,
+            pool_ref: None,
             route: RouteRequest {
                 preferred_target: None,
                 required_target: None,

@@ -1,4 +1,5 @@
 use crate::config::EffectiveConfig;
+use crate::coordination::Role;
 use crate::protocol::{ConfigId, CredentialRef, ProjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -228,6 +229,48 @@ impl std::fmt::Display for RouteError {
 }
 
 impl std::error::Error for RouteError {}
+
+pub(crate) fn validate_pool_scope(
+    config: &EffectiveConfig,
+    pool_ref: &CredentialRef,
+    project: &ProjectId,
+    role: &Role,
+    account: &CredentialRef,
+) -> Result<(), RouteError> {
+    let catalog = config
+        .settings
+        .model_access
+        .as_ref()
+        .ok_or_else(|| RouteError("route_pool_missing".into()))?;
+    let pool = catalog
+        .pools
+        .iter()
+        .find(|pool| &pool.id == pool_ref)
+        .ok_or_else(|| RouteError("route_pool_missing".into()))?;
+    let role = match role {
+        Role::WorkspaceLeader => "workspace_leader",
+        Role::ProjectLeader => "project_leader",
+        Role::Worker => "worker",
+        Role::NativeDescendant => "native_descendant",
+    };
+    if !pool
+        .projects
+        .iter()
+        .any(|id| id.as_str() == project.as_str())
+        || !pool.roles.iter().any(|id| id.as_str() == role)
+    {
+        return Err(RouteError("route_pool_scope_denied".into()));
+    }
+    if !config.settings.routing.approved_accounts.contains(account) {
+        return Err(RouteError("route_account_denied".into()));
+    }
+    if !catalog.connections.iter().any(|connection| {
+        &connection.account_ref == account && pool.members.contains(&connection.id)
+    }) {
+        return Err(RouteError("route_pool_account_denied".into()));
+    }
+    Ok(())
+}
 
 struct AdmittedTarget {
     profile: CredentialRef,

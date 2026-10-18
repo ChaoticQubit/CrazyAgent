@@ -1441,6 +1441,7 @@ async fn owner_approves_real_coordination_plan_and_discovers_it_without_launch_c
             session_id: SessionId::new("worker").unwrap(),
             role: Role::Worker,
             native_descendant: None,
+            pool_ref: None,
             route: RouteRequest {
                 resources: ResourceBudget::unit(),
                 preferred_target: None,
