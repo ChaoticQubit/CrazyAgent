@@ -12,6 +12,7 @@ use std::process::ExitCode;
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME\n\
+crazyagent tui SOCKET\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -37,6 +38,29 @@ fn main() -> ExitCode {
     if args == ["--version"] {
         println!("crazyagent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if args == ["tui", "--help"] {
+        println!("crazyagent tui SOCKET");
+        return ExitCode::SUCCESS;
+    }
+    if args.first().is_some_and(|arg| arg == "tui") {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent tui SOCKET".to_owned())
+        } else {
+            crazyagent::engine::Client::new(
+                Path::new(&args[1]).to_path_buf(),
+                std::time::Duration::from_secs(1),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|client| crazyagent::tui::run_tui(client).map_err(|e| e.to_string()))
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
@@ -75,27 +99,50 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let engine = std::sync::Arc::new(
-            crazyagent::engine::Engine::open(&runtime_dir.join("engine.db"), config.clone())
-                .await
-                .map_err(|e| e.to_string())?,
-        );
-        let server = crazyagent::engine::Server::bind(
-            &runtime_dir.join(socket_name),
-            engine.clone(),
-            &config,
-        )
-        .map_err(|e| e.to_string())?;
-        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(|e| e.to_string())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| e.to_string())?;
+        let (stop, stopped) = tokio::sync::watch::channel(false);
         let signal = tokio::spawn(async move {
-            tokio::signal::ctrl_c().await?;
-            let _ = stop.send(());
-            Ok::<(), std::io::Error>(())
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            stop.send_replace(true);
         });
-        writeln!(io::stdout().lock(), "ready").map_err(|e| e.to_string())?;
-        let result = server.run(stopped).await.map_err(|e| e.to_string());
+        let result = async {
+            let mut service = crazyagent::engine::bootstrap::EngineService::start(
+                runtime_dir,
+                socket_name,
+                &config,
+                &stopped,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            tokio::task::yield_now().await;
+            let ready = service
+                .ensure_ready(&stopped)
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    let mut output = io::stdout().lock();
+                    writeln!(output, "ready")
+                        .and_then(|()| output.flush())
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(error) = ready {
+                return match service.shutdown().await {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                };
+            }
+            service.run(stopped).await.map_err(|e| e.to_string())
+        }
+        .await;
         signal.abort();
-        engine.close().await.map_err(|e| e.to_string())?;
+        let _ = signal.await;
         result
     })
 }

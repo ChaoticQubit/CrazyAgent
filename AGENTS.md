@@ -2,11 +2,11 @@
 
 ## Current authority
 
-Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-071 govern the current implementation phase and scoped authorizations. Later explicit owner instructions take precedence.
+Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-075 govern the current implementation phase and scoped authorizations. Later explicit owner instructions take precedence. Local documentation is ignored by owner policy; never force-add it.
 
 The owner explicitly selected leader-coordinated subagent implementation in visible Herdr panes, one writer per isolated Git worktree. Do not substitute invisible background agents or several writers in one checkout.
 
-The owner explicitly deferred code and security reviews for this development phase. Do not launch task reviewers, normal code-review jobs, DeepSec or Codex Security reviews. Mark those gates deferred, never passed. Preserve testing and runtime security controls. Do not edit global agent instructions or installed skills.
+The latest owner-supplied AGENTS workflow supersedes DEC-061's historical review deferral under DEC-075. Apply the required frozen normal code-review and Codex Security tracks after implementation and before any authorized push or PR. Preserve DeepSec evidence and follow the owner's model, authentication, coverage and round limits. The leader coordinates reviews; do not scan changing worker source or silently install tools or substitute models. Report missing prerequisites and pending reviews honestly. Preserve testing and runtime security controls. Do not edit global agent instructions or installed skills.
 
 ## Work ownership and durable context
 
@@ -18,9 +18,9 @@ The owner explicitly deferred code and security reviews for this development pha
 
 ## Implementation and testing
 
-Maintain docs/implementation-decisions.md under DEC-067. Record high-level and function-level choices with stable IMP IDs, alternatives, pros/cons, costs, real verification and revisit conditions. Each production function must map to relevant decisions; common decisions may cover several symbols. Record new choices durably as they are made in the worker's own .local-state/implementation-decisions.md, and have the leader consolidate them into the tracked log before task integration. Label retrospective inferences. One named writer owns the shared log at a time.
+Maintain docs/implementation-decisions.md under DEC-067. Record high-level and function-level choices with stable IMP IDs, alternatives, pros/cons, costs, real verification and revisit conditions. Each production function must map to relevant decisions; common decisions may cover several symbols. Record new choices durably as they are made in the worker's own .local-state/implementation-decisions.md, and have the leader consolidate them into the local ignored canonical log before task integration. Label retrospective inferences. One named writer owns the shared log at a time.
 
-Use engineering-principles, the owner's minimum-working-code ladder, tiger-style and TDD. The review portions of skills are overridden by DEC-061 during this phase.
+Use engineering-principles, the owner's minimum-working-code ladder, tiger-style and TDD. Follow the latest owner workflow for the ordered design, implementation, verification and frozen review gates. Historical review deferral is not a current exemption.
 
 Write the missing-behavior test, observe the intended failure, implement the minimum behavior, build and rerun tests. No mocks at any level. Use real production functions and real filesystem/process/database/native systems. Temporary real files and synthetic input data are permitted; fabricated provider/engine replies are not runtime evidence.
 
@@ -52,7 +52,7 @@ All launches must retain the accepted live-worker recovery, individual native ch
 
 ## Repository commands and layout
 
-`make check` is the local test/build/test entry point. `make test`, `make build`, `make lint` and `make fmt-check` are narrower checks. Cargo currently runs offline and adds no external dependency.
+`make check` is the local test/build/test entry point. `make test`, `make build`, `make lint` and `make fmt-check` are narrower checks. Cargo runs locked and offline by default. DEC-068 permits required V1 dependency acquisition from official registries into project-local caches with exact locks; respect the current named resource owner and inspect acquired build/install scripts before execution. Keep CARGO_INCREMENTAL=0. No global tool installation is authorized.
 
 Rust code lives in `crates/crazyagent`. Desktop code will be added at `apps/desktop` when its task starts. Canonical documents live in `docs`; existing research is retained in `reports` and `research_notes`. Local worktrees, graph cache, build products and execution scratch are ignored; agent instructions are tracked.
 

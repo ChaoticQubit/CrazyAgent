@@ -2,6 +2,7 @@ graphify-out
 .worktrees/
 .superpowers/
 .local-state/
+.serena/
 target/
 node_modules/
 dist/
@@ -13,3 +14,6 @@ credentials/
 *.key
 *.p12
 *.pfx
+docs/
+research_notes/
+reports/

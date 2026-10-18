@@ -10,6 +10,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
+pub mod bootstrap;
+pub mod owner;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputLease {
@@ -59,6 +62,7 @@ pub type ClientError = EngineError;
 pub struct Client {
     socket: std::path::PathBuf,
     timeout: Duration,
+    binding: Option<bootstrap::NativeBinding>,
 }
 
 impl Client {
@@ -66,14 +70,54 @@ impl Client {
         if timeout.is_zero() || timeout > Duration::from_secs(30) {
             return Err(EngineError("invalid_client_timeout".into()));
         }
-        Ok(Self { socket, timeout })
+        Ok(Self {
+            socket,
+            timeout,
+            binding: None,
+        })
     }
+
+    /// Admits this configured endpoint with its authenticated native owner.
+    /// Consumes the ordinary client and fixes the requested native client kind.
+    /// Returns one bound client and the owner identity from the same discovery.
+    pub async fn with_owner(
+        mut self,
+        kind: owner::OwnerClientKind,
+    ) -> Result<(Self, owner::OwnerClient, bootstrap::OwnerConnectionIdentity), ClientError> {
+        let (owner, identity, binding) =
+            bootstrap::discover_pair(&self.socket, kind, self.timeout).await?;
+        self.socket = binding.socket();
+        self.binding = Some(binding);
+        Ok((self, owner, identity))
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub(crate) fn into_unbound_configuration(
+        self,
+    ) -> Result<(std::path::PathBuf, Duration), ClientError> {
+        if self.binding.is_some() {
+            return Err(EngineError(
+                "tui_requires_original_unbound_configuration".into(),
+            ));
+        }
+        Ok((self.socket, self.timeout))
+    }
+
     pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
         request.validate().map_err(|e| EngineError(e.to_string()))?;
+        if let Some(binding) = &self.binding {
+            binding.verify()?;
+        }
         verify_endpoint(&self.socket)?;
         tokio::time::timeout(self.timeout, async {
             let mut stream = UnixStream::connect(&self.socket).await.map_err(io_error)?;
             verify_peer(&stream)?;
+            if let Some(binding) = &self.binding {
+                binding.verify()?;
+            }
             let frame = encode_frame(&request).map_err(io_error)?;
             stream.write_all(&frame).await.map_err(io_error)?;
             let bytes = read_frame(&mut stream).await?;
@@ -96,6 +140,8 @@ pub struct Server {
     socket: std::path::PathBuf,
     socket_inode: u64,
     socket_device: u64,
+    directory_inode: u64,
+    directory_device: u64,
 }
 
 impl Server {
@@ -114,13 +160,48 @@ impl Server {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err(EngineError("socket_path_already_exists".into())),
         }
+        let directory = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
         let listener = UnixListener::bind(socket).map_err(io_error)?;
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
-            .map_err(io_error)?;
         let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
-        verify_endpoint(socket)?;
+        let checked = (|| {
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != rustix::process::getuid().as_raw()
+                || metadata.nlink() != 1
+            {
+                return Err(EngineError("socket_replaced_during_startup".into()));
+            }
+            let parent = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
+            if parent.ino() != directory.ino() || parent.dev() != directory.dev() {
+                return Err(EngineError("socket_directory_replaced".into()));
+            }
+            std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+                .map_err(io_error)?;
+            verify_endpoint(socket)?;
+            let current = std::fs::symlink_metadata(socket).map_err(io_error)?;
+            if current.ino() != metadata.ino() || current.dev() != metadata.dev() {
+                return Err(EngineError("socket_replaced_during_startup".into()));
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            drop(listener);
+            let cleanup = remove_server_socket(
+                socket,
+                metadata.dev(),
+                metadata.ino(),
+                directory.dev(),
+                directory.ino(),
+            );
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(EngineError(format!("{}; cleanup: {}", error.0, cleanup.0))),
+            };
+        }
         assert!(metadata.file_type().is_socket());
-        assert_eq!(metadata.mode() & 0o077, 0);
+        assert_eq!(
+            std::fs::symlink_metadata(socket).map_err(io_error)?.mode() & 0o077,
+            0
+        );
         Ok(Self {
             listener,
             engine,
@@ -129,18 +210,20 @@ impl Server {
             socket: socket.to_path_buf(),
             socket_inode: metadata.ino(),
             socket_device: metadata.dev(),
+            directory_inode: directory.ino(),
+            directory_device: directory.dev(),
         })
     }
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut clients = tokio::task::JoinSet::new();
-        loop {
+        let mut result = loop {
             tokio::select! {
-                _ = &mut stop => break,
+                _ = &mut stop => break Ok(()),
                 result = clients.join_next(), if !clients.is_empty() => {
-                    result.unwrap().map_err(io_error)?;
+                    if let Some(Err(error)) = result { break Err(io_error(error)); }
                 }
                 accepted = self.listener.accept() => {
-                    let (stream, _) = accepted.map_err(io_error)?;
+                    let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
                     if clients.len() >= self.clients_max { drop(stream); continue; }
                     let engine = self.engine.clone();
                     let timeout = self.timeout;
@@ -148,25 +231,58 @@ impl Server {
                 }
             }
             assert!(clients.len() <= self.clients_max);
-        }
+        };
         clients.abort_all();
-        while let Some(result) = clients.join_next().await {
-            if let Err(error) = result
+        while let Some(joined) = clients.join_next().await {
+            if let Err(error) = joined
                 && !error.is_cancelled()
             {
-                return Err(io_error(error));
+                result = Err(io_error(error));
             }
         }
         assert!(clients.is_empty());
-        let metadata = std::fs::symlink_metadata(&self.socket).map_err(io_error)?;
-        if metadata.ino() != self.socket_inode
-            || metadata.dev() != self.socket_device
-            || !metadata.file_type().is_socket()
-        {
-            return Err(EngineError("socket_replaced_during_shutdown".into()));
+        drop(self.listener);
+        let cleanup = remove_server_socket(
+            &self.socket,
+            self.socket_device,
+            self.socket_inode,
+            self.directory_device,
+            self.directory_inode,
+        );
+        match (result, cleanup) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(error), Err(cleanup)) => {
+                Err(EngineError(format!("{}; cleanup: {}", error.0, cleanup.0)))
+            }
         }
-        std::fs::remove_file(&self.socket).map_err(io_error)
     }
+}
+
+fn remove_server_socket(
+    socket: &Path,
+    device: u64,
+    inode: u64,
+    directory_device: u64,
+    directory_inode: u64,
+) -> Result<(), EngineError> {
+    let parent = socket
+        .parent()
+        .ok_or_else(|| EngineError("socket parent missing".into()))?;
+    verify_directory(parent)?;
+    let directory = std::fs::symlink_metadata(parent).map_err(io_error)?;
+    let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
+    if directory.dev() != directory_device
+        || directory.ino() != directory_inode
+        || metadata.dev() != device
+        || metadata.ino() != inode
+        || !metadata.file_type().is_socket()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(EngineError("socket_replaced_during_shutdown".into()));
+    }
+    std::fs::remove_file(socket).map_err(io_error)
 }
 
 fn io_error(error: impl std::fmt::Display) -> EngineError {
@@ -268,6 +384,7 @@ pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
     timeout: Duration,
+    owner_egress: tokio::sync::RwLock<()>,
 }
 
 impl Engine {
@@ -278,6 +395,7 @@ impl Engine {
             storage: Storage::open(path, config, false).await?,
             input: Mutex::default(),
             timeout,
+            owner_egress: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -288,10 +406,14 @@ impl Engine {
             storage: Storage::open(path, config, true).await?,
             input: Mutex::default(),
             timeout,
+            owner_egress: tokio::sync::RwLock::new(()),
         })
     }
 
     pub async fn apply(&self, request: WireRequest) -> Result<WireReply, EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.read())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
@@ -305,6 +427,9 @@ impl Engine {
     }
 
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
@@ -318,6 +443,9 @@ impl Engine {
     }
 
     pub async fn close(&self) -> Result<(), EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         let (send, receive) = oneshot::channel();
         self.storage
             .sender

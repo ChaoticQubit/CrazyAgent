@@ -1,12 +1,42 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
+use crate::engine::owner::*;
 use crate::protocol::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) enum Job {
+    OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
+    OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
+    OwnerControl(
+        HostStamp,
+        OwnerControl,
+        oneshot::Sender<Result<(OwnerControlReply, Registration), EngineError>>,
+    ),
+    OwnerControlReconcile(
+        HostStamp,
+        OwnerControl,
+        oneshot::Sender<Result<Option<OwnerControlReply>, EngineError>>,
+    ),
+    OwnerApply(
+        Admission,
+        OwnerRequest,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
+    ),
+    OwnerRead(
+        Admission,
+        OwnerRead,
+        oneshot::Sender<Result<OwnerReadReply, EngineError>>,
+    ),
+    OwnerReconcile(
+        Admission,
+        RequestId,
+        Option<String>,
+        oneshot::Sender<Result<OwnerResponse, EngineError>>,
+    ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<()>),
@@ -39,8 +69,63 @@ impl Storage {
                     }
                 };
                 let mut config = config;
+                let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::OwnerStart(reply) => {
+                            let result = if readonly || owner_runtime.is_some() {
+                                Err(error("owner_runtime_unavailable_or_busy"))
+                            } else {
+                                owner_start(&mut connection)
+                            };
+                            if let Ok(started) = &result {
+                                owner_runtime = Some(started.host.clone());
+                            }
+                            let _ = reply.send(result);
+                        }
+                        Job::OwnerStop(stamp, reply) => {
+                            let result = owner_stop(&mut connection, &stamp);
+                            if result.is_ok() {
+                                owner_runtime = None;
+                            }
+                            let _ = reply.send(result);
+                        }
+                        Job::OwnerControl(stamp, control, reply) => {
+                            let _ = reply.send(owner_control(&mut connection, &stamp, &control));
+                        }
+                        Job::OwnerControlReconcile(stamp, control, reply) => {
+                            let _ = reply.send(owner_control_reconcile(
+                                &mut connection,
+                                &stamp,
+                                &control,
+                            ));
+                        }
+                        Job::OwnerApply(admission, request, reply) => {
+                            let _ = reply.send(owner_apply(
+                                &mut connection,
+                                &config,
+                                &path,
+                                &admission,
+                                &request,
+                            ));
+                        }
+                        Job::OwnerRead(admission, query, reply) => {
+                            let _ = reply.send(owner_read(
+                                &mut connection,
+                                &config,
+                                &path,
+                                &admission,
+                                &query,
+                            ));
+                        }
+                        Job::OwnerReconcile(admission, id, hash, reply) => {
+                            let _ = reply.send(owner_reconcile(
+                                &mut connection,
+                                &admission,
+                                &id,
+                                hash.as_deref(),
+                            ));
+                        }
                         Job::Apply(request, reply) => {
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
@@ -52,6 +137,9 @@ impl Storage {
                             let _ = reply.send(result);
                         }
                         Job::Close(reply) => {
+                            if let Some(stamp) = &owner_runtime {
+                                let _ = owner_stop(&mut connection, stamp);
+                            }
                             drop(connection);
                             drop(lock);
                             let _ = reply.send(());
@@ -70,6 +158,9 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+/// Opens private engine storage and initializes additive authority schemas.
+/// Takes a database path and read-only mode and returns connection ownership.
+/// Rejects unsafe filesystem metadata and competing engine ownership.
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
     let parent = path
         .parent()
@@ -122,6 +213,9 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
     if !readonly {
         initialize_schema(&connection)?;
         crate::coordination::initialize(&connection)?;
+        crate::memory::initialize(&connection)?;
+        crate::assets::initialize(&connection)?;
+        crate::verification::initialize(&connection)?;
         crate::worktrees::initialize(&connection)?;
         crate::worktrees::reconcile(&connection)?;
     }
@@ -175,13 +269,31 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Applies one revision-checked operation through the storage transaction.
+/// Takes current config, storage path and an identified request.
+/// Returns a durable reply while preserving replay and sensitive input hashes.
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
     path: &Path,
     request: WireRequest,
 ) -> Result<WireReply, EngineError> {
-    let bytes = serde_json::to_vec(&request).map_err(error)?;
+    if matches!(request.command, Command::OwnerConversation { .. }) {
+        return Err(error("owner_authentication_required"));
+    }
+    if request.client_id.as_str().starts_with("owner:") {
+        return Err(error("reserved_owner_identity"));
+    }
+    let mut bytes = serde_json::to_vec(&request).map_err(error)?;
+    if matches!(
+        request.command,
+        Command::Knowledge { .. }
+            | Command::Assets { .. }
+            | Command::ProposeBaseline { .. }
+            | Command::OwnerVerification { .. }
+    ) {
+        bytes = format!("sha256:{}", crate::memory::hash(&bytes)).into_bytes();
+    }
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -201,7 +313,10 @@ fn apply(
             | Command::AdmitRepository { .. }
             | Command::AllocateWorktree { .. }
             | Command::ReleaseWorktree { .. }
-    ) || crate::coordination::is_mutation(&request.command);
+    ) || crate::verification::is_mutation(&request.command)
+        || crate::coordination::is_mutation(&request.command)
+        || matches!(&request.command, Command::Knowledge { action } if crate::memory::is_mutation(action))
+        || matches!(&request.command, Command::Assets { action } if crate::assets::is_mutation(action));
     let replay = previous.is_some();
     if let Some((original, reply)) = previous {
         if original != bytes {
@@ -269,6 +384,9 @@ fn apply(
     )
 }
 
+/// Atomically records an operation reply, revision and retained event.
+/// Takes an open transaction and its bounded operation outcome.
+/// Sensitive authority reads are reevaluated rather than cached as replies.
 fn finish_operation(
     transaction: Transaction<'_>,
     config: &EffectiveConfig,
@@ -285,6 +403,10 @@ fn finish_operation(
         persist_event(&transaction, config, request, next)?;
     }
     if !replay {
+        let sensitive_read = matches!(&request.command, Command::Knowledge { action } if !crate::memory::is_mutation(action))
+            || matches!(&request.command, Command::Assets { action } if !crate::assets::is_mutation(action))
+            || matches!(&request.command, Command::OwnerVerification { .. } if !crate::verification::is_mutation(&request.command));
+        let reply_bytes = if sensitive_read { &[][..] } else { &frame[4..] };
         transaction
             .execute(
                 "INSERT INTO operations VALUES (?1,?2,?3,?4)",
@@ -292,7 +414,7 @@ fn finish_operation(
                     request.client_id.as_str(),
                     request.request_id.as_str(),
                     bytes,
-                    &frame[4..]
+                    reply_bytes
                 ],
             )
             .map_err(error)?;
@@ -303,6 +425,9 @@ fn finish_operation(
     Ok(reply)
 }
 
+/// Dispatches a typed command inside the engine storage transaction.
+/// Takes current configuration, command and storage context.
+/// Returns domain outcomes without granting worker-wire owner authority.
 fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -311,6 +436,14 @@ fn execute(
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     match command {
+        Command::OwnerConversation { mutation } => {
+            crate::conversation::apply(tx, mutation, revision)
+        }
+        Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
+            crate::verification::execute(tx, config, command)
+        }
+        Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
+        Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
         Command::Snapshot => {
             let mut outcome = snapshot(tx)?;
@@ -609,4 +742,1444 @@ pub(crate) fn store_config(
         )
         .map_err(error)?;
     Ok(())
+}
+
+const OWNER_META: &str = "CREATE TABLE owner_meta (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    db_instance TEXT NOT NULL CHECK(length(db_instance) = 64),
+    engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
+    runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active'))
+)";
+const OWNER_IDENTITIES: &str = "CREATE TABLE owner_identities (
+    owner_id TEXT NOT NULL PRIMARY KEY CHECK(length(owner_id) = 64),
+    client_kind TEXT NOT NULL UNIQUE CHECK(client_kind IN ('tui', 'desktop')),
+    owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
+    status TEXT NOT NULL CHECK(status IN ('active', 'revoked'))
+)";
+const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
+    origin TEXT NOT NULL CHECK(origin IN ('native_owner', 'trusted_host')),
+    owner_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL CHECK(length(operation_id) BETWEEN 1 AND 128),
+    request_hash BLOB NOT NULL CHECK(length(request_hash) = 32),
+    engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
+    admitted_epoch INTEGER NOT NULL CHECK(admitted_epoch >= 1),
+    resulting_epoch INTEGER NOT NULL CHECK(resulting_epoch >= admitted_epoch),
+    revision_before INTEGER NOT NULL CHECK(revision_before >= 0),
+    revision_after INTEGER NOT NULL CHECK(revision_after >= revision_before),
+    result BLOB NOT NULL CHECK(length(result) BETWEEN 1 AND 4096),
+    event_cursor INTEGER CHECK(event_cursor IS NULL OR event_cursor >= 1),
+    PRIMARY KEY(origin, owner_id, operation_id)
+)";
+const OWNER_EVENT: &str = "CREATE UNIQUE INDEX owner_operation_event ON owner_operations(event_cursor) WHERE event_cursor IS NOT NULL";
+
+fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+    let expected = [
+        ("owner_meta", OWNER_META),
+        ("owner_identities", OWNER_IDENTITIES),
+        ("owner_operations", OWNER_OPERATIONS),
+        ("owner_operation_event", OWNER_EVENT),
+    ];
+    let mut stmt = tx.prepare("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND (name GLOB 'owner_*' OR tbl_name IN ('owner_meta','owner_identities','owner_operations')) ORDER BY name").map_err(error)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    if rows.len() != expected.len() {
+        return Err(error("owner_schema_unknown"));
+    }
+    for (name, sql) in rows {
+        let original = expected
+            .iter()
+            .find(|(n, _)| *n == name)
+            .ok_or_else(|| error("owner_schema_unknown"))?
+            .1;
+        if sql.trim_end_matches(';') != original {
+            return Err(error("owner_schema_unknown"));
+        }
+    }
+    Ok(true)
+}
+
+fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if !owner_schema(&tx)? {
+        for sql in [OWNER_META, OWNER_IDENTITIES, OWNER_OPERATIONS, OWNER_EVENT] {
+            tx.execute_batch(sql).map_err(error)?;
+        }
+        tx.execute(
+            "INSERT INTO owner_meta VALUES (1,1,?1,?2,'offline')",
+            params![random_id()?, random_id()?],
+        )
+        .map_err(error)?;
+        for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
+            tx.execute(
+                "INSERT INTO owner_identities VALUES (?1,?2,1,'active')",
+                params![random_id()?, kind.name()],
+            )
+            .map_err(error)?;
+        }
+    }
+    crate::conversation::initialize(&tx)?;
+    let count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM owner_meta", [], |r| r.get(0))
+        .map_err(error)?;
+    let (version, instance, old_engine, state): (i64, String, String, String) = tx.query_row("SELECT schema_version,db_instance,engine_epoch,runtime_state FROM owner_meta WHERE singleton=1", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(error)?;
+    if count != 1
+        || version != 1
+        || !is_hex_id(&instance)
+        || !is_hex_id(&old_engine)
+        || !matches!(state.as_str(), "active" | "offline")
+    {
+        return Err(error("owner_metadata_invalid"));
+    }
+    let count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM owner_identities", [], |r| r.get(0))
+        .map_err(error)?;
+    if count != 2 {
+        return Err(error("owner_registration_invalid"));
+    }
+    let host = HostStamp {
+        db_instance: instance,
+        engine_epoch: random_id()?,
+    };
+    tx.execute(
+        "UPDATE owner_meta SET engine_epoch=?1,runtime_state='active' WHERE singleton=1",
+        [&host.engine_epoch],
+    )
+    .map_err(error)?;
+    let owners = [
+        owner_registration(&tx, &host, OwnerClientKind::Tui)?,
+        owner_registration(&tx, &host, OwnerClientKind::Desktop)?,
+    ];
+    assert_ne!(owners[0].admission.owner_id, owners[1].admission.owner_id);
+    tx.commit().map_err(error)?;
+    Ok(Started { host, owners })
+}
+
+fn check_owner_host(tx: &Transaction<'_>, stamp: &HostStamp) -> Result<(), EngineError> {
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_meta WHERE singleton=1 AND schema_version=1 AND db_instance=?1 AND engine_epoch=?2 AND runtime_state='active')", params![stamp.db_instance, stamp.engine_epoch], |r|r.get(0)).map_err(error)?;
+    if !valid {
+        return Err(error("owner_runtime_stale"));
+    }
+    Ok(())
+}
+
+fn owner_registration(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    kind: OwnerClientKind,
+) -> Result<Registration, EngineError> {
+    let (id, epoch, status): (String, i64, String) = tx
+        .query_row(
+            "SELECT owner_id,owner_epoch,status FROM owner_identities WHERE client_kind=?1",
+            [kind.name()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(error)?;
+    if !is_hex_id(&id) || epoch < 1 || !matches!(status.as_str(), "active" | "revoked") {
+        return Err(error("owner_registration_invalid"));
+    }
+    Ok(Registration {
+        kind,
+        admission: Admission {
+            db_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            owner_id: id,
+            owner_epoch: epoch,
+        },
+        active: status == "active",
+    })
+}
+
+fn check_owner_admission(tx: &Transaction<'_>, a: &Admission) -> Result<(), EngineError> {
+    check_owner_host(
+        tx,
+        &HostStamp {
+            db_instance: a.db_instance.clone(),
+            engine_epoch: a.engine_epoch.clone(),
+        },
+    )?;
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_identities WHERE owner_id=?1 AND owner_epoch=?2 AND status='active')", params![a.owner_id,a.owner_epoch], |r|r.get(0)).map_err(error)?;
+    if !valid {
+        return Err(error("owner_grant_stale_or_revoked"));
+    }
+    Ok(())
+}
+
+fn owner_stop(db: &mut Connection, host: &HostStamp) -> Result<(), EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_host(&tx, host)?;
+    tx.execute(
+        "UPDATE owner_meta SET runtime_state='offline' WHERE singleton=1",
+        [],
+    )
+    .map_err(error)?;
+    tx.commit().map_err(error)
+}
+
+fn owner_revision(tx: &Transaction<'_>) -> Result<u64, EngineError> {
+    let n: i64 = tx
+        .query_row("SELECT revision FROM state WHERE id=1", [], |r| r.get(0))
+        .map_err(error)?;
+    u64::try_from(n).map_err(error)
+}
+
+fn owner_record(
+    tx: &Transaction<'_>,
+    provenance: &OwnerProvenance,
+    hash: &[u8],
+    result: &[u8],
+) -> Result<(), EngineError> {
+    assert_eq!(hash.len(), 32);
+    if result.is_empty() || result.len() > 4096 {
+        return Err(error("owner_result_bounds"));
+    }
+    tx.execute(
+        "INSERT INTO owner_operations VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            provenance.origin,
+            provenance.owner_id,
+            provenance.operation_id.as_str(),
+            hash,
+            provenance.engine_epoch,
+            provenance.admitted_epoch,
+            provenance.resulting_epoch,
+            provenance.revision_before.value() as i64,
+            provenance.revision_after.value() as i64,
+            result,
+            provenance.event_cursor.as_ref().map(|c| c.value() as i64)
+        ],
+    )
+    .map_err(error)?;
+    assert!(!tx.is_autocommit());
+    Ok(())
+}
+
+pub(crate) fn owner_lookup(
+    tx: &Transaction<'_>,
+    origin: &str,
+    owner: &str,
+    id: &RequestId,
+    expected: Option<&str>,
+) -> Result<Option<(OwnerProvenance, Vec<u8>)>, EngineError> {
+    let row = tx.query_row("SELECT request_hash,engine_epoch,admitted_epoch,resulting_epoch,revision_before,revision_after,CASE WHEN length(result)<=4096 THEN result END,event_cursor FROM owner_operations WHERE origin=?1 AND owner_id=?2 AND operation_id=?3", params![origin,owner,id.as_str()], |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,i64>(5)?,r.get::<_,Option<Vec<u8>>>(6)?,r.get::<_,Option<i64>>(7)?))).optional().map_err(error)?;
+    let Some((hash, engine, admitted, resulting, before, after, result, event)) = row else {
+        return Ok(None);
+    };
+    let hex = hash.iter().map(|n| format!("{n:02x}")).collect::<String>();
+    if !is_hex_id(&hex)
+        || !is_hex_id(&engine)
+        || admitted < 1
+        || resulting < admitted
+        || before < 0
+        || after < before
+        || event.is_some_and(|n| n < 1)
+    {
+        return Err(error("owner_ledger_invalid"));
+    }
+    if expected.is_some_and(|s| s != hex) {
+        return Err(error("operation_identity_conflict"));
+    }
+    let provenance = OwnerProvenance {
+        origin: origin.into(),
+        owner_id: owner.into(),
+        operation_id: id.clone(),
+        request_hash: hex,
+        engine_epoch: engine,
+        admitted_epoch: admitted,
+        resulting_epoch: resulting,
+        revision_before: Cursor::new(before as u64),
+        revision_after: Cursor::new(after as u64),
+        event_cursor: event.map(|n| Cursor::new(n as u64)),
+    };
+    Ok(Some((
+        provenance,
+        result.ok_or_else(|| error("owner_result_bounds"))?,
+    )))
+}
+
+fn owner_apply(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+) -> Result<OwnerApplied, EngineError> {
+    request.validate()?;
+    let OwnerOperation::Apply { mutation } = &request.operation else {
+        return Err(error("owner_mutation_required"));
+    };
+    let command = mutation.command()?;
+    let hash_text = request.mutation_hash()?;
+    let hash = Sha256::digest(serde_json::to_vec(request).map_err(error)?);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let revision = owner_revision(&tx)?;
+    if let Some((provenance, bytes)) = owner_lookup(
+        &tx,
+        "native_owner",
+        &a.owner_id,
+        &request.request_id,
+        Some(&hash_text),
+    )? {
+        let result = serde_json::from_slice(&bytes).map_err(error)?;
+        return Ok(OwnerApplied {
+            result,
+            provenance,
+            historical_replay: true,
+            current_revision: Cursor::new(revision),
+        });
+    }
+    let outcome = if request.expected_revision.value() != revision {
+        Outcome::Rejected {
+            code: "stale_revision".into(),
+        }
+    } else {
+        execute(&tx, config, path, &command, revision)?
+    };
+    let (result, changed) = match outcome {
+        Outcome::Applied => {
+            let result = if let Command::OwnerVerification {
+                action: crate::verification::OwnerVerification::Verify { attempt_id, .. },
+            } = &command
+            {
+                OwnerResult::VerificationUnavailable {
+                    attempt_id: attempt_id.clone(),
+                }
+            } else {
+                OwnerResult::Applied
+            };
+            (result, true)
+        }
+        Outcome::Rejected { code } => (OwnerResult::Rejected { code }, false),
+        _ => return Err(error("owner_mutation_result_unavailable")),
+    };
+    let next = if changed {
+        revision
+            .checked_add(1)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or_else(|| error("revision_exhausted"))?
+    } else {
+        revision
+    };
+    if changed {
+        let wire = WireRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: ClientId::new(format!("owner:{}", a.owner_id)).map_err(error)?,
+            request_id: request.request_id.clone(),
+            expected_revision: request.expected_revision.clone(),
+            command,
+        };
+        persist_event(&tx, config, &wire, next)?;
+    }
+    let provenance = OwnerProvenance {
+        origin: "native_owner".into(),
+        owner_id: a.owner_id.clone(),
+        operation_id: request.request_id.clone(),
+        request_hash: hash_text,
+        engine_epoch: a.engine_epoch.clone(),
+        admitted_epoch: a.owner_epoch,
+        resulting_epoch: a.owner_epoch,
+        revision_before: Cursor::new(revision),
+        revision_after: Cursor::new(next),
+        event_cursor: changed.then(|| Cursor::new(next)),
+    };
+    owner_record(
+        &tx,
+        &provenance,
+        &hash,
+        &serde_json::to_vec(&result).map_err(error)?,
+    )?;
+    tx.commit().map_err(error)?;
+    assert_eq!(next > revision, changed);
+    Ok(OwnerApplied {
+        result,
+        provenance,
+        historical_replay: false,
+        current_revision: Cursor::new(next),
+    })
+}
+
+fn owner_reconcile(
+    db: &mut Connection,
+    a: &Admission,
+    id: &RequestId,
+    hash: Option<&str>,
+) -> Result<OwnerResponse, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let revision = Cursor::new(owner_revision(&tx)?);
+    Ok(
+        match owner_lookup(&tx, "native_owner", &a.owner_id, id, hash)? {
+            Some((provenance, bytes)) => OwnerResponse::Committed {
+                operation: OwnerApplied {
+                    result: serde_json::from_slice(&bytes).map_err(error)?,
+                    provenance,
+                    historical_replay: true,
+                    current_revision: revision,
+                },
+            },
+            None => OwnerResponse::NotRecordedAtBarrier { revision },
+        },
+    )
+}
+
+fn owner_control(
+    db: &mut Connection,
+    host: &HostStamp,
+    control: &OwnerControl,
+) -> Result<(OwnerControlReply, Registration), EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let registration = owner_registration(&tx, host, control.target)?;
+    let a = &registration.admission;
+    let bytes = serde_json::to_vec(control).map_err(error)?;
+    let hash_text = crate::memory::hash(&bytes);
+    if let Some((_, result)) = owner_lookup(
+        &tx,
+        "trusted_host",
+        &a.owner_id,
+        &control.operation_id,
+        Some(&hash_text),
+    )? {
+        return Ok((
+            serde_json::from_slice(&result).map_err(error)?,
+            registration,
+        ));
+    }
+    if control.expected_epoch != a.owner_epoch {
+        return Err(error("owner_control_stale"));
+    }
+    let next = a.owner_epoch.checked_add(1);
+    if next.is_none() && control.decision == OwnerDecision::Reactivate {
+        return Err(error("owner_epoch_exhausted"));
+    }
+    let reply = OwnerControlReply {
+        owner_id: a.owner_id.clone(),
+        owner_epoch: next.unwrap_or(i64::MAX),
+        active: control.decision == OwnerDecision::Reactivate,
+        epoch_exhausted_revoked: next.is_none(),
+    };
+    tx.execute(
+        "UPDATE owner_identities SET owner_epoch=?1,status=?2 WHERE owner_id=?3",
+        params![
+            reply.owner_epoch,
+            if reply.active { "active" } else { "revoked" },
+            reply.owner_id
+        ],
+    )
+    .map_err(error)?;
+    let revision = owner_revision(&tx)?;
+    let provenance = OwnerProvenance {
+        origin: "trusted_host".into(),
+        owner_id: a.owner_id.clone(),
+        operation_id: control.operation_id.clone(),
+        request_hash: hash_text,
+        engine_epoch: host.engine_epoch.clone(),
+        admitted_epoch: a.owner_epoch,
+        resulting_epoch: reply.owner_epoch,
+        revision_before: Cursor::new(revision),
+        revision_after: Cursor::new(revision),
+        event_cursor: None,
+    };
+    owner_record(
+        &tx,
+        &provenance,
+        &Sha256::digest(&bytes),
+        &serde_json::to_vec(&reply).map_err(error)?,
+    )?;
+    let registration = owner_registration(&tx, host, control.target)?;
+    tx.commit().map_err(error)?;
+    Ok((reply, registration))
+}
+
+fn owner_control_reconcile(
+    db: &mut Connection,
+    host: &HostStamp,
+    control: &OwnerControl,
+) -> Result<Option<OwnerControlReply>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let registration = owner_registration(&tx, host, control.target)?;
+    let hash = crate::memory::hash(&serde_json::to_vec(control).map_err(error)?);
+    owner_lookup(
+        &tx,
+        "trusted_host",
+        &registration.admission.owner_id,
+        &control.operation_id,
+        Some(&hash),
+    )?
+    .map(|(_, b)| serde_json::from_slice(&b).map_err(error))
+    .transpose()
+}
+
+fn owner_read(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    query: &OwnerRead,
+) -> Result<OwnerReadReply, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let revision = owner_revision(&tx)?;
+    let data = match query {
+        OwnerRead::Settings => {
+            let names: Vec<_> = config.descriptors.keys().cloned().collect();
+            assert!(!names.is_empty());
+            assert!(names.len() <= 25);
+            OwnerData::Settings { names }
+        }
+        OwnerRead::Setting { name } => read_owner_setting(config, name)?,
+        OwnerRead::ConversationHistory {
+            project_id,
+            cursor,
+            limit,
+        } => crate::conversation::history(
+            &tx,
+            &config.id,
+            a,
+            project_id,
+            cursor.as_ref(),
+            *limit,
+            revision,
+        )?,
+        OwnerRead::CurrentBrief { project_id } => {
+            crate::conversation::current_brief(&tx, project_id)?
+        }
+        OwnerRead::Page {
+            view,
+            cursor,
+            limit,
+        } => read_owner_page(&tx, config, a, *view, cursor.as_ref(), *limit, revision)?,
+        OwnerRead::Baseline { baseline_id } => read_owner_baseline(&tx, baseline_id)?,
+        OwnerRead::Capabilities => OwnerData::Capabilities {
+            authenticated_owner_transport: true,
+            native_worker_admission: false,
+            human_consent_proven: false,
+            native_input: false,
+            merge_execution: false,
+            settings_persistence: false,
+        },
+        _ => {
+            let command = query
+                .command()?
+                .ok_or_else(|| error("owner_read_required"))?;
+            OwnerData::Domain {
+                outcome: Box::new(execute(&tx, config, path, &command, revision)?),
+            }
+        }
+    };
+    let reply = OwnerReadReply {
+        revision: Cursor::new(revision),
+        config_id: config.id.clone(),
+        data,
+    };
+    if serde_json::to_vec(&reply).map_err(error)?.len() > FRAME_BYTES_MAX - 1024 {
+        return Err(error("owner_response_bounds"));
+    }
+    Ok(reply)
+}
+
+fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {
+    let descriptor = config
+        .descriptors
+        .get(name)
+        .ok_or_else(|| error("owner_setting_not_found"))?;
+    assert_eq!(descriptor.name, name);
+    assert!(config.descriptors.len() <= 25);
+    Ok(OwnerData::Setting {
+        descriptor: Box::new(descriptor.clone()),
+    })
+}
+
+fn read_owner_baseline(tx: &Transaction<'_>, id: &BaselineId) -> Result<OwnerData, EngineError> {
+    let (body,approved,revoked,current): (Option<String>,i64,i64,bool) = tx.query_row("SELECT CASE WHEN length(CAST(b.body AS BLOB))<=32768 THEN b.body END,b.approved,b.revoked,EXISTS(SELECT 1 FROM verification_current c WHERE c.project=b.project AND c.baseline=b.id) FROM verification_baselines b WHERE b.id=?1", [id.as_str()], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(error)?;
+    let body = body.ok_or_else(|| error("owner_baseline_bounds"))?;
+    let draft = crate::verification::BaselineDraft::import(body.as_bytes()).map_err(error)?;
+    if draft.identity().map_err(error)? != *id
+        || !matches!(approved, 0 | 1)
+        || !matches!(revoked, 0 | 1)
+    {
+        return Err(error("owner_baseline_invalid"));
+    }
+    Ok(OwnerData::Baseline {
+        draft,
+        approved: approved == 1,
+        revoked: revoked == 1,
+        current,
+    })
+}
+
+fn read_owner_page(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    a: &Admission,
+    view: OwnerView,
+    cursor: Option<&OwnerPageCursor>,
+    limit: u8,
+    revision: u64,
+) -> Result<OwnerData, EngineError> {
+    if !(1..=32).contains(&limit) {
+        return Err(error("owner_page_limit"));
+    }
+    if let Some(c) = cursor {
+        if c.db_instance != a.db_instance
+            || c.owner_id != a.owner_id
+            || c.engine_epoch != a.engine_epoch
+            || c.owner_epoch != a.owner_epoch
+            || c.config_id != config.id
+            || c.at_revision.value() != revision
+            || c.view != view
+        {
+            return Ok(OwnerData::ResyncRequired);
+        }
+        RequestId::new(c.after_id.clone()).map_err(error)?;
+    }
+    let after = cursor.map_or("", |c| c.after_id.as_str());
+    let sql = match view {
+        OwnerView::Projects => {
+            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM projects WHERE id>?1 ORDER BY id LIMIT ?2"
+        }
+        OwnerView::Tasks => {
+            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM tasks WHERE id>?1 ORDER BY id LIMIT ?2"
+        }
+        OwnerView::Candidates => {
+            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM verification_candidates WHERE id>?1 ORDER BY id LIMIT ?2"
+        }
+        OwnerView::Plans => {
+            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(task)<=128 THEN task END FROM coordination_plans WHERE id>?1 ORDER BY id LIMIT ?2"
+        }
+        OwnerView::Baselines => {
+            "SELECT CASE WHEN length(b.id)<=128 THEN b.id END,CASE WHEN length(b.project)<=128 THEN b.project END,b.approved,b.revoked,EXISTS(SELECT 1 FROM verification_current c WHERE c.project=b.project AND c.baseline=b.id) FROM verification_baselines b WHERE b.id>?1 ORDER BY b.id LIMIT ?2"
+        }
+    };
+    let mut stmt = tx.prepare(sql).map_err(error)?;
+    let mut rows = stmt
+        .query(params![after, i64::from(limit) + 1])
+        .map_err(error)?;
+    let mut items = Vec::new();
+    let mut last = None;
+    let mut more = false;
+    while let Some(row) = rows.next().map_err(error)? {
+        if items.len() == usize::from(limit) {
+            more = true;
+            break;
+        }
+        let id: String = row
+            .get::<_, Option<String>>(0)
+            .map_err(error)?
+            .ok_or_else(|| error("owner_row_bounds"))?;
+        let body: String = row
+            .get::<_, Option<String>>(1)
+            .map_err(error)?
+            .ok_or_else(|| error("owner_row_bounds"))?;
+        RequestId::new(id.clone()).map_err(error)?;
+        let item = match view {
+            OwnerView::Projects => {
+                let p: StoredProject = serde_json::from_str(&body).map_err(error)?;
+                if p.project_id.as_str() != id
+                    || p.spec.name.len() > 256
+                    || p.spec.repositories.len() > 64
+                {
+                    return Err(error("owner_row_invalid"));
+                }
+                OwnerSummary::Project {
+                    project_id: p.project_id,
+                    name: p.spec.name,
+                    repository_count: p.spec.repositories.len(),
+                }
+            }
+            OwnerView::Tasks => {
+                let t: ExecutionContext = serde_json::from_str(&body).map_err(error)?;
+                if t.task_id.as_str() != id {
+                    return Err(error("owner_row_invalid"));
+                }
+                OwnerSummary::Task {
+                    task_id: t.task_id,
+                    project_id: t.project_id,
+                    config_id: t.config_id,
+                    baseline_id: t.baseline_id,
+                    snapshot_id: t.snapshot_id,
+                }
+            }
+            OwnerView::Plans => OwnerSummary::Plan {
+                plan_id: PlanId::new(&id).map_err(error)?,
+                task_id: TaskId::new(body).map_err(error)?,
+            },
+            OwnerView::Candidates => {
+                let c: crate::verification::Candidate =
+                    serde_json::from_str(&body).map_err(error)?;
+                if c.id.as_str() != id {
+                    return Err(error("owner_row_invalid"));
+                }
+                OwnerSummary::Candidate {
+                    id: c.id,
+                    task_id: c.task_id,
+                    snapshot_id: c.snapshot_id,
+                    environment_id: c.environment_id,
+                    pinned_baseline_id: c.pinned_baseline_id,
+                    config_id: c.config_id,
+                }
+            }
+            OwnerView::Baselines => {
+                let approved: i64 = row.get(2).map_err(error)?;
+                let revoked: i64 = row.get(3).map_err(error)?;
+                if !matches!(approved, 0 | 1) || !matches!(revoked, 0 | 1) {
+                    return Err(error("owner_row_invalid"));
+                }
+                OwnerSummary::Baseline {
+                    baseline_id: BaselineId::new(&id).map_err(error)?,
+                    project_id: ProjectId::new(body).map_err(error)?,
+                    approved: approved == 1,
+                    revoked: revoked == 1,
+                    current: row.get(4).map_err(error)?,
+                }
+            }
+        };
+        items.push(item);
+        if serde_json::to_vec(&items).map_err(error)?.len() > FRAME_BYTES_MAX - 4096 {
+            items.pop();
+            if items.is_empty() {
+                return Err(error("owner_row_bounds"));
+            }
+            more = true;
+            break;
+        }
+        last = Some(id);
+    }
+    let next = if more {
+        Some(OwnerPageCursor {
+            db_instance: a.db_instance.clone(),
+            owner_id: a.owner_id.clone(),
+            engine_epoch: a.engine_epoch.clone(),
+            owner_epoch: a.owner_epoch,
+            config_id: config.id.clone(),
+            at_revision: Cursor::new(revision),
+            view,
+            after_id: last.ok_or_else(|| error("owner_page_progress"))?,
+        })
+    } else {
+        None
+    };
+    assert!(items.len() <= usize::from(limit));
+    Ok(OwnerData::Page { items, next })
+}
+
+#[cfg(test)]
+mod owner_actor_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, EffectiveConfig) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("db");
+        let cfg =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        (root, path, cfg)
+    }
+
+    async fn start(storage: &Storage) -> Started {
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerStart(tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        rx.await.unwrap().unwrap()
+    }
+
+    #[test]
+    fn settings_reader_asserts_impossible_internal_metadata_corruption() {
+        for case in 0..4 {
+            let (_root, path, mut cfg) = fixture();
+            let (mut db, _lock) = open_database(&path, false).unwrap();
+            let started = owner_start(&mut db).unwrap();
+            let owner = &started.owners[0].admission;
+            let query = serde_json::from_value(serde_json::json!({"kind":"Settings"})).unwrap();
+            assert!(owner_read(&mut db, &cfg, &path, owner, &query).is_ok());
+            match case {
+                0 => cfg.descriptors.clear(),
+                1 | 3 => {
+                    let descriptor = cfg.descriptors.values().next().unwrap().clone();
+                    for index in 0..26 {
+                        cfg.descriptors
+                            .insert(format!("invalid-{index}"), descriptor.clone());
+                    }
+                }
+                _ => {
+                    cfg.descriptors.get_mut("timeout_ms").unwrap().name = "corrupt".into();
+                }
+            }
+            let query = if case >= 2 {
+                serde_json::from_value(serde_json::json!({"kind":"Setting","name":"timeout_ms"}))
+                    .unwrap()
+            } else {
+                query
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner_read(&mut db, &cfg, &path, owner, &query)
+            }));
+            assert!(
+                outcome.is_err(),
+                "internal corruption case {case} must trip an invariant"
+            );
+            let tx = db.transaction().unwrap();
+            assert_eq!(owner_revision(&tx).unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_owner_read_rechecks_epoch_after_revoke() {
+        let (_root, path, cfg) = fixture();
+        let storage = Storage::open(&path, cfg, false).await.unwrap();
+        let started = start(&storage).await;
+        let owner = started.owners[0].admission.clone();
+        let control = OwnerControl {
+            operation_id: RequestId::new("revoke").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: owner.owner_epoch,
+            decision: OwnerDecision::Revoke,
+        };
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerControl(started.host, control, tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        let (read_tx, read_rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerRead(owner, OwnerRead::Capabilities, read_tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(!rx.await.unwrap().unwrap().0.active);
+        assert!(read_rx.await.unwrap().is_err());
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::Close(tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        rx.await.unwrap();
+    }
+
+    fn mutation(id: &str) -> OwnerRequest {
+        OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::Coordination {
+                    action: crate::coordination::OwnerAction::ApprovePlan {
+                        plan_id: PlanId::new("missing").unwrap(),
+                    },
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
+        let (_root, path, cfg) = fixture();
+        use crate::verification::*;
+        let draft = BaselineDraft {
+            version: 1,
+            project_id: ProjectId::new("p").unwrap(),
+            origin: BaselineOrigin::Imported,
+            requirements: "exact accepted checks".into(),
+            checks: vec![
+                CheckSpec {
+                    id: RequestId::new("code").unwrap(),
+                    kind: CheckKind::Code,
+                    minimum_risk: Risk::Low,
+                    content: b"code".to_vec(),
+                },
+                CheckSpec {
+                    id: RequestId::new("integrity").unwrap(),
+                    kind: CheckKind::TestIntegrity,
+                    minimum_risk: Risk::Low,
+                    content: b"integrity".to_vec(),
+                },
+            ],
+            rules: vec![],
+            retry_limit: 0,
+        };
+        let baseline = draft.identity().unwrap();
+        {
+            let (mut db, _lock) = open_database(&path, false).unwrap();
+            for (n, command) in [
+                Command::CreateProject {
+                    project_id: draft.project_id.clone(),
+                    spec: ProjectSpec {
+                        name: "Project".into(),
+                        repositories: vec![],
+                    },
+                },
+                Command::ProposeBaseline { draft },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let req = WireRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_id: ClientId::new("host").unwrap(),
+                    request_id: RequestId::new(format!("seed-{n}")).unwrap(),
+                    expected_revision: Cursor::new(n as u64),
+                    command,
+                };
+                assert_eq!(
+                    apply(&mut db, &cfg, &path, req).unwrap().outcome,
+                    Outcome::Applied
+                );
+            }
+        }
+        let storage = Storage::open(&path, cfg.clone(), false).await.unwrap();
+        let started = start(&storage).await;
+        let owner = started.owners[0].admission.clone();
+        let req = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("lost-ack").unwrap(),
+            expected_revision: Cursor::new(2),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ApproveBaseline {
+                    baseline_id: baseline.clone(),
+                },
+            },
+        };
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        storage
+            .sender
+            .try_send(Job::OwnerApply(owner.clone(), req.clone(), tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerReconcile(
+                owner.clone(),
+                req.request_id.clone(),
+                Some(req.mutation_hash().unwrap()),
+                tx,
+            ))
+            .unwrap_or_else(|_| panic!("queue"));
+        let recovered = rx.await.unwrap().unwrap();
+        let OwnerResponse::Committed {
+            operation: original,
+        } = recovered
+        else {
+            panic!("committed")
+        };
+        assert_eq!(original.result, OwnerResult::Applied);
+        let control = OwnerControl {
+            operation_id: RequestId::new("lost-ack").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: 1,
+            decision: OwnerDecision::Revoke,
+        };
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerControl(started.host.clone(), control.clone(), tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        let (late_tx, late_rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerApply(
+                owner.clone(),
+                mutation("after-revoke"),
+                late_tx,
+            ))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(!rx.await.unwrap().unwrap().0.active);
+        assert!(late_rx.await.unwrap().is_err());
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerReconcile(
+                owner.clone(),
+                req.request_id.clone(),
+                None,
+                tx,
+            ))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(rx.await.unwrap().is_err());
+        let reactivate = OwnerControl {
+            operation_id: RequestId::new("reactivate").unwrap(),
+            expected_epoch: 2,
+            decision: OwnerDecision::Reactivate,
+            ..control.clone()
+        };
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerControl(started.host, reactivate, tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(rx.await.unwrap().unwrap().0.active);
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::Close(tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        rx.await.unwrap();
+        let storage = Storage::open(&path, cfg, false).await.unwrap();
+        let restarted = start(&storage).await;
+        assert_eq!(restarted.owners[0].admission.owner_id, owner.owner_id);
+        assert_ne!(restarted.host.engine_epoch, owner.engine_epoch);
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerApply(owner, req.clone(), tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(rx.await.unwrap().is_err());
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerApply(
+                restarted.owners[0].admission.clone(),
+                req,
+                tx,
+            ))
+            .unwrap_or_else(|_| panic!("queue"));
+        let replay = rx.await.unwrap().unwrap();
+        assert!(replay.historical_replay);
+        assert_eq!(replay.provenance, original.provenance);
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerControlReconcile(restarted.host, control, tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        assert!(!rx.await.unwrap().unwrap().unwrap().active);
+        let (tx, rx) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::Close(tx))
+            .unwrap_or_else(|_| panic!("queue"));
+        rx.await.unwrap();
+        let db = Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM owner_operations WHERE origin='native_owner'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM operations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT revision FROM state", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT approved FROM verification_baselines WHERE id=?1",
+                [baseline.as_str()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn owner_schema_is_additive_and_unknown_schema_is_preserved() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        db.execute(
+            "INSERT INTO operations VALUES ('owner:tui','legacy',x'01',x'02')",
+            [],
+        )
+        .unwrap();
+        let started = owner_start(&mut db).unwrap();
+        assert_ne!(
+            started.owners[0].admission.owner_id,
+            started.owners[1].admission.owner_id
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT request FROM operations WHERE client='owner:tui'",
+                [],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            vec![1]
+        );
+        owner_stop(&mut db, &started.host).unwrap();
+        db.execute("UPDATE owner_meta SET schema_version=2", [])
+            .unwrap_err();
+        db.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE owner_meta SET schema_version=2; PRAGMA ignore_check_constraints=OFF;").unwrap();
+        assert!(owner_start(&mut db).is_err());
+        assert_eq!(
+            db.query_row("SELECT schema_version FROM owner_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let other = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(other.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut conflict, _other_lock) = open_database(&other.path().join("db"), false).unwrap();
+        conflict
+            .execute("CREATE TABLE owner_meta (unknown TEXT)", [])
+            .unwrap();
+        conflict
+            .execute("INSERT INTO owner_meta VALUES ('preserve')", [])
+            .unwrap();
+        assert!(owner_start(&mut conflict).is_err());
+        assert_eq!(
+            conflict
+                .query_row("SELECT unknown FROM owner_meta", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserve"
+        );
+        assert_eq!(
+            conflict
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='owner_identities'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn internal_ledger_hash_shape_is_a_runtime_invariant() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        let result = owner_apply(
+            &mut db,
+            &cfg,
+            &path,
+            &started.owners[0].admission,
+            &mutation("shape"),
+        )
+        .unwrap();
+        let tx = db.transaction().unwrap();
+        owner_record(&tx, &result.provenance, &[0; 31], b"{}").unwrap();
+    }
+
+    #[test]
+    fn epoch_exhaustion_revokes_and_cannot_reactivate() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        db.execute(
+            "UPDATE owner_identities SET owner_epoch=?1 WHERE client_kind='tui'",
+            [i64::MAX],
+        )
+        .unwrap();
+        let control = OwnerControl {
+            operation_id: RequestId::new("exhausted").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: i64::MAX,
+            decision: OwnerDecision::Revoke,
+        };
+        let (reply, _) = owner_control(&mut db, &started.host, &control).unwrap();
+        assert!(!reply.active);
+        assert!(reply.epoch_exhausted_revoked);
+        assert_eq!(reply.owner_epoch, i64::MAX);
+        let reactivate = OwnerControl {
+            operation_id: RequestId::new("reactivate").unwrap(),
+            decision: OwnerDecision::Reactivate,
+            ..control.clone()
+        };
+        assert!(owner_control(&mut db, &started.host, &reactivate).is_err());
+        assert!(
+            !owner_control(&mut db, &started.host, &control)
+                .unwrap()
+                .0
+                .active
+        );
+    }
+
+    #[test]
+    fn owner_ledger_abort_rolls_back_domain_effect_and_pages_bound_corrupt_body() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        let a = &started.owners[0].admission;
+        db.execute(
+            "INSERT INTO projects VALUES ('huge',?1)",
+            ["x".repeat(FRAME_BYTES_MAX + 1)],
+        )
+        .unwrap();
+        assert!(
+            owner_read(
+                &mut db,
+                &cfg,
+                &path,
+                a,
+                &OwnerRead::Page {
+                    view: OwnerView::Projects,
+                    cursor: None,
+                    limit: 2
+                }
+            )
+            .is_err()
+        );
+        db.execute("DELETE FROM projects WHERE id='huge'", [])
+            .unwrap();
+        use crate::verification::*;
+        let draft = BaselineDraft {
+            version: 1,
+            project_id: ProjectId::new("p").unwrap(),
+            origin: BaselineOrigin::Imported,
+            requirements: "approved checks".into(),
+            checks: vec![
+                CheckSpec {
+                    id: RequestId::new("code").unwrap(),
+                    kind: CheckKind::Code,
+                    minimum_risk: Risk::Low,
+                    content: b"code".to_vec(),
+                },
+                CheckSpec {
+                    id: RequestId::new("integrity").unwrap(),
+                    kind: CheckKind::TestIntegrity,
+                    minimum_risk: Risk::Low,
+                    content: b"integrity".to_vec(),
+                },
+            ],
+            rules: vec![],
+            retry_limit: 0,
+        };
+        let baseline = draft.identity().unwrap();
+        for (n, command) in [
+            Command::CreateProject {
+                project_id: draft.project_id.clone(),
+                spec: ProjectSpec {
+                    name: "Project".into(),
+                    repositories: vec![],
+                },
+            },
+            Command::ProposeBaseline { draft },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("host").unwrap(),
+                request_id: RequestId::new(format!("fixture-{n}")).unwrap(),
+                expected_revision: Cursor::new(n as u64),
+                command,
+            };
+            assert_eq!(
+                apply(&mut db, &cfg, &path, input).unwrap().outcome,
+                Outcome::Applied
+            );
+        }
+        db.execute_batch("CREATE TRIGGER owner_abort BEFORE INSERT ON owner_operations BEGIN SELECT RAISE(ABORT,'real_sqlite_abort'); END;").unwrap();
+        let before: i64 = db
+            .query_row("SELECT COUNT(*) FROM owner_operations", [], |r| r.get(0))
+            .unwrap();
+        let approve = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("aborted").unwrap(),
+            expected_revision: Cursor::new(2),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ApproveBaseline {
+                    baseline_id: baseline.clone(),
+                },
+            },
+        };
+        assert!(
+            owner_apply(&mut db, &cfg, &path, a, &approve)
+                .unwrap_err()
+                .0
+                .contains("real_sqlite_abort")
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM owner_operations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            db.query_row("SELECT revision FROM state", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT approved FROM verification_baselines WHERE id=?1",
+                [baseline.as_str()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+}
+
+#[cfg(test)]
+mod knowledge_storage_tests {
+    use super::*;
+    use crate::memory::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn bounded_sqlite_full_rolls_back_knowledge_and_operation_acknowledgement() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("db");
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let mut revision = 0;
+        let mut sequence = 0;
+        let project_id = ProjectId::new("p").unwrap();
+        let task_id = TaskId::new("t").unwrap();
+        let mut call = |db: &mut Connection, command| {
+            sequence += 1;
+            let reply = apply(
+                db,
+                &config,
+                &path,
+                WireRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_id: ClientId::new("host").unwrap(),
+                    request_id: RequestId::new(format!("op-{sequence}")).unwrap(),
+                    expected_revision: Cursor::new(revision),
+                    command,
+                },
+            );
+            if let Ok(reply) = &reply {
+                revision = reply.revision.value();
+            }
+            reply
+        };
+        assert_eq!(
+            call(
+                &mut db,
+                Command::CreateProject {
+                    project_id: project_id.clone(),
+                    spec: ProjectSpec {
+                        name: "p".into(),
+                        repositories: vec![]
+                    }
+                }
+            )
+            .unwrap()
+            .outcome,
+            Outcome::Applied
+        );
+        assert_eq!(
+            call(
+                &mut db,
+                Command::PinTask {
+                    context: ExecutionContext {
+                        project_id: project_id.clone(),
+                        task_id: task_id.clone(),
+                        config_id: config.id.clone(),
+                        snapshot_id: SnapshotId::new("s").unwrap(),
+                        baseline_id: BaselineId::new("b").unwrap(),
+                        allowed_destinations: vec![],
+                        budget_ref: CredentialRef::new("budget").unwrap(),
+                    }
+                }
+            )
+            .unwrap()
+            .outcome,
+            Outcome::Applied
+        );
+        assert_eq!(
+            call(
+                &mut db,
+                Command::Knowledge {
+                    action: KnowledgeAction::Admit {
+                        principal: Principal {
+                            id: RequestId::new("writer").unwrap(),
+                            project_id,
+                            task_id,
+                            session_id: SessionId::new("session").unwrap(),
+                            role: KnowledgeRole::Contributor,
+                        }
+                    }
+                }
+            )
+            .unwrap()
+            .outcome,
+            Outcome::Applied
+        );
+        let pages: i64 = db.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
+        let bounded: i64 = db
+            .query_row(&format!("PRAGMA max_page_count={pages}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pages, bounded);
+        let before: (i64, i64) = db
+            .query_row(
+                "SELECT revision,(SELECT COUNT(*) FROM operations) FROM state",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let result = call(
+            &mut db,
+            Command::Knowledge {
+                action: KnowledgeAction::Capture {
+                    principal_id: RequestId::new("writer").unwrap(),
+                    activity: ActivityInput {
+                        id: RequestId::new("full").unwrap(),
+                        source_id: RequestId::new("source").unwrap(),
+                        category: CaptureCategory::ToolOutput,
+                        text: "x".repeat(config.settings.knowledge.excerpt_bytes_max),
+                        gaps: vec![],
+                    },
+                },
+            },
+        );
+        assert!(result.unwrap_err().0.contains("database or disk is full"));
+        let after: (i64, i64) = db
+            .query_row(
+                "SELECT revision,(SELECT COUNT(*) FROM operations) FROM state",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM knowledge_activity", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM knowledge_sources", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(db.is_autocommit());
+    }
 }

@@ -1,0 +1,35 @@
+{
+  "name": "crazyagent-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js --host 127.0.0.1",
+    "build": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "tauri": "node node_modules/@tauri-apps/cli/tauri.js",
+    "test:native": "node test/native/run.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "@wdio/cli": "9.31.9",
+    "@wdio/local-runner": "9.31.9",
+    "@wdio/mocha-framework": "9.31.9",
+    "@wdio/spec-reporter": "9.31.2",
+    "@wdio/tauri-service": "1.5.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "webdriverio": "9.31.9"
+  }
+}

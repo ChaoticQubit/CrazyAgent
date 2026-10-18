@@ -1,0 +1,25 @@
+{
+  "identifier": "main-window",
+  "description": "The local main window has only named owner inspection and decision commands.",
+  "local": true,
+  "windows": ["main"],
+  "webviews": ["main"],
+  "permissions": [
+    "allow-desktop-connect",
+    "allow-desktop-status",
+    "allow-desktop-baselines",
+    "allow-desktop-inspect-baseline",
+    "allow-desktop-approve-baseline",
+    "allow-desktop-revoke-baseline",
+    "allow-desktop-reconcile",
+    "allow-desktop-retry",
+    "allow-desktop-projects",
+    "allow-desktop-open-project",
+    "allow-desktop-history",
+    "allow-desktop-send-message",
+    "allow-desktop-replace-brief",
+    "allow-desktop-pending-intent",
+    "allow-desktop-reconcile-intent",
+    "allow-desktop-retry-intent"
+  ]
+}
