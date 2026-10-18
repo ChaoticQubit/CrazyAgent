@@ -1,0 +1,47 @@
+# Symvibe and CrazyAgent comparison
+
+**Symvibe is a direct competitor worth studying, not merely a board of terminals.** Its public documentation already describes a central orchestrator, native coding harnesses, role-based teams, handoffs, loops, account profiles, memory and session restoration. The assumption that CrazyAgent differs simply by coordinating harnesses and subagents is too broad. Continue building only around a clearer promise: bounded delegated work, inspectable authority, trustworthy verification and recoverable execution across independently complete interfaces. Those are CrazyAgent's accepted targets, not proven advantages over Symvibe. This is research and proposed positioning, not an approved architecture pivot. ([Product overview](https://www.symvibe.com/), [cross-harness workflow](https://www.symvibe.com/guides/claude-code-codex-gemini-cli-side-by-side), [CrazyAgent architecture](../docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md))
+
+Research date: October 17, 2026. This synthesis uses the completed [primary-source research notes](../research_notes/Symvibe%20and%20CrazyAgent%20comparison/symvibe.md). No installation, login, provider request, executable download, security review or runtime qualification occurred. CrazyAgent's comparison baseline is local commit `8c6d06f81e0d68b3e3c556f3284a58e5e1ceaac8` and its adopted documents. Public Symvibe descriptions establish documented behavior; missing descriptions establish questions, not absent features.
+
+## Symvibe already coordinates agents rather than just displaying them
+
+The documented workflow combines Claude Code, Codex and Gemini CLI with hook-derived status, directed commands, summarized handoffs and native session continuation. The orchestrator submits model-written instructions to addressed consoles; teams assign roles, while loops continue work toward a goal. Native CLI permissions remain unless the user enables auto-approval, which is off by default. This is substantive application-level coordination, although its terms acknowledge that natural-language checks can be wrong. ([Cross-harness guide](https://www.symvibe.com/guides/claude-code-codex-gemini-cli-side-by-side), [orchestration terms, sections 7-8](https://www.symvibe.com/terms))
+
+**The subagent distinction needs precision.** Symvibe's parallel-session guide explicitly distinguishes separate sessions from Claude Code's internal subagents and agent teams, and recommends native subagents where appropriate. It therefore supports neither the claim that Symvibe lacks subagents nor the claim that it centrally manages every nested child across harnesses. Public evidence does not establish child identity, per-child control, shared budget accounting or recovery semantics across those boundaries. These are qualification questions. ([Parallel-session guide](https://www.symvibe.com/guides/run-multiple-claude-code-sessions-mac))
+
+Symvibe also documents Git/GitHub interaction, editable documents, diagrams, voice and memory. Its tour labels demonstrations as shipped functionality, but this research inspected the page and media references rather than video frames or a running application. Product breadth is credible competitive evidence; it is not an independently tested reliability result. ([Product overview](https://www.symvibe.com/), [tour](https://www.symvibe.com/tour))
+
+## The meaningful comparison is between guarantees we can prove
+
+| Area | Symvibe public evidence | CrazyAgent target and implication |
+|---|---|---|
+| Coordination | Orchestrator, directed commands, teams, roles, handoffs and loops. | Treat these as overlap. More agents or another board is insufficient differentiation. |
+| Admission and budgets | Native CLI permissions and profile selection are documented; engine-wide enforcement is unverified. | Prove Rust-owned scope, destinations, accounts, quotas and descendant authorization. |
+| Trustworthy completion | Reviewer roles do not establish an immutable verifier or protected acceptance tests. | Prove independent verification and source-bound test integrity. |
+| Recovery and context | Native session resume, local state and memory features are documented. | Prove live-worker recovery, child identity and approved shared-context authority. |
+| Delivery and openness | A proprietary macOS application is available today. | Open-source Rust, complete TUI and desktop clients, and additional platform ambitions remain delivery obligations. |
+
+Symvibe evidence comes from its [workflow guide](https://www.symvibe.com/guides/claude-code-codex-gemini-cli-side-by-side), [tmux comparison](https://www.symvibe.com/compare/tmux), [profiles](https://www.symvibe.com/features/multiple-accounts), [download page](https://www.symvibe.com/download) and [terms](https://www.symvibe.com/terms). CrazyAgent targets come from the [adopted architecture](../docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and [implementation plan](../docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). The implications are this report's recommendations.
+
+Three boundaries matter. **A worktree isolates edits, not OS authority.** Profile folders separate CLI configuration, not necessarily accounts at the operating-system boundary. Neither proves filesystem/network confinement or aggregate CPU, RAM and process budgets. Likewise, a reviewer agent does not become independent merely through its role name; worker-modifiable tests and shared privileged access can undermine verification. CrazyAgent must earn these claims too.
+
+Finally, **resume is not live-process survival**. Symvibe documents relaunching consoles and offering native CLI resume with user confirmation. That does not establish uninterrupted workers surviving an application or engine crash. Its documented local operation also does not provide native remote-machine orchestration; SSH or tmux inside a terminal is a separate arrangement. ([Restoration and remote-operation comparison](https://www.symvibe.com/compare/tmux))
+
+## A young proprietary product offers useful patterns, not reusable implementation
+
+The changelog shows an initial Hypervibe release on October 1 and Symvibe 1.0.42 on October 15, with a rename preserving existing accounts and boards. This is a young, actively changing shipped product. Current availability is **macOS 14 or later on Apple Silicon**; additional platform support was not established. ([Changelog](https://www.symvibe.com/changelog), [download requirements](https://www.symvibe.com/download))
+
+Published pricing is **$19/month or $190/year**, including 10,000 monthly hosted-feature credits, with agent subscriptions separate. Its personal subscription license does not grant general implementation reuse or redistribution. No official open-source repository, component license or stable integration SDK was identified. Study interaction patterns and evaluate the product; do not treat it as an open-source foundation. ([Pricing](https://www.symvibe.com/), [license terms](https://www.symvibe.com/terms))
+
+Local-first also needs qualification. The privacy policy says planner text and board context pass through Symvibe's gateway to Groq; spoken replies use Inworld, while transcription is local. Optional live-status integration modifies backed-up native CLI hooks. Subscription verification can lock board input after 15 minutes offline while existing agents continue, so that restriction is not equivalent to terminating workers. These are relevant tradeoffs for autonomy, privacy and recovery. ([Privacy policy](https://www.symvibe.com/privacy), [subscription terms](https://www.symvibe.com/terms))
+
+The most useful patterns to learn are visible needs-you status, an overview beside interactive native terminals, explicit account selection, deliberate context handoff and honest resume controls. They reduce attention cost without requiring us to copy its studios, voice features or entire interface. ([Workflow comparison](https://www.symvibe.com/compare/tmux), [account profiles](https://www.symvibe.com/features/multiple-accounts))
+
+## Build only where a bounded demonstration establishes distinct value
+
+**If the need is visual supervision of native coding sessions, evaluating Symvibe is more sensible than duplicating its breadth.** If the need includes enforceable account routing, nested-child budgets, live-worker recovery and protected verification, public evidence does not establish that it replaces CrazyAgent. Equally, our design documents do not prove we have delivered those properties.
+
+The proposed priority is one real multi-harness task that demonstrates isolated writers, descendant cancellation, engine restart recovery, bounded admission and independent test-integrity verification. Measure accepted outcomes, intervention burden, recovery failures and resource use. Defer additional boards, studios and catalog breadth until this core works. This is a proposed qualification focus, not new authorized implementation work.
+
+Symvibe belongs in the product comparison. The previously assessed fx belongs in the open-source harness-component comparison, and Vercel Sandbox belongs in optional execution infrastructure. Keeping these categories distinct avoids choosing an application, a reasoning library and a cloud backend as though they solve the same problem. Continue CrazyAgent with a narrower, evidence-backed promise, while treating Symvibe's undocumented guarantees as open questions rather than competitive weaknesses.
