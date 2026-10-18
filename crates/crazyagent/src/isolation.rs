@@ -451,6 +451,300 @@ fn collect_boundary(
     Err(BoundaryError::Unenforced(Box::new(evidence)))
 }
 
+/** Measures a disposable engine boundary with real worker and child operations.
+Inputs are a validated fixture profile, sibling roots and the owned engine child.
+Returns retained observations as failed or resource-unqualified evidence.
+*/
+pub fn run_engine_boundary_probe(
+    profile: &SandboxProfile,
+    candidate: &Path,
+    trusted: &Path,
+    engine: &mut std::process::Child,
+) -> Result<BoundaryEvidence, BoundaryError> {
+    use crate::protocol::*;
+
+    profile.validate(candidate, trusted)?;
+    if engine.try_wait()?.is_some() {
+        return Err(BoundaryError::Unavailable(
+            "disposable engine exited".into(),
+        ));
+    }
+    let artifacts = candidate.parent().unwrap().join("engine-boundary-evidence");
+    if !artifacts.is_dir()
+        || !trusted.join("engine.sock").exists()
+        || !trusted.join("engine.db").is_file()
+    {
+        return Err(BoundaryError::InvalidProfile(
+            "requires live disposable engine and evidence directory".into(),
+        ));
+    }
+    let timeout = Duration::from_secs(u64::from(profile.resource_limits.wall_time_seconds));
+    let mut evidence = BoundaryEvidence {
+        profile_id: profile.id.clone(),
+        allowed: BTreeMap::new(),
+        denied: BTreeMap::new(),
+        unenforced: vec![
+            "cpu-seconds".into(),
+            "memory-bytes".into(),
+            "process-count".into(),
+            "runtime-default-write-exceptions-not-qualified".into(),
+        ],
+        artifacts: vec![artifacts.clone()],
+        versions: BTreeMap::new(),
+        measurements: BTreeMap::new(),
+    };
+    for (name, executable) in [
+        ("node", &profile.node_path),
+        ("sandbox-runtime", &profile.runtime_path),
+    ] {
+        let output = artifacts.join(format!("{name}.version"));
+        let status = bounded_command(
+            &profile.node_path,
+            executable,
+            &["--version".into()],
+            candidate,
+            &output,
+            timeout,
+        )?;
+        let version = read_bounded(&output)?.trim().to_string();
+        if !status.success() || (name == "sandbox-runtime" && version != "0.0.80") {
+            return Err(BoundaryError::Unavailable(format!(
+                "{name} version mismatch: {version}"
+            )));
+        }
+        evidence.versions.insert(name.into(), version);
+    }
+    write_new(&artifacts.join("engine-probe.cjs"), ENGINE_PROBE.as_bytes())?;
+    write_json(
+        &artifacts.join("settings.json"),
+        &serde_json::json!({
+            "network": {"allowedDomains": [], "deniedDomains": [],
+                "allowUnixSockets": [], "allowAllUnixSockets": false, "allowLocalBinding": false},
+            "filesystem": {"allowWrite": [candidate], "denyWrite": [trusted, artifacts],
+                "denyRead": [trusted], "allowRead": []}
+        }),
+    )?;
+    for mode in ["unconfined", "confined"] {
+        let mut requests = BTreeMap::new();
+        for role in ["worker", "child"] {
+            let identity = format!("{mode}-{role}");
+            let snapshot = WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new(&identity).unwrap(),
+                request_id: RequestId::new(format!("{identity}-snapshot")).unwrap(),
+                expected_revision: Cursor::new(0),
+                command: crate::protocol::Command::Snapshot,
+            };
+            let mut control = snapshot.clone();
+            control.request_id = RequestId::new(format!("{identity}-control")).unwrap();
+            control.command = crate::protocol::Command::CreateProject {
+                project_id: ProjectId::new(&identity).unwrap(),
+                spec: ProjectSpec {
+                    name: identity,
+                    repositories: vec![],
+                },
+            };
+            requests.insert(
+                role,
+                serde_json::json!({"snapshot": snapshot, "control": control}),
+            );
+        }
+        let request_path = artifacts.join(format!("{mode}-requests.json"));
+        write_json(&request_path, &requests)?;
+        let mut args: Vec<std::ffi::OsString> = vec![];
+        let executable = if mode == "confined" {
+            args.extend([
+                "--settings".into(),
+                artifacts.join("settings.json").into_os_string(),
+                "--".into(),
+                profile.node_path.as_os_str().into(),
+            ]);
+            &profile.runtime_path
+        } else {
+            &profile.node_path
+        };
+        args.extend([
+            artifacts.join("engine-probe.cjs").into_os_string(),
+            candidate.as_os_str().into(),
+            trusted.as_os_str().into(),
+            engine.id().to_string().into(),
+            request_path.into_os_string(),
+            mode.into(),
+            "worker".into(),
+        ]);
+        let output = artifacts.join(format!("{mode}.stdout"));
+        let started = Instant::now();
+        let status = bounded_command(
+            &profile.node_path,
+            executable,
+            &args,
+            candidate,
+            &output,
+            timeout,
+        )?;
+        evidence.measurements.insert(
+            format!("{mode}-elapsed-ms"),
+            started.elapsed().as_millis().try_into().unwrap(),
+        );
+        if !status.success() {
+            return Err(BoundaryError::Unavailable(format!(
+                "{mode} probe exited {status}: {}; artifacts {}",
+                read_bounded(&output.with_extension("stderr"))?,
+                artifacts.display()
+            )));
+        }
+        for role in ["worker", "child"] {
+            let result_path = candidate.join(format!("{mode}-{role}.json"));
+            let raw: EngineProbeResult = serde_json::from_str(&read_bounded(&result_path)?)
+                .map_err(|error| {
+                    BoundaryError::Unavailable(format!("invalid engine observations: {error}"))
+                })?;
+            evidence.artifacts.push(result_path);
+            if evidence.versions.get("node") != Some(&raw.node_version) {
+                return Err(BoundaryError::Unavailable(
+                    "probe Node version mismatch".into(),
+                ));
+            }
+            for case in [
+                "contact",
+                "control",
+                "state-read",
+                "state-write",
+                "signal",
+                "candidate-write",
+            ] {
+                let observation = raw.operations.get(case).map(String::as_str);
+                if mode == "unconfined" || case == "candidate-write" {
+                    let applied = case != "control"
+                        || raw.reply.as_ref().is_some_and(|reply| {
+                            reply.request_id.as_str() == format!("{mode}-{role}-control")
+                                && reply.outcome == crate::protocol::Outcome::Applied
+                        });
+                    record_case(
+                        &mut evidence.allowed,
+                        &format!("{mode}-{role}-{case}"),
+                        observation == Some("ok")
+                            && applied
+                            && (case != "candidate-write"
+                                || fs::read(candidate.join(format!("{mode}-{role}.output")))
+                                    .is_ok_and(|bytes| bytes == role.as_bytes())),
+                    );
+                    if mode == "confined" {
+                        record_case(
+                            &mut evidence.allowed,
+                            &format!("{role}-{case}"),
+                            observation == Some("ok"),
+                        );
+                    }
+                } else {
+                    record_case(
+                        &mut evidence.denied,
+                        &format!("{role}-{case}"),
+                        matches!(observation, Some("EACCES" | "EPERM" | "EROFS")),
+                    );
+                }
+            }
+        }
+        write_json(&artifacts.join(format!("{mode}-evidence.json")), &evidence)?;
+        if evidence
+            .allowed
+            .values()
+            .chain(evidence.denied.values())
+            .any(|value| !value)
+        {
+            return Err(BoundaryError::Failed(Box::new(evidence)));
+        }
+    }
+    assert_eq!(evidence.denied.len(), 10);
+    Err(BoundaryError::Unenforced(Box::new(evidence)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EngineProbeResult {
+    operations: BTreeMap<String, String>,
+    node_version: String,
+    reply: Option<crate::protocol::WireReply>,
+}
+
+const ENGINE_PROBE: &str = r#"const fs = require('node:fs');
+const net = require('node:net');
+const cp = require('node:child_process');
+const path = require('node:path');
+const [candidate, trusted, pid, requestsPath, mode, role] = process.argv.slice(2);
+const requests = JSON.parse(fs.readFileSync(requestsPath, 'utf8'))[role];
+const operations = {};
+function observe(name, action) {
+    try { action(); operations[name] = 'ok'; }
+    catch (error) { operations[name] = error.code || String(error); }
+}
+function exchange(request, name) {
+    return new Promise(resolve => {
+        const socket = net.createConnection(path.join(trusted, 'engine.sock'));
+        const payload = Buffer.from(JSON.stringify(request));
+        const size = Buffer.alloc(4);
+        size.writeUInt32BE(payload.length);
+        let received = Buffer.alloc(0);
+        let settled = false;
+        function finish(error, reply) {
+            if (settled) return;
+            settled = true;
+            operations[name] = error || 'ok';
+            socket.destroy();
+            resolve(reply);
+        }
+        socket.setTimeout(1500, () => finish('TIMEOUT'));
+        socket.once('error', error => finish(error.code || String(error)));
+        socket.once('connect', () => socket.write(Buffer.concat([size, payload])));
+        socket.on('data', bytes => {
+            received = Buffer.concat([received, bytes]);
+            if (received.length > 65540) return finish('OVERSIZED');
+            if (received.length < 4) return;
+            const length = received.readUInt32BE();
+            if (length === 0 || length > 65536) return finish('INVALID_FRAME');
+            if (received.length === length + 4) {
+                try {
+                    const reply = JSON.parse(received.subarray(4));
+                    if (reply.request_id !== request.request_id) return finish('INVALID_REPLY');
+                    finish(null, reply);
+                } catch { finish('INVALID_JSON'); }
+            }
+        });
+        socket.once('close', () => finish('CLOSED'));
+    });
+}
+async function main() {
+    observe('candidate-write', () => fs.writeFileSync(path.join(candidate, `${mode}-${role}.output`), role));
+    observe('state-read', () => {
+        const fd = fs.openSync(path.join(trusted, 'engine.db'), 'r');
+        try {
+            const header = Buffer.alloc(16);
+            if (fs.readSync(fd, header, 0, 16, 0) !== 16 || header.toString() !== 'SQLite format 3\0') throw new Error('INVALID_DB');
+        } finally { fs.closeSync(fd); }
+    });
+    observe('state-write', () => {
+        const fd = fs.openSync(path.join(trusted, 'engine.db'), 'r+');
+        try { if (fs.writeSync(fd, Buffer.from('S'), 0, 1, 0) !== 1) throw new Error('SHORT_WRITE'); }
+        finally { fs.closeSync(fd); }
+    });
+    observe('signal', () => process.kill(Number(pid), 'SIGCONT'));
+    const snapshot = await exchange(requests.snapshot, 'contact');
+    if (snapshot && snapshot.outcome.kind === 'Snapshot') requests.control.expected_revision = snapshot.revision;
+    const reply = await exchange(requests.control, 'control');
+    fs.writeFileSync(path.join(candidate, `${mode}-${role}.json`), JSON.stringify({operations, node_version: process.version, reply: reply || null}));
+    if (role === 'worker') {
+        const child = cp.spawnSync(process.execPath, [__filename, candidate, trusted, pid, requestsPath, mode, 'child'], {
+            timeout: 7000, maxBuffer: 65536, env: process.env
+        });
+        if (child.status !== 0 || child.error) {
+            process.stderr.write(child.stderr || String(child.error));
+            process.exitCode = 1;
+        }
+    }
+}
+main().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
+"#;
+
 fn record_case(cases: &mut BTreeMap<String, bool>, name: &str, outcome: bool) {
     assert!(
         cases.insert(name.into(), outcome).is_none(),
