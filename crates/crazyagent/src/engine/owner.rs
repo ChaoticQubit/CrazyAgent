@@ -54,6 +54,9 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    Conversation {
+        mutation: crate::conversation::ConversationMutation,
+    },
     ProposeBaseline {
         draft: BaselineDraft,
     },
@@ -85,6 +88,12 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::Conversation { mutation } => {
+                mutation.validate()?;
+                Command::OwnerConversation {
+                    mutation: mutation.clone(),
+                }
+            }
             Self::ProposeBaseline { draft } => Command::ProposeBaseline {
                 draft: draft.clone(),
             },
@@ -167,6 +176,14 @@ pub struct OwnerPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerRead {
+    ConversationHistory {
+        project_id: ProjectId,
+        cursor: Option<crate::conversation::ConversationCursor>,
+        limit: u8,
+    },
+    CurrentBrief {
+        project_id: ProjectId,
+    },
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -210,7 +227,11 @@ pub enum OwnerRead {
 impl OwnerRead {
     pub(crate) fn command(&self) -> Result<Option<Command>, EngineError> {
         Ok(Some(match self {
-            Self::Page { .. } | Self::Baseline { .. } | Self::Capabilities => return Ok(None),
+            Self::Page { .. }
+            | Self::Baseline { .. }
+            | Self::Capabilities
+            | Self::ConversationHistory { .. }
+            | Self::CurrentBrief { .. } => return Ok(None),
             Self::CoordinationState { plan_id } => Command::CoordinationState {
                 plan_id: plan_id.clone(),
             },
@@ -299,6 +320,14 @@ impl OwnerRequest {
             }
             OwnerOperation::Read { query } => {
                 query.command()?;
+                if let OwnerRead::ConversationHistory {
+                    project_id,
+                    cursor,
+                    limit,
+                } = query
+                {
+                    crate::conversation::validate_history(project_id, cursor.as_ref(), *limit)?;
+                }
                 if let OwnerRead::Page { limit, cursor, .. } = query {
                     if !(1..=32).contains(limit) {
                         return Err(failure("owner_page_limit"));
@@ -400,6 +429,13 @@ pub enum OwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
+    ConversationHistory {
+        page: crate::conversation::ConversationPage,
+    },
+    CurrentBrief {
+        project_id: ProjectId,
+        brief: Option<crate::conversation::ConversationEntry>,
+    },
     Page {
         items: Vec<OwnerSummary>,
         next: Option<OwnerPageCursor>,

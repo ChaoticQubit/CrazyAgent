@@ -278,6 +278,9 @@ fn apply(
     path: &Path,
     request: WireRequest,
 ) -> Result<WireReply, EngineError> {
+    if matches!(request.command, Command::OwnerConversation { .. }) {
+        return Err(error("owner_authentication_required"));
+    }
     if request.client_id.as_str().starts_with("owner:") {
         return Err(error("reserved_owner_identity"));
     }
@@ -433,6 +436,9 @@ fn execute(
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     match command {
+        Command::OwnerConversation { mutation } => {
+            crate::conversation::apply(tx, mutation, revision)
+        }
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
             crate::verification::execute(tx, config, command)
         }
@@ -820,6 +826,7 @@ fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
             .map_err(error)?;
         }
     }
+    crate::conversation::initialize(&tx)?;
     let count: i64 = tx
         .query_row("SELECT COUNT(*) FROM owner_meta", [], |r| r.get(0))
         .map_err(error)?;
@@ -957,7 +964,7 @@ fn owner_record(
     Ok(())
 }
 
-fn owner_lookup(
+pub(crate) fn owner_lookup(
     tx: &Transaction<'_>,
     origin: &str,
     owner: &str,
@@ -1230,6 +1237,22 @@ fn owner_read(
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
     let data = match query {
+        OwnerRead::ConversationHistory {
+            project_id,
+            cursor,
+            limit,
+        } => crate::conversation::history(
+            &tx,
+            &config.id,
+            a,
+            project_id,
+            cursor.as_ref(),
+            *limit,
+            revision,
+        )?,
+        OwnerRead::CurrentBrief { project_id } => {
+            crate::conversation::current_brief(&tx, project_id)?
+        }
         OwnerRead::Page {
             view,
             cursor,

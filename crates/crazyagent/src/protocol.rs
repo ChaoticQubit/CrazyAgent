@@ -124,6 +124,10 @@ pub struct ExecutionContext {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
     #[serde(skip_deserializing)]
+    OwnerConversation {
+        mutation: crate::conversation::ConversationMutation,
+    },
+    #[serde(skip_deserializing)]
     ProposeBaseline {
         draft: crate::verification::BaselineDraft,
     },
@@ -221,6 +225,11 @@ impl WireRequest {
             return Err(ProtocolError("unsupported protocol version".into()));
         }
         match &self.command {
+            Command::OwnerConversation { mutation } => {
+                mutation
+                    .validate()
+                    .map_err(|e| ProtocolError(e.to_string()))?;
+            }
             Command::ProposeBaseline { draft } => {
                 draft.validate().map_err(|e| ProtocolError(e.to_string()))?;
             }

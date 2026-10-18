@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod client_controller;
 pub mod config;
+pub mod conversation;
 pub mod coordination;
 pub mod engine;
 pub mod isolation;
