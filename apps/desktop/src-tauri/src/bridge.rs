@@ -1,10 +1,14 @@
 use crazyagent::client_controller::OwnerController;
+use crazyagent::conversation::{
+    ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
+    TEXT_BYTES_MAX,
+};
 use crazyagent::engine::Client;
 use crazyagent::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor, OwnerRead,
     OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
-use crazyagent::protocol::BaselineId;
+use crazyagent::protocol::{BaselineId, ProjectId};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -108,6 +112,71 @@ struct BaselineSelection {
     revoked: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectPage {
+    pub items: Vec<ProjectRow>,
+    pub has_more: bool,
+    pub fresh: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationRow {
+    pub kind: &'static str,
+    pub version: Option<String>,
+    pub text: String,
+    pub event: String,
+    pub revision: String,
+    pub origin: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectDetail {
+    pub project_id: String,
+    pub ticket: String,
+    pub brief: Option<ConversationRow>,
+    pub fresh: bool,
+    pub revision: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryPage {
+    pub project_id: String,
+    pub entries: Vec<ConversationRow>,
+    pub has_more: bool,
+    pub fresh: bool,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingIntent {
+    pub kind: &'static str,
+    pub project_id: Option<String>,
+    pub baseline_id: Option<String>,
+    pub generation: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentReceipt {
+    #[serde(flatten)]
+    pub intent: PendingIntent,
+    pub outcome: ActionOutcome,
+    pub pending: bool,
+    pub rejection: Option<&'static str>,
+}
+
+struct ProjectSelection {
+    id: ProjectId,
+    generation: u64,
+    expected_version: u64,
+    next: Option<ConversationCursor>,
+}
+
 pub struct NativeBridge {
     socket: Option<PathBuf>,
     ordinary: Option<Client>,
@@ -115,6 +184,8 @@ pub struct NativeBridge {
     next: Option<OwnerPageCursor>,
     generation: u64,
     selected: Option<BaselineSelection>,
+    projects_next: Option<OwnerPageCursor>,
+    project: Option<ProjectSelection>,
 }
 
 impl NativeBridge {
@@ -126,12 +197,16 @@ impl NativeBridge {
             next: None,
             generation: 0,
             selected: None,
+            projects_next: None,
+            project: None,
         }
     }
 
     pub async fn connect(&mut self) -> Result<ConnectionStatus, BridgeError> {
         self.next = None;
         self.selected = None;
+        self.project = None;
+        self.projects_next = None;
         self.ordinary = None;
         let socket = self
             .socket
@@ -293,18 +368,66 @@ impl NativeBridge {
     }
 
     async fn deliver(&mut self, reconcile: bool) -> Result<ActionReceipt, BridgeError> {
-        let controller = self.controller()?;
-        let pending = controller
-            .pending()
+        let target = self
+            .pending_intent()?
             .ok_or_else(|| failure("no_pending_intent"))?;
+        let baseline_id = target
+            .baseline_id
+            .ok_or_else(|| failure("unexpected_pending_intent"))?;
+        let result = self.deliver_intent(reconcile).await?;
+        bounded(ActionReceipt {
+            baseline_id,
+            outcome: result.outcome,
+            pending: result.pending,
+        })
+    }
+
+    pub fn pending_intent(&self) -> Result<Option<PendingIntent>, BridgeError> {
+        let Some(pending) = self.controller.as_ref().and_then(|c| c.pending()) else {
+            return Ok(None);
+        };
         let OwnerOperation::Apply { mutation } = &pending.request().operation else {
             return Err(failure("unexpected_pending_intent"));
         };
-        let baseline_id = match mutation {
-            OwnerMutation::ApproveBaseline { baseline_id }
-            | OwnerMutation::RevokeBaseline { baseline_id } => baseline_id.as_str().to_owned(),
+        let (kind, project_id, baseline_id) = match mutation {
+            OwnerMutation::ApproveBaseline { baseline_id } => (
+                "approve_baseline",
+                None,
+                Some(baseline_id.as_str().to_owned()),
+            ),
+            OwnerMutation::RevokeBaseline { baseline_id } => (
+                "revoke_baseline",
+                None,
+                Some(baseline_id.as_str().to_owned()),
+            ),
+            OwnerMutation::Conversation {
+                mutation: ConversationMutation::AppendMessage { project_id, .. },
+            } => ("message", Some(project_id.as_str().to_owned()), None),
+            OwnerMutation::Conversation {
+                mutation: ConversationMutation::ReplaceBrief { project_id, .. },
+            } => ("brief", Some(project_id.as_str().to_owned()), None),
             _ => return Err(failure("unexpected_pending_intent")),
         };
+        bounded(Some(PendingIntent {
+            kind,
+            project_id,
+            baseline_id,
+            generation: pending.generation().to_string(),
+        }))
+    }
+
+    pub async fn reconcile_intent(&mut self) -> Result<IntentReceipt, BridgeError> {
+        self.deliver_intent(true).await
+    }
+
+    pub async fn retry_intent(&mut self) -> Result<IntentReceipt, BridgeError> {
+        self.deliver_intent(false).await
+    }
+
+    async fn deliver_intent(&mut self, reconcile: bool) -> Result<IntentReceipt, BridgeError> {
+        let intent = self
+            .pending_intent()?
+            .ok_or_else(|| failure("no_pending_intent"))?;
         self.selected = None;
         self.next = None;
         let response = if reconcile {
@@ -312,15 +435,22 @@ impl NativeBridge {
         } else {
             self.controller()?.retry_pending().await
         };
+        let mut rejection = None;
         let outcome = match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
                 match operation.result {
                     OwnerResult::Applied => ActionOutcome::Applied,
-                    OwnerResult::Rejected { .. } => ActionOutcome::Rejected,
+                    OwnerResult::Rejected { code } => {
+                        rejection = Some(rejection_code(&code));
+                        ActionOutcome::Rejected
+                    }
                     OwnerResult::VerificationUnavailable { .. } => ActionOutcome::Unavailable,
                 }
             }
-            Ok(OwnerResponse::Rejected { .. }) => ActionOutcome::Rejected,
+            Ok(OwnerResponse::Rejected { code }) => {
+                rejection = Some(rejection_code(&code));
+                ActionOutcome::Rejected
+            }
             Ok(OwnerResponse::OutcomeUnknown { .. }) => ActionOutcome::Unknown,
             Ok(OwnerResponse::NotRecordedAtBarrier { .. }) => ActionOutcome::NotRecordedAtBarrier,
             Ok(OwnerResponse::Read { .. }) => return Err(failure("unexpected_reply")),
@@ -330,11 +460,236 @@ impl NativeBridge {
                 ActionOutcome::Uncertain
             }
         };
-        bounded(ActionReceipt {
-            baseline_id,
+        bounded(IntentReceipt {
+            intent,
             outcome,
             pending: self.status().pending,
+            rejection,
         })
+    }
+
+    pub async fn projects(&mut self, next: bool) -> Result<ProjectPage, BridgeError> {
+        self.selected = None;
+        let cursor = if next {
+            Some(
+                self.projects_next
+                    .take()
+                    .ok_or_else(|| failure("no_next_page"))?,
+            )
+        } else {
+            self.projects_next = None;
+            None
+        };
+        let state = self
+            .controller()?
+            .read_page(OwnerView::Projects, cursor, Some(PAGE_SIZE))
+            .await
+            .map_err(|_| failure("owner_read_failed"))?;
+        let OwnerData::Page { items, next } = state.data else {
+            return Err(failure("resync_required"));
+        };
+        if items.len() > usize::from(PAGE_SIZE) {
+            return Err(failure("projection_limit"));
+        }
+        let rows = items
+            .into_iter()
+            .map(|item| match item {
+                OwnerSummary::Project {
+                    project_id, name, ..
+                } => Ok(ProjectRow {
+                    id: project_id.as_str().into(),
+                    name,
+                }),
+                _ => Err(failure("unexpected_reply")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let page = bounded(ProjectPage {
+            items: rows,
+            has_more: next.is_some(),
+            fresh: true,
+        })?;
+        self.projects_next = next;
+        Ok(page)
+    }
+
+    pub async fn open_project(&mut self, id: &str) -> Result<ProjectDetail, BridgeError> {
+        self.project = None;
+        self.selected = None;
+        let project_id = ProjectId::new(id).map_err(|_| failure("invalid_project"))?;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| failure("selection_limit"))?;
+        let state = self
+            .controller()?
+            .read(OwnerRead::CurrentBrief {
+                project_id: project_id.clone(),
+            })
+            .await
+            .map_err(|_| failure("owner_read_failed"))?;
+        let OwnerData::CurrentBrief {
+            project_id: actual,
+            brief,
+        } = state.data
+        else {
+            return Err(failure("unexpected_reply"));
+        };
+        if actual != project_id {
+            return Err(failure("unexpected_reply"));
+        }
+        let expected_version = match brief.as_ref().map(|entry| &entry.content) {
+            None => 0,
+            Some(ConversationContent::Brief { version }) => *version,
+            _ => return Err(failure("unexpected_reply")),
+        };
+        let result = bounded(ProjectDetail {
+            project_id: id.into(),
+            ticket: self.generation.to_string(),
+            brief: brief.map(conversation_row),
+            fresh: true,
+            revision: state.revision.value().to_string(),
+        })?;
+        self.project = Some(ProjectSelection {
+            id: project_id,
+            generation: self.generation,
+            expected_version,
+            next: None,
+        });
+        Ok(result)
+    }
+
+    pub async fn history(&mut self, next: bool) -> Result<HistoryPage, BridgeError> {
+        self.selected = None;
+        let selected = self
+            .project
+            .as_mut()
+            .ok_or_else(|| failure("stale_selection"))?;
+        let id = selected.id.clone();
+        let cursor = if next {
+            Some(
+                selected
+                    .next
+                    .take()
+                    .ok_or_else(|| failure("no_next_page"))?,
+            )
+        } else {
+            selected.next = None;
+            None
+        };
+        let state = self
+            .controller()?
+            .read(OwnerRead::ConversationHistory {
+                project_id: id.clone(),
+                cursor,
+                limit: 1,
+            })
+            .await
+            .map_err(|_| failure("owner_read_failed"))?;
+        let OwnerData::ConversationHistory { page } = state.data else {
+            return Err(failure("resync_required"));
+        };
+        if page.project_id != id || page.entries.len() > 1 {
+            return Err(failure("unexpected_reply"));
+        }
+        let result = bounded(HistoryPage {
+            project_id: id.as_str().into(),
+            entries: page.entries.into_iter().map(conversation_row).collect(),
+            has_more: page.next.is_some(),
+            fresh: true,
+            revision: state.revision.value().to_string(),
+        })?;
+        self.project
+            .as_mut()
+            .ok_or_else(|| failure("stale_selection"))?
+            .next = page.next;
+        Ok(result)
+    }
+
+    pub async fn send_message(
+        &mut self,
+        ticket: &str,
+        text: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.prepare_conversation(ticket, text, generation, false)?;
+        self.deliver_intent(false).await
+    }
+
+    pub async fn replace_brief(
+        &mut self,
+        ticket: &str,
+        text: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.prepare_conversation(ticket, text, generation, true)?;
+        self.deliver_intent(false).await
+    }
+
+    fn prepare_conversation(
+        &mut self,
+        ticket: &str,
+        text: &str,
+        generation: u64,
+        brief: bool,
+    ) -> Result<(), BridgeError> {
+        if self.status().pending {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        if text.trim().is_empty() || text.len() > TEXT_BYTES_MAX || text.contains('\0') {
+            return Err(failure("conversation_text_bounds"));
+        }
+        let selected = self
+            .project
+            .as_ref()
+            .filter(|s| ticket.len() <= 20 && ticket == s.generation.to_string())
+            .ok_or_else(|| failure("stale_selection"))?;
+        let mutation = if brief {
+            ConversationMutation::ReplaceBrief {
+                project_id: selected.id.clone(),
+                expected_version: selected.expected_version,
+                text: text.into(),
+            }
+        } else {
+            ConversationMutation::AppendMessage {
+                project_id: selected.id.clone(),
+                text: text.into(),
+            }
+        };
+        self.controller()?
+            .begin_mutation(OwnerMutation::Conversation { mutation }, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.selected = None;
+        assert!(self.status().pending);
+        Ok(())
+    }
+}
+
+fn conversation_row(entry: ConversationEntry) -> ConversationRow {
+    let (kind, version) = match entry.content {
+        ConversationContent::Message => ("message", None),
+        ConversationContent::Brief { version } => ("brief", Some(version.to_string())),
+    };
+    ConversationRow {
+        kind,
+        version,
+        text: entry.text,
+        event: entry.event_cursor.value().to_string(),
+        revision: entry.provenance.revision_after.value().to_string(),
+        origin: entry.provenance.origin,
+    }
+}
+
+fn rejection_code(code: &str) -> &'static str {
+    match code {
+        "stale_brief_version" => "stale_brief_version",
+        "conversation_capacity" => "conversation_capacity",
+        "project_missing" => "project_missing",
+        "stale_revision" => "stale_revision",
+        "owner_revoked" => "owner_revoked",
+        _ => "owner_rejected",
     }
 }
 

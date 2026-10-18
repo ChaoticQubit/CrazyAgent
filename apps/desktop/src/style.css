@@ -60,6 +60,11 @@ dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
 .check .muted { font-size: 10px; margin-bottom: 7px; }
 .decision-bar { border-top: 1px solid #dfe4d9; padding-top: 18px; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.conversation-editor { display: grid; gap: 12px; }
+.conversation-editor label { font-weight: 600; }
+textarea { width: 100%; min-height: 100px; resize: vertical; padding: 12px; color: inherit; background: #fff; border: 1px solid #a9b7a4; border-radius: 5px; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+textarea:focus-visible { outline: 3px solid #63866d; outline-offset: 2px; }
+.conversation-history pre, [data-testid="current-project-brief"] { max-height: 320px; overflow: auto; }
 @media (max-width: 980px) {
   .app-shell { grid-template-columns: 156px minmax(0, 1fr); }
   main { padding: 26px 20px; }

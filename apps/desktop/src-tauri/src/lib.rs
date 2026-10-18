@@ -1,7 +1,8 @@
 pub mod bridge;
 
 use bridge::{
-    ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, NativeBridge,
+    ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, HistoryPage,
+    IntentReceipt, NativeBridge, PendingIntent, ProjectDetail, ProjectPage,
 };
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
@@ -97,6 +98,89 @@ async fn desktop_retry(
     lock(&state)?.retry().await
 }
 
+#[tauri::command]
+async fn desktop_projects(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    next: bool,
+) -> Result<ProjectPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.projects(next).await
+}
+
+#[tauri::command]
+async fn desktop_open_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ProjectDetail, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.open_project(&id).await
+}
+
+#[tauri::command]
+async fn desktop_history(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    next: bool,
+) -> Result<HistoryPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.history(next).await
+}
+
+#[tauri::command]
+async fn desktop_send_message(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.send_message(&ticket, &text, generation).await
+}
+
+#[tauri::command]
+async fn desktop_replace_brief(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .replace_brief(&ticket, &text, generation)
+        .await
+}
+
+#[tauri::command]
+fn desktop_pending_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Option<PendingIntent>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.pending_intent()
+}
+
+#[tauri::command]
+async fn desktop_reconcile_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.reconcile_intent().await
+}
+
+#[tauri::command]
+async fn desktop_retry_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.retry_intent().await
+}
+
 pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
@@ -110,6 +194,14 @@ pub fn run() {
             desktop_revoke_baseline,
             desktop_reconcile,
             desktop_retry,
+            desktop_projects,
+            desktop_open_project,
+            desktop_history,
+            desktop_send_message,
+            desktop_replace_brief,
+            desktop_pending_intent,
+            desktop_reconcile_intent,
+            desktop_retry_intent,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

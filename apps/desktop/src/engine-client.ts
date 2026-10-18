@@ -77,6 +77,9 @@ export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
   const messages: Record<string, string> = {
+    invalid_project: "The selected project identity is invalid.",
+    draft_generation_limit: "This draft reached its safe generation limit. Preserve it before restarting.",
+    conversation_text_bounds: "Text must be nonempty, contain no NUL, and fit within 8192 UTF-8 bytes. The draft was not submitted.",
     not_configured: "No engine connection was configured for this desktop session.",
     not_connected: "Connect to the engine before reading owner state.",
     busy: "Another owner request is still running. Wait for it to finish.",
@@ -97,4 +100,80 @@ export function errorMessage(error: unknown): string {
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
   return messages[code] ?? "The owner request failed. Refresh before continuing.";
+}
+
+export interface ProjectPage {
+  items: { id: string; name: string }[];
+  has_more: boolean;
+  fresh: boolean;
+}
+
+export interface ConversationRow {
+  kind: "message" | "brief";
+  version: string | null;
+  text: string;
+  event: string;
+  revision: string;
+  origin: string;
+}
+
+export interface ProjectDetail {
+  project_id: string;
+  ticket: string;
+  brief: ConversationRow | null;
+  fresh: boolean;
+  revision: string;
+}
+
+export interface HistoryPage {
+  project_id: string;
+  entries: ConversationRow[];
+  has_more: boolean;
+  fresh: boolean;
+  revision: string;
+}
+
+export interface PendingIntent {
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline";
+  generation: string;
+  project_id: string | null;
+  baseline_id: string | null;
+}
+
+export interface IntentReceipt extends PendingIntent {
+  outcome: ActionReceipt["outcome"];
+  pending: boolean;
+  rejection: string | null;
+}
+
+export function projects(next = false): Promise<ProjectPage> {
+  return invoke<ProjectPage>("desktop_projects", { next });
+}
+
+export function openProject(id: string): Promise<ProjectDetail> {
+  return invoke<ProjectDetail>("desktop_open_project", { id });
+}
+
+export function history(next = false): Promise<HistoryPage> {
+  return invoke<HistoryPage>("desktop_history", { next });
+}
+
+export function sendMessage(ticket: string, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_send_message", { ticket, text, generation });
+}
+
+export function replaceBrief(ticket: string, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_replace_brief", { ticket, text, generation });
+}
+
+export function pendingIntent(): Promise<PendingIntent | null> {
+  return invoke<PendingIntent | null>("desktop_pending_intent");
+}
+
+export function reconcileIntent(): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_reconcile_intent");
+}
+
+export function retryIntent(): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_retry_intent");
 }
