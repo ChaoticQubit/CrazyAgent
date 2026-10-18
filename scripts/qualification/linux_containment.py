@@ -91,14 +91,32 @@ def touch(size):
     invariant(block[0] == 1, "allocation not touched")
     return len(block)
 
-def topology():
-    interfaces = socket.if_nameindex()
+def validate_topology(observation):
+    require(observation["complete"], "incomplete topology observation")
+    interfaces = observation["interfaces"]
     require([name for index, name in interfaces] == ["lo"], "non-loopback interface")
-    routes = Path("/proc/net/route").read_text().splitlines()[1:]
+    routes, routes6 = observation["ipv4_routes"], observation["ipv6_routes"]
     require(not any(line.split()[1] == "00000000" and int(line.split()[3], 16) & 1 and not int(line.split()[3], 16) & 0x200 for line in routes), "default IPv4 route")
-    routes6 = Path("/proc/net/ipv6_route").read_text().splitlines()
     require(not any(line.split()[0] == "0" * 32 and line.split()[1] == "00" and int(line.split()[8], 16) & 1 and not int(line.split()[8], 16) & 0x200 for line in routes6), "default IPv6 route")
-    return {"interfaces": interfaces, "ipv4_routes": routes, "ipv6_routes": routes6}
+
+def topology(role="worker", ipv4_path=Path("/proc/net/route"), ipv6_path=Path("/proc/net/ipv6_route")):
+    invariant(role in ("worker", "child"), "unknown topology actor")
+    interfaces = socket.if_nameindex()
+    observation = {"interfaces": interfaces[:64], "complete": len(interfaces) <= 64, "read_errors": {}}
+    for name, path, header in (("ipv4_routes", ipv4_path, 1), ("ipv6_routes", ipv6_path, 0)):
+        try:
+            with path.open("r") as source:
+                text = source.read(4097)
+            observation[name] = text[:4096].splitlines()[header:]
+            observation["complete"] &= len(text) <= 4096
+        except OSError as error:
+            observation[name] = []
+            observation["read_errors"][name] = error.errno
+            observation["complete"] = False
+    invariant(len(observation["interfaces"]) <= 64, "interface retention bound lost")
+    emit("topology-" + role, **observation)
+    validate_topology(observation)
+    return observation
 
 def exchange(address, family, nonce):
     with socket.socket(family, socket.SOCK_STREAM) as client:
@@ -122,7 +140,7 @@ def filesystem_actor(manifest, role, port, unix_path):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(0.25)
         errors["host_socket"] = denied(lambda: client.connect(manifest["host_engine"] + "/engine.sock"), (errno.ENOENT,))
-    network = topology()
+    network = topology(role)
     exchange(("127.0.0.1", port), socket.AF_INET, nonce)
     exchange(unix_path, socket.AF_UNIX, nonce)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
@@ -740,6 +758,8 @@ def preflight(controller, engine, expected_hash, binding):
 def evaluate(case, result, receipt, run, uid, gid):
     require(receipt["confirmed"] and receipt["absent"], "evaluation before cleanup confirmation")
     require(not result["overflow"] and not result["timed_out"], "incomplete attached stream")
+    if case == "boundary":
+        require(result["returncode"] == 0, "boundary payload failed: " + result["stderr"])
     records = [json.loads(line) for line in result["stdout"].splitlines()]
     require(len(records) <= 12, "unexpected payload record count")
     phases = {record["phase"]: record for record in records}
@@ -760,6 +780,22 @@ def evaluate(case, result, receipt, run, uid, gid):
         if case == "boundary":
             require("worker" in phases and "child" in phases, "worker/child controls incomplete")
     return {"records": records, "actual_lifetime_ns": elapsed, "status": "observed"}
+
+
+def finalize_case(root, case, record, baseline, run, uid, gid):
+    if "error" in record:
+        record["status"] = "failed"
+        return record
+    try:
+        evaluated = evaluate(case, record["execution"], record["cleanup"], run, uid, gid)
+        require(canaries(root) == baseline, "protected canary changed")
+        if case == "boundary":
+            for role in ("worker", "child"):
+                require((root / "candidate" / case / (role + ".txt")).read_text() == run + ":" + role + "\n", "candidate positive control failed")
+        record.update(evaluated)
+    except (OSError, ValueError, KeyError) as error:
+        record["status"], record["error"] = "failed", str(error)
+    return record
 
 
 def execute_case(controller, case, baseline):
@@ -866,15 +902,7 @@ def execute_case(controller, case, baseline):
             record["cleanup"]["error"] = str(error)
         record["started_monotonic"] = started
         save(root, case + "-result.json", record)
-    if "error" not in record:
-        try:
-            require(canaries(root) == baseline, "protected canary changed")
-            if case == "boundary":
-                for role in ("worker", "child"):
-                    require((root / "candidate" / case / (role + ".txt")).read_text() == run + ":" + role + "\n", "candidate positive control failed")
-            record.update(evaluate(case, record["execution"], record["cleanup"], run, controller.uid, controller.gid))
-        except (OSError, ValueError, KeyError) as error:
-            record["status"], record["error"] = "failed", str(error)
+    finalize_case(root, case, record, baseline, run, controller.uid, controller.gid)
     save(root, case + "-result.json", record)
     return record
 
@@ -883,12 +911,36 @@ def interrupted(signum, current_frame):
     raise KeyboardInterrupt("controller signal " + str(signum))
 
 
+def selected_cases(diagnostic):
+    invariant(type(diagnostic) is bool, "diagnostic selection must be boolean")
+    return ("boundary",) if diagnostic else CASES
+
+
+def claim_attempt(directory, diagnostic, provenance):
+    cases = selected_cases(diagnostic)
+    name = "linux-topology-diagnostic-attempt.json" if diagnostic else "linux-containment-native-attempt.json"
+    record = {**provenance, "mode": "boundary-only-diagnostic" if diagnostic else "five-case-qualification",
+              "cases": list(cases), "payload_sha256": payload_hash()}
+    with (directory / name).open("x") as attempt:
+        json.dump(record, attempt, sort_keys=True)
+    return record
+
+
+def completion_status(diagnostic, results):
+    if tuple(item["case"] for item in results) != selected_cases(diagnostic):
+        return "failed"
+    if not all(item["status"] == "observed" and item["cleanup"]["confirmed"] and item["cleanup"]["absent"] for item in results):
+        return "failed"
+    return "diagnostic-observed" if diagnostic else "observed"
+
+
 def main():
     parser = argparse.ArgumentParser(description="DEC-071 leader-only native experiment; help makes no Docker calls")
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--engine-sha256", required=True)
     parser.add_argument("--build-evidence", type=Path, required=True)
     parser.add_argument("--check-local", action="store_true", help="validate existing local inputs without Docker or experiment setup")
+    parser.add_argument("--boundary-only-diagnostic", action="store_true", help="one separately authorized boundary diagnostic; never five-case qualification")
     args = parser.parse_args()
     require(__debug__, "assertions disabled")
     if args.check_local:
@@ -903,13 +955,15 @@ def main():
     setup_fixture(root, run)
     controller = Controller(root, run, budget)
     report = {"run_id": run, "root": str(root), "status": "unavailable", "cases": [], "native_admitted": False,
+              "mode": "boundary-only-diagnostic" if args.boundary_only_diagnostic else "five-case-qualification",
+              "selected_cases": list(selected_cases(args.boundary_only_diagnostic)), "combined_qualification_passed": False,
               "permanent_runtime_selected": False, "aggregate_cpu_budget_proven": False, "review": "deferred",
               "gaps": ["full Task 2 admission", "aggregate CPU-time and disk budgets", "native harness/auth/child control/live recovery", "worker-engine bridge and arbitrary escape resistance"]}
     engine, engine_thread, engine_log, engine_socket = None, None, {}, None
     operations = ["host-before", "host-create"]
     try:
-        with (ROOT / ".local-state" / "linux-containment-native-attempt.json").open("x") as attempt:
-            json.dump({"run_id": run, "root": str(root), "source_sha256": file_hash(Path(__file__)), "engine_sha256": args.engine_sha256}, attempt)
+        report["attempt"] = claim_attempt(ROOT / ".local-state", args.boundary_only_diagnostic,
+                                          {"run_id": run, "root": str(root), "source_sha256": file_hash(Path(__file__)), "engine_sha256": args.engine_sha256})
         with (root / "evidence" / "allocation.lock").open("x") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             report["provenance"] = preflight(controller, args.engine, args.engine_sha256, args.build_evidence)
@@ -941,7 +995,7 @@ def main():
             report["canaries_before"] = baseline
             host_state(root, "host-control", operations)
             operations.append("host-control")
-            for case in CASES:
+            for case in selected_cases(args.boundary_only_diagnostic):
                 require(engine.poll() is None and not engine_log.get("overflow"), "host engine control/log unavailable")
                 result = execute_case(controller, case, baseline)
                 report["cases"].append(result)
@@ -950,7 +1004,7 @@ def main():
                 save(root, "report.json", report)
                 if result["status"] != "observed" or not result["cleanup"]["confirmed"]:
                     break
-            report["status"] = "observed" if len(report["cases"]) == 5 and all(item["status"] == "observed" for item in report["cases"]) else "failed"
+            report["status"] = completion_status(args.boundary_only_diagnostic, report["cases"])
     except (OSError, ValueError, RuntimeError, KeyboardInterrupt, subprocess.SubprocessError, sqlite3.Error) as error:
         report["error"] = str(error) or "interrupted"
     finally:
@@ -992,9 +1046,10 @@ def main():
                 require(report["canaries_unchanged"], "canaries changed")
         except (OSError, ValueError) as error:
             report["fixture_error"], report["status"] = str(error), "failed"
+        report["combined_qualification_passed"] = not args.boundary_only_diagnostic and report["status"] == "observed"
         save(root, "report.json", report)
     print(json.dumps({"status": report["status"], "evidence": str(root), "elapsed_seconds": report["elapsed_seconds"]}))
-    return 0 if report["status"] == "observed" else 1
+    return 0 if report["status"] in ("observed", "diagnostic-observed") else 1
 
 
 if __name__ == "__main__":

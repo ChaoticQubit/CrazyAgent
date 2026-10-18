@@ -1,6 +1,7 @@
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,114 @@ import linux_containment as probe
 
 
 class ContainmentTests(unittest.TestCase):
+    def test_actual_host_topology_is_emitted_even_when_local_route_files_are_unavailable(self):
+        namespace = {"__name__": "payload_helper_test"}
+        exec(compile(probe.PAYLOAD, "probe.py", "exec"), namespace)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            try:
+                namespace["topology"]()
+            except (OSError, ValueError):
+                pass
+        self.assertTrue(output.getvalue(), "actual interfaces were lost before rejection")
+        self.assertEqual(json.loads(output.getvalue())["interfaces"], [list(item) for item in socket.if_nameindex()])
+
+    def test_topology_retains_real_interfaces_and_bounded_routes_before_rejection(self):
+        namespace = {"__name__": "payload_helper_test"}
+        exec(compile(probe.PAYLOAD, "probe.py", "exec"), namespace)
+        with self.assertRaises(AssertionError):
+            namespace["topology"]("unknown")
+        with tempfile.TemporaryDirectory() as directory:
+            ipv4, ipv6 = Path(directory) / "route", Path(directory) / "route6"
+            ipv4.write_text("Iface Destination Gateway Flags\nlo 00000000 00000000 0001\n")
+            ipv6.write_text("")
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(ValueError):
+                namespace["topology"]("worker", ipv4, ipv6)
+            observation = json.loads(output.getvalue())
+            self.assertEqual(observation["phase"], "topology-worker")
+            self.assertEqual(observation["interfaces"], [list(item) for item in socket.if_nameindex()])
+            self.assertEqual(observation["ipv4_routes"], ipv4.read_text().splitlines()[1:])
+            self.assertEqual(observation["ipv6_routes"], [])
+            ipv4.write_text("x" * 5000)
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaisesRegex(ValueError, "incomplete topology"):
+                namespace["topology"]("child", ipv4, ipv6)
+            observation = json.loads(output.getvalue())
+            self.assertFalse(observation["complete"])
+            self.assertLessEqual(sum(map(len, observation["ipv4_routes"])), 4096)
+            self.assertLess(len(output.getvalue()), 16384)
+            ipv4.unlink()
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaisesRegex(ValueError, "incomplete topology"):
+                namespace["topology"]("worker", ipv4, ipv6)
+            self.assertIn("ipv4_routes", json.loads(output.getvalue())["read_errors"])
+
+    def test_topology_validator_keeps_exact_expectation_on_controlled_inputs(self):
+        namespace = {"__name__": "payload_helper_test"}
+        exec(compile(probe.PAYLOAD, "probe.py", "exec"), namespace)
+        observation = {"interfaces": [(1, "lo")], "ipv4_routes": [], "ipv6_routes": [], "complete": True}
+        namespace["validate_topology"](observation)
+        for interfaces in ([], [(1, "renamed")], [(1, "lo"), (2, "eth0")]):
+            with self.subTest(interfaces=interfaces), self.assertRaisesRegex(ValueError, "non-loopback interface"):
+                namespace["validate_topology"]({**observation, "interfaces": interfaces})
+        for key, route in (("ipv4_routes", "lo 00000000 00000000 0001"),
+                           ("ipv6_routes", "0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32 + " 00000000 00000000 00000000 00000001 lo")):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "default IPv"):
+                namespace["validate_topology"]({**observation, key: [route]})
+
+    def test_failed_execution_traceback_precedes_missing_positive_control_file(self):
+        result = probe.capture([sys.executable, "-c", "raise ValueError('primary topology rejection')"], time.monotonic() + 2)
+        self.assertNotEqual(result["returncode"], 0)
+        record = {"execution": result, "status": "unavailable", "cleanup": {"confirmed": True, "absent": True}}
+        with tempfile.TemporaryDirectory() as directory:
+            finalized = probe.finalize_case(Path(directory), "boundary", record, {}, "a" * 32, 501, 20)
+        self.assertEqual(finalized["status"], "failed")
+        self.assertIn("primary topology rejection", finalized["error"])
+        self.assertIn("Traceback", finalized["error"])
+        self.assertNotIn("child.txt", finalized["error"])
+        self.assertEqual(finalized["execution"], result)
+        record["error"] = "earlier controller failure"
+        self.assertEqual(probe.finalize_case(Path("/unused"), "boundary", record, {}, "a" * 32, 501, 20)["error"], "earlier controller failure")
+
+    def test_diagnostic_has_one_fixed_case_separate_exclusive_marker_and_no_qualification(self):
+        self.assertEqual(probe.selected_cases(False), probe.CASES)
+        self.assertEqual(probe.selected_cases(True), ("boundary",))
+        with self.assertRaises(AssertionError):
+            probe.selected_cases("cpu")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "linux-containment-native-attempt.json"
+            original.write_bytes(b"immutable original attempt")
+            provenance = {"run_id": "a" * 32, "source_sha256": probe.file_hash(Path(probe.__file__)), "engine_sha256": "b" * 64}
+            marker = probe.claim_attempt(root, True, provenance)
+            diagnostic = root / "linux-topology-diagnostic-attempt.json"
+            self.assertEqual(marker, json.loads(diagnostic.read_text()))
+            self.assertEqual(marker["mode"], "boundary-only-diagnostic")
+            self.assertEqual(marker["cases"], ["boundary"])
+            self.assertEqual(marker["payload_sha256"], probe.payload_hash())
+            self.assertEqual(original.read_bytes(), b"immutable original attempt")
+            for diagnostic_mode in (True, False):
+                with self.assertRaises(FileExistsError):
+                    probe.claim_attempt(root, diagnostic_mode, provenance)
+            self.assertEqual(original.read_bytes(), b"immutable original attempt")
+            self.assertEqual(json.loads(diagnostic.read_text()), marker)
+        observed = {"case": "boundary", "status": "observed", "cleanup": {"confirmed": True, "absent": True}}
+        self.assertEqual(probe.completion_status(True, [observed]), "diagnostic-observed")
+        self.assertEqual(probe.completion_status(False, [observed]), "failed")
+        self.assertEqual(probe.completion_status(True, [observed, observed]), "failed")
+        self.assertEqual(probe.completion_status(True, [{**observed, "case": "cpu"}]), "failed")
+        self.assertEqual(probe.completion_status(True, [{**observed, "cleanup": {"confirmed": False, "absent": False}}]), "failed")
+        complete = [{**observed, "case": case} for case in probe.CASES]
+        self.assertEqual(probe.completion_status(False, complete), "observed")
+
+    def test_cli_exposes_only_explicit_diagnostic_selection_without_docker(self):
+        result = probe.capture([sys.executable, str(Path(probe.__file__)), "--help"], time.monotonic() + 2)
+        self.assertEqual(result["returncode"], 0)
+        self.assertIn("--boundary-only-diagnostic", result["stdout"])
+        for option in ("--case", "--marker", "--limit", "--ignore-failure"):
+            self.assertNotIn(option, result["stdout"])
+
     @contextmanager
     def owned_socket_fixture(self):
         with tempfile.TemporaryDirectory(prefix="ca-lc-clean-", dir="/private/tmp") as directory:
