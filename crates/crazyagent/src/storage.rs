@@ -1237,6 +1237,13 @@ fn owner_read(
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
     let data = match query {
+        OwnerRead::Settings => {
+            let names: Vec<_> = config.descriptors.keys().cloned().collect();
+            assert!(!names.is_empty());
+            assert!(names.len() <= 25);
+            OwnerData::Settings { names }
+        }
+        OwnerRead::Setting { name } => read_owner_setting(config, name)?,
         OwnerRead::ConversationHistory {
             project_id,
             cursor,
@@ -1285,6 +1292,18 @@ fn owner_read(
         return Err(error("owner_response_bounds"));
     }
     Ok(reply)
+}
+
+fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {
+    let descriptor = config
+        .descriptors
+        .get(name)
+        .ok_or_else(|| error("owner_setting_not_found"))?;
+    assert_eq!(descriptor.name, name);
+    assert!(config.descriptors.len() <= 25);
+    Ok(OwnerData::Setting {
+        descriptor: Box::new(descriptor.clone()),
+    })
 }
 
 fn read_owner_baseline(tx: &Transaction<'_>, id: &BaselineId) -> Result<OwnerData, EngineError> {
@@ -1481,6 +1500,46 @@ mod owner_actor_tests {
             .try_send(Job::OwnerStart(tx))
             .unwrap_or_else(|_| panic!("queue"));
         rx.await.unwrap().unwrap()
+    }
+
+    #[test]
+    fn settings_reader_asserts_impossible_internal_metadata_corruption() {
+        for case in 0..4 {
+            let (_root, path, mut cfg) = fixture();
+            let (mut db, _lock) = open_database(&path, false).unwrap();
+            let started = owner_start(&mut db).unwrap();
+            let owner = &started.owners[0].admission;
+            let query = serde_json::from_value(serde_json::json!({"kind":"Settings"})).unwrap();
+            assert!(owner_read(&mut db, &cfg, &path, owner, &query).is_ok());
+            match case {
+                0 => cfg.descriptors.clear(),
+                1 | 3 => {
+                    let descriptor = cfg.descriptors.values().next().unwrap().clone();
+                    for index in 0..26 {
+                        cfg.descriptors
+                            .insert(format!("invalid-{index}"), descriptor.clone());
+                    }
+                }
+                _ => {
+                    cfg.descriptors.get_mut("timeout_ms").unwrap().name = "corrupt".into();
+                }
+            }
+            let query = if case >= 2 {
+                serde_json::from_value(serde_json::json!({"kind":"Setting","name":"timeout_ms"}))
+                    .unwrap()
+            } else {
+                query
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner_read(&mut db, &cfg, &path, owner, &query)
+            }));
+            assert!(
+                outcome.is_err(),
+                "internal corruption case {case} must trip an invariant"
+            );
+            let tx = db.transaction().unwrap();
+            assert_eq!(owner_revision(&tx).unwrap(), 0);
+        }
     }
 
     #[tokio::test]

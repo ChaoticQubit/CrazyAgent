@@ -176,6 +176,10 @@ pub struct OwnerPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerRead {
+    Settings,
+    Setting {
+        name: String,
+    },
     ConversationHistory {
         project_id: ProjectId,
         cursor: Option<crate::conversation::ConversationCursor>,
@@ -227,11 +231,18 @@ pub enum OwnerRead {
 impl OwnerRead {
     pub(crate) fn command(&self) -> Result<Option<Command>, EngineError> {
         Ok(Some(match self {
-            Self::Page { .. }
+            Self::Settings
+            | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. } => return Ok(None),
+            Self::Setting { name } => {
+                if name.is_empty() || name.len() > 96 {
+                    return Err(failure("owner_setting_name_bounds"));
+                }
+                return Ok(None);
+            }
             Self::CoordinationState { plan_id } => Command::CoordinationState {
                 plan_id: plan_id.clone(),
             },
@@ -429,6 +440,12 @@ pub enum OwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
+    Settings {
+        names: Vec<String>,
+    },
+    Setting {
+        descriptor: Box<crate::config::SettingDescriptor>,
+    },
     ConversationHistory {
         page: crate::conversation::ConversationPage,
     },
