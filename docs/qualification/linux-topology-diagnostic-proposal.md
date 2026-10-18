@@ -1,6 +1,6 @@
 # One-container topology diagnostic proposal
 
-Date: October 18, 2026. Status: prepared and locally tested; owner execution approval pending. IMP-080 and IMP-082 through IMP-086 cover source preparation. DEC-071's failed original attempt is preserved and does not authorize this new invocation.
+Date: October 18, 2026. Status: owner explicitly approved the one-container execution in DEC-072, Q-057 A. IMP-080 and IMP-082 through IMP-086 cover source preparation. DEC-071's failed original attempt remains preserved as a separate result.
 
 ## Why this attempt exists
 
