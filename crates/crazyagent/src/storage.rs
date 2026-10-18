@@ -70,6 +70,9 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+/// Opens private engine storage and initializes additive authority schemas.
+/// Takes a database path and read-only mode and returns connection ownership.
+/// Rejects unsafe filesystem metadata and competing engine ownership.
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
     let parent = path
         .parent()
@@ -124,6 +127,7 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         crate::coordination::initialize(&connection)?;
         crate::memory::initialize(&connection)?;
         crate::assets::initialize(&connection)?;
+        crate::verification::initialize(&connection)?;
         crate::worktrees::initialize(&connection)?;
         crate::worktrees::reconcile(&connection)?;
     }
@@ -177,6 +181,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Applies one revision-checked operation through the storage transaction.
+/// Takes current config, storage path and an identified request.
+/// Returns a durable reply while preserving replay and sensitive input hashes.
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
@@ -186,7 +193,10 @@ fn apply(
     let mut bytes = serde_json::to_vec(&request).map_err(error)?;
     if matches!(
         request.command,
-        Command::Knowledge { .. } | Command::Assets { .. }
+        Command::Knowledge { .. }
+            | Command::Assets { .. }
+            | Command::ProposeBaseline { .. }
+            | Command::OwnerVerification { .. }
     ) {
         bytes = format!("sha256:{}", crate::memory::hash(&bytes)).into_bytes();
     }
@@ -209,7 +219,8 @@ fn apply(
             | Command::AdmitRepository { .. }
             | Command::AllocateWorktree { .. }
             | Command::ReleaseWorktree { .. }
-    ) || crate::coordination::is_mutation(&request.command)
+    ) || crate::verification::is_mutation(&request.command)
+        || crate::coordination::is_mutation(&request.command)
         || matches!(&request.command, Command::Knowledge { action } if crate::memory::is_mutation(action))
         || matches!(&request.command, Command::Assets { action } if crate::assets::is_mutation(action));
     let replay = previous.is_some();
@@ -279,6 +290,9 @@ fn apply(
     )
 }
 
+/// Atomically records an operation reply, revision and retained event.
+/// Takes an open transaction and its bounded operation outcome.
+/// Sensitive authority reads are reevaluated rather than cached as replies.
 fn finish_operation(
     transaction: Transaction<'_>,
     config: &EffectiveConfig,
@@ -296,7 +310,8 @@ fn finish_operation(
     }
     if !replay {
         let sensitive_read = matches!(&request.command, Command::Knowledge { action } if !crate::memory::is_mutation(action))
-            || matches!(&request.command, Command::Assets { action } if !crate::assets::is_mutation(action));
+            || matches!(&request.command, Command::Assets { action } if !crate::assets::is_mutation(action))
+            || matches!(&request.command, Command::OwnerVerification { .. } if !crate::verification::is_mutation(&request.command));
         let reply_bytes = if sensitive_read { &[][..] } else { &frame[4..] };
         transaction
             .execute(
@@ -316,6 +331,9 @@ fn finish_operation(
     Ok(reply)
 }
 
+/// Dispatches a typed command inside the engine storage transaction.
+/// Takes current configuration, command and storage context.
+/// Returns domain outcomes without granting worker-wire owner authority.
 fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -324,6 +342,9 @@ fn execute(
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     match command {
+        Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
+            crate::verification::execute(tx, config, command)
+        }
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
