@@ -447,6 +447,30 @@ pub(crate) fn execute(
     match command {
         Command::ProposeBaseline { draft } => {
             let id = draft.identity().map_err(db_error)?;
+            let project: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    [draft.project_id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(db_error)?;
+            if !project {
+                return rejected("project_missing");
+            }
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM verification_baselines WHERE id=?1)",
+                    [id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(db_error)?;
+            if exists {
+                let (stored, _, _) = baseline(tx, &id)?;
+                if stored != *draft {
+                    return Err(db_error("baseline_tampered"));
+                }
+                return Ok(Outcome::Applied);
+            }
             capacity(tx, "verification_baselines")?;
             tx.execute(
                 "INSERT OR IGNORE INTO verification_baselines(id,project,body) VALUES (?1,?2,?3)",

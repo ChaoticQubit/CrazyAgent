@@ -6,7 +6,7 @@ use super::EngineError;
 use crate::coordination::OwnerAction;
 use crate::memory::{HumanReview, KnowledgeAction};
 use crate::protocol::*;
-use crate::verification::{OwnerVerification, Risk};
+use crate::verification::{BaselineDraft, OwnerVerification, Risk};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,9 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    ProposeBaseline {
+        draft: BaselineDraft,
+    },
     Coordination {
         action: OwnerAction,
     },
@@ -82,6 +85,9 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::ProposeBaseline { draft } => Command::ProposeBaseline {
+                draft: draft.clone(),
+            },
             Self::Coordination { action } => Command::OwnerCoordination {
                 action: action.clone(),
             },

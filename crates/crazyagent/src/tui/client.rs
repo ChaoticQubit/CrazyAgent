@@ -73,7 +73,7 @@ impl Connection {
             .is_some_and(|pending| matches!(pending.request.command, Command::CreateProject { .. }))
     }
 
-    pub fn start(&mut self, command: Command, revision: Cursor) -> Result<(), String> {
+    pub fn start(&mut self, command: Command, revision: Cursor) -> Result<RequestId, String> {
         if self.busy() {
             return Err("A request is pending; Ctrl-R retries an uncertain project creation with its original identity".into());
         }
@@ -95,11 +95,12 @@ impl Connection {
             .ok_or("Client stopped")?
             .try_send(request.clone())
             .map_err(|e| e.to_string())?;
+        let request_id = request.request_id.clone();
         self.pending = Some(Pending {
             request,
             failed: false,
         });
-        Ok(())
+        Ok(request_id)
     }
 
     pub fn poll(&mut self) -> Result<Option<Result<WireReply, ClientError>>, String> {

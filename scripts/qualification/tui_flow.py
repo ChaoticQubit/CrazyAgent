@@ -1,4 +1,5 @@
 import errno
+import json
 import fcntl
 import os
 from pathlib import Path
@@ -6,6 +7,7 @@ import pty
 import re
 import select
 import signal
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -13,6 +15,7 @@ import sys
 import tempfile
 import termios
 import time
+import threading
 import unicodedata
 
 
@@ -204,16 +207,81 @@ def close_tui(child, master, slave, before, key=b"\x11"):
     os.close(slave)
 
 
+class ReplyRelay:
+    def __init__(self, root):
+        self.path = root / "relay.sock"
+        self.upstream = root / "engine.sock"
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.stopped = threading.Event()
+        self.failure = None
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.listener.bind(str(self.path))
+        self.path.chmod(0o600)
+        self.listener.listen(1)
+        self.listener.settimeout(0.1)
+        self.worker = threading.Thread(target=self.forward, daemon=True)
+        self.worker.start()
+
+    def frame(self, peer):
+        def exact(size):
+            data = bytearray()
+            while len(data) < size:
+                part = peer.recv(size - len(data))
+                if not part:
+                    raise AssertionError("relay peer closed before complete actual frame")
+                data.extend(part)
+            return bytes(data)
+        header = exact(4)
+        size = struct.unpack("!I", header)[0]
+        assert 0 < size <= 1048576
+        return header + exact(size)
+
+    def forward(self):
+        try:
+            while not self.stopped.is_set():
+                try:
+                    downstream, _ = self.listener.accept()
+                except socket.timeout:
+                    continue
+                with downstream, socket.socket(socket.AF_UNIX) as upstream:
+                    downstream.settimeout(5)
+                    upstream.settimeout(5)
+                    upstream.connect(str(self.upstream))
+                    request = self.frame(downstream)
+                    upstream.sendall(request)
+                    reply = self.frame(upstream)
+                    command = json.loads(request[4:])["command"]
+                    if command.get("kind") == "CreateProject" and not self.held.is_set():
+                        assert json.loads(reply[4:])["outcome"]["kind"] == "Applied"
+                        self.held.set()
+                        assert self.release.wait(5), "actual A reply was not released"
+                    downstream.sendall(reply)
+        except BaseException as error:
+            self.failure = error
+
+    def close(self):
+        self.stopped.set()
+        self.release.set()
+        self.worker.join(timeout=6)
+        self.listener.close()
+        assert not self.worker.is_alive(), "relay cleanup exceeded bound"
+        if self.failure is not None:
+            raise self.failure
+
+
 def run(binary):
     children = []
     descriptors = []
+    relay = None
     with tempfile.TemporaryDirectory(prefix="crazyagent-tui-") as temporary:
         root = Path(temporary)
         root.chmod(0o700)
         try:
             service = engine(binary, root)
             children.append(service)
-            child, master, slave, before = launch(binary, root / "engine.sock")
+            relay = ReplyRelay(root)
+            child, master, slave, before = launch(binary, relay.path)
             children.append(child)
             descriptors.extend([master, slave])
             expect(master, "Connected", child)
@@ -223,10 +291,24 @@ def run(binary):
             os.write(master, b"n")
             expect(master, "Project name", child)
             os.write(master, "界-pty-project".encode() + b"\r")
+            assert relay.held.wait(5), "relay did not hold actual committed A reply"
+            os.write(master, b"\x1b")
+            expect(master, "Draft cleared", child)
+            os.write(master, b"n")
+            expect(master, "Project name", child)
+            os.write(master, b"second-draft-unique")
+            expect(master, "second-draft-unique", child)
+            relay.release.set()
             expect(master, "Project created", child)
+            os.write(master, b"\r")
             with sqlite3.connect(str(root / "engine.db")) as database:
                 rows = database.execute("SELECT body FROM projects").fetchall()
                 assert any("pty-project" in row[0] for row in rows), rows
+                deadline = time.monotonic() + 5
+                while not any("second-draft-unique" in row[0] for row in rows) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                    rows = database.execute("SELECT body FROM projects").fetchall()
+                assert any("second-draft-unique" in row[0] for row in rows), ("actual second project missing", rows)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 30, 0, 0))
             inspect_pty(child, master, slave, "kernel resize with automatic SIGWINCH only")
             expect(master, "Projects | Connected", child)
@@ -281,6 +363,8 @@ def run(binary):
                     child.release()
             for descriptor in descriptors:
                 os.close(descriptor)
+            if relay is not None:
+                relay.close()
 
 
 if __name__ == "__main__":

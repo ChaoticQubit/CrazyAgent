@@ -869,7 +869,7 @@ async fn current_configuration_and_operation_identity_are_enforced() {
 }
 
 #[test]
-fn worker_can_propose_untrusted_baseline_but_cannot_admit_it() {
+fn worker_can_draft_content_but_cannot_allocate_or_admit_a_baseline() {
     let draft = serde_json::json!({
         "version": 1, "project_id": "project", "origin": "Imported",
         "requirements": "Approved behavior must be checked",
@@ -879,7 +879,11 @@ fn worker_can_propose_untrusted_baseline_but_cannot_admit_it() {
         ], "rules": [], "retry_limit": 0
     });
     let command = serde_json::json!({"kind":"ProposeBaseline", "draft": draft});
-    assert!(serde_json::from_value::<Command>(command).is_ok());
+    assert!(
+        crazyagent::verification::BaselineDraft::import(&serde_json::to_vec(&draft).unwrap())
+            .is_ok()
+    );
+    assert!(serde_json::from_value::<Command>(command).is_err());
     for operation in [
         "Approve",
         "Revoke",
@@ -897,8 +901,5 @@ fn worker_can_propose_untrusted_baseline_but_cannot_admit_it() {
         "protocol_version":1,"client_id":"worker","request_id":"operation",
         "expected_revision":"0","command":{"kind":"ProposeBaseline","draft":draft}
     });
-    serde_json::from_value::<WireRequest>(request)
-        .unwrap()
-        .validate()
-        .unwrap();
+    assert!(serde_json::from_value::<WireRequest>(request).is_err());
 }
