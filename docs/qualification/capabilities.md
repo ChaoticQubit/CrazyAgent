@@ -19,6 +19,8 @@ Artifact paths must stay inside the designated evidence directory after resolvin
 
 These capabilities are qualified per source revision, profile, operating system, harness and relevant authentication mode. An installed executable, help response, successful build or other profile's result cannot establish them.
 
+The [early qualification forecast](forecast.md) freezes actual rejected-admission results for three launch-profile candidates and separates the verified durable core from incomplete native execution. The [bounded Linux resource results](container-resource-results.md) establish only the measured development prototype controls; they do not select a permanent runtime or complete the confinement row above.
+
 ## Evidence boundaries
 
 Keep raw local evidence under private ignored storage. Publish sanitized summaries with enough provenance to locate and verify the authorized local evidence. Do not commit credentials, raw provider transcripts or private host paths as test artifacts.
