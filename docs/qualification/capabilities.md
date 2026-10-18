@@ -12,7 +12,7 @@ Artifact paths must stay inside the designated evidence directory after resolvin
 
 | Capability | Required proof | Current status |
 |---|---|---|
-| Confinement | Permitted candidate writes succeed; forbidden host/trusted writes, symlink escapes and network actions fail; child restrictions and resource limits are measured | Unavailable; real runtime probes have not run |
+| Confinement | Permitted candidate writes succeed; forbidden host/trusted writes, symlink escapes and network actions fail; child restrictions and resource limits are measured | Unavailable; actual filesystem/network probes pass, but resource controls, engine endpoint denial and default writable exceptions remain unqualified. See [native boundary results](native-boundary-results.md) |
 | Live recovery | The original live worker survives an engine-only crash and reattaches without duplicate dispatch | Unavailable; runner implementation and native evidence are pending |
 | Native authentication | The chosen account/API/local-endpoint mode works inside the admitted profile without exposing credentials | Unavailable; no provider authentication qualification has run |
 | Native child control | Stable child identity, state, targeted cancellation and recovery work through the chosen native harness | Unavailable; adapter implementation and native evidence are pending |
@@ -30,6 +30,8 @@ The current owner-directed development phase defers code and security reviews. N
 ## Delivery checkpoints
 
 The repository foundation supports offline formatting, linting and test/build/test through make check. The empty scaffold had zero application tests. Task 1 now supplies qualification/admission behavior and CLI commands. The integrated source at d1aa990 passed formatting, strict Clippy, 11 real unit tests, 3 real-binary integration tests, build and the same test suites again, with no ignored tests. Subsequent tasks must provide the runtime evidence that can justify an admitted workflow.
+
+Task 2 source at `381d6d6` adds actual sandbox-runtime 0.0.80 probes and explicit resource observations. The leader's integrated native `make check` passed format, strict Clippy, 17 library plus 9 integration tests, build and the same suites again, with zero ignored tests. Tests assert the actual gaps rather than admitting the full profile. DEC-069 authorizes a bounded Docker replacement prototype; it does not select a permanent runtime or qualify native accounts.
 
 ## Current CLI
 

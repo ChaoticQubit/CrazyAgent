@@ -339,3 +339,132 @@ Alternatives and costs: waiting for all native qualification serializes unrelate
 Acceptance and verification: real tests must cover operation replay after lost acknowledgement and engine restart, strict bounded requests, task-pinned configuration, migration/revocation, exclusive input ownership, event cursor resynchronization and SQLite failures without false acknowledgement. No mock harness or forged capability may satisfy the missing worker-boundary test. Exact dependency versions/licenses, function rationale and unproven edges belong in the worker handoff and this log before integration.
 
 Risks and revisit: the complete Task 5 acceptance remains pending until its real admitted-boundary test passes. Shared manifest, library-export and CLI edits are serialized after Task 2 hands them back. The leader must reconcile actual commits and test output before marking any step complete.
+
+
+## IMP-021: Explicit bounded probe profile
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: selected before implementation. Symbols: SandboxProfile, ResourceLimits, NetworkPolicy, SandboxProfile::validate, BoundaryError and its Display/Error implementations.
+
+Goal: qualify the actual pinned runtime using disposable files without loading native accounts or granting arbitrary paths. Store runtime and Node executable paths as explicit nonsecret references; require canonical disjoint sibling candidate/trusted directories, exactly the candidate write grant, deny-all network, synthetic credential references within trusted fixtures and bounded positive resource requirements. Reject malformed input with ordinary errors. Use existing Serde and stdlib; add no dependency.
+
+Alternatives: inherit arbitrary PATH/settings/environment, accept broad grants, or build a general sandbox-policy compiler. These either hide effective authority or exceed this qualification slice. The explicit profile costs more invocation arguments but is reproducible and narrow. Cross-platform and arbitrary policy support remain unavailable.
+
+Acceptance: actual-file validation tests reject overlapping roots, symlinked roots, traversal and unsupported policy. Runtime absence/version mismatch must be unavailable. No native pass from validation alone. Revisit when engine-controlled profile storage and authenticated policy exist.
+
+## IMP-022: Native observations separate from admission
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: selected before implementation. Symbols: BoundaryEvidence, run_boundary_probe, probe execution and observation helpers, record_case.
+
+Goal: run a fixed Node probe through the actual srt CLI with explicit settings, sanitized environment and bounded process-group supervision. Retain settings, scripts, stdout/stderr, results and parent-observed filesystem/network outcomes. Check a real loopback positive control before denial. Native child probes use actual subprocesses. Never accept a command exit/output marker alone as confinement proof. Record missing CPU/memory/process enforcement and deferred engine endpoint controls explicitly; unsupported required controls return a blocking result carrying evidence.
+
+Alternatives: shell-output-only assertions, inventing a resource controller, unchecked arbitrary test commands or a generic runner abstraction. They either overstate proof or increase attack surface. Fixed probes cost one bounded native launch and a small number of disposable files. Resource observations are measurements, not enforcement. Revisit backend/resource policy after real results. The application engine endpoint does not exist and is not tested here.
+
+Acceptance: real red/green tests; exact unavailable diagnostics when the outer sandbox blocks launch; preserved evidence and nonzero native qualification exit for failed controls or missing required enforcement. Assertions guard duplicate case recording and have a triggering test.
+
+## Execution plan
+
+1. Add real filesystem profile-validation tests and the explicit native qualification test. Capture red evidence.
+2. Implement minimum typed validation and bounded actual-runtime probe. Capture green validation evidence.
+3. Run the actual disposable native probe; retain versions, outcomes and exact restrictions.
+4. Run make check and record precise status. Prepare scoped commit if metadata permits.
+5. Hand decision/evidence paths and graph-refresh request to the leader. Reviews stay deferred.
+
+## IMP-023: Bound the real positive-control accept
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: implemented after reproduced behavioral failure. Symbols: accept_control, positive_loopback_control_waits_for_connection.
+
+Problem: the nonblocking host listener can return WouldBlock immediately after the positive TCP connect completes. The first native probe failed with os error 35 before srt launch. A delayed actual TCP connection reproduced this failure in the production accept helper.
+
+Choice: poll nonblocking accept every 10 ms with a caller-selected one-second deadline. Alternatives were an unbounded blocking accept or assuming immediate readiness. Bounded polling costs at most 100 wakeups for the positive control and avoids a false native failure. No platform privilege escalation or mock is involved.
+
+Verification: the delayed-connection test first failed with Io(WouldBlock); after the change all 14 library tests and all 5 boundary integration tests passed. The actual runtime was 0.0.80, host/child Node v26.12.0. Revisit for a reusable event-driven runner rather than generalizing this qualification helper.
+
+## IMP-024: Empirically qualify inherited Darwin resource limits
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: selected before implementation following explicit owner resource-gap follow-up. Symbols: separate crazyagent-boundary-child executable and its resource-role functions; resource-boundary tests; bounded_command and kill_group.
+
+Problem: native srt observations prove filesystem/network behavior but do not prove the requested CPU=2 seconds, RSS=64 MiB or process-count=4 limits. The first successful native run used 59,852 user CPU microseconds, 20,942 system CPU microseconds, 43,312 KiB max RSS and one successful candidate child. These are observations under no resource controller. The watchdog independently killed a real 5-second sleep after a 40 ms deadline.
+
+Choice: use already-locked rustix safe process/resource APIs in a separately launched Rust child, set inherited limits there and execute only fixed bounded disposable test roles. Measure CPU termination, a small allocation against address-space/resident-set controls and whether process limits prevent even the first child for the already-busy real user. No unsafe pre_exec, Python, new dependency version or privileged mechanism. Keep controls unavailable until measured; inherited per-process CPU and per-UID process counts cannot be silently described as whole-tree budgets.
+
+Alternatives: assume RLIMIT_AS enforcement on macOS, build a new runtime, use a privileged helper or weaken the profile. The first is unproved and the others need a demonstrated gap and further design/authority. The bounded experiment costs one small Rust executable plus real integration tests, a few seconds CPU and at most 32 MiB allocation per child. Revisit with measured results before selecting a production controller.
+
+Measured results: resource-tests/.tmpvFv7th/resource-evidence.json records a 24 MiB allocated/touched positive control and six simultaneous short-lived child processes without NPROC=4. RLIMIT_CPU soft/hard=2 survived exec and terminated the real CPU child with signal 24 after 2,113 ms. RLIMIT_AS=16 MiB, RLIMIT_AS=64 MiB and RLIMIT_RSS=64 MiB all returned EINVAL; rustix represents Darwin Rss as an alias of As. NPROC=4 survived exec but rejected all six spawn attempts with os error 35, including the first. This is not a usable task-local four-process budget. CPU evidence proves the fixed Rust role's per-process limit only, not an aggregate tree budget or application to srt. The full sandbox profile retains all three resource gaps.
+
+## IMP-025: Reuse Task 1 outcome vocabulary without granting authority
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: implemented. Symbols: BoundaryEvidence::confinement_outcome, BoundaryEvidence::admissible.
+
+Choice: missing or false named controls map to Task 1 Outcome::Failed; complete observations with any enforcement gap map to Outcome::Unavailable. Only complete observations without gaps map to Proven. The actual runner always returns the blocking Unenforced error after successful filesystem/network observations because CPU, memory, process, engine endpoint and default-write exceptions remain unqualified.
+
+Alternatives: treating srt exit zero as admission, accepting partial case maps or inventing a second outcome taxonomy. Reusing the existing enum costs no dependency or report migration and prevents successful observations from concealing missing controls. These structures do not authenticate an evidence producer and do not replace Task 1 trusted-context/integrity checks or later engine policy.
+
+Verification: empty/partial evidence is rejected by the library test; the native integration check asserts inadmissibility and the Unavailable outcome. The final native rerun remains pending after workspace loopback infrastructure denial. Revisit when the leader integrates actual trusted evidence production and each required control is empirically established.
+
+## IMP-026: Preserve bounded evidence and cleanup on observation errors
+
+Date: October 17, 2026. Task: Task 2. Source: contemporaneous execution-boundary worker handoff.
+
+Status: implemented. Symbols: write_new, write_json, read_bounded, bounded_command, kill_group, ResourceObservation.
+
+Choice: create evidence files exclusively instead of overwriting; cap each inspected native stdout/stderr/result at 64 KiB; poll command deadlines/output every 10 ms. Clear inherited environment and expose only selected executable directories plus system commands, disposable HOME/TMPDIR and LANG=C. Use isolated process groups and the existing rustix process feature for safe group termination, followed by direct-child reaping on unsuccessful observation. Reject PID 1 before group signaling. No unsafe hook, external kill subprocess, Python or new package version is needed.
+
+Alternatives: inherit provider environment, collect unbounded pipes, reuse files, use unsafe pre_exec or modify the runtime. The fixed launcher and file outputs keep this slice small and observable. Polling bounds wall time and sampled file growth, not atomic hard output bytes or resource consumption. A hostile descendant escaping its group remains unqualified; this watchdog is not claimed as a whole-tree resource boundary.
+
+Verification: a real five-second sleep is stopped by the 40 ms watchdog test; the PID-1 guard has a should-panic test; exclusive writes and output inspection run through actual native artifacts. Final Clippy passed with warnings denied; final build passed. The final make check reached the real library tests and failed on two loopback binds denied by the ordinary workspace sandbox. No test was ignored, weakened or removed.
+
+Revisit: when runner lifetime/cancellation is implemented, use qualified tree identity and cleanup rather than generalizing this probe supervisor into a security authority.
+
+## Production function coverage index
+
+| File and symbols | Decisions | Function-level rationale |
+| --- | --- | --- |
+| isolation.rs: SandboxProfile::validate, clean_absolute | IMP-021 | Canonical sibling fixtures, exact candidate grant, bounded metadata/requirements, no traversal, no credential values and direct trusted credential references. Invalid inputs return errors before native work. |
+| isolation.rs: BoundaryError::fmt, From<io::Error>::from | IMP-021, IMP-026 | Distinguish invalid input, runtime/infrastructure unavailability, failed controls and unsupported requirements. Preserve actual errors and artifact location. |
+| isolation.rs: run_boundary_probe | IMP-022, IMP-026 | Validate first, require disposable empty roots, create a fresh evidence directory and persist both blocking evidence and launch errors. Never overwrite user files. |
+| isolation.rs: collect_boundary | IMP-022, IMP-025 | Verify actual host/srt/child versions, construct explicit settings, run fixed native probes, inspect independent filesystem and connection outcomes, retain every required-control gap. |
+| isolation.rs: record_case | IMP-022 | Duplicate case observations are an internal invariant violation; a test trips the assertion. Distinct named cases prevent silent replacement. |
+| isolation.rs: accept_control | IMP-023 | Wait for real nonblocking TCP readiness under a deadline; do not mistake a readiness race for failed confinement. |
+| isolation.rs: BoundaryEvidence::admissible, BoundaryEvidence::confinement_outcome | IMP-025 | Require every named positive/negative observation and zero gaps; reuse Task 1 Outcome without authenticating or admitting a worker. |
+| isolation.rs: run_resource_probe | IMP-024, IMP-026 | Run seven fixed bounded real roles, preserve exit/signal/time/raw output, provide observation evidence rather than claiming all setters enforce policy. |
+| isolation.rs: write_new, write_json | IMP-026 | Exclusive writes prevent destructive fixture/evidence reuse; existing Serde serializes records without a custom format. |
+| isolation.rs: read_bounded | IMP-026 | Inspect only regular native outputs, reject oversized data before read and recheck the bounded read. |
+| isolation.rs: bounded_command, kill_group | IMP-024, IMP-026 | Sanitize environment, isolate process groups, monitor wall/output bounds, terminate/reap on monitor errors and reject PID 1 before safe rustix signaling. |
+| isolation.rs: PROBE deniedWrite, finish and fixed callbacks | IMP-022 | Real direct/traversal/symlink writes, actual child Node writes, synthetic credential reads and loopback connection attempts. Permission-specific errors and parent-observed unchanged bytes/no connection are both required. Child usage is measured, never labeled enforcement. |
+| crazyagent-boundary-child.rs: main | IMP-024 | Explicit nonzero exit plus actual diagnostics for failed setters or execution. No unavailable result is translated to successful qualification. |
+| crazyagent-boundary-child.rs: execute | IMP-024 | Dispatch only a bounded fixed role set; disable core dumps in the disposable child; query limits after exec to prove inheritance. No arbitrary command role is exposed. |
+| crazyagent-boundary-child.rs: limit_and_exec | IMP-024 | Apply soft and hard limits in an independently launched process and exec the same fixed Rust binary. This avoids unsafe pre_exec and does not modify the parent engine/user limits. |
+| crazyagent-boundary-child.rs: allocate | IMP-024 | Reserve/touch/checksum exactly 24 MiB, recording success or allocation denial. This is a positive workload control, not proof a 64 MiB budget is enforced. |
+| crazyagent-boundary-child.rs: burn_cpu | IMP-024 | Fixed four-second wall envelope with actual arithmetic work; observe OS CPU termination at the inherited two-second limit. |
+| crazyagent-boundary-child.rs: spawn_children | IMP-024 | At most six actual children, each sleeping 100 ms; retain setter-inherited spawn errors and reap successful children. This measures feasibility without a fork bomb. |
+
+## Historical worker handoff before leader native verification
+
+The final workspace-native make check passed formatting and strict Clippy, then failed two real loopback unit tests at bind with EPERM. The successful native filesystem/network and resource probes ran through context-mode's separate execution environment. Do not conflate those contexts or retry through that environment after discovering the distinction. No sandbox escalation is attempted by this worker. The leader owns the approved final native command in task-02-report.md.
+
+One concrete replacement for consideration, not implementation: a project-local Linux VM worker boundary with one delegated cgroup v2 per task, memory.max, pids.max and a measured CPU controller, retaining srt where filesystem/network policy is useful. Estimate 2-4 engineering days for a bounded prototype and real enforcement tests, plus separately estimated native account/control/recovery compatibility qualification. This changes deployment and may conflict with required native macOS integrations. No VM installation, privilege change, account change or acceptance-criteria change is selected or authorized here. The current profile remains unavailable; the owner must decide any replacement after reviewing the measured gaps.
+
+Final native command, to be run by the leader with its owner-authorized local-probe escalation:
+
+```sh
+cd /Users/chaoticqubit/Projects/CrazyAgent/.worktrees/execution-boundary
+PATH=/Users/chaoticqubit/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH CRAZYAGENT_SRT=/Users/chaoticqubit/Projects/CrazyAgent/.local-state/tools/sandbox-runtime/node_modules/.bin/srt CRAZYAGENT_NODE=/opt/homebrew/bin/node make check
+```
+
+Commit handoff: scoped git add failed because the workspace sandbox denied creation of /Users/chaoticqubit/Projects/CrazyAgent/.git/worktrees/execution-boundary/index.lock. No commit, metadata escalation or publication was attempted. The leader must stage/commit the preserved six scoped files and consolidate this local log. Task 2 remains partial and the full profile unavailable.
+
+## Leader verification of Task 2 implementation
+
+The unchanged native `make check` exited 0 in the owner-authorized local-probe environment. Formatting, strict Clippy, 17 library tests, 5 filesystem/network boundary tests, 3 CLI tests and 1 resource-observation test passed; build and the complete same suites passed again. No tests were ignored. Raw output is retained at `.worktrees/execution-boundary/.local-state/leader-native-check.log`. This supersedes the earlier workspace-sandbox EPERM as the final execution result, without erasing that historical infrastructure failure.
+
+A source/document consistency check found 22/22 Rust production definitions across `isolation.rs` and `crazyagent-boundary-child.rs` mapped to the decision index above. Fixed embedded JavaScript probe functions and callbacks are mapped separately. These checks establish implementation behavior and documentation coverage, not a completed security/code review or a fully admitted native profile. The resource controller, engine-endpoint denial and default writable exceptions remain explicit gaps. DEC-069 authorizes the bounded Docker replacement prototype documented in `docs/qualification/resource-boundary-proposal.md`; permanent runtime adoption remains undecided.
