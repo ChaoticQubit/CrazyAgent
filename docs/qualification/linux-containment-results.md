@@ -6,7 +6,7 @@ Date: October 18, 2026. Authority: DEC-071 and the accepted linux-containment-pr
 
 The single approved experiment failed at its first boundary case and stopped. One container was created, started, observed stopped and removed with exact identity checks. The memory, PID, CPU and deadline cases did not run. This is not a passing combined containment result.
 
-The payload rejected its network topology because socket.if_nameindex did not satisfy the exact list containing only lo. The payload raised non-loopback interface before retaining the actual interface list or routes. Docker inspection reported NetworkMode none. The evidence therefore does not establish which interface caused rejection or whether that interface could provide external connectivity. Do not weaken the expectation, infer an escape or classify this as a network-denial pass.
+The payload rejected its network topology because socket.if_nameindex did not satisfy the exact list containing only lo. The payload raised non-loopback interface before retaining the actual interface list or routes. Docker inspection reported NetworkMode none. The evidence does not distinguish an empty list, renamed interface or additional interface, and does not establish usable external connectivity. Do not weaken the expectation, infer an escape or classify this as a network-denial pass.
 
 The host evaluator subsequently encountered the missing child.txt positive-control artifact. That is a consequence of the earlier payload failure, not proof of a separate filesystem denial. The raw container traceback is retained.
 
