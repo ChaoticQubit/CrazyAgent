@@ -123,6 +123,7 @@ pub struct ExecutionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
+    #[serde(skip_deserializing)]
     ProposeBaseline {
         draft: crate::verification::BaselineDraft,
     },

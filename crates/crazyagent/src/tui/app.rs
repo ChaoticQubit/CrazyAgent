@@ -1,7 +1,8 @@
 use crate::config::EffectiveConfig;
 use crate::coordination::PlanState;
 use crate::protocol::{
-    Command, Cursor, ExecutionContext, Outcome, ProjectId, ProjectSpec, StoredProject, WireReply,
+    Command, Cursor, ExecutionContext, Outcome, ProjectId, ProjectSpec, RequestId, StoredProject,
+    WireReply,
 };
 
 pub const DRAFT_BYTES_MAX: usize = 4096;
@@ -59,6 +60,9 @@ pub struct App {
     task: usize,
     creating_project: bool,
     command: Option<Command>,
+    draft_generation: u64,
+    submitted_generation: Option<u64>,
+    pending_creation: Option<(RequestId, u64)>,
 }
 
 impl Default for App {
@@ -86,6 +90,9 @@ impl App {
             task: 0,
             creating_project: false,
             command: None,
+            draft_generation: 0,
+            submitted_generation: None,
+            pending_creation: None,
         }
     }
 
@@ -135,10 +142,15 @@ impl App {
                     && self.draft().len() + character.len_utf8() <= DRAFT_BYTES_MAX
                 {
                     self.active_draft().push(character);
+                    if self.creating_project {
+                        self.advance_generation()?;
+                    }
                 }
             }
             UiEvent::Backspace => {
-                self.active_draft().pop();
+                if self.active_draft().pop().is_some() && self.creating_project {
+                    self.advance_generation()?;
+                }
             }
             UiEvent::SelectionNext | UiEvent::SelectionPrevious => {
                 if !self.projects.is_empty() {
@@ -168,15 +180,18 @@ impl App {
             }
             UiEvent::BeginProject => {
                 if self.focus == Focus::Projects {
+                    self.advance_generation()?;
                     self.creating_project = true;
                     self.project_draft.clear();
                     self.notice("Project name: type a name and press Enter; Esc cancels");
                 }
             }
             UiEvent::Cancel => {
+                self.advance_generation()?;
                 self.active_draft().clear();
                 self.creating_project = false;
                 self.command = None;
+                self.submitted_generation = None;
                 self.notice("Draft cleared");
             }
             UiEvent::Submit => {
@@ -185,7 +200,7 @@ impl App {
                     if name.is_empty() || name.len() > 256 {
                         return Err("Project name must contain 1 to 256 UTF-8 bytes".into());
                     }
-                    if self.command.is_some() {
+                    if self.command.is_some() || self.pending_creation.is_some() {
                         return Err("A project command is already queued".into());
                     }
                     self.command = Some(Command::CreateProject {
@@ -203,6 +218,7 @@ impl App {
                             repositories: Vec::new(),
                         },
                     });
+                    self.submitted_generation = Some(self.draft_generation);
                 } else {
                     self.notice("Leader conversation unavailable: authenticated owner API is required; draft retained");
                 }
@@ -214,6 +230,14 @@ impl App {
     }
 
     pub fn apply_reply(&mut self, reply: WireReply) -> Result<(), String> {
+        let completed = self
+            .pending_creation
+            .as_ref()
+            .filter(|(id, _)| id == &reply.request_id)
+            .map(|(_, generation)| *generation);
+        if completed.is_some() {
+            self.pending_creation = None;
+        }
         if reply.revision.value() < self.revision.value() {
             self.notice("Stale engine reply ignored; retained current revision");
             return Ok(());
@@ -263,9 +287,13 @@ impl App {
                 }
             }
             Outcome::Applied => {
-                self.creating_project = false;
-                self.project_draft.clear();
-                self.notice("Project created; refreshing durable engine state");
+                if let Some(generation) = completed {
+                    if self.creating_project && generation == self.draft_generation {
+                        self.creating_project = false;
+                        self.project_draft.clear();
+                    }
+                    self.notice("Project created; refreshing durable engine state");
+                }
             }
             Outcome::Rejected { code } => self.notice(&format!(
                 "Engine rejected request: {code}. Refresh before retrying."
@@ -298,6 +326,24 @@ impl App {
 
     pub fn take_command(&mut self) -> Option<Command> {
         self.command.take()
+    }
+
+    pub fn bind_project_request(&mut self, request_id: RequestId) {
+        assert!(self.pending_creation.is_none());
+        assert!(self.command.is_none());
+        let generation = self
+            .submitted_generation
+            .take()
+            .expect("project dispatch requires submitted generation");
+        self.pending_creation = Some((request_id, generation));
+    }
+
+    fn advance_generation(&mut self) -> Result<(), String> {
+        self.draft_generation = self
+            .draft_generation
+            .checked_add(1)
+            .ok_or("Draft generation exhausted")?;
+        Ok(())
     }
 
     pub fn has_command(&self) -> bool {

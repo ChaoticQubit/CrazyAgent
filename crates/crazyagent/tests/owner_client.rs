@@ -78,6 +78,295 @@ async fn owner_fixture() -> (
 }
 
 #[tokio::test]
+async fn ordinary_wire_cannot_allocate_baselines_or_exhaust_trusted_capacity() {
+    let (root, config, engine) = owner_fixture().await;
+    let server = Server::bind(&root.path().join("ordinary.sock"), engine.clone(), &config).unwrap();
+    let (stop, rx) = oneshot::channel();
+    let task = tokio::spawn(server.run(rx));
+    let client = Client::new(root.path().join("ordinary.sock"), Duration::from_secs(2)).unwrap();
+    let mut revision = 0;
+    let mut allocated = 0;
+    for index in 0..128 {
+        let mut draft = baseline();
+        draft.project_id = ProjectId::new(format!("nonexistent-{index}")).unwrap();
+        let mut req = request(
+            "ordinary",
+            &format!("proposal-{index}"),
+            Command::ProposeBaseline { draft },
+        );
+        req.expected_revision = Cursor::new(revision);
+        if let Ok(reply) = client.request(req).await {
+            revision = reply.revision.value();
+            allocated += usize::from(reply.outcome == Outcome::Applied);
+        }
+    }
+    let mut create = request(
+        "host",
+        "real-project",
+        Command::CreateProject {
+            project_id: ProjectId::new("project").unwrap(),
+            spec: ProjectSpec {
+                name: "Real project".into(),
+                repositories: vec![],
+            },
+        },
+    );
+    create.expected_revision = Cursor::new(revision);
+    assert_eq!(
+        engine.apply(create).await.unwrap().outcome,
+        Outcome::Applied
+    );
+    let mut trusted = request(
+        "host",
+        "trusted-draft",
+        Command::ProposeBaseline { draft: baseline() },
+    );
+    trusted.expected_revision = Cursor::new(revision + 1);
+    let trusted_result = engine.apply(trusted).await;
+    println!("actual ordinary allocations={allocated}; trusted proposal={trusted_result:?}");
+    let database = rusqlite::Connection::open(root.path().join("db")).unwrap();
+    let unknown_rows: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM verification_baselines WHERE project LIKE 'nonexistent-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(allocated, 0, "ordinary wire allocated protected rows");
+    assert_eq!(unknown_rows, 0);
+    assert_eq!(trusted_result.unwrap().outcome, Outcome::Applied);
+}
+
+#[tokio::test]
+async fn authenticated_proposals_require_projects_preserve_history_and_bound_new_rows() {
+    let (root, config, engine) = owner_fixture().await;
+    let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
+        .await
+        .unwrap();
+    let (stop, rx) = oneshot::channel();
+    let task = tokio::spawn(server.run(rx));
+    let client =
+        OwnerClient::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(2)).unwrap();
+    let missing = client
+        .request(owner_request(
+            "missing",
+            0,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProposeBaseline { draft: baseline() },
+            },
+        ))
+        .await
+        .unwrap();
+    let OwnerResponse::Applied { operation } = missing.response else {
+        panic!("owner result")
+    };
+    assert_eq!(
+        operation.result,
+        OwnerResult::Rejected {
+            code: "project_missing".into()
+        }
+    );
+    assert_eq!(
+        engine
+            .apply(request(
+                "host",
+                "project",
+                Command::CreateProject {
+                    project_id: ProjectId::new("project").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Existing".into(),
+                        repositories: vec![]
+                    },
+                }
+            ))
+            .await
+            .unwrap()
+            .outcome,
+        Outcome::Applied
+    );
+    let mut revision = 1;
+    let first = owner_request(
+        "proposal-0",
+        revision,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::ProposeBaseline { draft: baseline() },
+        },
+    );
+    let applied = client.request(first.clone()).await.unwrap();
+    let OwnerResponse::Applied { operation } = &applied.response else {
+        panic!("owner result")
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    revision += 1;
+    let approved = client
+        .request(owner_request(
+            "approve-first",
+            revision,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ApproveBaseline {
+                    baseline_id: baseline().identity().unwrap(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    let OwnerResponse::Applied { operation } = approved.response else {
+        panic!("approval")
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    revision += 1;
+    for index in 1..128 {
+        let mut draft = baseline();
+        draft.requirements = format!("Distinct trusted baseline {index}");
+        let reply = client
+            .request(owner_request(
+                &format!("proposal-{index}"),
+                revision,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::ProposeBaseline { draft },
+                },
+            ))
+            .await
+            .unwrap();
+        let OwnerResponse::Applied { operation } = reply.response else {
+            panic!("proposal")
+        };
+        assert_eq!(operation.result, OwnerResult::Applied);
+        revision += 1;
+    }
+    let duplicate = client
+        .request(owner_request(
+            "duplicate-at-capacity",
+            revision,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProposeBaseline { draft: baseline() },
+            },
+        ))
+        .await
+        .unwrap();
+    let OwnerResponse::Applied { operation } = duplicate.response else {
+        panic!("duplicate")
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    revision += 1;
+    let db = rusqlite::Connection::open(root.path().join("db")).unwrap();
+    let counts = || {
+        db.query_row("SELECT (SELECT COUNT(*) FROM verification_baselines),(SELECT COUNT(*) FROM events),(SELECT COUNT(*) FROM owner_operations),(SELECT COUNT(*) FROM owner_operations WHERE event_cursor IS NOT NULL)", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap()
+    };
+    let snapshot = || {
+        [
+            "SELECT id,project,body,approved,revoked FROM verification_baselines ORDER BY id",
+            "SELECT project,baseline FROM verification_current ORDER BY project",
+            "SELECT cursor,body FROM events ORDER BY cursor",
+            "SELECT * FROM owner_operations ORDER BY origin,owner_id,operation_id",
+            "SELECT client,id,request,reply FROM operations ORDER BY client,id",
+            "SELECT id,revision FROM state ORDER BY id",
+        ]
+        .into_iter()
+        .map(|sql| {
+            let mut statement = db.prepare(sql).unwrap();
+            let columns = statement.column_count();
+            statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>()
+    };
+    let before_replay = counts();
+    let before_rows = snapshot();
+    let replay = client.request(first.clone()).await.unwrap();
+    let OwnerResponse::Applied {
+        operation: replayed,
+    } = replay.response
+    else {
+        panic!("replay")
+    };
+    let OwnerResponse::Applied {
+        operation: original,
+    } = applied.response
+    else {
+        panic!("original")
+    };
+    assert_eq!(replayed.result, original.result);
+    assert_eq!(replayed.provenance, original.provenance);
+    assert!(replayed.historical_replay);
+    assert_eq!(replayed.current_revision.value(), revision);
+    assert_eq!(counts(), before_replay);
+    assert_eq!(snapshot(), before_rows);
+    let mut draft = baseline();
+    draft.requirements = "New trusted row beyond capacity".into();
+    let full = client
+        .request(owner_request(
+            "over-capacity",
+            revision,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProposeBaseline { draft },
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(full.response, OwnerResponse::OutcomeUnknown { ref operation_id } if operation_id.as_str() == "over-capacity"),
+        "{full:?}"
+    );
+    let reconciled = client
+        .request(owner_request(
+            "capacity-reconcile",
+            0,
+            OwnerOperation::Reconcile {
+                operation_id: RequestId::new("over-capacity").unwrap(),
+                expected_hash: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(reconciled.response, OwnerResponse::NotRecordedAtBarrier { revision: ref barrier } if barrier.value() == revision)
+    );
+    assert_eq!(counts(), before_replay);
+    assert_eq!(snapshot(), before_rows);
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM owner_operations WHERE operation_id='over-capacity'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let (count, approved): (i64, bool) = db
+        .query_row(
+            "SELECT COUNT(*),MAX(approved) FROM verification_baselines",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 128);
+    assert!(approved);
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-proposer").unwrap(),
+        target: OwnerClientKind::Tui,
+        expected_epoch: host.epoch(OwnerClientKind::Tui).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    assert!(client.request(first).await.is_err());
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn owner_baseline_effect_is_atomic_replayable_and_restart_authenticated() {
     let (root, config, engine) = owner_fixture().await;
     let draft = baseline();

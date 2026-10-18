@@ -142,9 +142,10 @@ fn event_loop(
         }
         if !connection.busy() {
             if let Some(command) = app.take_command() {
-                connection
+                let request_id = connection
                     .start(command, app.revision())
                     .map_err(TuiError)?;
+                app.bind_project_request(request_id);
                 snapshot = true;
                 refresh = Instant::now();
             } else if Instant::now() >= refresh {

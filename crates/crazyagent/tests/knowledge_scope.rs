@@ -364,6 +364,196 @@ async fn configured_provider_access_does_not_authorize_memory_processing() {
 }
 
 #[tokio::test]
+async fn revoked_curator_releases_pending_work_without_losing_activity() {
+    let mut h =
+        Harness::open("[knowledge]\nprocessing_destinations=['local']\nqueue_capacity=1").await;
+    h.seed().await;
+    h.applied(KnowledgeAction::QueueExtraction {
+        principal_id: id("curator"),
+        job_id: id("pending"),
+        destination: CredentialRef::new("local").unwrap(),
+    })
+    .await;
+    h.applied(KnowledgeAction::RevokePrincipal {
+        principal_id: id("curator"),
+    })
+    .await;
+    h.admit("p", "replacement-curator", KnowledgeRole::Curator)
+        .await;
+    h.engine.close().await.unwrap();
+    h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
+        .await
+        .unwrap();
+    h.applied(KnowledgeAction::QueueExtraction {
+        principal_id: id("replacement-curator"),
+        job_id: id("replacement"),
+        destination: CredentialRef::new("local").unwrap(),
+    })
+    .await;
+    let Outcome::Extraction { batch } = h
+        .call(KnowledgeAction::Extraction {
+            principal_id: id("replacement-curator"),
+            job_id: id("replacement"),
+        })
+        .await
+    else {
+        panic!("original activity remains available")
+    };
+    assert_eq!(batch.activities.len(), 1);
+    assert_eq!(batch.activities[0].input.id, id("a"));
+    denied(
+        h.call(KnowledgeAction::CompleteExtraction {
+            principal_id: id("curator"),
+            job_id: id("pending"),
+        })
+        .await,
+        "knowledge_principal_denied",
+    );
+    h.engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn principal_retirement_is_atomic_selective_and_fresh_cleanup_preserves_replay() {
+    let mut h =
+        Harness::open("[knowledge]\nprocessing_destinations=['local']\nqueue_capacity=2").await;
+    h.seed().await;
+    h.admit("q", "other-curator", KnowledgeRole::Curator).await;
+    h.admit("q", "other-worker", KnowledgeRole::Contributor)
+        .await;
+    h.capture("other-worker", "other-activity", "other-source")
+        .await;
+    for (principal, job) in [("curator", "pending-a"), ("other-curator", "pending-other")] {
+        h.applied(KnowledgeAction::QueueExtraction {
+            principal_id: id(principal),
+            job_id: id(job),
+            destination: CredentialRef::new("local").unwrap(),
+        })
+        .await;
+    }
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    db.execute_batch("CREATE TRIGGER deny_retirement BEFORE DELETE ON knowledge_jobs BEGIN SELECT RAISE(ABORT,'retirement_blocked'); END;").unwrap();
+    assert!(
+        h.command(Command::Knowledge {
+            action: KnowledgeAction::RevokePrincipal {
+                principal_id: id("curator")
+            }
+        })
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("retirement_blocked")
+    );
+    assert!(matches!(
+        h.call(KnowledgeAction::Extraction {
+            principal_id: id("curator"),
+            job_id: id("pending-a")
+        })
+        .await,
+        Outcome::Extraction { .. }
+    ));
+    assert_eq!(
+        db.query_row(
+            "SELECT revoked FROM knowledge_principals WHERE id='curator'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    db.execute_batch("DROP TRIGGER deny_retirement;").unwrap();
+    let revoke = WireRequest {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: ClientId::new("host").unwrap(),
+        request_id: id("first-retirement"),
+        expected_revision: Cursor::new(h.revision),
+        command: Command::Knowledge {
+            action: KnowledgeAction::RevokePrincipal {
+                principal_id: id("curator"),
+            },
+        },
+    };
+    let reply = h.engine.apply(revoke.clone()).await.unwrap();
+    assert_eq!(reply.outcome, Outcome::Applied);
+    h.revision = reply.revision.value();
+    assert!(matches!(
+        h.call(KnowledgeAction::Extraction {
+            principal_id: id("other-curator"),
+            job_id: id("pending-other")
+        })
+        .await,
+        Outcome::Extraction { .. }
+    ));
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM knowledge_watermarks", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute(
+        "UPDATE knowledge_principals SET revoked=0 WHERE id='curator'",
+        [],
+    )
+    .unwrap();
+    h.applied(KnowledgeAction::QueueExtraction {
+        principal_id: id("curator"),
+        job_id: id("legacy-residual"),
+        destination: CredentialRef::new("local").unwrap(),
+    })
+    .await;
+    db.execute(
+        "UPDATE knowledge_principals SET revoked=1 WHERE id='curator'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(h.engine.apply(revoke).await.unwrap(), reply);
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM knowledge_jobs WHERE id='legacy-residual'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    h.applied(KnowledgeAction::RevokePrincipal {
+        principal_id: id("curator"),
+    })
+    .await;
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM knowledge_jobs WHERE id='legacy-residual'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    denied(
+        h.call(KnowledgeAction::RevokePrincipal {
+            principal_id: id("unknown"),
+        })
+        .await,
+        "knowledge_principal_denied",
+    );
+    h.applied(KnowledgeAction::CompleteExtraction {
+        principal_id: id("other-curator"),
+        job_id: id("pending-other"),
+    })
+    .await;
+    h.applied(KnowledgeAction::RevokePrincipal {
+        principal_id: id("other-curator"),
+    })
+    .await;
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM knowledge_watermarks", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    h.engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn revoked_sources_release_pending_work_without_advancing_the_watermark() {
     let mut h =
         Harness::open("[knowledge]\nprocessing_destinations=['local']\nqueue_capacity=1").await;

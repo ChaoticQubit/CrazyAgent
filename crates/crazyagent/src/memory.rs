@@ -442,22 +442,55 @@ pub(crate) fn execute(
 ) -> Result<Outcome, EngineError> {
     match action {
         KnowledgeAction::Admit { principal } => admit(tx, current, principal),
-        KnowledgeAction::RevokePrincipal { principal_id } => {
-            if tx
-                .execute(
-                    "UPDATE knowledge_principals SET revoked=1 WHERE id=?1 AND revoked=0",
-                    [principal_id.as_str()],
-                )
-                .map_err(error)?
-                == 0
-            {
-                return reject("knowledge_principal_denied");
-            }
-            Ok(Outcome::Applied)
-        }
+        KnowledgeAction::RevokePrincipal { principal_id } => revoke_principal(tx, principal_id),
         KnowledgeAction::Owner { action } => owner(tx, current, action, revision),
         _ => execute_scoped(tx, current, action, revision),
     }
+}
+
+fn revoke_principal(
+    tx: &Transaction<'_>,
+    principal_id: &RequestId,
+) -> Result<Outcome, EngineError> {
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_principals WHERE id=?1)",
+            [principal_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !known {
+        return reject("knowledge_principal_denied");
+    }
+    let mut statement = tx
+        .prepare("SELECT body FROM knowledge_jobs LIMIT 129")
+        .map_err(error)?;
+    let bodies = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?;
+    let mut jobs = Vec::new();
+    for body in bodies {
+        let job: ExtractionJob = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+        jobs.push(job);
+    }
+    if jobs.len() > 128 {
+        return Err(error("knowledge_job_bound"));
+    }
+    tx.execute(
+        "UPDATE knowledge_principals SET revoked=1 WHERE id=?1",
+        [principal_id.as_str()],
+    )
+    .map_err(error)?;
+    for job in jobs
+        .into_iter()
+        .filter(|job| &job.principal_id == principal_id)
+    {
+        let removed = tx
+            .execute("DELETE FROM knowledge_jobs WHERE id=?1", [job.id.as_str()])
+            .map_err(error)?;
+        assert_eq!(removed, 1);
+    }
+    Ok(Outcome::Applied)
 }
 
 fn admit(

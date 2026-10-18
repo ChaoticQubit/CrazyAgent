@@ -229,6 +229,86 @@ fn wire(
 }
 
 #[tokio::test]
+async fn project_completion_matches_actual_request_and_submitted_generation() {
+    use crazyagent::engine::Engine;
+    use crazyagent::protocol::Command as EngineCommand;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config =
+        crazyagent::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+    let mut revision = 0;
+    for (index, mode) in ["unchanged", "edited", "identical-replacement", "rejected"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut app = App::new();
+        app.reduce(UiEvent::FocusNext).unwrap();
+        app.reduce(UiEvent::BeginProject).unwrap();
+        app.reduce(UiEvent::Character('A')).unwrap();
+        app.reduce(UiEvent::Submit).unwrap();
+        let command = app.take_command().unwrap();
+        let request_id = format!("generation-{index}");
+        app.bind_project_request(RequestId::new(&request_id).unwrap());
+        let reply = engine
+            .apply(wire(
+                &request_id,
+                if mode == "rejected" {
+                    revision + 1
+                } else {
+                    revision
+                },
+                command,
+            ))
+            .await
+            .unwrap();
+        revision = reply.revision.value();
+        if mode == "edited" {
+            app.reduce(UiEvent::Character('B')).unwrap();
+        }
+        if mode == "identical-replacement" {
+            app.reduce(UiEvent::Cancel).unwrap();
+            app.reduce(UiEvent::BeginProject).unwrap();
+            app.reduce(UiEvent::Character('A')).unwrap();
+        }
+        app.apply_reply(reply.clone()).unwrap();
+        if mode == "unchanged" {
+            assert!(!app.is_creating_project());
+            assert!(app.draft().is_empty());
+        } else {
+            assert!(app.is_creating_project());
+            assert_eq!(app.draft(), if mode == "edited" { "AB" } else { "A" });
+        }
+        if !app.is_creating_project() {
+            app.reduce(UiEvent::BeginProject).unwrap();
+            app.reduce(UiEvent::Character('B')).unwrap();
+        }
+        app.reduce(UiEvent::Submit).unwrap();
+        let next = app.take_command().unwrap();
+        let next_id = format!("next-{index}");
+        app.bind_project_request(RequestId::new(&next_id).unwrap());
+        let before = app.draft().to_owned();
+        app.apply_reply(reply).unwrap();
+        assert_eq!(app.draft(), before);
+        assert!(app.reduce(UiEvent::Submit).is_err());
+        let next_reply = engine.apply(wire(&next_id, revision, next)).await.unwrap();
+        revision = next_reply.revision.value();
+        app.apply_reply(next_reply).unwrap();
+        assert!(!app.is_creating_project());
+    }
+    assert!(matches!(
+        engine
+            .apply(wire("read", 0, EngineCommand::Snapshot))
+            .await
+            .unwrap()
+            .outcome,
+        Outcome::Snapshot { .. }
+    ));
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn real_wire_data_preserves_selection_and_scopes_configuration() {
     use crazyagent::engine::{Client, Engine, Server};
     use crazyagent::protocol::{
@@ -333,6 +413,7 @@ async fn real_wire_data_preserves_selection_and_scopes_configuration() {
     app.reduce(UiEvent::Character('P')).unwrap();
     app.reduce(UiEvent::Submit).unwrap();
     let command = app.take_command().unwrap();
+    app.bind_project_request(RequestId::new("preserve-draft").unwrap());
     let created = client
         .request(wire("preserve-draft", app.revision().value(), command))
         .await
