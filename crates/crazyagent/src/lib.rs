@@ -6,3 +6,4 @@ pub mod isolation;
 pub mod protocol;
 pub mod qualification;
 pub mod storage;
+pub mod worktrees;

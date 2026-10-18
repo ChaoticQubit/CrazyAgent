@@ -42,7 +42,7 @@ impl Storage {
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Apply(request, reply) => {
-                            let _ = reply.send(apply(&mut connection, &config, request));
+                            let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
                         Job::Config(next, reply) => {
                             let result = store_config(&connection, &next);
@@ -121,6 +121,8 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         .map_err(error)?;
     if !readonly {
         initialize_schema(&connection)?;
+        crate::worktrees::initialize(&connection)?;
+        crate::worktrees::reconcile(&connection)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -175,6 +177,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
+    path: &Path,
     request: WireRequest,
 ) -> Result<WireReply, EngineError> {
     let bytes = serde_json::to_vec(&request).map_err(error)?;
@@ -191,7 +194,12 @@ fn apply(
         .map_err(error)?;
     let mutation = matches!(
         request.command,
-        Command::CreateProject { .. } | Command::PinTask { .. } | Command::MigrateTask { .. }
+        Command::CreateProject { .. }
+            | Command::PinTask { .. }
+            | Command::MigrateTask { .. }
+            | Command::AdmitRepository { .. }
+            | Command::AllocateWorktree { .. }
+            | Command::ReleaseWorktree { .. }
     );
     let replay = previous.is_some();
     if let Some((original, reply)) = previous {
@@ -213,7 +221,27 @@ fn apply(
             code: "stale_revision".into(),
         }
     } else {
-        execute(&transaction, config, &request.command, revision)?
+        execute(&transaction, config, path, &request.command, revision)?
+    };
+    let (transaction, outcome) = if outcome == Outcome::Applied
+        && let Command::AllocateWorktree {
+            task_id,
+            repository,
+            ..
+        } = &request.command
+    {
+        transaction.commit().map_err(error)?;
+        let result = crate::worktrees::provision(connection, task_id, repository);
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let outcome = match result {
+            Ok(()) => Outcome::Applied,
+            Err(e) => Outcome::Rejected { code: e.0 },
+        };
+        (transaction, outcome)
+    } else {
+        (transaction, outcome)
     };
     let changed = mutation && outcome == Outcome::Applied;
     let next = if changed {
@@ -277,6 +305,7 @@ fn finish_operation(
 fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
+    path: &Path,
     command: &Command,
     revision: u64,
 ) -> Result<Outcome, EngineError> {
@@ -324,6 +353,25 @@ fn execute(
                 config: Box::new(serde_json::from_str(&body).map_err(error)?),
             })
         }
+        Command::AdmitRepository {
+            project_id,
+            repository,
+        } => crate::worktrees::admit(tx, project_id, repository),
+        Command::AllocateWorktree { .. } => crate::worktrees::reserve(
+            tx,
+            &std::fs::canonicalize(
+                path.parent()
+                    .ok_or_else(|| error("runtime_parent_missing"))?,
+            )
+            .map_err(error)?,
+            command,
+        ),
+        Command::WorktreeLeases { task_id } => crate::worktrees::leases(tx, task_id),
+        Command::ReleaseWorktree {
+            task_id,
+            repository,
+            owner_session,
+        } => crate::worktrees::release(tx, task_id, repository, owner_session),
     }
 }
 

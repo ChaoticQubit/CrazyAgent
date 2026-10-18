@@ -144,6 +144,24 @@ pub enum Command {
     TaskConfig {
         task_id: TaskId,
     },
+    AdmitRepository {
+        project_id: ProjectId,
+        repository: String,
+    },
+    AllocateWorktree {
+        task_id: TaskId,
+        repository: String,
+        owner_session: SessionId,
+        native_descendant: Option<String>,
+    },
+    WorktreeLeases {
+        task_id: TaskId,
+    },
+    ReleaseWorktree {
+        task_id: TaskId,
+        repository: String,
+        owner_session: SessionId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +197,24 @@ impl WireRequest {
             }
             Command::PinTask { context } if context.allowed_destinations.len() > 64 => {
                 return Err(ProtocolError("too many destinations".into()));
+            }
+            Command::AdmitRepository { repository, .. }
+            | Command::AllocateWorktree { repository, .. }
+            | Command::ReleaseWorktree { repository, .. } => {
+                if repository.is_empty()
+                    || repository.len() > 4096
+                    || repository.chars().any(char::is_control)
+                    || !std::path::Path::new(repository).is_absolute()
+                {
+                    return Err(ProtocolError("invalid repository path".into()));
+                }
+                if let Command::AllocateWorktree {
+                    native_descendant: Some(native),
+                    ..
+                } = &self.command
+                {
+                    validate_identity(native)?;
+                }
             }
             _ => {}
         }
@@ -227,6 +263,9 @@ pub enum Outcome {
     },
     Configuration {
         config: Box<crate::config::EffectiveConfig>,
+    },
+    Worktrees {
+        leases: Vec<crate::worktrees::WorktreeLease>,
     },
 }
 
