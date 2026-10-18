@@ -10,6 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
+pub mod owner;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputLease {
@@ -268,6 +270,7 @@ pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
     timeout: Duration,
+    owner_egress: tokio::sync::RwLock<()>,
 }
 
 impl Engine {
@@ -278,6 +281,7 @@ impl Engine {
             storage: Storage::open(path, config, false).await?,
             input: Mutex::default(),
             timeout,
+            owner_egress: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -288,10 +292,14 @@ impl Engine {
             storage: Storage::open(path, config, true).await?,
             input: Mutex::default(),
             timeout,
+            owner_egress: tokio::sync::RwLock::new(()),
         })
     }
 
     pub async fn apply(&self, request: WireRequest) -> Result<WireReply, EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.read())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
@@ -305,6 +313,9 @@ impl Engine {
     }
 
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
@@ -318,6 +329,9 @@ impl Engine {
     }
 
     pub async fn close(&self) -> Result<(), EngineError> {
+        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         let (send, receive) = oneshot::channel();
         self.storage
             .sender

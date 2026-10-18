@@ -369,6 +369,9 @@ pub fn decode_request(frame: &[u8]) -> Result<WireRequest, ProtocolError> {
     }
     let request: WireRequest =
         serde_json::from_slice(&frame[4..]).map_err(|e| ProtocolError(e.to_string()))?;
+    if request.client_id.as_str().starts_with("owner:") {
+        return Err(ProtocolError("reserved_owner_identity".into()));
+    }
     request.validate()?;
     assert_eq!(size, frame.len() - 4);
     assert!(size <= FRAME_BYTES_MAX);
