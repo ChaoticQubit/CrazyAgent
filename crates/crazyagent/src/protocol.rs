@@ -123,6 +123,13 @@ pub struct ExecutionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
+    ProposeBaseline {
+        draft: crate::verification::BaselineDraft,
+    },
+    #[serde(skip_deserializing)]
+    OwnerVerification {
+        action: crate::verification::OwnerVerification,
+    },
     #[serde(skip_deserializing)]
     Knowledge {
         action: crate::memory::KnowledgeAction,
@@ -205,11 +212,17 @@ pub struct WireRequest {
 }
 
 impl WireRequest {
+    /// Validates supported commands, draft content and wire bounds.
+    /// Takes an untrusted request and returns structural validation.
+    /// Host-only authority variants remain unavailable to wire decoding.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(ProtocolError("unsupported protocol version".into()));
         }
         match &self.command {
+            Command::ProposeBaseline { draft } => {
+                draft.validate().map_err(|e| ProtocolError(e.to_string()))?;
+            }
             Command::CreateProject { spec, .. } => {
                 if spec.name.trim().is_empty()
                     || spec.name.len() > 256
@@ -276,6 +289,9 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Outcome {
+    Verification {
+        state: Box<crate::verification::VerificationState>,
+    },
     Nominations {
         nominations: Vec<crate::memory::Nomination>,
     },
