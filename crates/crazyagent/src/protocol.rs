@@ -123,6 +123,14 @@ pub struct ExecutionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
+    #[serde(skip_deserializing)]
+    Knowledge {
+        action: crate::memory::KnowledgeAction,
+    },
+    #[serde(skip_deserializing)]
+    Assets {
+        action: crate::assets::AssetAction,
+    },
     ProposePlan {
         plan: crate::coordination::WorkPlan,
     },
@@ -268,6 +276,21 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Outcome {
+    Nominations {
+        nominations: Vec<crate::memory::Nomination>,
+    },
+    GlobalCandidates {
+        candidates: Vec<crate::memory::GlobalCandidate>,
+    },
+    Knowledge {
+        entries: Vec<crate::memory::KnowledgeEntry>,
+    },
+    Extraction {
+        batch: crate::memory::ExtractionBatch,
+    },
+    Assets {
+        snapshot: Box<crate::assets::AssetSnapshot>,
+    },
     Coordination {
         state: Box<crate::coordination::PlanState>,
     },

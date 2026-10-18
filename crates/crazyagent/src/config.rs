@@ -17,6 +17,11 @@ pub struct Settings {
     pub revoked_destinations: Vec<CredentialRef>,
     #[serde(default, skip_serializing_if = "RoutingPolicy::is_default")]
     pub routing: RoutingPolicy,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::memory::KnowledgePolicy::is_default"
+    )]
+    pub knowledge: crate::memory::KnowledgePolicy,
 }
 
 impl Default for Settings {
@@ -30,6 +35,7 @@ impl Default for Settings {
             allowed_destinations: vec![],
             revoked_destinations: vec![],
             routing: RoutingPolicy::default(),
+            knowledge: crate::memory::KnowledgePolicy::default(),
         }
     }
 }
@@ -76,9 +82,11 @@ impl EffectiveConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_settings(&self.settings)?;
         let legacy = self.descriptors.len() == 7;
-        let defaults = setting_values(&Settings::default(), !legacy);
-        let values = setting_values(&self.settings, !legacy);
+        let knowledge = self.descriptors.len() != 7 && self.descriptors.len() != 17;
+        let defaults = setting_values(&Settings::default(), !legacy, knowledge);
+        let values = setting_values(&self.settings, !legacy, knowledge);
         if (legacy && !self.settings.routing.is_default())
+            || (!knowledge && !self.settings.knowledge.is_default())
             || self.descriptors.len() != values.len()
             || self.descriptors.iter().any(|(name, descriptor)| {
                 descriptor.name != *name
@@ -121,6 +129,20 @@ struct ConfigFile {
     allowed_destinations: Option<Vec<CredentialRef>>,
     revoked_destinations: Option<Vec<CredentialRef>>,
     routing: Option<RoutingFile>,
+    knowledge: Option<KnowledgeFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeFile {
+    processing_destinations: Option<Vec<CredentialRef>>,
+    text_bytes_max: Option<usize>,
+    excerpt_bytes_max: Option<usize>,
+    records_max: Option<usize>,
+    queue_capacity: Option<usize>,
+    batch_size: Option<usize>,
+    asset_bytes_max: Option<usize>,
+    asset_sources_max: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -156,8 +178,9 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
         apply_file(&mut settings, file, origin, &mut origins);
     }
     validate_settings(&settings)?;
-    let defaults = setting_values(&Settings::default(), true);
-    let values = setting_values(&settings, true);
+    let knowledge = origins.keys().any(|name| name.starts_with("knowledge."));
+    let defaults = setting_values(&Settings::default(), true, knowledge);
+    let values = setting_values(&settings, true, knowledge);
     let descriptors = values
         .iter()
         .map(|(name, value)| {
@@ -172,6 +195,8 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
                 "routing.global_capacity" | "routing.scheduling" => EffectTiming::Immediate,
                 "allowed_destinations" => EffectTiming::NewTask,
                 n if n.starts_with("routing.") => EffectTiming::NewTask,
+                "knowledge.processing_destinations" => EffectTiming::Immediate,
+                n if n.starts_with("knowledge.") => EffectTiming::NewTask,
                 _ => EffectTiming::Restart,
             };
             (
@@ -188,7 +213,7 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
         })
         .collect();
     assert!(origins.len() <= values.len());
-    assert_eq!(values.len(), 17);
+    assert_eq!(values.len(), if knowledge { 25 } else { 17 });
     from_settings(settings, descriptors)
 }
 
@@ -270,11 +295,30 @@ fn apply_file(
             mailbox_capacity
         );
     }
+    if let Some(knowledge) = file.knowledge {
+        macro_rules! apply_knowledge {
+            ($($name:ident),+) => {$(if let Some(value) = knowledge.$name {
+                settings.knowledge.$name = value;
+                origins.insert(concat!("knowledge.", stringify!($name)).into(), origin.clone());
+            })+};
+        }
+        apply_knowledge!(
+            processing_destinations,
+            text_bytes_max,
+            excerpt_bytes_max,
+            records_max,
+            queue_capacity,
+            batch_size,
+            asset_bytes_max,
+            asset_sources_max
+        );
+    }
 }
 
 fn setting_values(
     settings: &Settings,
     include_routing: bool,
+    include_knowledge: bool,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut values = serde_json::to_value(settings)
         .unwrap()
@@ -282,10 +326,17 @@ fn setting_values(
         .unwrap()
         .clone();
     values.remove("routing");
+    values.remove("knowledge");
     if include_routing {
         let routing = serde_json::to_value(&settings.routing).unwrap();
         for (name, value) in routing.as_object().unwrap() {
             values.insert(format!("routing.{name}"), value.clone());
+        }
+    }
+    if include_knowledge {
+        let knowledge = serde_json::to_value(&settings.knowledge).unwrap();
+        for (name, value) in knowledge.as_object().unwrap() {
+            values.insert(format!("knowledge.{name}"), value.clone());
         }
     }
     values.into_iter().collect()
@@ -293,6 +344,7 @@ fn setting_values(
 
 pub fn validate_settings(settings: &Settings) -> Result<(), ConfigError> {
     settings.routing.validate().map_err(ConfigError)?;
+    settings.knowledge.validate().map_err(ConfigError)?;
     if !(1..=1024).contains(&settings.queue_capacity)
         || !(1..=128).contains(&settings.clients_max)
         || !(10..=30000).contains(&settings.timeout_ms)
@@ -317,7 +369,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 17);
+    assert!(descriptors.len() <= 25);
     Ok(EffectiveConfig {
         id,
         settings,
