@@ -123,6 +123,28 @@ pub struct ExecutionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
+    ProposePlan {
+        plan: crate::coordination::WorkPlan,
+    },
+    CoordinationState {
+        plan_id: PlanId,
+    },
+    TaskPlan {
+        task_id: TaskId,
+    },
+    #[serde(skip_deserializing)]
+    OwnerCoordination {
+        action: crate::coordination::OwnerAction,
+    },
+    RouteWorkItem {
+        plan_id: PlanId,
+        item_id: TaskId,
+    },
+    Mailbox {
+        plan_id: PlanId,
+        recipient: SessionId,
+        after: Cursor,
+    },
     CreateProject {
         project_id: ProjectId,
         spec: ProjectSpec,
@@ -246,6 +268,15 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Outcome {
+    Coordination {
+        state: Box<crate::coordination::PlanState>,
+    },
+    Messages {
+        messages: Vec<crate::coordination::DeliveredMessage>,
+    },
+    Route {
+        decision: crate::routing::RouteDecision,
+    },
     Applied,
     Snapshot {
         projects: Vec<StoredProject>,

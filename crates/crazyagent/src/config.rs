@@ -1,4 +1,5 @@
 use crate::protocol::{ConfigId, CredentialRef};
+use crate::routing::{ApprovalMode, ResourceBudget, RoutingPolicy, SchedulingPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -14,6 +15,8 @@ pub struct Settings {
     pub bulk_queue_capacity: usize,
     pub allowed_destinations: Vec<CredentialRef>,
     pub revoked_destinations: Vec<CredentialRef>,
+    #[serde(default, skip_serializing_if = "RoutingPolicy::is_default")]
+    pub routing: RoutingPolicy,
 }
 
 impl Default for Settings {
@@ -26,6 +29,7 @@ impl Default for Settings {
             bulk_queue_capacity: 64,
             allowed_destinations: vec![],
             revoked_destinations: vec![],
+            routing: RoutingPolicy::default(),
         }
     }
 }
@@ -71,9 +75,11 @@ pub struct EffectiveConfig {
 impl EffectiveConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_settings(&self.settings)?;
-        let defaults = serde_json::to_value(Settings::default()).unwrap();
-        let values = serde_json::to_value(&self.settings).unwrap();
-        if self.descriptors.len() != 7
+        let legacy = self.descriptors.len() == 7;
+        let defaults = setting_values(&Settings::default(), !legacy);
+        let values = setting_values(&self.settings, !legacy);
+        if (legacy && !self.settings.routing.is_default())
+            || self.descriptors.len() != values.len()
             || self.descriptors.iter().any(|(name, descriptor)| {
                 descriptor.name != *name
                     || values.get(name) != Some(&descriptor.value)
@@ -87,7 +93,7 @@ impl EffectiveConfig {
             return Err(ConfigError("config_identity_mismatch".into()));
         }
         assert_eq!(self.id.as_str().len(), 64);
-        assert_eq!(self.descriptors.len(), 7);
+        assert_eq!(self.descriptors.len(), values.len());
         Ok(())
     }
 }
@@ -114,6 +120,22 @@ struct ConfigFile {
     bulk_queue_capacity: Option<usize>,
     allowed_destinations: Option<Vec<CredentialRef>>,
     revoked_destinations: Option<Vec<CredentialRef>>,
+    routing: Option<RoutingFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutingFile {
+    preference_order: Option<Vec<CredentialRef>>,
+    approved_accounts: Option<Vec<CredentialRef>>,
+    fallback_allowed: Option<bool>,
+    approval_mode: Option<ApprovalMode>,
+    scheduling: Option<SchedulingPolicy>,
+    priority_weight: Option<u16>,
+    global_capacity: Option<ResourceBudget>,
+    project_capacity: Option<ResourceBudget>,
+    task_capacity: Option<ResourceBudget>,
+    mailbox_capacity: Option<usize>,
 }
 
 pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, ConfigError> {
@@ -121,14 +143,22 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
     let mut origins = BTreeMap::new();
     for (path, origin) in [(global, Origin::Global), (project, Origin::Project)] {
         let file = read_config(path)?;
+        if origin == Origin::Project
+            && file
+                .routing
+                .as_ref()
+                .is_some_and(|r| r.global_capacity.is_some() || r.scheduling.is_some())
+        {
+            return Err(ConfigError(
+                "shared_routing_settings_require_global_scope".into(),
+            ));
+        }
         apply_file(&mut settings, file, origin, &mut origins);
     }
     validate_settings(&settings)?;
-    let defaults = serde_json::to_value(Settings::default()).unwrap();
-    let values = serde_json::to_value(&settings).unwrap();
+    let defaults = setting_values(&Settings::default(), true);
+    let values = setting_values(&settings, true);
     let descriptors = values
-        .as_object()
-        .unwrap()
         .iter()
         .map(|(name, value)| {
             let origin = origins.get(name).cloned().unwrap_or(Origin::Default);
@@ -139,7 +169,9 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
             };
             let effect_timing = match name.as_str() {
                 "revoked_destinations" => EffectTiming::Immediate,
+                "routing.global_capacity" | "routing.scheduling" => EffectTiming::Immediate,
                 "allowed_destinations" => EffectTiming::NewTask,
+                n if n.starts_with("routing.") => EffectTiming::NewTask,
                 _ => EffectTiming::Restart,
             };
             (
@@ -155,8 +187,8 @@ pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, 
             )
         })
         .collect();
-    assert!(origins.len() <= 7);
-    assert_eq!(values.as_object().unwrap().len(), 7);
+    assert!(origins.len() <= values.len());
+    assert_eq!(values.len(), 17);
     from_settings(settings, descriptors)
 }
 
@@ -216,11 +248,51 @@ fn apply_file(
                 settings.revoked_destinations.push(destination);
             }
         }
-        origins.insert("revoked_destinations".into(), origin);
+        origins.insert("revoked_destinations".into(), origin.clone());
+    }
+    if let Some(routing) = file.routing {
+        macro_rules! apply_routing {
+            ($($name:ident),+) => {$(if let Some(value) = routing.$name {
+                settings.routing.$name = value;
+                origins.insert(concat!("routing.", stringify!($name)).into(), origin.clone());
+            })+};
+        }
+        apply_routing!(
+            preference_order,
+            approved_accounts,
+            fallback_allowed,
+            approval_mode,
+            scheduling,
+            priority_weight,
+            global_capacity,
+            project_capacity,
+            task_capacity,
+            mailbox_capacity
+        );
     }
 }
 
+fn setting_values(
+    settings: &Settings,
+    include_routing: bool,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut values = serde_json::to_value(settings)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    values.remove("routing");
+    if include_routing {
+        let routing = serde_json::to_value(&settings.routing).unwrap();
+        for (name, value) in routing.as_object().unwrap() {
+            values.insert(format!("routing.{name}"), value.clone());
+        }
+    }
+    values.into_iter().collect()
+}
+
 pub fn validate_settings(settings: &Settings) -> Result<(), ConfigError> {
+    settings.routing.validate().map_err(ConfigError)?;
     if !(1..=1024).contains(&settings.queue_capacity)
         || !(1..=128).contains(&settings.clients_max)
         || !(10..=30000).contains(&settings.timeout_ms)
@@ -245,7 +317,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 7);
+    assert!(descriptors.len() <= 17);
     Ok(EffectiveConfig {
         id,
         settings,
@@ -267,6 +339,70 @@ impl ConfigState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_configuration_keeps_its_identity_and_default_routing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        config
+            .descriptors
+            .retain(|name, _| !name.starts_with("routing."));
+        config.id =
+            ConfigId::new("472693a858862960f058c909a411a19aa8f8d03e94240e0aa4ccb8c1ad4f3e0c")
+                .unwrap();
+        let mut stored = serde_json::to_value(&config).unwrap();
+        assert!(stored["settings"].get("routing").is_none());
+        let decoded: EffectiveConfig = serde_json::from_value(stored.clone()).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.settings.routing, RoutingPolicy::default());
+        assert_eq!(serde_json::to_value(decoded).unwrap(), stored);
+        stored["settings"]["routing"] = serde_json::to_value(RoutingPolicy {
+            fallback_allowed: false,
+            ..RoutingPolicy::default()
+        })
+        .unwrap();
+        assert!(
+            serde_json::from_value::<EffectiveConfig>(stored)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn routing_fields_merge_with_provenance_and_shared_capacity_stays_global() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("g");
+        let project = root.path().join("p");
+        std::fs::write(&global,
+            "[routing]\npreference_order=['beta','alpha']\napproved_accounts=['account']\nscheduling='StrictPriority'").unwrap();
+        std::fs::write(
+            &project,
+            "[routing]\nmailbox_capacity=4\nfallback_allowed=false",
+        )
+        .unwrap();
+        let config = resolve_config(&global, &project).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.settings.routing.preference_order[0].as_str(), "beta");
+        assert_eq!(
+            config.descriptors["routing.preference_order"].origin,
+            Origin::Global
+        );
+        assert_eq!(
+            config.descriptors["routing.mailbox_capacity"].origin,
+            Origin::Project
+        );
+        assert_eq!(
+            config.descriptors["routing.scheduling"].effect_timing,
+            EffectTiming::Immediate
+        );
+        assert!(!config.settings.routing.fallback_allowed);
+        std::fs::write(&project, "[routing]\nscheduling='FairShare'").unwrap();
+        assert!(resolve_config(&global, &project).is_err());
+        std::fs::write(&project,
+            "[routing.global_capacity]\nslots=999\ncpu_millis=1000\nmemory_mib=512\nprocesses=4\noutput_bytes=1048576\nwall_time_ms=60000\nspend_microunits=0").unwrap();
+        assert!(resolve_config(&global, &project).is_err());
+    }
 
     #[test]
     fn real_file_override_and_metadata() {

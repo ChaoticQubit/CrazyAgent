@@ -121,6 +121,7 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         .map_err(error)?;
     if !readonly {
         initialize_schema(&connection)?;
+        crate::coordination::initialize(&connection)?;
         crate::worktrees::initialize(&connection)?;
         crate::worktrees::reconcile(&connection)?;
     }
@@ -200,7 +201,7 @@ fn apply(
             | Command::AdmitRepository { .. }
             | Command::AllocateWorktree { .. }
             | Command::ReleaseWorktree { .. }
-    );
+    ) || crate::coordination::is_mutation(&request.command);
     let replay = previous.is_some();
     if let Some((original, reply)) = previous {
         if original != bytes {
@@ -372,6 +373,7 @@ fn execute(
             repository,
             owner_session,
         } => crate::worktrees::release(tx, task_id, repository, owner_session),
+        _ => crate::coordination::execute(tx, config, command, revision),
     }
 }
 
@@ -493,7 +495,7 @@ fn persist_event(
     Ok(())
 }
 
-fn task_context(
+pub(crate) fn task_context(
     tx: &Transaction<'_>,
     task_id: &TaskId,
 ) -> Result<Option<ExecutionContext>, EngineError> {
@@ -593,7 +595,10 @@ fn migrate_task(
     Ok(Outcome::Applied)
 }
 
-fn store_config(connection: &Connection, config: &EffectiveConfig) -> Result<(), EngineError> {
+pub(crate) fn store_config(
+    connection: &Connection,
+    config: &EffectiveConfig,
+) -> Result<(), EngineError> {
     connection
         .execute(
             "INSERT OR IGNORE INTO configs VALUES (?1,?2)",
