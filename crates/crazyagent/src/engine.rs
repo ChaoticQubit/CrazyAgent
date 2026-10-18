@@ -62,6 +62,7 @@ pub type ClientError = EngineError;
 pub struct Client {
     socket: std::path::PathBuf,
     timeout: Duration,
+    binding: Option<bootstrap::NativeBinding>,
 }
 
 impl Client {
@@ -69,14 +70,43 @@ impl Client {
         if timeout.is_zero() || timeout > Duration::from_secs(30) {
             return Err(EngineError("invalid_client_timeout".into()));
         }
-        Ok(Self { socket, timeout })
+        Ok(Self {
+            socket,
+            timeout,
+            binding: None,
+        })
     }
+
+    /// Admits this configured endpoint with its authenticated native owner.
+    /// Consumes the ordinary client and fixes the requested native client kind.
+    /// Returns one bound client and the owner identity from the same discovery.
+    pub async fn with_owner(
+        mut self,
+        kind: owner::OwnerClientKind,
+    ) -> Result<(Self, owner::OwnerClient, bootstrap::OwnerConnectionIdentity), ClientError> {
+        let (owner, identity, binding) =
+            bootstrap::discover_pair(&self.socket, kind, self.timeout).await?;
+        self.socket = binding.socket();
+        self.binding = Some(binding);
+        Ok((self, owner, identity))
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
         request.validate().map_err(|e| EngineError(e.to_string()))?;
+        if let Some(binding) = &self.binding {
+            binding.verify()?;
+        }
         verify_endpoint(&self.socket)?;
         tokio::time::timeout(self.timeout, async {
             let mut stream = UnixStream::connect(&self.socket).await.map_err(io_error)?;
             verify_peer(&stream)?;
+            if let Some(binding) = &self.binding {
+                binding.verify()?;
+            }
             let frame = encode_frame(&request).map_err(io_error)?;
             stream.write_all(&frame).await.map_err(io_error)?;
             let bytes = read_frame(&mut stream).await?;

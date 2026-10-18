@@ -1,9 +1,9 @@
-use crate::engine::EngineError;
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor,
     OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerView,
 };
+use crate::engine::{Client, EngineError};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
 use std::path::Path;
 use std::time::Duration;
@@ -63,6 +63,28 @@ impl PendingMutation {
 }
 
 impl OwnerController {
+    /// Admits the configured ordinary endpoint with its actual owner connection.
+    /// Consumes a native client and fixes its kind and configured timeout.
+    /// Returns the bound ordinary client and controller without rediscovery.
+    pub async fn attach_configured(
+        ordinary: Client,
+        kind: OwnerClientKind,
+    ) -> Result<(Client, Self), EngineError> {
+        let timeout = ordinary.timeout();
+        let (ordinary, client, identity) = ordinary.with_owner(kind).await?;
+        Ok((
+            ordinary,
+            Self {
+                client: Some(client),
+                identity,
+                view: None,
+                pending: None,
+                kind,
+                timeout,
+            },
+        ))
+    }
+
     /// Discovers one authenticated native owner and its paired identity.
     /// Takes a trusted anchor, fixed client kind and bounded timeout.
     /// Returns connected state without host control or credentials.
@@ -119,6 +141,26 @@ impl OwnerController {
     pub async fn reattach(&mut self, anchor: &Path) -> Result<(), EngineError> {
         self.detach();
         let (client, identity) = OwnerClient::discover(anchor, self.kind, self.timeout).await?;
+        self.install_connection(client, identity)
+    }
+
+    /// Reconnects this controller through configured native endpoint admission.
+    /// Consumes a client while retaining pending intent and the fixed owner kind.
+    /// Returns its bound ordinary peer only after database fencing succeeds.
+    pub async fn reattach_configured(&mut self, ordinary: Client) -> Result<Client, EngineError> {
+        self.detach();
+        let timeout = ordinary.timeout();
+        let (ordinary, client, identity) = ordinary.with_owner(self.kind).await?;
+        self.install_connection(client, identity)?;
+        self.timeout = timeout;
+        Ok(ordinary)
+    }
+
+    fn install_connection(
+        &mut self,
+        client: OwnerClient,
+        identity: OwnerConnectionIdentity,
+    ) -> Result<(), EngineError> {
         if self
             .pending
             .as_ref()
