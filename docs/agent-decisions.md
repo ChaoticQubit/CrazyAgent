@@ -2576,3 +2576,6 @@ B. Continue investigating a macOS-native boundary.
 
 Owner answer: A. Authorize the bounded Docker prototype. Resulting decision ID: DEC-069. Permanent runtime adoption remains a later decision.
 
+### Q-057: One boundary-only topology diagnostic
+
+Date: October 18, 2026. Status: pending owner response. Proposal: docs/qualification/linux-topology-diagnostic-proposal.md, frozen source 8cfbf15, with twenty-four passing leader-native helper methods. Scope: one invocation, at most one boundary container, the unchanged pinned image/profile, 64 MiB RAM, 0.5 CPU, sixteen PIDs, fifteen-second lifetime and twenty-minute total allocation, synthetic mounts only, no credentials/providers/host sockets/privileges/unrelated workloads. Preserve original evidence and separate exclusive marker; no retry or permanent runtime adoption. DEC-071 requires the first failed experiment to stop; this is a separate proposed attempt. Independent Task 8 continues while approval is pending. No new execution authority is inferred until the owner answers.

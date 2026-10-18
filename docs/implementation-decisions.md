@@ -1093,3 +1093,72 @@ Decision: inspect the exact installed Codex 0.163.0 help and generate its defaul
 Alternatives: terminal parsing loses structured identity, status and request boundaries; a new inference/tool loop duplicates the selected harness; automatic global daemon management crosses current machine-state authority. These are rejected as defaults. Pros: native structured contracts and less custom state interpretation. Costs/risks: experimental/versioned transport, finite pagination requirements, and real account/runtime/recovery tests remain mandatory. Unsupported/unknown states stay unavailable rather than mapped to success.
 
 Evidence: docs/qualification/codex-transport-contract.md records the installed binary hash, 318 generated schema files, sorted tree digest, selected methods and field semantics, exact commands and denied alias-write warning. No generated file was edited and no credential/configuration change or model call occurred. The worker/session spawning boundary remains unavailable. Revisit only against a newly pinned installed contract and actual admission evidence; these observations do not choose a permanent runtime or complete Task 3.
+Worker provenance: IMP-082 through IMP-085 preserve the source-only topology worker's choices at base 41cd3b6. Its sandbox failures are historical; leader-native results and any new experiment authority are recorded separately.
+
+## IMP-082: Retain topology before strict rejection
+
+Goal: preserve actual interface and route observations that explain a failed boundary payload. Constraints: two source files only, no Docker, providers, installs, reviews, shared graph writes or original-attempt changes. Grill-me resolution: IMP-080 supplies the accepted design; no unresolved owner design question remains. Engineering-principles favors preserving evidence and explicit failure; the minimum-working-code ladder selects existing emit/require helpers and standard-library filesystem/socket operations; tiger-style requires explicit bounds and trippable invariants.
+
+Decision: collect bounded IPv4/IPv6 route text and interface entries, emit a role-specific topology record before validating the unchanged exact lo-only interface expectation and default-route denials. Keep overflow/read errors explicit, never accepted. Unit checks may use real temporary route files and pure controlled validator inputs, labeled as such, plus actual host interface enumeration. They are not Linux/Docker evidence.
+
+Alternatives: relaxing interface checks, extra connectivity probes, another supervisor and mocked socket results are rejected. Cost: one small validator and bounded observation handling in the embedded payload. Risk: names and route tables alone do not establish connectivity. Acceptance: rejected input is retained first; normal expected input still validates; oversize observations fail. Unresolved: actual native topology until separately authorized diagnostic.
+
+## IMP-083: Primary execution evidence precedes positive-control artifacts
+
+Decision: finalize a case through one local helper that evaluates the retained execution/cleanup evidence before reading worker/child files. Preserve the full raw execution and traceback, attach the bounded stderr to the primary workload failure, and keep later host-artifact errors secondary. All callers of evaluate and execute_case were traced; only execute_case owns host artifact evaluation.
+
+Alternatives: swallowing missing files or weakening positive controls rejected. Cost: extract the existing evaluation tail for direct real-filesystem unit checks. Risk: cleanup or incomplete-stream errors still legitimately precede workload evaluation. Acceptance: a real failing Python subprocess with absent child.txt retains its traceback as primary error; an actually successful execution still requires artifacts and canaries.
+
+## IMP-084: Separate exclusive diagnostic selection
+
+Decision: add only --boundary-only-diagnostic, selecting exactly (boundary,) and a fixed linux-topology-diagnostic-attempt.json exclusive marker. Ordinary selection remains CASES and linux-containment-native-attempt.json. The marker includes mode, selected cases and frozen source/payload/engine identity. Diagnostic reports explicitly cannot claim combined qualification or admit a runtime. No free-form case, limit or marker overrides.
+
+Alternatives: rerunning five cases, a marker path flag, replacing original evidence or returning ordinary observed qualification status rejected. Cost: small selection/marker/result helpers so tests exercise real marker files without native execution. Risk: an exclusive marker permits one invocation only in this worktree and is not a global authority mechanism. Acceptance: markers never overwrite or cross modes; diagnostic completion is labeled diagnostic-observed only for one successful boundary case and otherwise fails. Owner experiment approval remains pending.
+
+## IMP-085: Build provenance and deferred gates
+
+Decision: build the actual unchanged Rust tree here with bounded local make build and offline Cargo; retain toolchain, source manifest, log hash and existing build-binding schema. Run local helper tests and available formatting/build gates, report native prerequisites separately, do not retry unavailable native suites. Build success alone is no complete qualification gate. Reviews and shared graph refresh remain deferred to leader under the explicit brief.
+
+Alternatives: another checkout's engine, downloads, native Docker preflight and broad source edits rejected. Cost: local compilation and evidence storage. Acceptance: binary hash matches this worktree and its unchanged Rust source manifest; all actual commands and red/green logs appear in linux-topology-report.md.
+
+### Topology diagnostic production symbol map
+
+The following mappings are prospective for changed/new symbols. Unchanged mappings explicitly carry forward tracked IMP-072 through IMP-078; those existing choices were not reinvented. Host and payload symbols have independent namespaces. The local verification script is evidence orchestration, not production code.
+
+| Symbols | Decision and implementation choice | Alternatives, costs, risks and revisit |
+| --- | --- | --- |
+| PAYLOAD.validate_topology | IMP-082: pure validation of complete observations, exact lo-only list, unchanged usable default-route predicates | Merging collection and rejection loses evidence; extraction costs one helper. Revisit only on a concrete parsing defect, never by silently relaxing expectations. Controlled empty/renamed/extra interfaces and default-route inputs are unit data only. |
+| PAYLOAD.topology | IMP-082: actual if_nameindex, first 64 entries, each route read limited to 4097 characters with at most 4096 retained, explicit incomplete/read errno, role-specific emit before validation | No unbounded route read, mock interfaces or configuration flag. Optional Path arguments allow real temporary-file tests only; native callers use fixed proc paths. Incomplete input always fails. Two assertions enforce known actor and retained interface count; the first is externally trippable in the payload namespace. |
+| PAYLOAD.filesystem_actor | IMP-082, IMP-076: pass its existing worker/child role into topology; all other actor operations and denial expectations stay unchanged | A shared phase would collide when both actors emit. Duplicate existing successful actor topology is retained for compatibility, at the cost of stream space under the unchanged overflow rejection. |
+| evaluate | IMP-083, IMP-077: for boundary only, reject nonzero attached exit with its retained stderr before parsing control records; all cleanup, stream, lifetime and positive checks remain | Reading positive files first masked the payload cause. Full bounded traceback costs report bytes; the existing save/output limits remain authoritative. Other resource-specific expected exits are unchanged. |
+| finalize_case | IMP-083: preserve any earlier controller error; otherwise evaluate first, then require unchanged canaries and exact worker/child bytes; mutate and return the same bounded record | A second evaluator would duplicate policy. This extraction costs one helper and keeps the raw execution dictionary intact. Its real failing-subprocess test intentionally has no candidate files. Revisit on demonstrated evaluation priority loss. |
+| execute_case | IMP-083, IMP-074: replace only the old final evaluation block with finalize_case | Existing watchdog, stream collection, stop, exact identity and cleanup code is retained byte-for-byte before that block. Nested deadline_watchdog and collect_attached keep IMP-074. |
+| selected_cases | IMP-084: boolean-only internal selection, either original CASES or one boundary tuple | No arbitrary case list or additional override. Trippable assertion rejects non-boolean programming errors; a trivial selector needs no abstraction. |
+| claim_attempt | IMP-084: x-mode create of one fixed mode-specific filename, provenance plus authoritative mode/cases/payload hash | No writable CLI marker path or reset. Caller supplies ROOT/.local-state in production; real temporary directories test x-mode collisions. Interrupted writes still consume the attempt conservatively. Native authorization remains an owner/leader boundary, not a marker claim. |
+| completion_status | IMP-084, IMP-077: compare exact ordered cases, require every observed result and confirmed absence, return diagnostic-observed distinctly | Counting results alone could accept duplicates/wrong cases. Pure controlled report dictionaries test success/failure combinations, never native evidence. No boolean result can admit a runtime. |
+| main | IMP-084, IMP-085, IMP-074, IMP-075, IMP-077: one explicit boolean CLI flag, selected-case loop, claim_attempt before preflight, mode/selection/attempt provenance and final combined flag false for diagnostics | No changed limit, extra case, Docker setting, marker path or ignored-failure option. Native_admitted and permanent_runtime_selected remain false. Only observed or diagnostic-observed returns zero; neither helper nor diagnostic is admission evidence. |
+
+All other production functions retain existing decisions and identical ASTs:
+
+| Existing decision | Unchanged host symbols |
+| --- | --- |
+| IMP-072 | invariant, require, validate_config, create_arguments, validate_identity, validate_profile, Controller.__init__, Controller.inspect, Controller.stop, Controller.cleanup |
+| IMP-073 | Budget.__init__, Budget.command_deadline, Budget.admit_case, capture, payload_hash, file_hash, fixture_size, save, Controller.docker |
+| IMP-075 | frame, receive_exact, engine_request, host_state, canaries, setup_fixture, local_preflight, preflight, main.collect_engine |
+| IMP-074 | interrupted, execute_case.deadline_watchdog, execute_case.collect_attached |
+| IMP-078 | fixture_identity, engine_socket_receipt, cleanup_engine_socket |
+
+IMP-076 continues to cover unchanged payload invariant, require, observe_errno, denied, snapshot, counters, emit, reap, touch, exchange, boundary, memory_case, pids_case, cpu_case and main. Existing lambdas remain covered by their parent decisions. Including nested functions there are 41 host plus 18 payload functions, 59 total; every production function maps above.
+
+### Topology diagnostic source-freeze evidence
+
+Six added test methods have retained initial red and green logs. Full helper execution ran 24 methods: 19 pass and five existing methods fail at sandbox-denied Unix socket binds, producing eight unittest failure entries because replacement cases have subtests. No skip, expectation relaxation or retry of those denied checks was used. make build, make fmt-check, strict make lint, Python compilation with a worktree-local cache, and input-only CLI preflight pass. Initial py_compile attempted the macOS global cache and received EPERM; redirecting only its cache location fixes compilation without global configuration edits.
+
+Git staging failed creating the shared worktree index.lock, so source is handed off by exact hashes and a generated patch instead of a commit. No escalation or approval request was needed because the brief explicitly allows that fallback. Original source, tests and report match their tracked historical hashes; original marker remains present. The two current attempt markers remain absent. Native socket tests, complete make check, Docker diagnostic, reviews, graph refresh and leader decision consolidation are not reported as passed.
+## IMP-086: Present the frozen single-container diagnostic after real native helper checks
+
+Date: October 18, 2026. Task: topology diagnostic readiness. Goal: make the next requested authority concrete and reviewable before asking the owner.
+
+Decision: require all twenty-four actual native helper methods to pass against the frozen two-file source and its own bound Rust engine before presenting docs/qualification/linux-topology-diagnostic-proposal.md. The leader-native run passed twenty-four methods in 1.243 seconds, zero failures/skips. Log SHA-256 5ad86ce08064effbe85e5e63397cdd01149fa7e0b352ec0f8f351f4e438dff7e; both source hashes match the worker handoff. Earlier sandbox failures stay retained and are not reclassified as passes.
+
+The proposal permits only one boundary container under the unchanged complete profile, fifteen-second lifetime and twenty-minute allocation, with the new separate marker and no retry or runtime-adoption claim. Its exact command, image, mounts, engine/build/source hashes, cleanup and evidence limits are recorded. Additional Docker execution remains pending explicit authority; preparation and helper tests do not imply it. Independent Task 8 work continues while a decision is pending. Reviews remain deferred.
