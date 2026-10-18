@@ -115,11 +115,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             .block(Block::bordered().title(title)),
         rows[1],
     );
-    let label = if app.is_creating_project() {
-        "Project name"
-    } else {
-        "Leader draft (local until owner API is available)"
-    };
+    let label = app.draft_label();
     let draft = app
         .draft()
         .chars()
@@ -139,7 +135,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Line::from(vec![
             Span::styled("Tab/Shift-Tab", Style::default().fg(Color::Cyan)),
             Span::raw(
-                " focus | arrows select | ] task | PgUp/PgDn scroll | Ctrl-R retry | Ctrl-Q quit",
+                " focus | arrows select | PgUp/PgDn scroll | Ctrl-B brief | Ctrl-R retry | Ctrl-Q quit",
             ),
         ]),
         Line::raw(safe_text(&app.status, 4096)),
@@ -165,7 +161,7 @@ fn owner_problem(app: &App) -> String {
 
 pub fn body(app: &App) -> String {
     match app.focus() {
-        Focus::Conversation => format!("Central leader conversation\n\nAuthenticated owner conversation API unavailable. Your draft stays in this client and is not sent over the worker wire.\n\n{}\n\nBrief decisions, plan approval and task execution require the protected owner endpoint. Closing this TUI leaves the engine running.", task_summary(app)),
+        Focus::Conversation => conversation_lines(app),
         Focus::Projects => project_lines(app),
         Focus::Settings => settings_lines(app),
         Focus::Plan => plan_lines(app),
@@ -173,6 +169,72 @@ pub fn body(app: &App) -> String {
         Focus::Memory => "Memory inbox\n\nUnavailable: owner-scoped nomination and promotion APIs are required. No empty inbox or approved promotion is inferred from a worker snapshot.".into(),
         Focus::Evidence => evidence_lines(app),
     }
+}
+
+fn conversation_lines(app: &App) -> String {
+    let mut lines = vec![
+        "Project owner conversation | Enter: message | Ctrl-B: explicit brief edit".to_owned(),
+    ];
+    if !app.owner_ready {
+        lines.push(
+            "Owner input unavailable; limited ordinary mode. Drafts retained; Ctrl-R reconnects."
+                .into(),
+        );
+    }
+    let Some(view) = app.conversation_view() else {
+        lines.push(safe_text(&app.conversation_notice, 512));
+        lines.push("No protected history is inferred from a worker snapshot.".into());
+        lines.push(
+            "Ctrl-U: separate unassigned draft. Messages do not rewrite a brief or start tasks."
+                .into(),
+        );
+        lines.push("Leader consumption and replies are not integrated.".into());
+        return lines.join("\n");
+    };
+    lines.push(format!(
+        "{} owner revision {}",
+        if app.conversation_stale || !app.owner_ready {
+            "STALE"
+        } else {
+            "Current"
+        },
+        view.revision.value(),
+    ));
+    if let Some(brief) = &view.brief {
+        if let crate::conversation::ConversationContent::Brief { version } = brief.content {
+            lines.push(format!(
+                "Current brief v{version}: {}",
+                safe_text(&brief.text, 8192)
+            ));
+        }
+    } else {
+        lines.push("No project brief recorded; Ctrl-B explicitly starts version 1.".into());
+    }
+    if let Some(pending) = app.pending_conversation_label() {
+        lines.push(safe_text(&pending, 512));
+    }
+    lines.push(format!(
+        "History page: {} actual entries",
+        view.page.entries.len()
+    ));
+    for entry in &view.page.entries {
+        let kind = match entry.content {
+            crate::conversation::ConversationContent::Message => "Owner message".to_owned(),
+            crate::conversation::ConversationContent::Brief { version } => {
+                format!("Brief v{version}")
+            }
+        };
+        lines.push(format!(
+            "{kind} | event {} | operation {}",
+            entry.event_cursor.value(),
+            entry.provenance.operation_id.as_str()
+        ));
+        lines.push(safe_text(&entry.text, 8192));
+    }
+    lines.push(safe_text(&app.conversation_notice, 512));
+    lines.push("Ctrl-N: next history page | Ctrl-P: first | Ctrl-U: unassigned draft".into());
+    lines.push("Messages never approve or start tasks. Leader replies are not integrated.".into());
+    lines.join("\n")
 }
 
 fn evidence_lines(app: &App) -> String {
@@ -293,7 +355,7 @@ fn settings_lines(app: &App) -> String {
 fn plan_lines(app: &App) -> String {
     let Some(state) = &app.plan else {
         return format!(
-            "Brief and plan\n\n{}\n\nNo plan state loaded for this task. Owner brief history, approval and rejection require the authenticated owner API.",
+            "Brief and plan\n\n{}\n\nProject brief history and explicit Ctrl-B versioned editing are in Conversation. No task plan state is loaded; plan approval and rejection remain unavailable here.",
             task_summary(app)
         );
     };

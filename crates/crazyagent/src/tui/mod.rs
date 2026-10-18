@@ -120,6 +120,7 @@ fn event_loop(
     let mut dirty = true;
     let mut snapshot = true;
     let mut owner_refresh = Instant::now();
+    let mut owner_reconnect = false;
     loop {
         if stopped.load(Ordering::Relaxed) {
             break;
@@ -153,13 +154,24 @@ fn event_loop(
             dirty = true;
         }
         if !connection.busy() {
-            if let Some(command) = app.take_command() {
+            if owner_reconnect {
+                owner_reconnect = false;
+                if !app.retry_conversation()
+                    && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
+                {
+                    app.notice(&error);
+                }
+                dirty = true;
+            } else if let Some(command) = app.take_command() {
                 let request_id = connection
                     .start(command, app.revision())
                     .map_err(TuiError)?;
                 app.bind_project_request(request_id);
                 snapshot = true;
                 refresh = Instant::now();
+            } else if let Some(job) = app.take_conversation_job() {
+                connection.conversation(job).map_err(TuiError)?;
+                dirty = true;
             } else if Instant::now() >= refresh {
                 let command = if snapshot {
                     crate::protocol::Command::Snapshot
@@ -172,7 +184,10 @@ fn event_loop(
                     .map_err(TuiError)?;
                 refresh = Instant::now() + Duration::from_secs(1);
             } else if Instant::now() >= owner_refresh {
-                if let Some((project, generation, first)) =
+                if let Some(job) = app.conversation_request().map_err(TuiError)? {
+                    connection.conversation(job).map_err(TuiError)?;
+                    dirty = true;
+                } else if let Some((project, generation, first)) =
                     app.evidence_request().map_err(TuiError)?
                 {
                     connection
@@ -202,6 +217,12 @@ fn event_loop(
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
                     let result = if connection.uncertain() {
                         connection.retry()
+                    } else if app.has_unresolved_conversation() {
+                        owner_reconnect = true;
+                        app.notice(
+                            "Original owner recovery queued until the native worker is idle",
+                        );
+                        Ok(())
                     } else {
                         connection.reconnect().and_then(|()| app.reconnect_owner())
                     };
@@ -220,7 +241,9 @@ fn event_loop(
                     } else if let Err(error) = app.reduce(event) {
                         app.notice(&error);
                     }
-                    if previous_focus != Focus::Evidence && app.focus() == Focus::Evidence {
+                    if previous_focus != app.focus()
+                        && matches!(app.focus(), Focus::Evidence | Focus::Conversation)
+                    {
                         owner_refresh = Instant::now();
                     }
                     refresh = Instant::now();
@@ -242,6 +265,21 @@ fn event_loop(
 }
 
 fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        && app.focus() == Focus::Conversation
+        && !app.is_creating_project()
+    {
+        return match key.code {
+            KeyCode::Char('b') => Some(UiEvent::ToggleBrief),
+            KeyCode::Char('u') => Some(UiEvent::ToggleUnassigned),
+            KeyCode::Char('n') => Some(UiEvent::HistoryNext),
+            KeyCode::Char('p') => Some(UiEvent::HistoryFirst),
+            _ => None,
+        };
+    }
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)

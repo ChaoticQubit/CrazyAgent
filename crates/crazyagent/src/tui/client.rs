@@ -1,6 +1,9 @@
 use crate::client_controller::OwnerController;
+use crate::conversation::{ConversationCursor, ConversationMutation};
+use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerPageCursor, OwnerRead, OwnerSummary, OwnerView,
+    OwnerClientKind, OwnerData, OwnerMutation, OwnerPageCursor, OwnerRead, OwnerReadReply,
+    OwnerResponse, OwnerSummary, OwnerView,
 };
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
@@ -26,10 +29,63 @@ enum WorkerMode {
 enum Job {
     Wire(Box<WireRequest>),
     Reconnect,
+    Conversation(Box<ConversationJob>),
     Evidence {
         project: ProjectId,
         generation: u64,
         first: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ConversationContext {
+    pub identity: OwnerConnectionIdentity,
+    pub project: ProjectId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ConversationSubmission {
+    pub identity: OwnerConnectionIdentity,
+    pub generation: u64,
+    pub mutation: ConversationMutation,
+}
+
+#[derive(Clone)]
+pub(super) enum ConversationQuery {
+    History { cursor: Option<ConversationCursor> },
+    Brief,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MutationDelivery {
+    Submit,
+    Reconcile,
+    Retry,
+}
+
+#[derive(Clone)]
+pub(super) enum ConversationJob {
+    Read {
+        context: ConversationContext,
+        query: ConversationQuery,
+    },
+    Mutation {
+        submission: ConversationSubmission,
+        delivery: MutationDelivery,
+    },
+}
+
+pub(super) enum ConversationEvent {
+    Read {
+        context: ConversationContext,
+        result: Result<Box<OwnerReadReply>, String>,
+    },
+    Mutation {
+        submission: ConversationSubmission,
+        operation: Option<(RequestId, String)>,
+        result: Result<Box<OwnerResponse>, String>,
+        retained: bool,
     },
 }
 
@@ -56,7 +112,9 @@ pub(super) enum OwnerEvent {
     Access {
         ready: bool,
         problem: String,
+        identity: Option<OwnerConnectionIdentity>,
     },
+    Conversation(Box<ConversationEvent>),
     Read {
         project: ProjectId,
         generation: u64,
@@ -154,6 +212,7 @@ impl Connection {
                                 let event = OwnerEvent::Access {
                                     ready: false,
                                     problem: "trusted_connection_lost".into(),
+                                    identity: None,
                                 };
                                 if owner_replies
                                     .send(OwnerReply {
@@ -179,6 +238,29 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Conversation(job) => {
+                            let native = native
+                                .as_mut()
+                                .expect("conversation requires native configuration");
+                            let event = runtime.block_on(native.conversation(*job));
+                            let failed = match &event {
+                                ConversationEvent::Read { result, .. } => result.is_err(),
+                                ConversationEvent::Mutation { result, .. } => result.is_err(),
+                            };
+                            if failed {
+                                native.detach();
+                                client = native.ordinary();
+                            }
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Conversation(Box::new(event)),
                                 })
                                 .is_err()
                             {
@@ -346,6 +428,10 @@ impl Connection {
         self.owner_job(Job::Reconnect)
     }
 
+    pub(super) fn conversation(&mut self, job: ConversationJob) -> Result<(), String> {
+        self.owner_job(Job::Conversation(Box::new(job)))
+    }
+
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
         if self.busy() {
             return Err("A native request is still pending".into());
@@ -389,6 +475,8 @@ struct NativeOwner {
     controller: Option<OwnerController>,
     ready: bool,
     scan: Option<Scan>,
+    conversation_pending: Option<ConversationSubmission>,
+    conversation_operation: Option<(RequestId, String)>,
 }
 
 impl NativeOwner {
@@ -399,6 +487,8 @@ impl NativeOwner {
             controller: None,
             ready: false,
             scan: None,
+            conversation_pending: None,
+            conversation_operation: None,
         }
     }
 
@@ -436,6 +526,7 @@ impl NativeOwner {
                     OwnerEvent::Access {
                         ready: true,
                         problem: String::new(),
+                        identity: self.controller.as_ref().map(|c| c.identity().clone()),
                     },
                 )
             }
@@ -446,8 +537,195 @@ impl NativeOwner {
                     OwnerEvent::Access {
                         ready: false,
                         problem: bounded_problem(&error.0),
+                        identity: None,
                     },
                 )
+            }
+        }
+    }
+
+    async fn conversation(&mut self, job: ConversationJob) -> ConversationEvent {
+        match job {
+            ConversationJob::Read { context, query } => {
+                let result = self.read_conversation(&context, query).await.map(Box::new);
+                ConversationEvent::Read { context, result }
+            }
+            ConversationJob::Mutation {
+                submission,
+                delivery,
+            } => {
+                let result = self
+                    .mutate_conversation(&submission, delivery)
+                    .await
+                    .map(Box::new);
+                let pending = self.controller.as_ref().and_then(|c| c.pending());
+                let operation = self.conversation_operation.clone();
+                let retained = pending.is_some();
+                assert!(!retained || (self.conversation_pending.is_some() && operation.is_some()));
+                if !retained {
+                    self.conversation_pending = None;
+                    self.conversation_operation = None;
+                }
+                ConversationEvent::Mutation {
+                    submission,
+                    operation,
+                    result,
+                    retained,
+                }
+            }
+        }
+    }
+
+    async fn read_conversation(
+        &mut self,
+        context: &ConversationContext,
+        query: ConversationQuery,
+    ) -> Result<OwnerReadReply, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        if controller.identity() != &context.identity {
+            return Err("conversation_connection_changed".into());
+        }
+        let cursor = match &query {
+            ConversationQuery::History { cursor } => cursor.clone(),
+            ConversationQuery::Brief => None,
+        };
+        let history = matches!(&query, ConversationQuery::History { .. });
+        let read = match query {
+            ConversationQuery::History { cursor } => OwnerRead::ConversationHistory {
+                project_id: context.project.clone(),
+                cursor,
+                limit: 32,
+            },
+            ConversationQuery::Brief => OwnerRead::CurrentBrief {
+                project_id: context.project.clone(),
+            },
+        };
+        let state = controller
+            .read(read)
+            .await
+            .map_err(|e| bounded_problem(&e.0))?;
+        match &state.data {
+            OwnerData::ConversationHistory { page } => {
+                if !history || page.project_id != context.project || page.entries.len() > 32 {
+                    return Err("conversation_page_context".into());
+                }
+                let mut after = cursor.as_ref().map_or(0, |c| c.after.value());
+                for entry in &page.entries {
+                    if entry.text.len() > crate::conversation::TEXT_BYTES_MAX
+                        || entry.event_cursor.value() <= after
+                        || entry.event_cursor.value() > state.revision.value()
+                        || entry.provenance.event_cursor.as_ref() != Some(&entry.event_cursor)
+                        || entry.provenance.revision_after != entry.event_cursor
+                    {
+                        return Err("conversation_entry_context".into());
+                    }
+                    after = entry.event_cursor.value();
+                }
+                if let Some(next) = &page.next
+                    && (page.entries.is_empty()
+                        || next.project_id != context.project
+                        || next.db_instance != context.identity.database_instance()
+                        || next.engine_epoch != context.identity.engine_epoch()
+                        || next.at_revision != state.revision
+                        || next.config_id != state.config_id
+                        || next.after.value() != after)
+                {
+                    return Err("conversation_cursor_context".into());
+                }
+            }
+            OwnerData::CurrentBrief { project_id, brief } => {
+                if history
+                    || project_id != &context.project
+                    || brief.as_ref().is_some_and(|entry| {
+                        !matches!(
+                            entry.content,
+                            crate::conversation::ConversationContent::Brief { .. }
+                        ) || entry.text.len() > crate::conversation::TEXT_BYTES_MAX
+                            || entry.event_cursor.value() == 0
+                            || entry.event_cursor.value() > state.revision.value()
+                            || entry.provenance.event_cursor.as_ref() != Some(&entry.event_cursor)
+                            || entry.provenance.revision_after != entry.event_cursor
+                    })
+                {
+                    return Err("conversation_brief_context".into());
+                }
+            }
+            OwnerData::ResyncRequired => {}
+            _ => return Err("conversation_read_kind".into()),
+        }
+        Ok(state)
+    }
+
+    async fn mutate_conversation(
+        &mut self,
+        submission: &ConversationSubmission,
+        delivery: MutationDelivery,
+    ) -> Result<OwnerResponse, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        match delivery {
+            MutationDelivery::Submit => {
+                if controller.identity() != &submission.identity
+                    || self.conversation_pending.is_some()
+                    || controller.pending().is_some()
+                {
+                    return Err("conversation_pending_or_connection_changed".into());
+                }
+                let project = match &submission.mutation {
+                    ConversationMutation::AppendMessage { project_id, .. }
+                    | ConversationMutation::ReplaceBrief { project_id, .. } => project_id.clone(),
+                };
+                let state = controller
+                    .read(OwnerRead::CurrentBrief {
+                        project_id: project.clone(),
+                    })
+                    .await
+                    .map_err(|e| bounded_problem(&e.0))?;
+                if !matches!(state.data, OwnerData::CurrentBrief { project_id, .. } if project_id == project)
+                {
+                    return Err("conversation_fresh_read_required".into());
+                }
+                let pending = controller
+                    .begin_mutation(
+                        OwnerMutation::Conversation {
+                            mutation: submission.mutation.clone(),
+                        },
+                        submission.generation,
+                    )
+                    .map_err(|e| bounded_problem(&e.0))?;
+                self.conversation_operation = Some((
+                    pending.request().request_id.clone(),
+                    pending.hash().to_owned(),
+                ));
+                self.conversation_pending = Some(submission.clone());
+                controller
+                    .send_pending()
+                    .await
+                    .map_err(|e| bounded_problem(&e.0))
+            }
+            MutationDelivery::Reconcile | MutationDelivery::Retry => {
+                if self.conversation_pending.as_ref() != Some(submission)
+                    || controller.pending().is_none()
+                {
+                    return Err("conversation_pending_context".into());
+                }
+                match delivery {
+                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
+                    MutationDelivery::Retry => controller.retry_pending().await,
+                    MutationDelivery::Submit => unreachable!(),
+                }
+                .map_err(|e| bounded_problem(&e.0))
             }
         }
     }
