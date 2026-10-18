@@ -10,6 +10,14 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     for name in ["Cargo.toml", "Cargo.lock"] {
         std::fs::copy(workspace.join(name), root.path().join(name)).unwrap();
     }
+    let desktop = root.path().join("apps/desktop/src-tauri");
+    let desktop_source = workspace.join("apps/desktop/src-tauri");
+    std::fs::create_dir_all(&desktop).unwrap();
+    copy_source(&desktop_source, &desktop, 0);
+    assert_eq!(
+        std::fs::read(desktop.join("Cargo.toml")).unwrap(),
+        std::fs::read(desktop_source.join("Cargo.toml")).unwrap()
+    );
     let mut manifest = std::fs::read_to_string(source.join("Cargo.toml")).unwrap();
     manifest.push_str("\n[[bin]]\nname = 'crazyagent-boundary-child'\npath = 'src/bin/crazyagent-boundary-child.rs'\n");
     std::fs::write(package.join("Cargo.toml"), manifest).unwrap();
