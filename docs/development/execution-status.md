@@ -4,6 +4,16 @@ Date: October 17, 2026.
 
 Authority: DEC-060 through DEC-064. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
 
+## Current checkpoint after research
+
+DEC-070 records the explicit return to the complete V1 plan. All fx, Vercel Sandbox, podcast and Symvibe research is tracked in reports and research_notes. AGENTS.md applies accepted-outcome measurement, small components, separate execution authority, verification-first work and bounded resources. Symvibe stays a competitor; additional harnesses and backends stay future work.
+
+Task 5 core and its disconnected-peer fix are integrated as 4919e1d and 72d5b5d. The leader's actual integrated make check passed 49 tests, build and 49 tests again, zero ignored. The original failure remains retained. IMP-029 through IMP-037 and IMP-043 record implementation, source coverage and evidence. Actual worker-to-engine denial remains pending under Task 2.
+
+The development-only Docker scripts are integrated as f285a2b. Five checks and six native resource probes passed with cleanup confirmed; see [resource results](../qualification/container-resource-results.md). Native admission, aggregate CPU-time budgets and permanent runtime selection remain unavailable. No account-connected product call has been made.
+
+Task 6, project/repository registration and one-writer worktree ownership, is the next independent slice. It must preserve dirty work, neutralize repository-controlled execution and reconcile uncertain ownership. Native Tasks 2-3 retain their blockers. Reviews remain deferred under DEC-061. Historical sections below retain the execution sequence and are superseded by this checkpoint where status differs.
+
 ## Repository foundation
 
 The local repository is initialized with an empty trunk commit and task branch `chore/project-foundation`. The workspace, build entry points, tracked project instructions and existing product/research documents form the foundation.

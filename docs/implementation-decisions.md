@@ -498,3 +498,199 @@ Alternatives and costs: repeated one-shot CLI launches are simple but do not mee
 Acceptance and verification: inspect the pinned production closure and startup effects before execution, then pass two actual turns, permission round trip, original-process reconnect, cancellation and logging-failure checks under an admitted profile and separately approved account/budget. Do not infer Claude Code/Codex subscription compatibility from the observed Backboard/BYOK provider factory.
 
 Risks and revisit: RCLI declares no public exports map and its controller assembly includes multiple supporting services. Trace those constructors before choosing the smallest host composition; forecast additional work if it cannot meet the accepted contract. Permanent execution runtime and native account authority remain unresolved. No new runtime dependency or source fork is shipped by this preparation decision.
+
+
+## IMP-029: Strict protocol boundary
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Goal: validated string identities, bounded JSON frames, explicit versions and outcomes. Use serde deny_unknown_fields, validated constructors/deserializers and length-prefixed frames. Reject credentials by schema rather than generic secret scanning. Alternatives: arbitrary JSON is smaller initially but lacks a trust boundary; UUID adds no needed capability. Cost: typed enums require coordinated additions. Limits: 64 KiB frames, 128-byte identity, 256-byte project name, 64 repositories. Acceptance: invalid identities, versions, unknown fields and oversized frames rejected. Revisit when another task adds a command. Symbols: protocol identity newtypes, Cursor, WireRequest, WireReply, Command, Outcome, ProjectSpec, ExecutionContext, framing.
+
+## IMP-030: Durable serialized authority
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Goal: commit operation identity, result, revision and event atomically before acknowledgement. One dedicated SQLite thread consumes a bounded Tokio channel; no database work on reactor. Scope idempotency by client plus request ID and canonical typed request bytes. Cache lookup precedes revision checking. Alternatives: reactor-blocking SQLite harms responsiveness; pool adds contention; in-memory replay loses crash safety. Cost: one thread and serialized writes. Use SQLite FULL synchronous WAL, bounded busy timeout, bounded event page with snapshot on gaps. Acceptance: real reopen replay creates one project, changed operation bytes fail, SQLite read-only write fails without success. Symbols: storage worker and transaction functions, Engine durable command methods.
+
+## IMP-031: Typed canonical settings
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Goal: typed TOML defaults with per-setting origin/scope/effect. Resolve bounded real files, preserve last valid snapshot on malformed reload, hash deterministic values for ConfigId. Tasks persist ExecutionContext; migration explicit. Current revocations intersect pinned destinations immediately. Alternatives: generic schema framework adds unnecessary abstraction; copying latest config into tasks violates pinning. Cost: explicit metadata maintained with fields. Acceptance: real-file override, malformed reload, pin/migrate/revoke tests. Symbols: config types/resolution/metadata/reload, engine task configuration methods.
+
+## IMP-032: Local transport and input ownership
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Goal: owner-only Unix socket in private non-symlink runtime directory. Never unlink preexisting paths. Bounded client concurrency, message deadlines and frame limits; one request at a time per connection. Validate peer UID with safe rustix API. Input lease requires session, client and controller epoch; reconnect preserves lease and epoch rotation invalidates it. Native dispatch is unavailable. Alternatives: TCP broadens exposure; UID alone cannot isolate same-user workers and is not Task 2 acceptance. Cost: macOS/Unix-specific endpoint plus pending admitted-boundary test. Acceptance: real socket replay, stalled client, saturation, path permissions and exclusive leases. Symbols: engine server, Client, lease methods, CLI.
+
+## Verification ledger
+
+Pending initial red runs. This record is prospective, not retrospective. Function-level coverage will be expanded as declarations are added. No original intent is inferred for existing qualification code.
+
+Protocol red: four tests failed on empty identity, unsupported version, frame bounds and canonical cursor. Green: 15 library tests. Settings red: override ignored and malformed reload accepted. Green: both real-file checks. Storage red: four behavior failures. Green: all four real SQLite checks after correcting test directory modes and canonicalizing the verified macOS parent before SQLITE_OPEN_NOFOLLOW.
+
+Transport red: missing socket and preexisting file accepted. Sandbox implementation run: path tests passed, socket bind EPERM. Authorized host run: two passed, zero ignored. Lease tests were added alongside implementation, not observed red; they are additional coverage, not claimed test-first evidence. No mocked provider/engine responses are runtime evidence.
+
+## IMP-033: State and endpoint lifetime bounds
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Date: 2026-10-17. Goal: all authoritative state remains recoverable within the bounded wire protocol. Limit projects/tasks to 128 each and their complete serialized snapshot to 63 KiB. Reject the transaction at capacity, preserving the prior snapshot. Event pages are bounded independently of retention. Durable operation history remains on disk for idempotency and is not silently evicted. Cost: a concrete initial state quota; revisit with explicit snapshot pagination before increasing it. Graceful server shutdown unlinks only the socket inode/device created by that instance. Existing paths, including stale sockets after a crash, fail closed and are never silently removed. Restart can select a fresh socket filename while reopening the same database; a supervisor may later own explicit stale-endpoint recovery. No native capability is inferred.
+
+## IMP-034: Dedicated-worker deadlines
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Date: 2026-10-17. Goal: bounded callers without false rollback claims. Queue insertion uses try_send and explicit saturation errors; response waits have configured deadlines. A timed-out write can still commit, so report outcome_unknown_retry_same_identity. Retrying the same durable identity recovers the committed outcome. SQLite busy timeout is 250 ms. Task config snapshots will be stored alongside tasks so a restart retains original settings, not only their hash. Revocation filtering applies to every context retrieval, including replay. Alternatives: cancelling a queued mutation introduces acknowledgement races; copying latest settings breaks pinning. Revisit with broader task commands. Evidence: real reopen and read-only database rejection tests.
+
+## IMP-035: Cargo entrypoint remains explicit
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Date: 2026-10-17. Owner supplied a real integration failure on leader source 77e540f after Task 2 added crazyagent-boundary-child; shared graph refreshed after 381d6d6. Goal: preserve the documented cargo run --offline -- qualification report invocation with multiple binary targets. Decision: default-run = crazyagent in the package manifest. Alternative: document --bin everywhere, rejected because it changes the established entrypoint. Cost: one manifest key and one real Cargo regression check. The test copies actual production source and manifests into disposable real files, retains the actual probe when present or adds a competing exit-only binary when absent, then runs actual Cargo and parses the real qualification CLI output. No provider or engine response is fabricated. Red evidence: actual Cargo exit 101 naming both targets and requesting default-run. Revisit only if the primary executable changes. Symbols: cargo_entrypoint test and package.default-run; original qualification functions remain untouched.
+
+## IMP-036: Input invariants and bounded epoch history
+
+Date: October 17, 2026. Task: Task 5. Source: contemporaneous durable-engine worker handoff.
+
+Date: 2026-10-17. Goal: no stale lease becomes valid after release or controller transfer. Require a fresh controller epoch after release, remember up to 4096 session/epoch pairs in this engine lifetime and cap registered sessions at 128. Assert that each lease has its matching session/epoch, is not retired and belongs to recorded history. The internal orphaned-lease test trips a production runtime assertion. These are engine authorization checks, not native input/resize evidence. Native runner epoch recovery remains Task 3 integration. Alternatives: reusing a released epoch resurrects stale leases; unbounded epoch history violates resource bounds. Cost: explicit epoch/session capacity errors. Revisit only when qualified runner integration supplies a durable epoch lifecycle.
+
+## Final production-symbol coverage index
+
+Each entry maps actual production declarations to decisions above. Formatting/error wrappers are included; existing qualification implementation is not retroactively attributed to this worker. Derive-generated Serde/Eq/Ord/Hash implementations inherit the declaration's decision.
+
+| File and symbols | Decisions | Rationale and verification |
+| --- | --- | --- |
+| protocol.rs: PROTOCOL_VERSION, FRAME_BYTES_MAX, ProtocolError, ProtocolError::fmt, validate_identity, identity macro | IMP-029 | Strict boundary and explicit errors; protocol red/green |
+| protocol.rs: ProjectId, SessionId, TaskId, PlanId, ConfigId, SnapshotId, BaselineId, EnvironmentId, ClientId, RequestId, ControllerEpoch, CredentialRef; each generated new/as_str/TryFrom<String>::try_from | IMP-029 | Validated caller-generated safe string identifiers; rejects_invalid_request |
+| protocol.rs: Cursor, Cursor::new, Cursor::value, Cursor::try_from, String::from(Cursor) | IMP-029, IMP-030 | Canonical string serialization, checked SQLite signed-range advancement; cursor tests |
+| protocol.rs: ProjectSpec, ExecutionContext, Command, WireRequest, WireRequest::validate | IMP-029, IMP-031 | Closed command schema, references only, bounded project/context fields |
+| protocol.rs: StoredProject, Event, Outcome, WireReply, encode_frame, decode_request | IMP-029, IMP-030, IMP-033 | Bounded versioned exchange and ordered cursor outcomes; framing and socket checks |
+| config.rs: Settings, Settings::default, Origin, EffectTiming, SettingScope, SettingDescriptor, EffectiveConfig | IMP-031, IMP-033 | Seven typed settings and limits; real override metadata test |
+| config.rs: EffectiveConfig::validate, ConfigError, ConfigError::fmt, ConfigFile | IMP-031 | Validate bounds, descriptor shape/values/defaults and content hash; config identity checks |
+| config.rs: resolve_config, read_config, apply_file, validate_settings, from_settings, ConfigState, ConfigState::reload | IMP-031 | Bounded real TOML, linked defaults and project override, union revocations, all-or-nothing reload; malformed file tests |
+| storage.rs: Job, Storage, Storage::open, error | IMP-030, IMP-034 | Bounded dedicated worker with explicit startup and request results |
+| storage.rs: open_database, lock_database, initialize_schema | IMP-030, IMP-032, IMP-033 | Owner-only files, no-follow SQLite open, canonical verified parent, private separate flock file, FULL/WAL persistence; real ownership/reopen tests |
+| storage.rs: apply, finish_operation, execute | IMP-030, IMP-034 | Atomic identity/result/revision/event commit. Mutating replay preserves exact original outcome; reads re-execute under current revocations after byte-identity validation |
+| storage.rs: create_project, snapshot, read_rows, enforce_snapshot_bound | IMP-030, IMP-033 | Complete bounded snapshots, atomic quota rollback; real state-quota test |
+| storage.rs: events, persist_event | IMP-030, IMP-033 | Retain configured event count, return at most 128 per page, future/gap resync; cursor-gap test |
+| storage.rs: task_context, pin_task, migrate_task, store_config | IMP-031, IMP-034 | Persist full pinned config with context, explicit migration, current revocations on reads; pin/revoke/reopen tests |
+| engine.rs: InputLease, InputState, InputState::assert_consistent | IMP-032, IMP-036 | Exclusive control invariants, bounded state and assertion-trip check |
+| engine.rs: EngineError, EngineError::fmt, ClientError, io_error | IMP-029, IMP-034 | Explicit errors and unknown-outcome distinction |
+| engine.rs: Client, Client::new, Client::request | IMP-032, IMP-034 | Owner endpoint/peer validation, frame and response identity checks, overall deadline; real socket reconnect tests |
+| engine.rs: Server, Server::bind, Server::run | IMP-032, IMP-033, IMP-034 | Private Unix listener, bounded clients, isolated stalled exchanges, bounded shutdown and exact-created-inode unlink |
+| engine.rs: verify_directory, verify_endpoint, verify_peer, read_frame, serve_client | IMP-029, IMP-032, IMP-034 | Permissions, real peer UID, bounded frame/deadline and explicit closure on invalid frames; no worker-isolation claim |
+| engine.rs: Engine, Engine::open, Engine::open_readonly, Engine::apply, Engine::update_config, Engine::close | IMP-030, IMP-031, IMP-034 | Dedicated worker admission, bounded queue and waits, persisted config changes, write-failure checks |
+| engine.rs: Engine::set_controller_epoch, Engine::acquire_input, Engine::authorize_input, Engine::authorize_resize, Engine::release_input | IMP-032, IMP-036 | Current exclusive lease and non-reused epoch; engine-only authorization tests, no native dispatch |
+| bin/crazyagent.rs: changed main routing and USAGE, new run_engine | IMP-032, IMP-034, IMP-035 | Bounded argument shape, existing qualification operations preserved, local engine startup and Ctrl-C shutdown; actual process and Cargo checks |
+| lib.rs: config/engine/protocol/storage exports; Cargo.toml dependencies/default-run; Cargo.lock | IMP-029 through IMP-035 | Accepted shared-file scope; Cargo-generated offline lock, no new acquisition |
+
+## Additional implementation costs and evidence limits
+
+The SQLite flock must use a separate engine-lock file: macOS SQLite locking conflicts with flock on the actual database inode. This was found by a real failed run and corrected. SQLite work is only on its dedicated OS thread. Configuration parsing is synchronous and happens before CLI reactor startup; caller-driven reload is bounded to 64 KiB per file. Bulk activity processing is not implemented here; the typed bulk_queue_capacity is the downstream capture boundary setting, not capture-runtime evidence.
+
+New direct dependencies: rusqlite 0.40.2 with default features disabled (system SQLite, MIT), tokio 1.53.2 with rt-multi-thread/macros/net/io-util/sync/time/signal (MIT), toml 1.1.6+spec-1.1.0 with parse/serde only (MIT OR Apache-2.0). rustix retains fs and adds process, matching Task 2's reported shared addition. No net feature is needed. Twenty lock packages were added from the existing cache. libsqlite3-sys 0.38.2 uses its declared build.rs to locate/link system SQLite; no bundled SQLite compilation/download or lifecycle-hook acquisition was introduced. System sqlite3 reports 3.51.0. No dependency request is outstanding.
+
+Observed behavioral reds exist for protocol, settings, durable storage, pin settings retrieval, replay revocation, released-epoch reuse, Cargo binary selection and CLI process startup. Existing supplemental tests for saturation/quota/client scoping and the internal invariant were green on first execution; they are not retrospectively described as missing-behavior reds. The initial exclusive-lease checks were added alongside implementation; the later released-epoch regression has an observed red/green pair. No broad future features were added.
+
+Graph remains leader-owned. No graph update was run from this worker. Code/security reviews remain deferred under DEC-061. worker_cannot_control_engine against the actual admitted Task 2 boundary remains pending, as do native runner input/resize and provider qualification. Passing owner-only socket checks does not establish same-user sandbox isolation.
+
+## Final verification and commit
+
+Local commit: 092666284accda02430701aaaa0b0a9f72dd7c77. Twelve scoped files, 2588 insertions, one deletion. Final make check exit 0: formatting, strict lint, 35 real tests, build, the same 35 tests again; zero ignored. The initial 33 increased by one invariant-trip check and one actual Cargo default-entrypoint check. The final log is .local-state/evidence/make-check-final.log, SHA-256 8790f2d859da58ef8a54462756191a792b01aa65de65ba53ac15309a8ea118df. Qualification source/tests have zero diff from 154ab76; isolation/probe files were untouched. Full handoff: .local-state/task-05-report.md. Tracked checkout clean after commit; preexisting untracked .serena/ preserved. No push, publication, global changes, provider calls or review jobs.
+
+
+## Task 5 replay correction and Task 2 resource prototype consolidation
+
+Date: October 17, 2026. Source: worker-owned decision records and retained native evidence. Historical pending statements below describe the point when each choice was made; the leader's integration record following them supplies current results.
+
+## IMP-037: Authenticate retained peer identity after disconnect
+
+Date: 2026-10-17. Task: leader's integrated engine_process commit-observation failure. Goal: persist a complete authorized request even when its sender disconnects before accept, preserving exact replay after a lost acknowledgement. Constraints: no weaker assertion, no longer polling, no unsafe Rust, no provider/Docker/global changes, native worker boundary still pending.
+
+Root cause: Tokio 1.53.2 macOS peer_cred first invokes getsockopt LOCAL_PEEREPID, which returns ENOTCONN after a peer disconnects. serve_client exits before read_frame and Engine::apply, so SQLite correctly contains no operation. The E2E was nondeterministic because server scheduling decided whether peer_cred ran before client close. Exact minimal PATH reproduced the unchanged process test failure. A new deterministic real engine/socket/SQLite regression writes the whole request and disconnects before starting accept; it fails with the same missing commit. Temporary diagnostics record peer=Socket is not connected and no frame/DB call. A separate disposable macOS socket probe established LOCAL_PEEREPID fails while getpeereid succeeds with the correct UID and all synthetic bytes remain readable.
+
+Decision: on macOS, use the safe cached nix getpeereid wrapper for precisely the UID authority already required, without making peer-PID availability a prerequisite. Keep the existing safe Tokio path on other platforms. No fail-open fallback on credential errors. Alternatives: ignoring credential errors weakens authentication; adding handshake and changing when the test disconnects avoids the accepted scenario rather than fixing it; moving the same PID query closer to accept cannot eliminate a close-before-accept race; unsafe local FFI violates project policy. Cost: one cached macOS-only dependency and its feature-minimal lock closure. Revisit when Tokio's macOS API can safely expose retained UID credentials independently of a live PID. Symbols: engine::verify_peer, target dependency selection, new complete_request_commits_when_peer_disconnects_before_accept regression. Acceptance: deterministic regression green, unchanged process/replay test green repeatedly with exact minimal PATH, full make check test/build/test green, no isolation/qualification changes. Implementation and green evidence pending at the time of this entry.
+
+Completion evidence: c56d93f2aed54fcf5ca7a70fa6c64eb04cb79bda. Four scoped files, 110 insertions, one deletion. Deterministic behavior red/green retained; real socket without kernel credentials rejected. The unchanged process test passed 20 consecutive exact-minimal-PATH runs. Final exact-PATH make check passed 37 tests/build/37 tests, zero ignored. The original engine_process test has zero diff; no polling or timeout changed. Cached nix 0.28.0 socket/user features add memoffset 0.9.1, cfg_aliases 0.1.1 and autocfg 1.5.1; no acquisition required. Full diagnostic, trust-boundary analysis, hashes and handoff are in .local-state/task-05-replay-fix-report.md. This is a pre-admission authentication correction, not a SQLite replay algorithm change. Write completion is not accepted as persistence proof; actual stored row/reply remain required. Native worker-boundary qualification is pending and reviews are deferred.
+
+
+Date: 2026-10-17. Task: bounded development-only Docker prototype under DEC-069. No permanent runtime adoption, native admission, provider calls or review/publication authority.
+
+## IMP-038: Fixed experiment and supervisor
+
+Goal: collect resource-enforcement evidence without adding product dependencies. Use installed Python stdlib, the exact acquired immutable image, fixed CLI/config/Unix endpoint and five fixed workloads. Rejected a Rust engine change, Docker SDK dependency and configurable arbitrary commands because each expands scope or acquisition. Pros: offline, small dependency surface and repeatable real probes. Cost: development-only Python code; no production control-plane qualification. Risk: existing daemon may be inaccessible from the coding sandbox; preserve failures and the unchanged integration command rather than modifying access. Acceptance: exact HostConfig/cgroup evidence, successful controls, OOMKilled, PID EAGAIN and CPU throttling. Revisit only for owner-approved permanent runtime work.
+
+## IMP-039: Lifecycle and bounded evidence
+
+Goal: prevent unbounded work and accidental mutation outside this slot. Use a local exclusive lock, unique run/probe labels, create stopped, verify full identity/security/resource settings before start, stream stdout/stderr with a fixed cap, enforce a 15-second external execution deadline and reconcile exact labels on all exit paths. Remove only a verified full container ID after postmortem inspect. Rejected docker run --rm because it loses postmortem evidence; rejected broad cleanup and client-timeout-only cleanup because they cannot establish ownership or termination. Pros: attributable artifacts and fail-closed cleanup. Costs: extra inspect/list calls and explicit unavailable results if cleanup cannot be proven. Risks: hard supervisor/host death remains outside Python finally guarantees. Revisit for product crash recovery.
+
+## IMP-040: Measurement semantics
+
+Goal: distinguish resource enforcement from workload errors. Compare small allocation and six-child controls against bounded 96 MiB OOM and the same six-fork workload under four PIDs; collect cgroup limits/counters before/after where the process survives. Measure one CPU worker for 3.5 seconds at 0.5 CPU, require positive throttling and capped usage with explicit scheduling tolerance. Rejected allocation exceptions alone and per-process CPU-time inference. Pros: kernel evidence plus successful workload controls. Costs: Docker integration requires actual daemon access; OOM post-counter capture may be unavailable after cgroup removal. Risks: CPU accounting varies with scheduling; report tolerance and raw counters. No claim of aggregate CPU budget or filesystem/network/credential/native qualification. Revisit when full runtime qualification is authorized.
+
+Function-symbol mapping and verification will be appended with the implementation. Shared tracked decision consolidation and graph refresh belong to the leader.
+
+## IMP-041: Deadline implementation and real local TDD
+
+Goal: prevent even starting a client with an expired deadline, and leave time for Docker termination dispatch inside the approved 15-second running ceiling. The start/attach client has a tighter 14-second watchdog. A fixed sixth deadline workload sleeps for 30 seconds but must be killed by that watchdog; actual Docker StartedAt/FinishedAt must remain within 15 seconds. No second CPU worker is needed for the 3.5-second CPU probe. The five resource probes remain unchanged in purpose. Rejected treating a killed Docker client as a stopped container; exact verified-ID kill plus exact-label reconciliation and stopped postmortem evidence are required. Cost: one additional sequential, low-resource deadline execution during native integration. Risk: unavailable/slow Docker control plane cannot guarantee termination; the test fails and cleanup uncertainty stops further probes. This is not production crash recovery.
+
+The existing deadline test was extended before the guard existed. The real function failed with ValueError not raised when passed an already-expired deadline (.local-state/deadline-red.log). Implementation now rejects that input before Popen. The same test then passed alongside real output-bound and invariant tests (.local-state/container-local-green.log). The earlier missing-script integration failure remains separately classified as missing-source evidence only.
+
+## Complete production-symbol map
+
+| Symbols | Decisions | Verification and remaining gap |
+| --- | --- | --- |
+| invariant | IMP-038, IMP-039 | Real true/false calls exercised; false raises AssertionError. Uses explicit raise so Python optimization cannot strip it. |
+| run_command | IMP-039, IMP-041 | Real Python stdout/stderr each produced 100000 bytes, retained 32768 each; real five-second sleep client was terminated at 0.3 seconds; expired deadline red/green passed. |
+| save | IMP-039 | Actual command/error/report artifacts written by failed real Docker preflight. |
+| docker | IMP-038, IMP-039 | Actual installed CLI invoked with fixed config/Unix endpoint and sanitized environment; permission denial retained, no substitute daemon used. Successful native calls remain pending. |
+| require | IMP-038, IMP-039, IMP-040 | Used in actual preflight for empty-auths config; other trust-boundary failures remain pending native integration. |
+| inspect_container, verify_identity, verify_stopped | IMP-038, IMP-039 | Full-ID, exact-label/name/image and stopped HostConfig checks implemented; runtime coverage blocked before create. |
+| cleanup | IMP-039, IMP-041 | Exact unique label, at most one match, verified full-ID stop/postmortem/remove/relist implemented; native execution pending. No broad selector, prune or image mutation. Interrupted create with no reconciled ID is explicitly uncertain and stops the sequence. |
+| counters, evaluate | IMP-040, IMP-041 | Actual cgroup parsing and state/counter/usage/deadline assertions remain pending native execution. CPU tolerance is 0.10 to 0.65 CPU plus 100ms accounting allowance over 3.5 to 5 wall seconds. OOM retains pre-counters and State.OOMKilled; post-OOM cgroup capture is explicitly unavailable. |
+| execute_probe | IMP-038, IMP-039, IMP-040, IMP-041 | Fixed create/verify/start/finally-cleanup lifecycle implemented; native execution pending. No next probe on unavailable or uncertain cleanup. |
+| preflight | IMP-038, IMP-039 | Actual empty-auths config read; actual Docker info denied by sandbox before image inspection or any create. Image platform/digest/size revalidation remains pending. |
+| interrupted | IMP-039, IMP-041 | SIGTERM routes through the same interruption/cleanup path; this signal path has not been exercised. Hard supervisor death remains an explicit qualification gap. |
+| main | IMP-038, IMP-039 | Actual CLI returned nonzero and persisted unavailable report, with no admission/runtime-selection claim. Full successful loop awaits native execution. |
+| embedded snapshot, emit | IMP-040 | Embedded Python compiled successfully; real in-container cgroup reads/structured streaming remain pending native execution. |
+
+All 15 supervisor functions and both embedded functions are mapped. No fabricated daemon/provider reply, mock, skip or ignored test was used. Coverage here means decision coverage, not executed runtime coverage.
+
+## Freeze and ownership handoff
+
+Owner steering: the leader confirmed the sandbox denial and will execute the native command under existing DEC-069 authority. Resource ownership was returned to the leader immediately. No further Docker calls were made after that instruction. The four active tests remain intact; the three local checks were selected for local verification only. Full native integration remains mandatory.
+
+Git add was attempted only for the two scoped Python files. The sandbox denied creation of the shared worktree index.lock; no escalation or commit was attempted. Source remains intact for leader staging. Tracked Rust/docs and shared graph are unchanged. Graph refresh and tracked decision consolidation remain leader-owned; reviews remain deferred under DEC-061.
+
+## IMP-042: Python 3.9 Docker timestamp precision
+
+Date: 2026-10-17. Task: repair the shared timestamp conversion after native run 74ad4c934ea44520a53c5f80430f5794. The owner reported six actual containers, preserved outcomes and clean_container_confirmation=true; inspection of the retained report confirms all six failed at the same Python 3.9 fractional timestamp parser. No new Docker calls are authorized for this repair, and the leader retains the slot.
+
+Goal: accept actual nanosecond RFC3339 StartedAt/FinishedAt values for every probe while retaining measured durations and all deadline thresholds. Regression first replays the actual recorded CPU cgroup stream, state and execution metadata in production evaluate. The first execution reproduced ValueError at the original fromisoformat call with 2026-10-18T02:53:23.385560418+00:00; see .local-state/timestamp-red.log. This is an executed production-path parser failure, not a missing-module failure or a new enforcement run.
+
+Decision: add one shared docker_timestamp_ns converter. Validate RFC3339 syntax with zero through nine fractional digits; parse only the whole-second date and timezone using Python 3.9 datetime.fromisoformat, and combine integer UTC epoch seconds with the right-padded fractional nanoseconds. Both StartedAt and FinishedAt callers in evaluate use it. Preserve the original floating seconds assertion and add an exact integer nanosecond bounds check before it. The reported running_nanoseconds retains the complete measured difference; running_seconds divides that small difference by one billion for the existing report/test interface.
+
+Alternatives: truncating to six decimal places is shorter but loses up to 999 nanoseconds per timestamp and can change an at-threshold decision; using datetime.timestamp on the full epoch introduces avoidable float rounding; adding a date library or upgrading Python violates the offline minimal-tooling scope. Pros: Python 3.9 compatible, no dependencies, UTC offsets supported, exact nanosecond threshold decisions. Cost: one small pure conversion function and an extra integer report field. No sub-microsecond input precision is discarded; only running_seconds has ordinary binary floating-point representation rounding after exact subtraction. Raw native timestamps remain untouched in artifacts. Malformed, timezone-free or greater-than-nine-digit values are rejected rather than guessed.
+
+Acceptance: the actual observed CPU pair gives exactly 3751966793 nanoseconds and 3.751966793 reported seconds, UTC Z and numeric timezone spellings agree, fractional widths and invalid inputs are checked, all four prior tests remain unchanged, and no deadline/CPU threshold is weakened. Native full-suite rerun stays leader-owned. Revisit if Docker emits a different documented timestamp grammar or precision above nanoseconds.
+
+Function map addition: docker_timestamp_ns maps to IMP-042; evaluate also maps to IMP-042 for both native timestamp fields. All prior function choices remain in force. Shared graph query had no matching timestamp/prototype nodes; refresh remains leader-owned.
+
+Verification: the new regression and three selected local tests passed on actual Python 3.9.6 in 0.354 seconds; .local-state/timestamp-local-green.log retains output. The regression covers exact observed nanosecond strings with Z and numeric offsets, no fraction and one/six/seven/eight/nine digits, malformed dates/precision/missing timezone, and production rejection of a duration one nanosecond over 15 seconds or below zero. Both modules and the embedded payload compile, whitespace is clean, and no comment tokens were added. Removing only the new regression reproduces the original four-test source SHA-256, proving those tests are unchanged. Offline production evaluate re-analysis of all six retained native outcomes passed with exact durations, without Docker calls or modifying the raw report. This is not a new native run. The current full-suite command now discovers five tests and still requires leader execution.
+
+Frozen source hashes: container_resources.py = 75e096a46252e590e3cfdf7e276526f95e52b60fa1cbab3e4f48d2e2a91b9849; test_container_resources.py = cc89d320932f2184e358a59175e8aa8dfc312f0eb9e74e9061423197844dc0d2. The leader retains resource ownership; no Docker calls, reviews or publication were performed for this repair. Tracked docs and Rust remain unchanged.
+
+## IMP-043: Integrate evidence without broadening admission
+
+Date: October 17, 2026. Task: DEC-070 V1 continuation. Goal: land completed core and resource work with explicit evidence limits.
+
+Decision: preserve engine 4919e1d, disconnected-peer fix 72d5b5d and development-only resource scripts f285a2b. The leader's integrated make check passed 49 real tests, build and 49 tests again, with zero failed or ignored tests. Log .local-state/integrated-engine-check-02.log SHA-256: 445110f4c9fcd0811ab877965e4375bfc1452a93cc09b1c9eb9d39d8504ab031. The initial integrated replay failure remains retained, not relabeled as a passing run.
+
+The unchanged integrated Python suite passed five checks in 21.054 seconds. Native run cc982da2309c4153aac2745a4b02f292 proved all six resource probes and exact cleanup. Report SHA-256: ac32c2af3c0799fc38852f908c9318b1d1b6f314e2c3f36ba65dfdd0ff35. The deadline container ran 14.019154243 seconds. Source hashes match IMP-042. Native admission, aggregate CPU-time budget and permanent runtime selection remain false.
+
+Rejected alternatives: equating resource probes with complete confinement; accepting worker-only results as integrated evidence; deleting failed attempts; or restarting completed tasks. Pros: independent core work proceeds from verified source. Cost and risk: worker endpoint denial, native recovery/auth/child control, total CPU budgets and product runtime adoption remain separate gates. Revisit on a concrete complete runtime proposal and separately approved provider scope.
+
+Symbols: protocol/config/storage/engine and CLI choices map to IMP-029 through IMP-037; every prototype function maps to IMP-038 through IMP-042. Acceptance: preserve source lineage, actual results and open gaps; never silently admit a runtime or provider.
+

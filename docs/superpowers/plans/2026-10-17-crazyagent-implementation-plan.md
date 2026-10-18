@@ -32,6 +32,8 @@ Execution override: DEC-061 supersedes task/final review and DeepSec/Codex Secur
 
 ## Scope, ownership and working method
 
+Continuation under DEC-070: preserve this accepted V1 scope after the completed research. Project AGENTS.md applies the workflow principles. Future harness/backend choices and competitor feature breadth add no work to this release. Resume from integrated evidence without restarting completed tasks. Task 6 is the next independent source slice; native qualification remains unavailable until its actual remaining gates pass. Preserve revisions, failed attempts and measured outcomes in the execution ledger and implementation log.
+
 This is one integrated product plan because the runner, authority, clients and verifier depend on the same session identities and durable protocol. Later operating systems, remote workers, extra Git hosts and the full agent ticket system are separate projects, not scaffolding in this plan.
 
 The initial executor owns Tasks 1-4 in order. Later tasks remain sequential unless the owner selects delegated execution and isolated worktrees with disjoint scopes. Shared native accounts, runtime fixtures, ports and performance workloads have one named owner. No two agents edit one checkout.
