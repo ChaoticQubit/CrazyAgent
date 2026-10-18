@@ -694,3 +694,10 @@ Rejected alternatives: equating resource probes with complete confinement; accep
 
 Symbols: protocol/config/storage/engine and CLI choices map to IMP-029 through IMP-037; every prototype function maps to IMP-038 through IMP-042. Acceptance: preserve source lineage, actual results and open gaps; never silently admit a runtime or provider.
 
+## IMP-044: Prove actual worker-to-engine denial in parallel with worktree ownership
+
+Date: October 17, 2026. Task: the accepted Task 2/5 endpoint-denial gap. Goal: measure actual sandboxed worker authority against the real engine while Task 6 implements independent Git ownership.
+
+Decision: assign one fresh visible worker only isolation.rs and a new real engine-boundary test in its own worktree; Task 6 exclusively owns core project/lease files. Reuse the already approved installed runtime and disposable native probes, with no Docker/provider/global changes. Compare legitimate host access and workspace writes against worker/descendant engine socket, state and fixture-process control attempts. Preserve any genuine enforcement failure.
+
+Alternatives: waiting for all project work before measuring a known launch blocker adds delay; merely exercising same-UID socket checks proves no worker confinement; selecting Docker or Vercel Sandbox now exceeds the current decision. Pros: concrete missing qualification evidence with disjoint writers. Costs: native checks may need leader execution outside the coding sandbox, and macOS resource-control gaps remain even if endpoint denial passes. Acceptance: real positive and negative controls, bounded fixture cleanup, actual source/policy identity and no full-admission claim. Revisit if the runtime cannot enforce this boundary.
