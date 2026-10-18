@@ -1,6 +1,8 @@
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use serde::{Deserialize, Serialize};
 
+pub mod codex;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeHarness {

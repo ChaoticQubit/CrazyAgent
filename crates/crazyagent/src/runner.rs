@@ -1,10 +1,7 @@
-#[path = "adapters/mod.rs"]
-mod adapters;
-
 use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
-use adapters::NativeAction;
+use crazyagent::adapters::NativeAction;
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
