@@ -99,27 +99,50 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let engine = std::sync::Arc::new(
-            crazyagent::engine::Engine::open(&runtime_dir.join("engine.db"), config.clone())
-                .await
-                .map_err(|e| e.to_string())?,
-        );
-        let server = crazyagent::engine::Server::bind(
-            &runtime_dir.join(socket_name),
-            engine.clone(),
-            &config,
-        )
-        .map_err(|e| e.to_string())?;
-        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(|e| e.to_string())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| e.to_string())?;
+        let (stop, stopped) = tokio::sync::watch::channel(false);
         let signal = tokio::spawn(async move {
-            tokio::signal::ctrl_c().await?;
-            let _ = stop.send(());
-            Ok::<(), std::io::Error>(())
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            stop.send_replace(true);
         });
-        writeln!(io::stdout().lock(), "ready").map_err(|e| e.to_string())?;
-        let result = server.run(stopped).await.map_err(|e| e.to_string());
+        let result = async {
+            let mut service = crazyagent::engine::bootstrap::EngineService::start(
+                runtime_dir,
+                socket_name,
+                &config,
+                &stopped,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            tokio::task::yield_now().await;
+            let ready = service
+                .ensure_ready(&stopped)
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    let mut output = io::stdout().lock();
+                    writeln!(output, "ready")
+                        .and_then(|()| output.flush())
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(error) = ready {
+                return match service.shutdown().await {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                };
+            }
+            service.run(stopped).await.map_err(|e| e.to_string())
+        }
+        .await;
         signal.abort();
-        engine.close().await.map_err(|e| e.to_string())?;
+        let _ = signal.await;
         result
     })
 }
