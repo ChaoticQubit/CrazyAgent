@@ -1,9 +1,73 @@
+use crate::client_controller::OwnerController;
+use crate::engine::owner::{
+    OwnerClientKind, OwnerData, OwnerPageCursor, OwnerRead, OwnerSummary, OwnerView,
+};
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
-    ClientId, Command, Cursor, PROTOCOL_VERSION, RequestId, WireReply, WireRequest,
+    BaselineId, ClientId, Command, ConfigId, Cursor, PROTOCOL_VERSION, ProjectId, RequestId,
+    WireReply, WireRequest,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
+use std::time::Duration;
+
+enum WorkerMode {
+    #[cfg(test)]
+    Ordinary(Box<Client>),
+    Paired {
+        socket: PathBuf,
+        timeout: Duration,
+    },
+}
+
+enum Job {
+    Wire(Box<WireRequest>),
+    Reconnect,
+    Evidence {
+        project: ProjectId,
+        generation: u64,
+        first: bool,
+    },
+}
+
+pub(super) struct Evidence {
+    pub project: ProjectId,
+    pub baseline_id: BaselineId,
+    pub requirements: String,
+    pub approved: bool,
+    pub revoked: bool,
+    pub current: bool,
+    pub revision: Cursor,
+    pub config_id: ConfigId,
+}
+
+pub(super) enum OwnerProgress {
+    Continue,
+    Empty { revision: Cursor },
+    Incomplete { revision: Cursor },
+    Refresh,
+    Ready(Evidence),
+}
+
+pub(super) enum OwnerEvent {
+    Access {
+        ready: bool,
+        problem: String,
+    },
+    Read {
+        project: ProjectId,
+        generation: u64,
+        result: Result<OwnerProgress, String>,
+    },
+}
+
+struct OwnerReply {
+    finished: bool,
+    event: OwnerEvent,
+}
 
 struct Pending {
     request: WireRequest,
@@ -11,8 +75,11 @@ struct Pending {
 }
 
 pub(super) struct Connection {
-    sender: Option<SyncSender<WireRequest>>,
+    sender: Option<SyncSender<Job>>,
     receiver: Option<Receiver<Result<WireReply, ClientError>>>,
+    owner_receiver: Option<Receiver<OwnerReply>>,
+    owner_busy: bool,
+    stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pending: Option<Pending>,
     client_id: ClientId,
@@ -20,13 +87,28 @@ pub(super) struct Connection {
 }
 
 impl Connection {
+    #[cfg(test)]
     pub fn connect(client: Client) -> Result<Self, String> {
+        Self::spawn(WorkerMode::Ordinary(Box::new(client)))
+    }
+
+    pub fn connect_paired(client: Client) -> Result<Self, String> {
+        let (socket, timeout) = client
+            .into_unbound_configuration()
+            .map_err(|e| e.to_string())?;
+        Self::spawn(WorkerMode::Paired { socket, timeout })
+    }
+
+    fn spawn(mode: WorkerMode) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
-        let (sender, requests) = sync_channel::<WireRequest>(1);
+        let (sender, requests) = sync_channel::<Job>(1);
         let (replies, receiver) = sync_channel(1);
+        let (owner_replies, owner_receiver) = sync_channel(1);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stop = stopped.clone();
         let client_id = ClientId::new(format!(
             "tui-{}-{}",
             std::process::id(),
@@ -39,12 +121,99 @@ impl Connection {
         let worker = std::thread::Builder::new()
             .name("tui-client".into())
             .spawn(move || {
-                while let Ok(request) = requests.recv() {
-                    if replies
-                        .send(runtime.block_on(client.request(request)))
-                        .is_err()
-                    {
+                let (mut client, mut native) = match mode {
+                    #[cfg(test)]
+                    WorkerMode::Ordinary(client) => (*client, None),
+                    WorkerMode::Paired { socket, timeout } => {
+                        let mut native = NativeOwner::new(socket, timeout);
+                        let (client, event) = runtime.block_on(native.attach());
+                        if owner_replies
+                            .send(OwnerReply {
+                                finished: false,
+                                event,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        (client, Some(native))
+                    }
+                };
+                while let Ok(job) = requests.recv() {
+                    if worker_stop.load(Ordering::Relaxed) {
                         break;
+                    }
+                    match job {
+                        Job::Wire(request) => {
+                            let result = runtime.block_on(client.request(*request));
+                            if result.is_err()
+                                && let Some(native) = native.as_mut().filter(|native| native.ready)
+                            {
+                                native.detach();
+                                client = native.ordinary();
+                                let event = OwnerEvent::Access {
+                                    ready: false,
+                                    problem: "trusted_connection_lost".into(),
+                                };
+                                if owner_replies
+                                    .send(OwnerReply {
+                                        finished: false,
+                                        event,
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            if replies.send(result).is_err() {
+                                break;
+                            }
+                        }
+                        Job::Reconnect => {
+                            let native = native
+                                .as_mut()
+                                .expect("paired reconnect requires native configuration");
+                            let (ordinary, event) = runtime.block_on(native.attach());
+                            client = ordinary;
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Evidence {
+                            project,
+                            generation,
+                            first,
+                        } => {
+                            let native = native
+                                .as_mut()
+                                .expect("owner read requires native configuration");
+                            let result =
+                                runtime.block_on(native.step(project.clone(), generation, first));
+                            if result.is_err() {
+                                native.detach();
+                                client = native.ordinary();
+                            }
+                            let event = OwnerEvent::Read {
+                                project,
+                                generation,
+                                result,
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
             })
@@ -52,6 +221,9 @@ impl Connection {
         Ok(Self {
             sender: Some(sender),
             receiver: Some(receiver),
+            owner_receiver: Some(owner_receiver),
+            owner_busy: false,
+            stopped,
             worker: Some(worker),
             pending: None,
             client_id,
@@ -60,7 +232,7 @@ impl Connection {
     }
 
     pub fn busy(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.owner_busy
     }
 
     pub fn uncertain(&self) -> bool {
@@ -93,7 +265,7 @@ impl Connection {
         self.sender
             .as_ref()
             .ok_or("Client stopped")?
-            .try_send(request.clone())
+            .try_send(Job::Wire(Box::new(request.clone())))
             .map_err(|e| e.to_string())?;
         let request_id = request.request_id.clone();
         self.pending = Some(Pending {
@@ -133,20 +305,313 @@ impl Connection {
         self.sender
             .as_ref()
             .ok_or("Client stopped")?
-            .try_send(pending.request.clone())
+            .try_send(Job::Wire(Box::new(pending.request.clone())))
             .map_err(|e| e.to_string())?;
         pending.failed = false;
+        Ok(())
+    }
+
+    pub fn poll_owner(&mut self) -> Result<Option<OwnerEvent>, String> {
+        let reply = match self
+            .owner_receiver
+            .as_ref()
+            .ok_or("Client stopped")?
+            .try_recv()
+        {
+            Ok(reply) => reply,
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => return Err("Client worker stopped".into()),
+        };
+        if reply.finished {
+            assert!(self.owner_busy);
+            self.owner_busy = false;
+        }
+        Ok(Some(reply.event))
+    }
+
+    pub fn read_evidence(
+        &mut self,
+        project: ProjectId,
+        generation: u64,
+        first: bool,
+    ) -> Result<(), String> {
+        self.owner_job(Job::Evidence {
+            project,
+            generation,
+            first,
+        })
+    }
+
+    pub fn reconnect(&mut self) -> Result<(), String> {
+        self.owner_job(Job::Reconnect)
+    }
+
+    fn owner_job(&mut self, job: Job) -> Result<(), String> {
+        if self.busy() {
+            return Err("A native request is still pending".into());
+        }
+        self.sender
+            .as_ref()
+            .ok_or("Client stopped")?
+            .try_send(job)
+            .map_err(|e| e.to_string())?;
+        self.owner_busy = true;
         Ok(())
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Relaxed);
         self.sender.take();
         self.receiver.take();
+        self.owner_receiver.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+struct Scan {
+    project: ProjectId,
+    generation: u64,
+    cursor: Option<OwnerPageCursor>,
+    revision: Option<Cursor>,
+    config_id: Option<ConfigId>,
+    last_id: Option<String>,
+    pages: u8,
+    selected: Option<BaselineId>,
+}
+
+struct NativeOwner {
+    socket: PathBuf,
+    timeout: Duration,
+    controller: Option<OwnerController>,
+    ready: bool,
+    scan: Option<Scan>,
+}
+
+impl NativeOwner {
+    fn new(socket: PathBuf, timeout: Duration) -> Self {
+        Self {
+            socket,
+            timeout,
+            controller: None,
+            ready: false,
+            scan: None,
+        }
+    }
+
+    fn ordinary(&self) -> Client {
+        Client::new(self.socket.clone(), self.timeout)
+            .expect("retained client configuration was validated")
+    }
+
+    fn detach(&mut self) {
+        self.ready = false;
+        self.scan = None;
+        if let Some(controller) = &mut self.controller {
+            controller.detach();
+        }
+    }
+
+    async fn attach(&mut self) -> (Client, OwnerEvent) {
+        self.scan = None;
+        let ordinary = self.ordinary();
+        let result = if let Some(controller) = &mut self.controller {
+            controller.reattach_configured(ordinary).await
+        } else {
+            OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+                .await
+                .map(|(ordinary, controller)| {
+                    self.controller = Some(controller);
+                    ordinary
+                })
+        };
+        match result {
+            Ok(ordinary) => {
+                self.ready = true;
+                (
+                    ordinary,
+                    OwnerEvent::Access {
+                        ready: true,
+                        problem: String::new(),
+                    },
+                )
+            }
+            Err(error) => {
+                self.detach();
+                (
+                    self.ordinary(),
+                    OwnerEvent::Access {
+                        ready: false,
+                        problem: bounded_problem(&error.0),
+                    },
+                )
+            }
+        }
+    }
+
+    async fn step(
+        &mut self,
+        project: ProjectId,
+        generation: u64,
+        first: bool,
+    ) -> Result<OwnerProgress, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        if first {
+            self.scan = Some(Scan {
+                project: project.clone(),
+                generation,
+                cursor: None,
+                revision: None,
+                config_id: None,
+                last_id: None,
+                pages: 0,
+                selected: None,
+            });
+        }
+        let scan = self.scan.as_mut().ok_or("owner_scan_missing")?;
+        if scan.project != project || scan.generation != generation {
+            return Err("owner_scan_context_mismatch".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        let query = if let Some(baseline_id) = &scan.selected {
+            OwnerRead::Baseline {
+                baseline_id: baseline_id.clone(),
+            }
+        } else {
+            OwnerRead::Page {
+                view: OwnerView::Baselines,
+                cursor: scan.cursor.clone(),
+                limit: 32,
+            }
+        };
+        let state = controller
+            .read(query)
+            .await
+            .map_err(|error| bounded_problem(&error.0))?;
+        if !controller.view().is_some_and(|view| view.fresh)
+            || scan
+                .revision
+                .as_ref()
+                .is_some_and(|revision| revision != &state.revision)
+            || scan
+                .config_id
+                .as_ref()
+                .is_some_and(|config| config != &state.config_id)
+        {
+            self.scan = None;
+            return Ok(OwnerProgress::Refresh);
+        }
+        match state.data {
+            OwnerData::Page { items, next } if scan.selected.is_none() => {
+                if items.len() > 32 || scan.pages >= 4 {
+                    return Err("owner_page_bounds".into());
+                }
+                scan.pages += 1;
+                scan.revision = Some(state.revision.clone());
+                scan.config_id = Some(state.config_id.clone());
+                for item in items {
+                    let OwnerSummary::Baseline {
+                        baseline_id,
+                        project_id,
+                        ..
+                    } = item
+                    else {
+                        return Err("owner_page_kind".into());
+                    };
+                    if scan
+                        .last_id
+                        .as_deref()
+                        .is_some_and(|last| last >= baseline_id.as_str())
+                    {
+                        return Err("owner_page_order".into());
+                    }
+                    scan.last_id = Some(baseline_id.as_str().to_owned());
+                    if scan.selected.is_none() && project_id == project {
+                        scan.selected = Some(baseline_id);
+                    }
+                }
+                if let Some(cursor) = &next
+                    && (Some(cursor.after_id.as_str()) != scan.last_id.as_deref()
+                        || cursor.at_revision != state.revision
+                        || cursor.config_id != state.config_id
+                        || cursor.view != OwnerView::Baselines)
+                {
+                    return Err("owner_cursor_context".into());
+                }
+                if scan.selected.is_some() {
+                    return Ok(OwnerProgress::Continue);
+                }
+                if next.is_some() && scan.pages < 4 {
+                    scan.cursor = next;
+                    return Ok(OwnerProgress::Continue);
+                }
+                let progress = if next.is_some() {
+                    OwnerProgress::Incomplete {
+                        revision: state.revision,
+                    }
+                } else {
+                    OwnerProgress::Empty {
+                        revision: state.revision,
+                    }
+                };
+                self.scan = None;
+                Ok(progress)
+            }
+            OwnerData::Baseline {
+                draft,
+                approved,
+                revoked,
+                current,
+            } => {
+                let baseline_id = scan
+                    .selected
+                    .as_ref()
+                    .ok_or("owner_detail_without_discovery")?;
+                if draft.project_id != project
+                    || draft.identity().map_err(|_| "owner_baseline_invalid")? != *baseline_id
+                {
+                    return Err("owner_detail_identity".into());
+                }
+                let evidence = Evidence {
+                    project,
+                    baseline_id: baseline_id.clone(),
+                    requirements: draft.requirements,
+                    approved,
+                    revoked,
+                    current,
+                    revision: state.revision,
+                    config_id: state.config_id,
+                };
+                self.scan = None;
+                Ok(OwnerProgress::Ready(evidence))
+            }
+            OwnerData::ResyncRequired => {
+                self.scan = None;
+                Ok(OwnerProgress::Refresh)
+            }
+            _ => Err("owner_read_kind".into()),
+        }
+    }
+}
+
+fn bounded_problem(problem: &str) -> String {
+    if !problem.is_empty()
+        && problem.len() <= 96
+        && problem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        problem.to_owned()
+    } else {
+        "trusted_owner_connection_failed".into()
     }
 }
 
@@ -235,5 +700,162 @@ mod tests {
         stop.send(()).unwrap();
         service.await.unwrap().unwrap();
         engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paired_client_configuration_cannot_be_stripped_back_to_unbound() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-bound-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = crate::engine::bootstrap::EngineService::start(
+            root.path(),
+            "engine.sock",
+            &config,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let ordinary =
+            Client::new(root.path().join("engine.sock"), Duration::from_secs(1)).unwrap();
+        let (paired, owner, _) = ordinary.with_owner(OwnerClientKind::Tui).await.unwrap();
+        let result = paired.into_unbound_configuration();
+        drop(owner);
+        service.shutdown().await.unwrap();
+        assert!(
+            matches!(result, Err(error) if error.0 == "tui_requires_original_unbound_configuration")
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_owner_completion_trips_corrupt_pending_invariant() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-pending-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = crate::engine::bootstrap::EngineService::start(
+            root.path(),
+            "engine.sock",
+            &config,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut connection = Connection::connect_paired(
+            Client::new(root.path().join("engine.sock"), Duration::from_secs(1)).unwrap(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(access) = connection.poll_owner().unwrap() {
+                assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actual owner attach exceeded deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        connection.reconnect().unwrap();
+        connection.owner_busy = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let tripped = loop {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connection.poll_owner()))
+            {
+                Err(_) => break true,
+                Ok(Ok(None)) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                _ => break false,
+            }
+        };
+        drop(connection);
+        service.shutdown().await.unwrap();
+        assert!(tripped, "real completion must detect corrupt pending state");
+    }
+
+    #[tokio::test]
+    async fn limited_mode_retains_exact_original_ordinary_endpoint_without_owner_access() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-limited-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_watch, stopped) = tokio::sync::watch::channel(false);
+        let mut owner_service = crate::engine::bootstrap::EngineService::start(
+            root.path(),
+            "engine.sock",
+            &config,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let engine = Arc::new(
+            Engine::open(&root.path().join("other.db"), config.clone())
+                .await
+                .unwrap(),
+        );
+        let socket = root.path().join("ordinary.sock");
+        let server = Server::bind(&socket, engine.clone(), &config).unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(server.run(stopped));
+        let mut native = NativeOwner::new(socket, Duration::from_secs(1));
+        let (ordinary, access) = native.attach().await;
+        let unavailable = native
+            .step(ProjectId::new("ordinary-only-project").unwrap(), 1, true)
+            .await;
+        let created = ordinary
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("limited-endpoint").unwrap(),
+                request_id: RequestId::new("create-ordinary-only").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::CreateProject {
+                    project_id: ProjectId::new("ordinary-only-project").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Original ordinary endpoint".into(),
+                        repositories: vec![],
+                    },
+                },
+            })
+            .await;
+        let (_, reconnected) = native.attach().await;
+        let actual_owner =
+            Client::new(root.path().join("engine.sock"), Duration::from_secs(1)).unwrap();
+        let observed = actual_owner
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("owner-observer").unwrap(),
+                request_id: RequestId::new("owner-snapshot").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::Snapshot,
+            })
+            .await;
+        drop(native);
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        engine.close().await.unwrap();
+        owner_service.shutdown().await.unwrap();
+        assert!(matches!(access, OwnerEvent::Access { ready: false, .. }));
+        assert!(matches!(
+            reconnected,
+            OwnerEvent::Access { ready: false, .. }
+        ));
+        assert!(matches!(unavailable, Err(error) if error == "trusted_connection_unavailable"));
+        assert!(matches!(created.unwrap().outcome, Outcome::Applied));
+        assert!(
+            matches!(observed.unwrap().outcome, Outcome::Snapshot { projects, .. } if projects.is_empty())
+        );
     }
 }

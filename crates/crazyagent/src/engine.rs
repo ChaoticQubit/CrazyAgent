@@ -95,6 +95,17 @@ impl Client {
         self.timeout
     }
 
+    pub(crate) fn into_unbound_configuration(
+        self,
+    ) -> Result<(std::path::PathBuf, Duration), ClientError> {
+        if self.binding.is_some() {
+            return Err(EngineError(
+                "tui_requires_original_unbound_configuration".into(),
+            ));
+        }
+        Ok((self.socket, self.timeout))
+    }
+
     pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         if let Some(binding) = &self.binding {

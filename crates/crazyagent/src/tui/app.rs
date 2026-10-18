@@ -1,3 +1,4 @@
+use super::client::{Evidence, OwnerEvent, OwnerProgress};
 use crate::config::EffectiveConfig;
 use crate::coordination::PlanState;
 use crate::protocol::{
@@ -63,6 +64,12 @@ pub struct App {
     draft_generation: u64,
     submitted_generation: Option<u64>,
     pending_creation: Option<(RequestId, u64)>,
+    pub(super) owner_ready: bool,
+    pub(super) owner_problem: Option<String>,
+    pub(super) owner_notice: String,
+    pub(super) evidence: Option<Evidence>,
+    owner_generation: u64,
+    owner_step: Option<bool>,
 }
 
 impl Default for App {
@@ -93,6 +100,12 @@ impl App {
             draft_generation: 0,
             submitted_generation: None,
             pending_creation: None,
+            owner_ready: false,
+            owner_problem: None,
+            owner_notice: "Connecting to the trusted engine endpoint".into(),
+            evidence: None,
+            owner_generation: 0,
+            owner_step: None,
         }
     }
 
@@ -125,6 +138,9 @@ impl App {
     }
 
     pub fn reduce(&mut self, event: UiEvent) -> Result<(), String> {
+        let previous_project = self
+            .selected_project()
+            .map(|project| project.project_id.clone());
         match event {
             UiEvent::Resize(width, height) => self.viewport = (width.min(1000), height.min(1000)),
             UiEvent::FocusNext | UiEvent::FocusPrevious => {
@@ -225,11 +241,21 @@ impl App {
             }
             UiEvent::Scroll(delta) => self.scroll = self.scroll.saturating_add_signed(delta),
         }
+        if previous_project
+            != self
+                .selected_project()
+                .map(|project| project.project_id.clone())
+        {
+            self.invalidate_evidence()?;
+        }
         self.assert_consistent();
         Ok(())
     }
 
     pub fn apply_reply(&mut self, reply: WireReply) -> Result<(), String> {
+        let previous_project = self
+            .selected_project()
+            .map(|project| project.project_id.clone());
         let completed = self
             .pending_creation
             .as_ref()
@@ -245,6 +271,7 @@ impl App {
         if reply.revision != self.revision {
             self.config = None;
             self.plan = None;
+            self.invalidate_evidence()?;
         }
         self.revision = reply.revision;
         self.connected = true;
@@ -301,7 +328,137 @@ impl App {
             Outcome::ResyncRequired => self.notice("Engine requests a fresh snapshot"),
             _ => self.notice("Unexpected outcome for the current TUI read"),
         }
+        if previous_project
+            != self
+                .selected_project()
+                .map(|project| project.project_id.clone())
+        {
+            self.invalidate_evidence()?;
+        }
         self.assert_consistent();
+        Ok(())
+    }
+
+    pub(super) fn owner_label(&self) -> &'static str {
+        if self.owner_ready {
+            "Owner: connected"
+        } else if self.owner_problem.is_some() {
+            "Owner: limited"
+        } else {
+            "Owner: connecting"
+        }
+    }
+
+    fn invalidate_evidence(&mut self) -> Result<(), String> {
+        self.owner_generation = self
+            .owner_generation
+            .checked_add(1)
+            .ok_or("Owner view generation exhausted")?;
+        self.evidence = None;
+        self.owner_step = Some(true);
+        self.owner_notice = "Evidence is stale; waiting for a current protected read".into();
+        Ok(())
+    }
+
+    pub(super) fn reconnect_owner(&mut self) -> Result<(), String> {
+        self.invalidate_evidence()?;
+        self.owner_ready = false;
+        self.owner_problem = None;
+        self.owner_notice = "Reconnecting to the original configured engine endpoint".into();
+        Ok(())
+    }
+
+    pub(super) fn owner_continuation(&self) -> bool {
+        self.owner_step == Some(false)
+    }
+
+    pub(super) fn evidence_request(&mut self) -> Result<Option<(ProjectId, u64, bool)>, String> {
+        if !self.owner_ready || self.focus != Focus::Evidence {
+            return Ok(None);
+        }
+        let Some(project) = self
+            .selected_project()
+            .map(|project| project.project_id.clone())
+        else {
+            return Ok(None);
+        };
+        if self.owner_step.is_none() {
+            self.invalidate_evidence()?;
+        }
+        let first = self
+            .owner_step
+            .take()
+            .expect("evidence scheduling prepares one step");
+        if first {
+            self.evidence = None;
+            self.owner_notice = "Loading actual acceptance baseline".into();
+        }
+        Ok(Some((project, self.owner_generation, first)))
+    }
+
+    pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
+        match event {
+            OwnerEvent::Access { ready, problem } => {
+                self.invalidate_evidence()?;
+                self.owner_ready = ready;
+                self.owner_problem = (!ready).then_some(problem);
+                if !ready {
+                    self.owner_notice =
+                        "Evidence and approvals are disabled; Ctrl-R reconnects".into();
+                }
+            }
+            OwnerEvent::Read {
+                project,
+                generation,
+                result,
+            } => {
+                let progress = match result {
+                    Ok(progress) => progress,
+                    Err(problem) => {
+                        self.invalidate_evidence()?;
+                        self.owner_ready = false;
+                        self.owner_problem = Some(problem);
+                        self.owner_notice =
+                            "Evidence and approvals are disabled; Ctrl-R reconnects".into();
+                        return Ok(());
+                    }
+                };
+                if generation != self.owner_generation
+                    || !self
+                        .selected_project()
+                        .is_some_and(|selected| selected.project_id == project)
+                    || !self.owner_ready
+                {
+                    return Ok(());
+                }
+                match progress {
+                    OwnerProgress::Continue => self.owner_step = Some(false),
+                    OwnerProgress::Refresh => self.invalidate_evidence()?,
+                    OwnerProgress::Empty { revision } => {
+                        self.owner_notice = format!(
+                            "No acceptance baseline for this project at owner revision {}",
+                            revision.value()
+                        );
+                    }
+                    OwnerProgress::Incomplete { revision } => {
+                        self.owner_notice = format!(
+                            "Baseline discovery incomplete at owner revision {}: four-page limit reached; absence is not established",
+                            revision.value()
+                        );
+                    }
+                    OwnerProgress::Ready(evidence) => {
+                        if evidence.project != project || evidence.revision != self.revision {
+                            self.invalidate_evidence()?;
+                            return Ok(());
+                        }
+                        self.owner_notice =
+                            "Actual protected baseline detail; approval is a separate owner action"
+                                .into();
+                        self.evidence = Some(evidence);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

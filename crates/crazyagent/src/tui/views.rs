@@ -30,7 +30,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         let rows = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(area);
         let connection = if app.connected {
@@ -57,6 +57,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::raw(safe_text(&app.status, 4096)),
+                Line::raw(safe_text(&owner_problem(app), 256)),
                 Line::raw("Tab focus | Ctrl-Q quit"),
             ]),
             rows[2],
@@ -67,7 +68,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(3),
-        Constraint::Length(3),
+        Constraint::Length(4),
     ])
     .split(area);
     let titles = [
@@ -97,7 +98,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         .select(index)
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .block(Block::bordered().title(format!(
-            "CrazyAgent | {connection} | revision {}",
+            "CrazyAgent | {connection} | {} | revision {}",
+            app.owner_label(),
             app.revision().value()
         )));
     frame.render_widget(tabs, rows[0]);
@@ -141,11 +143,24 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             ),
         ]),
         Line::raw(safe_text(&app.status, 4096)),
+        Line::raw(safe_text(&owner_problem(app), 256)),
     ];
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().borders(Borders::TOP)),
         rows[3],
     );
+}
+
+fn owner_problem(app: &App) -> String {
+    app.owner_problem
+        .as_ref()
+        .map(|problem| {
+            format!(
+                "{}: {problem}; Evidence/approvals disabled",
+                app.owner_label()
+            )
+        })
+        .unwrap_or_else(|| app.owner_label().into())
 }
 
 pub fn body(app: &App) -> String {
@@ -156,8 +171,47 @@ pub fn body(app: &App) -> String {
         Focus::Plan => plan_lines(app),
         Focus::Supervision => format!("Supervision\n\n{}\n\n{}\n\nChild status, pause/resume/cancel and native terminal attachment are unavailable: protected owner APIs and an admitted native runtime are required. No terminal input ownership is held by this client.", task_summary(app), plan_lines(app)),
         Focus::Memory => "Memory inbox\n\nUnavailable: owner-scoped nomination and promotion APIs are required. No empty inbox or approved promotion is inferred from a worker snapshot.".into(),
-        Focus::Evidence => format!("Receipts, evidence and merge\n\n{}\n\nUnavailable: owner-scoped verification, receipt and merge APIs are required. The core verifier executor and merge executor are not qualified. No passing receipt or completed merge is inferred.\n\nNative terminal: unavailable without an admitted runtime and an explicit input lease.", task_summary(app)),
+        Focus::Evidence => evidence_lines(app),
     }
+}
+
+fn evidence_lines(app: &App) -> String {
+    let mut lines = vec!["Receipts, evidence and merge".to_owned(), String::new()];
+    if !app.owner_ready {
+        lines.push(format!(
+            "{}: Evidence and approvals disabled",
+            app.owner_label()
+        ));
+        if let Some(problem) = &app.owner_problem {
+            lines.push(format!("Connection problem: {problem}"));
+        }
+        lines.push("Ctrl-R reconnects to the configured endpoint".into());
+    } else if let Some(evidence) = &app.evidence {
+        lines.push(format!(
+            "Acceptance baseline: {}",
+            evidence.baseline_id.as_str()
+        ));
+        lines.push(evidence.requirements.clone());
+        lines.push(format!(
+            "Approved: {} | Revoked: {} | Current: {}",
+            evidence.approved, evidence.revoked, evidence.current
+        ));
+        lines.push(format!(
+            "Owner revision: {} | Configuration: {}",
+            evidence.revision.value(),
+            evidence.config_id.as_str()
+        ));
+    } else {
+        lines.push(app.owner_notice.clone());
+    }
+    lines.push(String::new());
+    lines.push(task_summary(app));
+    lines.push("\nThe verifier executor and merge executor are not qualified. No passing receipt or completed merge is inferred. Approval actions require a separate protected owner mutation.".into());
+    lines.push(
+        "\nNative terminal: unavailable without an admitted runtime and an explicit input lease."
+            .into(),
+    );
+    lines.join("\n")
 }
 
 fn task_summary(app: &App) -> String {

@@ -54,7 +54,6 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(TuiError("TUI requires terminal stdin and stdout".into()));
     }
-    let mut connection = Connection::connect(client).map_err(TuiError)?;
     let signals = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -84,6 +83,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
         });
     });
     let result = (|| {
+        let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
         let _guard = TerminalGuard::enter()?;
         let (width, height) = crossterm::terminal::size().map_err(|e| TuiError(e.to_string()))?;
         let area = bounded_area(width, height);
@@ -119,9 +119,21 @@ fn event_loop(
     let mut refresh = Instant::now();
     let mut dirty = true;
     let mut snapshot = true;
+    let mut owner_refresh = Instant::now();
     loop {
         if stopped.load(Ordering::Relaxed) {
             break;
+        }
+        if let Some(event) = connection.poll_owner().map_err(TuiError)? {
+            app.apply_owner(event).map_err(TuiError)?;
+            owner_refresh = if app.owner_continuation() {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(1)
+            };
+            snapshot = true;
+            refresh = Instant::now();
+            dirty = true;
         }
         if let Some(result) = connection.poll().map_err(TuiError)? {
             match result {
@@ -159,6 +171,16 @@ fn event_loop(
                     .start(command, app.revision())
                     .map_err(TuiError)?;
                 refresh = Instant::now() + Duration::from_secs(1);
+            } else if Instant::now() >= owner_refresh {
+                if let Some((project, generation, first)) =
+                    app.evidence_request().map_err(TuiError)?
+                {
+                    connection
+                        .read_evidence(project, generation, first)
+                        .map_err(TuiError)?;
+                    dirty = true;
+                }
+                owner_refresh = Instant::now() + Duration::from_secs(1);
             }
         }
         if dirty {
@@ -178,10 +200,16 @@ fn event_loop(
                     break;
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-                    if let Err(error) = connection.retry() {
+                    let result = if connection.uncertain() {
+                        connection.retry()
+                    } else {
+                        connection.reconnect().and_then(|()| app.reconnect_owner())
+                    };
+                    if let Err(error) = result {
                         app.notice(&error);
                     }
                 } else if let Some(event) = key_event(key, app) {
+                    let previous_focus = app.focus();
                     if matches!(event, UiEvent::Submit)
                         && app.is_creating_project()
                         && (connection.mutation_pending() || app.has_command())
@@ -191,6 +219,9 @@ fn event_loop(
                         );
                     } else if let Err(error) = app.reduce(event) {
                         app.notice(&error);
+                    }
+                    if previous_focus != Focus::Evidence && app.focus() == Focus::Evidence {
+                        owner_refresh = Instant::now();
                     }
                     refresh = Instant::now();
                 }
