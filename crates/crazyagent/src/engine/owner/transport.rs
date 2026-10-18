@@ -134,6 +134,9 @@ impl Root {
         if Identity::of(&m) != id
             || (socket && !m.file_type().is_socket())
             || (!socket && !m.is_file())
+            || m.uid() != rustix::process::getuid().as_raw()
+            || m.mode() & 0o7777 != 0o600
+            || m.nlink() != 1
         {
             return Err(failure("owner_cleanup_replaced_artifact_preserved"));
         }
@@ -237,6 +240,10 @@ pub struct OwnerRuntimeHandle {
 }
 
 impl OwnerRuntimeHandle {
+    pub(crate) fn identity(&self) -> HostStamp {
+        self.authority.host.clone()
+    }
+
     pub fn epoch(&self, kind: OwnerClientKind) -> Result<i64, EngineError> {
         let slots = self
             .authority
@@ -311,15 +318,23 @@ impl OwnerServer {
                 _ => return Err(failure("owner_bootstrap_artifact_already_exists")),
             }
         }
+        let rollback = Root {
+            path: root.path.clone(),
+            directory: root.directory.try_clone().map_err(io_error)?,
+            identity: root.identity,
+        };
         let _barrier = tokio::time::timeout(engine.timeout, engine.owner_egress.write())
             .await
             .map_err(|_| failure("owner_start_not_submitted"))?;
         let started = engine.owner_job(Job::OwnerStart).await?;
         let host = started.host.clone();
+        let mut created_keys = Vec::new();
+        let mut created_socket = None;
         let result = (|| {
             let mut slots = Vec::new();
             for (i, registration) in started.owners.into_iter().enumerate() {
                 let file = root.open_key(KEYS[i], true)?;
+                created_keys.push((KEYS[i], Identity::of(&file.metadata().map_err(io_error)?)));
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 file.write_all_at(&token, 0).map_err(io_error)?;
@@ -336,6 +351,7 @@ impl OwnerServer {
             root.verify()?;
             let listener = UnixListener::bind(root.path.join(SOCKET)).map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
+            created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
                 || created.uid() != rustix::process::getuid().as_raw()
                 || created.nlink() != 1
@@ -366,8 +382,21 @@ impl OwnerServer {
         let (listener, authority) = match result {
             Ok(v) => v,
             Err(e) => {
-                let _ = engine.owner_job(|reply| Job::OwnerStop(host, reply)).await;
-                return Err(e);
+                let mut errors = vec![e.0];
+                if let Err(error) = engine.owner_job(|reply| Job::OwnerStop(host, reply)).await {
+                    errors.push(error.0);
+                }
+                if let Some(identity) = created_socket
+                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true)
+                {
+                    errors.push(error.0);
+                }
+                for (name, identity) in created_keys {
+                    if let Err(error) = rollback.unlink_owned(name, identity, false) {
+                        errors.push(error.0);
+                    }
+                }
+                return Err(failure(&errors.join("; ")));
             }
         };
         let server = Self {
@@ -615,6 +644,58 @@ impl OwnerClient {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn cleanup_preserves_hardlinked_capability() {
+        let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let file = root.open_key(KEYS[0], true).unwrap();
+        file.write_all_at(&[1; 32], 0).unwrap();
+        let identity = Identity::of(&file.metadata().unwrap());
+        std::fs::hard_link(
+            directory.path().join(KEYS[0]),
+            directory.path().join("extra"),
+        )
+        .unwrap();
+        assert_eq!(
+            root.unlink_owned(KEYS[0], identity, false).unwrap_err().0,
+            "owner_cleanup_replaced_artifact_preserved"
+        );
+        assert!(directory.path().join(KEYS[0]).exists());
+        assert!(directory.path().join("extra").exists());
+    }
+
+    #[tokio::test]
+    async fn partial_bind_failure_removes_created_keys_and_stops_owner() {
+        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let long = root.path().join("x".repeat(100));
+        std::fs::create_dir(&long).unwrap();
+        std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = long.join(SOCKET);
+        let expected = UnixListener::bind(&path).err().unwrap().to_string();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Arc::new(
+            Engine::open(&root.path().join("db"), config.clone())
+                .await
+                .unwrap(),
+        );
+        let error = OwnerServer::bind(&long, engine.clone(), &config)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.0, expected);
+        assert_eq!(std::fs::read_dir(&long).unwrap().count(), 0);
+        let (server, _) = OwnerServer::bind(root.path(), engine.clone(), &config)
+            .await
+            .unwrap();
+        let (stop, stopped) = oneshot::channel();
+        stop.send(()).unwrap();
+        server.run(stopped).await.unwrap();
+        engine.close().await.unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
