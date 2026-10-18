@@ -1,6 +1,6 @@
 # Agent decisions
 
-Current authority: DEC-001 through DEC-062 record the owner's latest accepted requirements and workflow. Earlier dated sections preserve planning history and may describe proposals subsequently approved or superseded in the numbered register. Q-001 through Q-050 are answered in their corresponding records. DEC-020 through DEC-024 establish project/global memory curation, the human review inbox, immediate provisional project memory, prior approval for global promotion, approved local/cloud processing destinations and retained activity until explicit deletion by default. DEC-025 supports both logging-failure behaviors; DEC-026 sets pause as the default with an explicit continue-with-gaps action and a configurable preferred mode. DEC-027 permits suitable approved routing alternatives while required-target rules remain binding. DEC-028 requires human approval for persistent routing-preference changes while routine selection and approved fallback remain automatic. DEC-029 combines visible requirements and development tests with protected holdout cases withheld from coding workers. DEC-030 requires a verification floor for every change, with additional depth selected by approved deterministic risk rules and a human option to request the full applicable suite. DEC-031 permits bounded automatic retries of temporary verification infrastructure failures under approved rules, preserving attempt history and unresolved defect or unknown-failure states. DEC-032 makes editable files authoritative for shared rules, skill definitions and shareable configuration, with engine validation and derived harness representations. DEC-033 links projects to accepted global defaults for new work, with explicit project overrides for ordinary overridable settings and visible provenance. DEC-034 pins effective configuration per active task, including new and replacement workers, until an explicit task-wide migration. DEC-035 uses managed session configuration by default, with reviewed imports and deliberate reviewed exports to usual native CLI destinations. DEC-036 permits peer-addressed messages within a task team through an engine-controlled mailbox, preserving leader assignment authority. DEC-037 requires explicit coordination links for same-project cross-task peer addressing, with unlinked requests routed through the leader. DEC-038 defines a project as a product workspace containing one or more explicitly registered repositories with scoped task access and attributable worktree and verification state. DEC-039 supports coordinated whole-change-set readiness by default and independently eligible member merges as a selectable mode, with an application setting and explicit project override. DEC-040 prefers a fix-forward recovery recommendation after confirmed partial merge failure, subject to existing authority and gates. DEC-041 supports both fair sharing and strict project-priority scheduling, with fair sharing as the default and an exposed setting. DEC-042 establishes broad workflow configurability through readable canonical files and settings in both interfaces, with shared validation and visible effective values. DEC-043 selects creating a small new application from a product brief as the first complete representative workflow. DEC-044 selects a small API service with persistent data as the first generated application's shape. DEC-045 selects the local inventory and reservations API proof, including concurrent stock consistency and persistence across restart, without sign-in or deployment. DEC-046 makes durable recovery plus live-worker survival and reattachment after an engine-only crash a first-public-release requirement for launch-qualified harnesses. DEC-047 selects a first-release qualification target of 10 active managed harness sessions across 3 projects on an agreed macOS profile, separate from configurable resource limits. DEC-048 permits central approval controls with explicit native-prompt handoff where a supported central integration is unavailable. DEC-049 selects user-owned or reviewed projects for first-release qualification and broader untrusted-repository support as a V2/V3 target. DEC-050 records layered application and execution isolation as a security goal with explicit host privileges and platform qualification. DEC-051 permits a documented separately installed local sandbox runtime prerequisite when the qualified isolation design needs one. DEC-052 selects Apache-2.0 for CrazyAgent's original code, retaining third-party terms and integration-specific compatibility review. DEC-053 requires a workspace-level leader above project leaders in the first public release, with explicit project authorization and preserved project boundaries. DEC-054 requires individual native child-agent status, cancellation and recovery or continuation-state coverage for native workflows in launch scope, subject to adapter qualification. DEC-055 selects private local storage for launch and retains configurable application-managed encryption as a required future capability, with no date assigned. The [stack and reuse research](../reports/Rust%20dual%20interface%20architecture.md), [RCLI qualification](../reports/RCLI%20leader%20reuse%20assessment.md) and [memory architecture assessment](../reports/Project%20and%20global%20memory%20architecture.md) inform the interview. Runtime integration, logging coverage and recovery mechanics, task classification, availability and handoff mechanics, baseline-transition mechanics, concrete verification checks and risk rules, retry classification and limits, flaky-test resolution, holdout feedback and confinement, configuration catalog and serialization, native configuration loading, detailed conflict and task-migration mechanics, messaging delivery and cross-project scope, cross-repository acceptance and recovery execution, resource scheduling algorithms, concrete memory schemas, scale and revised schedule remain unresolved. DEC-056 selects local Git and GitHub.com as launch integration scope, with other hosts later. DEC-057 requires independent complete core workflow coverage in both the TUI and desktop at launch. The recorded product and authority decisions are ready for a technical design synthesis; stack and implementation approval remain outstanding. DEC-058 adopts Ratatui/Crossterm and Tauri 2 with React/TypeScript as the interface framework baseline. A detailed design and qualification proposal is next; other implementation recommendations have not been silently accepted.
+Current authority: DEC-001 through DEC-064 record the owner's latest accepted requirements and workflow. Earlier dated sections preserve planning history and may describe proposals subsequently approved or superseded in the numbered register. Q-001 through Q-052 are answered in their corresponding records. DEC-020 through DEC-024 establish project/global memory curation, the human review inbox, immediate provisional project memory, prior approval for global promotion, approved local/cloud processing destinations and retained activity until explicit deletion by default. DEC-025 supports both logging-failure behaviors; DEC-026 sets pause as the default with an explicit continue-with-gaps action and a configurable preferred mode. DEC-027 permits suitable approved routing alternatives while required-target rules remain binding. DEC-028 requires human approval for persistent routing-preference changes while routine selection and approved fallback remain automatic. DEC-029 combines visible requirements and development tests with protected holdout cases withheld from coding workers. DEC-030 requires a verification floor for every change, with additional depth selected by approved deterministic risk rules and a human option to request the full applicable suite. DEC-031 permits bounded automatic retries of temporary verification infrastructure failures under approved rules, preserving attempt history and unresolved defect or unknown-failure states. DEC-032 makes editable files authoritative for shared rules, skill definitions and shareable configuration, with engine validation and derived harness representations. DEC-033 links projects to accepted global defaults for new work, with explicit project overrides for ordinary overridable settings and visible provenance. DEC-034 pins effective configuration per active task, including new and replacement workers, until an explicit task-wide migration. DEC-035 uses managed session configuration by default, with reviewed imports and deliberate reviewed exports to usual native CLI destinations. DEC-036 permits peer-addressed messages within a task team through an engine-controlled mailbox, preserving leader assignment authority. DEC-037 requires explicit coordination links for same-project cross-task peer addressing, with unlinked requests routed through the leader. DEC-038 defines a project as a product workspace containing one or more explicitly registered repositories with scoped task access and attributable worktree and verification state. DEC-039 supports coordinated whole-change-set readiness by default and independently eligible member merges as a selectable mode, with an application setting and explicit project override. DEC-040 prefers a fix-forward recovery recommendation after confirmed partial merge failure, subject to existing authority and gates. DEC-041 supports both fair sharing and strict project-priority scheduling, with fair sharing as the default and an exposed setting. DEC-042 establishes broad workflow configurability through readable canonical files and settings in both interfaces, with shared validation and visible effective values. DEC-043 selects creating a small new application from a product brief as the first complete representative workflow. DEC-044 selects a small API service with persistent data as the first generated application's shape. DEC-045 selects the local inventory and reservations API proof, including concurrent stock consistency and persistence across restart, without sign-in or deployment. DEC-046 makes durable recovery plus live-worker survival and reattachment after an engine-only crash a first-public-release requirement for launch-qualified harnesses. DEC-047 selects a first-release qualification target of 10 active managed harness sessions across 3 projects on an agreed macOS profile, separate from configurable resource limits. DEC-048 permits central approval controls with explicit native-prompt handoff where a supported central integration is unavailable. DEC-049 selects user-owned or reviewed projects for first-release qualification and broader untrusted-repository support as a V2/V3 target. DEC-050 records layered application and execution isolation as a security goal with explicit host privileges and platform qualification. DEC-051 permits a documented separately installed local sandbox runtime prerequisite when the qualified isolation design needs one. DEC-052 selects Apache-2.0 for CrazyAgent's original code, retaining third-party terms and integration-specific compatibility review. DEC-053 requires a workspace-level leader above project leaders in the first public release, with explicit project authorization and preserved project boundaries. DEC-054 requires individual native child-agent status, cancellation and recovery or continuation-state coverage for native workflows in launch scope, subject to adapter qualification. DEC-055 selects private local storage for launch and retains configurable application-managed encryption as a required future capability, with no date assigned. The [stack and reuse research](../reports/Rust%20dual%20interface%20architecture.md), [RCLI qualification](../reports/RCLI%20leader%20reuse%20assessment.md) and [memory architecture assessment](../reports/Project%20and%20global%20memory%20architecture.md) inform the interview. Runtime integration, logging coverage and recovery mechanics, task classification, availability and handoff mechanics, baseline-transition mechanics, concrete verification checks and risk rules, retry classification and limits, flaky-test resolution, holdout feedback and confinement, configuration catalog and serialization, native configuration loading, detailed conflict and task-migration mechanics, messaging delivery and cross-project scope, cross-repository acceptance and recovery execution, resource scheduling algorithms, concrete memory schemas, scale and revised schedule remain unresolved. DEC-056 selects local Git and GitHub.com as launch integration scope, with other hosts later. DEC-057 requires independent complete core workflow coverage in both the TUI and desktop at launch. The recorded product and authority decisions are ready for a technical design synthesis; stack and implementation approval remain outstanding. DEC-058 adopts Ratatui/Crossterm and Tauri 2 with React/TypeScript as the interface framework baseline. A detailed design and qualification proposal is next; other implementation recommendations have not been silently accepted.
 
 Architecture adoption: Q-049 is answered A and recorded in DEC-059. The full architecture and qualification proposal, including P-01 through P-11, is adopted for implementation planning. Implementation and runtime qualification remain outstanding. This supersedes earlier statements that these implementation recommendations were still awaiting an owner decision.
 
@@ -1497,6 +1497,58 @@ Acceptance criteria: Retain red/green command evidence. Tests execute actual cod
 Unresolved questions: The exact available native test prerequisites are inventoried before connected execution.
 
 
+### DEC-063: Targeted Herdr control from the leader session
+
+Date: October 17, 2026.
+
+Task: Q-051 visible implementation-worker launch.
+
+Status: Accepted owner exception for this session.
+
+Topic: Herdr session guard and workspace authority.
+
+Goal: Launch the approved implementation workers visibly without changing global configuration or disturbing unrelated workspaces.
+
+Constraints: The leader session has no HERDR_ENV context. The installed Herdr skill normally stops pane control in that condition. This exception covers only the existing CrazyAgent workspace w11, explicit observed pane IDs, labeled agents and their assigned worktree directories. Preserve the owner's focus and all other workspaces.
+
+Decision: The owner authorizes targeted pane control in w11 from this session. Do not fabricate Herdr environment variables. Create qualification and runtime-inventory panes with no-focus operations, verify their actual processes and worktree identities, and retain durable execution evidence. No unrelated pane control, cleanup, global configuration change or tool installation is authorized.
+
+Owner evidence: The owner selected "A. Allow targeted CrazyAgent pane control from this session (recommended)" in response to the narrow exception question.
+
+Rejected alternatives: Blocking the already-authorized implementation after the owner exception; invisible workers; pretending the session satisfied the installed guard.
+
+Risks: Workspace and pane identifiers can become stale. Check live identities before each targeted action. A successful pane creation or submitted prompt alone does not establish that implementation is running.
+
+Acceptance criteria: Observe both labeled agents in w11, verify each assigned worktree and branch, preserve focus and unrelated workspaces, and record actual readiness and task evidence.
+
+Unresolved questions: None for this scoped exception. Runtime and provider qualification remain separate gates.
+
+
+### DEC-064: Trust the owned CrazyAgent repository for worker startup
+
+Date: October 17, 2026.
+
+Task: Q-052 visible implementation-worker launch.
+
+Status: Accepted owner authorization.
+
+Topic: Codex folder trust for the two worker panes.
+
+Goal: Allow the approved coding agents to read, edit and run the owned repository within the workspace sandbox.
+
+Constraints: Codex's observed dialog applies trust to /Users/chaoticqubit/Projects/CrazyAgent and saves that trust decision. This does not disable the workspace sandbox or authorize global configuration edits, tool installs, provider account changes or publication.
+
+Decision: Select Trust and continue in the qualification and runtime worker panes. Preserve the installed Codex workspace sandbox and the disjoint worker scopes. The owner selected this action explicitly after the blocked dialog was inspected.
+
+Rejected alternatives: Answering a persistent trust prompt without the owner decision; restarting duplicate agents; disabling the sandbox to avoid the prompt.
+
+Risks: Repository-local settings can execute code under Codex's folder-trust model. The owner was shown the repository path and persistence of the trust decision before approving.
+
+Acceptance criteria: Both original worker processes pass the folder-trust screen, accept their assigned briefs and operate in their own verified worktrees. Record actual execution evidence separately from the trust decision.
+
+Unresolved questions: None for folder trust. Native runtime/provider qualification remains unproven.
+
+
 ## Technical synthesis for Q-048: interface framework recommendation
 
 Date: October 17, 2026.
@@ -2295,4 +2347,27 @@ Plan: [Integrated application implementation plan](superpowers/plans/2026-10-17-
 
 Owner answer: Subagent-driven implementation in visible Herdr panes, led from this conversation. Initialize the repository and project files, notify when setup is ready, then begin implementation. Skip code and security reviews for now; use real tests with no mocks or bypasses. Resulting decision IDs: DEC-060, DEC-061 and DEC-062.
 
+### Q-051: Narrow Herdr session exception
+
+Date: October 17, 2026. Status: answered A; recorded in DEC-063.
+
+Question: May the leader control only the existing CrazyAgent workspace w11 from this session despite the installed skill's missing-HERDR_ENV guard, creating labeled worker panes while preserving focus and all other workspaces?
+
+A. Allow targeted CrazyAgent pane control from this session. This is the recommended option.
+
+B. Wait for an attached Herdr session before launching visible workers.
+
+Owner answer: A. Allow targeted CrazyAgent pane control from this session. Resulting decision ID: DEC-063.
+
+### Q-052: Codex worker folder trust
+
+Date: October 17, 2026. Status: answered A; recorded in DEC-064.
+
+Question: May the leader select Trust and continue in both worker panes, saving trust for the CrazyAgent repository while retaining the workspace sandbox?
+
+A. Trust CrazyAgent and start both workers. This is the recommended option.
+
+B. Leave both workers paused.
+
+Owner answer: A. Trust CrazyAgent and start both workers. Resulting decision ID: DEC-064.
 

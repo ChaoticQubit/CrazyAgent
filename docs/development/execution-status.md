@@ -2,7 +2,7 @@
 
 Date: October 17, 2026.
 
-Authority: DEC-060 through DEC-062. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
+Authority: DEC-060 through DEC-064. Leader-coordinated visible Herdr subagents, isolated worktrees, real tests and no reviews during the current development phase.
 
 ## Repository foundation
 
@@ -22,9 +22,11 @@ The inventory worker does not run builds, services, native model calls or instal
 
 ## Current execution boundary
 
-The installed Herdr skill requires `HERDR_ENV=1` before pane control. This session has no Herdr environment context. Earlier read-only topology discovery identified the CrazyAgent workspace, but the skill's explicit session guard prevents launching panes from this session without an owner exception.
+The owner approved a narrow exception to the installed Herdr session guard in DEC-063. Only existing CrazyAgent workspace w11 is authorized. The leader remains in w11:p1; qualification uses w11:p2 and runtime inventory uses w11:p3. Both worker panes were created with no-focus operations in their assigned worktrees.
 
-Prepare local worktrees and briefs first. Do not set a fake Herdr environment or substitute invisible workers. Record the owner's session exception or move execution into an attached Herdr session before launching visible workers.
+DEC-064 records the owner's explicit approval of Codex folder trust for this repository. Both original worker processes passed the trust screen and received their focused briefs. Live terminal output shows each working on its assigned scope. Process inspection confirms qualification PID 20692 and runtime inventory PID 20807, each in its own assigned worktree. Both use installed gpt-6.1-sol with workspace approval review; qualification uses high reasoning and inventory uses medium. The leader pane w11:p1 remains focused.
+
+Do not set a fake Herdr environment or control other workspaces. A submitted prompt is not task-completion evidence. Worker outputs, real test results and commits remain subject to leader integration checks.
 
 ## Evidence status
 
