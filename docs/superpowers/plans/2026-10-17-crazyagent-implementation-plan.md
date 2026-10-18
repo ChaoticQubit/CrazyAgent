@@ -102,17 +102,17 @@ The owning task defines these types before another task consumes them. Serialize
 
 **Interfaces:** Produce Task-1 types and `admit(report: &QualificationReport, required: &[Capability]) -> Result<(), AdmissionError>`. Admission requires matching source/profile, intact evidence and proven outcomes for every required capability.
 
-- [ ] **Step 1:** Create the minimal build manifests and write `qualification::tests::missing_evidence_never_admits`: an empty report fails; an unavailable required result fails; a report for another profile fails; altered artifact bytes fail their stored hash; artifact references cannot escape the admitted evidence directory.
+- [x] **Step 1:** Create the minimal build manifests and write `qualification::tests::missing_evidence_never_admits`: an empty report fails; an unavailable required result fails; a report for another profile fails; altered artifact bytes fail their stored hash; artifact references cannot escape the admitted evidence directory.
 
 ```rust
 assert!(admit(&empty_report, &[Capability::LiveRecovery]).is_err());
 assert!(admit(&unavailable_report, &[Capability::LiveRecovery]).is_err());
 assert!(admit(&tampered_report, &[Capability::Confinement]).is_err());
 ```
-- [ ] **Step 2:** Run `cargo test -p crazyagent --lib qualification::tests::missing_evidence_never_admits`; expect a missing implementation failure, not a network or toolchain error counted as a red test.
-- [ ] **Step 3:** Implement the admission function, evidence serialization and CLI report/admit entry points. Inventory installed versions without installing or auto-downloading tools. Store raw local evidence under a private ignored directory and publish only sanitized summaries.
-- [ ] **Step 4:** Repeat the unit check; expect PASS. Run the CLI against a report containing unavailable native results; expect nonzero admission and named missing capabilities. Unit fixtures establish the admission logic, not native capability.
-- [ ] **Step 5:** Inspect the exact diff, update the graph and commit the scoped files as `feat: add qualification admission records`. Preserve unrelated owner documents and record source revision in later evidence.
+- [x] **Step 2:** Run `cargo test -p crazyagent --lib qualification::tests::missing_evidence_never_admits`; expect a missing implementation failure, not a network or toolchain error counted as a red test.
+- [x] **Step 3:** Implement the admission function, evidence serialization and CLI report/admit entry points. Inventory installed versions without installing or auto-downloading tools. Store raw local evidence under a private ignored directory and publish only sanitized summaries.
+- [x] **Step 4:** Repeat the unit check; expect PASS. Run the CLI against a report containing unavailable native results; expect nonzero admission and named missing capabilities. Unit fixtures establish the admission logic, not native capability.
+- [x] **Step 5:** Inspect the exact diff, update the graph and commit the scoped files as `feat: add qualification admission records`. Preserve unrelated owner documents and record source revision in later evidence.
 
 ## Task 2: Prove the execution boundary before native dispatch
 

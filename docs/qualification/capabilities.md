@@ -1,6 +1,6 @@
 # Qualification and admission
 
-Status: implementation in progress. No native execution profile is admitted by the repository foundation or by an admission unit test.
+Status: Task 1 qualification/admission code is implemented and passes real unit and CLI tests. No native execution profile is admitted by the repository foundation or by an admission unit test.
 
 ## Required evidence
 
@@ -29,4 +29,10 @@ The current owner-directed development phase defers code and security reviews. N
 
 ## Delivery checkpoints
 
-The repository foundation supports offline formatting, linting and test/build/test through make check. The empty scaffold had zero application tests. Task 1 adds the real qualification/admission behavior and CLI; subsequent tasks must provide the runtime evidence that can justify an admitted workflow.
+The repository foundation supports offline formatting, linting and test/build/test through make check. The empty scaffold had zero application tests. Task 1 now supplies qualification/admission behavior and CLI commands. The integrated source at d1aa990 passed formatting, strict Clippy, 11 real unit tests, 3 real-binary integration tests, build and the same test suites again, with no ignored tests. Subsequent tasks must provide the runtime evidence that can justify an admitted workflow.
+
+## Current CLI
+
+Run cargo run --offline -- qualification report --source-revision REV --profile-id PROFILE to produce a JSON report with explicitly unavailable native results. The command performs no provider call or native runtime qualification.
+
+For admission, use qualification admit --report PATH --source-revision REV --profile-id PROFILE --evidence-dir DIR --require live_recovery. Repeat --require for other required capabilities. The source and profile arguments are trusted invocation context independent of report JSON. Admission rejects missing evidence, changed bytes, unsupported paths and unproven required outcomes. Exit 0 admits the supplied evidence under this contract; exit 1 rejects admission or reports an I/O error; exit 2 rejects malformed invocation. Authenticating the evidence producer and protecting the verification process remain responsibilities of the later engine/verification layers.
