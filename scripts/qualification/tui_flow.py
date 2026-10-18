@@ -1,3 +1,6 @@
+if not __debug__:
+    raise SystemExit("TUI qualification requires Python assertions enabled")
+
 import errno
 import json
 import fcntl

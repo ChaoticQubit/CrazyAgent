@@ -5,8 +5,27 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
+fn optimized_python_qualification_refuses_before_argument_parsing() {
+    let output = Command::new("python3")
+        .arg("-O")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/qualification/tui_flow.py"
+        ))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "TUI qualification requires Python assertions enabled\n"
+    );
+}
+
+#[test]
 fn real_engine_and_tui_complete_the_local_pty_flow() {
     let output = Command::new("python3")
+        .env_remove("PYTHONOPTIMIZE")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../scripts/qualification/tui_flow.py"
