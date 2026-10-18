@@ -297,3 +297,45 @@ All qualification symbols below resolve in `crates/crazyagent/src/qualification.
 | CLI `write_report` | IMP-016 | Emit explicit unavailable outcomes without native/provider execution. |
 
 Coverage verification uses actual function definitions before `#[cfg(test)]` and the complete binary/library sources, not added-line counts. No source changed in this task. The shared graph was queried, not refreshed, because the focused brief reserves its symlinked cache for the leader. The leader owns subsequent consolidation, graph refresh and integration; this worker returns ownership of the tracked log on handoff.
+
+## IMP-018: Resolve and inspect the runtime lock before installation
+
+Date: October 17, 2026. Status: implemented. Task: DEC-068 dependency acquisition. Scope: `.local-state/tools/sandbox-runtime`, its generated package lock and npm invocation.
+
+Goal and constraints: acquire the exact candidate runtime using existing Node/npm, with project-local state and no global configuration, credentials, lifecycle hooks or provider calls.
+
+Decision and rationale: resolve the lock first, compare version and SHA-512 with official registry metadata, inspect the entire five-package closure, then run `npm ci --ignore-scripts` with audit, funding and update requests disabled. Supply dedicated empty user/global npm configuration files and a project-local cache. The published runtime needs neither credentials nor installation scripts. This makes the input concrete before execution and avoids importing user authentication or global npm behavior.
+
+Alternatives and costs: a global install is convenient but changes machine state and violates scope. Floating `npx` has less setup but can download changing inputs on invocation. A source rebuild adds a TypeScript/Bun build closure without being necessary for this published package. The selected approach costs local disk/cache duplication and an explicit lock inspection.
+
+Verification: runtime 0.0.80 matched published integrity `sha512-WG4P8faU/JDH90I8NLUBPmg7e72zhanlW3AVCD0OF06JCtId9IDFewFgv4YRvHLcnn//h1r6a1AMosBsMLpxnA==`. The resolved closure is sandbox-runtime 0.0.80, socks5-server 1.0.10, commander 12.1.0, node-forge 1.4.0 and zod 3.25.76. No package declares an install script. `npm ci` added five packages with lifecycle execution disabled; the actual executable returned 0.0.80.
+
+Risks and revisit: acquisition/version proof does not establish confinement. Release packaging still needs retained immutable metadata, license notices and an explicit runtime acquisition or bundle policy. The local tools and cache are ignored artifacts, not shipped dependencies.
+
+## IMP-019: Inspect immutable RCLI source before executing its lifecycle or build
+
+Date: October 17, 2026. Status: source acquired; execution unqualified. Task: Task 3 preparation. Scope: `.local-state/tools/rcli-source` and its bounded upstream archive.
+
+Goal and constraints: reuse the selected open-source leader harness while preserving project-local acquisition authority and avoiding provider calls, host changes and implicit Git hook changes.
+
+Decision and rationale: acquire Backboard-io/Backboard-R-CLI revision `51bee17e02344de5fffd89523ce2b73d5042f216`, validate the archive before extraction, and inspect transport and build metadata before running source. The actual npm package name returned 404; a similarly named package is not a substitute. The upstream `prepare` script changes Git hooks. Observed one-shot JSON output does not establish a persistent bidirectional leader protocol.
+
+Alternatives and costs: a floating installer reduces initial setup but loses immutable input and may run hooks. Forking before checking native capabilities creates avoidable maintenance. The selected path adds provenance bookkeeping and may reveal adapter/build work that changes the forecast. Source inspection can continue without credentials or provider spending.
+
+Verification: the bounded archive contains 787 members and 3,833,836 expanded bytes, with no absolute, parent, symlink, hardlink or device entries. The 1,374,859-byte archive has local SHA-256 `4519cfb485017e1690da72c86dcf7d5073fe09b81d7e632af4707052f57a7603`. Its manifest reports version 3.0.4 and MIT. No source execution or dependency build occurred. Graph generation for this ignored third-party tree reported no code files; the existing project graph and pinned research references supplied scoped navigation before source inspection.
+
+Risks and revisit: the local hash records observed bytes, not a publisher-signed checksum. Persistent leadership, authentication modes and child control remain unproven. Resolve and inspect the pinned dependency closure and any explicit build effects before execution; qualify an actual admitted profile before claiming native leader support.
+
+## IMP-020: Continue independent durable-core work while native admission is blocked
+
+Date: October 17, 2026. Status: planned. Task: Task 5 continuation under Task 4 step 5. Scope: protocol, configuration, storage and engine modules in a separate worktree.
+
+Goal and constraints: continue toward the complete V1 without weakening failed native requirements, claiming simulated integration or spending against provider accounts. One visible worker owns this task; the leader owns integration and the shared graph.
+
+Decision and rationale: implement and test real Rust authority, SQLite durability, local client transport and effective settings independently of native dispatch. Keep native launch unavailable until its profile is admitted. Complete real database/socket/restart tests now; retain the worker-sandbox endpoint denial as an explicit pending integration gate until Task 2 supplies an admitted boundary. The accepted plan explicitly permits independent authorized work when qualification is blocked.
+
+Alternatives and costs: waiting for all native qualification serializes unrelated work and consumes delivery capacity without producing evidence. Enabling native launch with partial boundary evidence violates the accepted contract. Independent implementation costs an additional integration checkpoint and careful separation of verified core behavior from unavailable native behavior.
+
+Acceptance and verification: real tests must cover operation replay after lost acknowledgement and engine restart, strict bounded requests, task-pinned configuration, migration/revocation, exclusive input ownership, event cursor resynchronization and SQLite failures without false acknowledgement. No mock harness or forged capability may satisfy the missing worker-boundary test. Exact dependency versions/licenses, function rationale and unproven edges belong in the worker handoff and this log before integration.
+
+Risks and revisit: the complete Task 5 acceptance remains pending until its real admitted-boundary test passes. Shared manifest, library-export and CLI edits are serialized after Task 2 hands them back. The leader must reconcile actual commits and test output before marking any step complete.
