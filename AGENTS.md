@@ -2,7 +2,7 @@
 
 ## Current authority
 
-Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-070 govern the current implementation phase and scoped authorizations. Later explicit owner instructions take precedence.
+Read [docs/agent-decisions.md](docs/agent-decisions.md), the [adopted architecture](docs/superpowers/specs/2026-10-17-crazyagent-architecture-design.md) and the [implementation plan](docs/superpowers/plans/2026-10-17-crazyagent-implementation-plan.md). DEC-060 through DEC-071 govern the current implementation phase and scoped authorizations. Later explicit owner instructions take precedence.
 
 The owner explicitly selected leader-coordinated subagent implementation in visible Herdr panes, one writer per isolated Git worktree. Do not substitute invisible background agents or several writers in one checkout.
 
