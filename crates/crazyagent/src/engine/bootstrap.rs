@@ -1,8 +1,8 @@
-use super::owner::OwnerServer;
 use super::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerOperation, OwnerRead, OwnerReply, OwnerRequest,
     OwnerResponse,
 };
+use super::owner::{OwnerRuntimeHandle, OwnerServer};
 use super::{Engine, EngineError, Server, io_error, verify_peer};
 use crate::config::EffectiveConfig;
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId, SessionId};
@@ -332,6 +332,7 @@ impl OwnerClient {
 pub struct EngineService {
     anchor: Anchor,
     engine: Arc<Engine>,
+    owner_runtime: Option<OwnerRuntimeHandle>,
     timeout: Duration,
     generation: Option<(String, Identity)>,
     temporary: Option<Identity>,
@@ -385,6 +386,7 @@ impl EngineService {
         let mut service = Self {
             anchor,
             engine,
+            owner_runtime: None,
             timeout: Duration::from_millis(config.settings.timeout_ms),
             generation: None,
             temporary: None,
@@ -403,6 +405,13 @@ impl EngineService {
         Ok(service)
     }
 
+    /// Borrows the existing trusted native host control for this service.
+    /// Takes a service reference and returns its live optional handle.
+    /// Shutdown removes the handle after listeners drain.
+    pub fn owner_runtime(&self) -> Option<&OwnerRuntimeHandle> {
+        self.owner_runtime.as_ref()
+    }
+
     async fn start_inner(
         &mut self,
         ordinary: &str,
@@ -418,6 +427,8 @@ impl EngineService {
         let generation = self.anchor.path.join(&name);
         let (owner, host) = OwnerServer::bind(&generation, self.engine.clone(), config).await?;
         let stamp = host.identity();
+        assert!(self.owner_runtime.is_none());
+        self.owner_runtime = Some(host);
         let (stop, stopped) = oneshot::channel();
         self.stops.push(stop);
         self.tasks.spawn(owner.run(stopped));
@@ -683,6 +694,7 @@ impl EngineService {
                 Err(error) => errors.push(error.to_string()),
             }
         }
+        drop(self.owner_runtime.take());
         if let Some((generation, identity)) = self.generation.take() {
             let clean = (|| {
                 let metadata = self.anchor.metadata(&generation)?;
