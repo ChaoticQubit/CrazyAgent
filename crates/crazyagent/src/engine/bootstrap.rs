@@ -298,6 +298,66 @@ async fn capabilities(client: &OwnerClient) -> Result<(), EngineError> {
     Ok(())
 }
 
+pub(super) struct NativeBinding {
+    anchor: Anchor,
+    pinned: PinnedLocator,
+}
+
+impl NativeBinding {
+    pub(super) fn socket(&self) -> PathBuf {
+        self.anchor.path.join(&self.pinned.value.ordinary_name)
+    }
+
+    pub(super) fn verify(&self) -> Result<(), EngineError> {
+        self.pinned.verify(&self.anchor)?;
+        check_database(&self.anchor, self.pinned.value.database)?;
+        check_generation(&self.anchor, &self.pinned.value)?;
+        check_socket(
+            &self.anchor,
+            &self.socket(),
+            self.pinned.value.ordinary_socket,
+        )
+    }
+}
+
+async fn discover_owner(
+    input: &Path,
+    kind: OwnerClientKind,
+    timeout: Duration,
+) -> Result<(OwnerClient, OwnerConnectionIdentity, NativeBinding), EngineError> {
+    let anchor = Anchor::open(input)?;
+    let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
+    let binding = NativeBinding { anchor, pinned };
+    binding.verify()?;
+    let client = OwnerClient::attach(
+        &binding.anchor.path.join(&binding.pinned.value.generation),
+        kind,
+        timeout,
+    )?;
+    capabilities(&client).await?;
+    binding.verify()?;
+    let identity = OwnerConnectionIdentity {
+        database_instance: binding.pinned.value.db_instance.clone(),
+        engine_epoch: binding.pinned.value.engine_epoch.clone(),
+    };
+    Ok((client, identity, binding))
+}
+
+pub(super) async fn discover_pair(
+    socket: &Path,
+    kind: OwnerClientKind,
+    timeout: Duration,
+) -> Result<(OwnerClient, OwnerConnectionIdentity, NativeBinding), EngineError> {
+    let parent = socket
+        .parent()
+        .ok_or_else(|| fail("socket parent missing"))?;
+    let (client, identity, binding) = discover_owner(parent, kind, timeout).await?;
+    if socket.file_name() != Some(std::ffi::OsStr::new(&binding.pinned.value.ordinary_name)) {
+        return Err(fail("owner_ordinary_socket_mismatch"));
+    }
+    Ok((client, identity, binding))
+}
+
 impl OwnerClient {
     /// Discovers authenticated native access under an explicitly trusted anchor.
     /// Takes a fixed client kind and returns client plus the same observed identity.
@@ -307,24 +367,7 @@ impl OwnerClient {
         kind: OwnerClientKind,
         timeout: Duration,
     ) -> Result<(Self, OwnerConnectionIdentity), EngineError> {
-        let anchor = Anchor::open(input)?;
-        let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
-        check_database(&anchor, pinned.value.database)?;
-        check_generation(&anchor, &pinned.value)?;
-        check_socket(
-            &anchor,
-            &anchor.path.join(&pinned.value.ordinary_name),
-            pinned.value.ordinary_socket,
-        )?;
-        let client = Self::attach(&anchor.path.join(&pinned.value.generation), kind, timeout)?;
-        capabilities(&client).await?;
-        pinned.verify(&anchor)?;
-        check_database(&anchor, pinned.value.database)?;
-        check_generation(&anchor, &pinned.value)?;
-        let identity = OwnerConnectionIdentity {
-            database_instance: pinned.value.db_instance.clone(),
-            engine_epoch: pinned.value.engine_epoch.clone(),
-        };
+        let (client, identity, _) = discover_owner(input, kind, timeout).await?;
         Ok((client, identity))
     }
 }
