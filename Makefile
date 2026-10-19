@@ -23,6 +23,7 @@ test-node:
 		scripts/rcli/host.turns.test.mjs \
 		scripts/rcli/host.entry.test.mjs \
 		scripts/rcli/build-closure.test.mjs \
+		apps/desktop/test/model-access.test.mjs \
 		apps/desktop/test/native/refresh-barrier.test.mjs \
 		apps/desktop/test/native/config-registration.test.mjs
 
