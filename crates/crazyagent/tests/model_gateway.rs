@@ -76,7 +76,7 @@ fn observation(config: &EffectiveConfig, index: usize, sequence: u64) -> Observa
         observed_at_ms: 100,
         valid_until_ms: 10000,
         kind: ObservationKind::Ready {
-            remaining: Some(config.settings.routing.task_capacity.clone()),
+            remaining: None,
             capabilities: vec!["coding".into()],
         },
     }
@@ -121,8 +121,9 @@ fn unknown_and_expired_observations_never_invent_capacity_or_authentication() {
         capabilities: vec!["coding".into()],
     };
     observe(&tx, &config, &unknown).unwrap();
+    let strict = load_config(&format!("{CATALOG}\nprovider_quota_policy = 'strict'\n"));
     assert_eq!(
-        begin_attempt(&tx, &config, &config, &request("first", None), 100)
+        begin_attempt(&tx, &strict, &strict, &request("first", None), 100)
             .unwrap_err()
             .0,
         "gateway_quota_unknown"
@@ -218,7 +219,7 @@ fn selection_pins_distinct_profile_account_and_connection_across_restart() {
     assert_eq!(selected.attempt.config_id, config.id);
     assert_eq!(
         selected.attempt.reasons,
-        ["preferred_account", "observed_capacity_checked"]
+        ["preferred_account", "bounded_attempt_quota_unknown"]
     );
     assert!(
         matches!(&selected.attempt.connection.auth, ModelAuthentication::NativeManaged { profile_ref } if profile_ref.as_str() == "auth-profile-a")
@@ -540,9 +541,10 @@ fn unknown_capacity_capability_mismatch_and_observation_bounds_are_rejected() {
     let mut database = Connection::open_in_memory().unwrap();
     initialize(&database).unwrap();
     let tx = database.transaction().unwrap();
+    let strict = load_config(&format!("{CATALOG}\nprovider_quota_policy = 'strict'\n"));
     for (sequence, remaining, capabilities) in [
-        (1, Some(ResourceBudget::zero()), vec!["coding".into()]),
-        (2, Some(ResourceBudget::unit()), vec!["different".into()]),
+        (1, None, vec!["coding".into()]),
+        (2, None, vec!["different".into()]),
     ] {
         let mut event = observation(&config, 0, sequence);
         event.kind = ObservationKind::Ready {
@@ -550,7 +552,17 @@ fn unknown_capacity_capability_mismatch_and_observation_bounds_are_rejected() {
             capabilities,
         };
         observe(&tx, &config, &event).unwrap();
-        assert!(begin_attempt(&tx, &config, &config, &request("first", None), 100).is_err());
+        let policy = if sequence == 1 { &strict } else { &config };
+        assert_eq!(
+            begin_attempt(&tx, policy, policy, &request("first", None), 100)
+                .unwrap_err()
+                .0,
+            if sequence == 1 {
+                "gateway_quota_unknown"
+            } else {
+                "gateway_capability_unavailable"
+            }
+        );
     }
     for (sequence, observed_at_ms, valid_until_ms) in
         [(0, 100, 10000), (3, 100, 100), (3, 100, 86_400_101)]
@@ -645,5 +657,547 @@ fn sqlite_sequence_overflow_is_rejected_before_insertion_without_corrupting_hist
     assert_eq!(count, 1);
     assert_eq!(sequence, 1);
     assert_eq!(serde_json::from_str::<Observation>(&body).unwrap(), first);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn quota_policy_default_allows_fresh_ready_with_unknown_numeric_quota() {
+    let config = load_config(CATALOG);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("gateway.sqlite");
+    let mut database = Connection::open(&path).unwrap();
+    initialize(&database).unwrap();
+    let event = Observation {
+        kind: ObservationKind::Ready {
+            remaining: None,
+            capabilities: vec!["coding".into()],
+        },
+        ..observation(&config, 0, 1)
+    };
+    let tx = database.transaction().unwrap();
+    observe(&tx, &config, &event).unwrap();
+    tx.commit().unwrap();
+    let state = connection_state(&database, &event.connection, 100).unwrap();
+    assert_eq!(state.health, Health::Ready);
+    assert_eq!(state.quota, Quota::Unknown);
+    assert_eq!(state.observed_at_ms, Some(100));
+    assert_eq!(state.valid_until_ms, Some(10000));
+    assert_eq!(state.cooldown_until_ms, None);
+    let requested = request("bounded-unknown-quota", None);
+    let tx = database.transaction().unwrap();
+    let selected = begin_attempt(&tx, &config, &config, &requested, 100)
+        .expect("default policy must allow fresh readiness with unknown numeric provider quota");
+    assert!(!selected.replayed);
+    assert_eq!(selected.attempt.request, requested);
+    assert_eq!(selected.attempt.connection, event.connection);
+    assert_eq!(selected.attempt.config_id, config.id);
+    assert_eq!(selected.attempt.selected_at_ms, 100);
+    assert_eq!(selected.attempt.completion, None);
+    assert_eq!(
+        selected.attempt.reasons,
+        ["preferred_account", "bounded_attempt_quota_unknown"]
+    );
+    assert_eq!(
+        connection_state(&tx, &event.connection, 100).unwrap(),
+        state
+    );
+    tx.commit().unwrap();
+    drop(database);
+    let database = Connection::open(&path).unwrap();
+    assert_eq!(
+        read_attempt(&database, &requested.id).unwrap(),
+        Some(selected.attempt)
+    );
+    assert_eq!(
+        connection_state(&database, &event.connection, 100).unwrap(),
+        state
+    );
+}
+
+#[test]
+fn quota_policy_strict_in_either_pinned_or_current_config_rejects_unknown_quota() {
+    let bounded = load_config(CATALOG);
+    let strict = load_config(&format!("{CATALOG}\nprovider_quota_policy = 'strict'\n"));
+    for (pinned, current) in [(&strict, &strict), (&strict, &bounded), (&bounded, &strict)] {
+        let mut database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        ready(&mut database, &bounded);
+        let tx = database.transaction().unwrap();
+        assert_eq!(
+            begin_attempt(&tx, pinned, current, &request("strict", None), 100)
+                .unwrap_err()
+                .0,
+            "gateway_quota_unknown"
+        );
+        let count: i64 = tx
+            .query_row("SELECT count(*) FROM model_gateway_attempts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    ready(&mut database, &bounded);
+    let tx = database.transaction().unwrap();
+    let selected = begin_attempt(&tx, &bounded, &bounded, &request("existing", None), 100).unwrap();
+    let replay = begin_attempt(&tx, &bounded, &strict, &request("existing", None), 150).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.attempt, selected.attempt);
+}
+
+#[test]
+fn quota_policy_never_bypasses_health_identity_or_authority_guards() {
+    for policy in ["bounded_attempt", "strict"] {
+        let catalog = CATALOG.replace("fallback_allowed = true", "fallback_allowed = false");
+        let config = load_config(&format!("{catalog}\nprovider_quota_policy = '{policy}'\n"));
+        for (kind, now, code) in [
+            (ObservationKind::Unknown, 100, "gateway_health_unknown"),
+            (
+                ObservationKind::InvalidAuthentication,
+                100,
+                "gateway_invalid_authentication",
+            ),
+            (
+                ObservationKind::RateLimited {
+                    retry_at_ms: Some(500),
+                },
+                100,
+                "gateway_rate_limited",
+            ),
+            (
+                ObservationKind::TransientFailure {
+                    retry_at_ms: Some(500),
+                },
+                100,
+                "gateway_transient_failure",
+            ),
+            (
+                ObservationKind::QuotaExhausted {
+                    retry_at_ms: Some(500),
+                },
+                100,
+                "gateway_quota_exhausted",
+            ),
+            (
+                ObservationKind::Ready {
+                    remaining: None,
+                    capabilities: vec!["coding".into()],
+                },
+                99,
+                "gateway_health_unknown",
+            ),
+            (
+                ObservationKind::Ready {
+                    remaining: None,
+                    capabilities: vec!["coding".into()],
+                },
+                10000,
+                "gateway_health_unknown",
+            ),
+        ] {
+            let mut database = Connection::open_in_memory().unwrap();
+            initialize(&database).unwrap();
+            let tx = database.transaction().unwrap();
+            let event = Observation {
+                kind,
+                ..observation(&config, 0, 1)
+            };
+            observe(&tx, &config, &event).unwrap();
+            assert_eq!(
+                begin_attempt(&tx, &config, &config, &request("guarded", None), now)
+                    .unwrap_err()
+                    .0,
+                code
+            );
+        }
+        for changed in [
+            CATALOG.replace("auth-profile-a", "changed-profile"),
+            CATALOG.replace(
+                "approved_accounts = [\"account-a\", \"account-b\"]",
+                "approved_accounts = [\"account-b\"]",
+            ),
+            CATALOG.replace(
+                "projects = [\"project-a\"]",
+                "projects = [\"other-project\"]",
+            ),
+            CATALOG.replace(
+                "allowed_destinations = [\"sandbox-profile\"]",
+                "allowed_destinations = []",
+            ),
+        ] {
+            let current = load_config(&format!("{changed}\nprovider_quota_policy = '{policy}'\n"));
+            let mut database = Connection::open_in_memory().unwrap();
+            initialize(&database).unwrap();
+            ready(&mut database, &config);
+            let tx = database.transaction().unwrap();
+            assert!(begin_attempt(&tx, &config, &current, &request("changed", None), 100).is_err());
+        }
+    }
+}
+
+fn quota_config_with_capacity(capacity: &ResourceBudget) -> EffectiveConfig {
+    let routing = toml::to_string(&serde_json::json!({"routing": {
+        "approved_accounts": ["account-a", "account-b"],
+        "global_capacity": capacity, "project_capacity": capacity, "task_capacity": capacity
+    }}))
+    .unwrap();
+    load_config(&CATALOG.replacen(
+        "[routing]\napproved_accounts = [\"account-a\", \"account-b\"]",
+        &routing,
+        1,
+    ))
+}
+
+#[test]
+fn quota_policy_does_not_substitute_for_engine_resource_limits() {
+    let tight = quota_config_with_capacity(&ResourceBudget::unit());
+    let wide = quota_config_with_capacity(&ResourceBudget {
+        slots: 2,
+        cpu_millis: 2000,
+        memory_mib: 1024,
+        processes: 8,
+        output_bytes: 2097152,
+        wall_time_ms: 120000,
+        spend_microunits: 1,
+    });
+    for dimension in 0..7 {
+        let mut requested = request("bounded-resources", None);
+        let value = match dimension {
+            0 => &mut requested.route.resources.slots,
+            1 => &mut requested.route.resources.cpu_millis,
+            2 => &mut requested.route.resources.memory_mib,
+            3 => &mut requested.route.resources.processes,
+            4 => &mut requested.route.resources.output_bytes,
+            5 => &mut requested.route.resources.wall_time_ms,
+            6 => &mut requested.route.resources.spend_microunits,
+            _ => unreachable!(),
+        };
+        *value += 1;
+        for (pinned, current) in [(&tight, &wide), (&wide, &tight)] {
+            let mut database = Connection::open_in_memory().unwrap();
+            initialize(&database).unwrap();
+            ready(&mut database, &wide);
+            let tx = database.transaction().unwrap();
+            assert_eq!(
+                begin_attempt(&tx, pinned, current, &requested, 100)
+                    .unwrap_err()
+                    .0,
+                "gateway_route_denied"
+            );
+            let count: i64 = tx
+                .query_row("SELECT count(*) FROM model_gateway_attempts", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+}
+
+fn legacy_ready_body(event: &Observation, remaining: Option<ResourceBudget>) -> String {
+    let mut body = serde_json::to_value(event).unwrap();
+    body["kind"]["Ready"]["remaining"] = serde_json::to_value(remaining).unwrap();
+    serde_json::to_string(&body).unwrap()
+}
+
+fn insert_legacy_observation(database: &Connection, event: &Observation, body: &str) {
+    use sha2::Digest;
+    let revision = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&event.connection).unwrap())
+    );
+    database.execute("INSERT INTO model_gateway_observations(id, connection_revision, sequence, body) VALUES(?1, ?2, ?3, ?4)", rusqlite::params![event.id.as_str(), revision, i64::try_from(event.sequence).unwrap(), body]).unwrap();
+}
+
+#[test]
+fn quota_policy_legacy_sqlite_ready_preserves_unknown_quota_and_original_bytes() {
+    let config = load_config(CATALOG);
+    let strict = load_config(&format!("{CATALOG}\nprovider_quota_policy = 'strict'\n"));
+    for remaining in [
+        None,
+        Some(ResourceBudget::zero()),
+        Some(ResourceBudget::unit()),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let database = Connection::open(&path).unwrap();
+        initialize(&database).unwrap();
+        let event = observation(&config, 0, 1);
+        let body = legacy_ready_body(&event, remaining.clone());
+        if remaining.is_some() {
+            assert!(serde_json::from_str::<Observation>(&body).is_err());
+        }
+        insert_legacy_observation(&database, &event, &body);
+        drop(database);
+        let mut database = Connection::open(&path).unwrap();
+        let state = connection_state(&database, &event.connection, 100).unwrap();
+        assert_eq!(state.health, Health::Ready);
+        assert_eq!(state.quota, Quota::Unknown);
+        assert_eq!(state.capabilities, ["coding"]);
+        let tx = database.transaction().unwrap();
+        assert_eq!(
+            begin_attempt(&tx, &strict, &strict, &request("strict-legacy", None), 100)
+                .unwrap_err()
+                .0,
+            "gateway_quota_unknown"
+        );
+        assert_eq!(
+            observe(&tx, &config, &event).unwrap_err().0,
+            "gateway_observation_conflict"
+        );
+        let selected =
+            begin_attempt(&tx, &config, &config, &request("bounded-legacy", None), 100).unwrap();
+        assert_eq!(selected.attempt.connection, event.connection);
+        assert_eq!(
+            begin_attempt(&tx, &config, &config, &request("again", None), 100)
+                .unwrap_err()
+                .0,
+            "gateway_attempt_active"
+        );
+        observe(&tx, &config, &observation(&config, 0, 2)).unwrap();
+        tx.commit().unwrap();
+        let raw: String = database
+            .query_row(
+                "SELECT body FROM model_gateway_observations WHERE id = ?1",
+                [event.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, body);
+        assert_eq!(
+            connection_state(&database, &event.connection, 10000)
+                .unwrap()
+                .health,
+            Health::Unknown
+        );
+        let mut historical = selected.attempt;
+        historical.reasons[1] = "observed_capacity_checked".into();
+        database
+            .execute(
+                "UPDATE model_gateway_attempts SET body = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::to_string(&historical).unwrap(),
+                    historical.request.id.as_str()
+                ],
+            )
+            .unwrap();
+        drop(database);
+        let mut database = Connection::open(&path).unwrap();
+        assert_eq!(
+            read_attempt(&database, &historical.request.id).unwrap(),
+            Some(historical.clone())
+        );
+        let tx = database.transaction().unwrap();
+        let replay = begin_attempt(&tx, &config, &strict, &historical.request, 100).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.attempt, historical);
+    }
+}
+
+#[test]
+fn quota_policy_legacy_ids_order_bounds_and_transactions_remain_exact() {
+    let config = load_config(CATALOG);
+    let event = observation(&config, 0, 1);
+    let valid = serde_json::from_str::<serde_json::Value>(&legacy_ready_body(
+        &event,
+        Some(ResourceBudget::unit()),
+    ))
+    .unwrap();
+    let mut malformed = Vec::new();
+    for (field, value) in [
+        ("extra", serde_json::json!(true)),
+        ("id", serde_json::json!("changed-observation-id")),
+        ("sequence", serde_json::json!(u64::MAX)),
+        ("valid_until_ms", serde_json::json!(100)),
+    ] {
+        let mut body = valid.clone();
+        body[field] = value;
+        malformed.push(serde_json::to_string(&body).unwrap());
+    }
+    let mut changed_connection = valid.clone();
+    changed_connection["connection"]["auth"]["profile_ref"] = serde_json::json!("changed-profile");
+    malformed.push(serde_json::to_string(&changed_connection).unwrap());
+    for remaining in [
+        serde_json::json!({"slots": 1}),
+        serde_json::json!({"slots": 0, "cpu_millis": 0, "memory_mib": 0, "processes": 0, "output_bytes": 0, "wall_time_ms": 0, "spend_microunits": 0, "extra": true}),
+        serde_json::json!(-1),
+    ] {
+        let mut body = valid.clone();
+        body["kind"]["Ready"]["remaining"] = remaining;
+        malformed.push(serde_json::to_string(&body).unwrap());
+    }
+    malformed.push(
+        serde_json::to_string(&valid)
+            .unwrap()
+            .replace("\"sequence\":1", "\"sequence\":1,\"sequence\":1"),
+    );
+    for body in malformed {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        insert_legacy_observation(&database, &event, &body);
+        assert!(connection_state(&database, &event.connection, 100).is_err());
+    }
+    let mut oversized = valid.clone();
+    oversized["kind"]["Ready"]["capabilities"] = serde_json::json!(["é".repeat(8192)]);
+    let oversized = serde_json::to_string(&oversized).unwrap();
+    assert!(oversized.len() > 16384);
+    assert!(oversized.chars().count() <= 16384);
+    let database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    insert_legacy_observation(&database, &event, &oversized);
+    assert_eq!(
+        connection_state(&database, &event.connection, 100)
+            .unwrap_err()
+            .0,
+        "gateway_record_bounds"
+    );
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    let mut latest = observation(&config, 0, 3);
+    latest.observed_at_ms = 300;
+    let body = legacy_ready_body(&latest, Some(ResourceBudget::unit()));
+    insert_legacy_observation(&database, &latest, &body);
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        observe(&tx, &config, &observation(&config, 0, 2))
+            .unwrap_err()
+            .0,
+        "gateway_observation_stale"
+    );
+    assert_eq!(
+        observe(&tx, &config, &observation(&config, 0, 4))
+            .unwrap_err()
+            .0,
+        "gateway_observation_stale"
+    );
+    tx.commit().unwrap();
+    database.execute_batch("CREATE TRIGGER reject_quota_attempt BEFORE INSERT ON model_gateway_attempts BEGIN SELECT RAISE(ABORT, 'quota attempt rollback'); END;").unwrap();
+    let tx = database.transaction().unwrap();
+    assert!(begin_attempt(&tx, &config, &config, &request("aborted", None), 300).is_err());
+    tx.rollback().unwrap();
+    assert!(
+        read_attempt(&database, &RequestId::new("aborted").unwrap())
+            .unwrap()
+            .is_none()
+    );
+    let raw: String = database
+        .query_row(
+            "SELECT body FROM model_gateway_observations WHERE id = ?1",
+            [latest.id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, body);
+}
+
+#[test]
+fn quota_policy_unknown_does_not_grant_failover_or_replay_uncertain_effects() {
+    let config = load_config(CATALOG);
+    let strict = load_config(&format!("{CATALOG}\nprovider_quota_policy = 'strict'\n"));
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    ready(&mut database, &config);
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        begin_attempt(&tx, &strict, &strict, &request("strict", None), 100)
+            .unwrap_err()
+            .0,
+        "gateway_quota_unknown"
+    );
+    let selected = begin_attempt(&tx, &config, &config, &request("bounded", None), 100).unwrap();
+    assert_eq!(
+        selected.attempt.connection.account_ref.as_str(),
+        "account-a"
+    );
+    assert_eq!(
+        selected.attempt.reasons,
+        ["preferred_account", "bounded_attempt_quota_unknown"]
+    );
+    finish_attempt(
+        &tx,
+        &selected.attempt.request.id,
+        &completion(FailureKind::QuotaExhausted, Effects::Uncertain),
+    )
+    .unwrap();
+    assert_eq!(
+        begin_attempt(
+            &tx,
+            &config,
+            &config,
+            &request("uncertain", Some("bounded")),
+            200
+        )
+        .unwrap_err()
+        .0,
+        "gateway_failover_unsafe"
+    );
+}
+
+#[test]
+fn quota_policy_fresh_ready_unknown_preserves_active_cooldown() {
+    let config = load_config(CATALOG);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("gateway.sqlite");
+    let mut database = Connection::open(&path).unwrap();
+    initialize(&database).unwrap();
+    let initial = observation(&config, 0, 1);
+    let control = request("without-prior-cooldown", None);
+    let tx = database.transaction().unwrap();
+    observe(&tx, &config, &initial).unwrap();
+    let selected = begin_attempt(&tx, &config, &config, &control, 100).unwrap();
+    assert_eq!(selected.attempt.connection, initial.connection);
+    assert_eq!(
+        connection_state(&tx, &initial.connection, 100)
+            .unwrap()
+            .cooldown_until_ms,
+        None
+    );
+    tx.rollback().unwrap();
+    assert_eq!(read_attempt(&database, &control.id).unwrap(), None);
+
+    let limited = Observation {
+        kind: ObservationKind::RateLimited {
+            retry_at_ms: Some(500),
+        },
+        ..initial
+    };
+    let tx = database.transaction().unwrap();
+    observe(&tx, &config, &limited).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        connection_state(&database, &limited.connection, 100)
+            .unwrap()
+            .cooldown_until_ms,
+        Some(500)
+    );
+
+    let fresh = Observation {
+        observed_at_ms: 200,
+        ..observation(&config, 0, 2)
+    };
+    assert_eq!(fresh.connection, limited.connection);
+    let tx = database.transaction().unwrap();
+    observe(&tx, &config, &fresh).unwrap();
+    tx.commit().unwrap();
+    drop(database);
+
+    let mut database = Connection::open(&path).unwrap();
+    let state = connection_state(&database, &fresh.connection, 200).unwrap();
+    assert_eq!(state.health, Health::Ready);
+    assert_eq!(state.quota, Quota::Unknown);
+    assert_eq!(state.observed_at_ms, Some(200));
+    assert_eq!(state.valid_until_ms, Some(10000));
+    assert_eq!(state.capabilities, ["coding"]);
+    assert_eq!(state.cooldown_until_ms, Some(500));
+    let blocked = request("during-prior-cooldown", None);
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        begin_attempt(&tx, &config, &config, &blocked, 200)
+            .unwrap_err()
+            .0,
+        "gateway_cooldown"
+    );
+    assert_eq!(read_attempt(&tx, &blocked.id).unwrap(), None);
     tx.commit().unwrap();
 }

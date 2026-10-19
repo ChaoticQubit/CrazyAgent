@@ -36,21 +36,82 @@ fn encode(value: &impl Serialize, limit: usize) -> Result<String, EngineError> {
     Ok(body)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyObservation {
+    id: RequestId,
+    connection: ModelConnection,
+    sequence: u64,
+    observed_at_ms: u64,
+    valid_until_ms: u64,
+    kind: LegacyObservationKind,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+enum LegacyObservationKind {
+    Ready {
+        #[serde(rename = "remaining")]
+        _remaining: Option<ResourceBudget>,
+        capabilities: Vec<String>,
+    },
+}
+
+fn decode_observation(body: &str) -> Result<Observation, EngineError> {
+    if body.len() > 16384 {
+        return Err(error("gateway_record_bounds"));
+    }
+    if let Ok(observation) = serde_json::from_str::<Observation>(body) {
+        return Ok(observation);
+    }
+    let legacy: LegacyObservation = serde_json::from_str(body).map_err(error)?;
+    let LegacyObservationKind::Ready { capabilities, .. } = legacy.kind;
+    let observation = Observation {
+        id: legacy.id,
+        connection: legacy.connection,
+        sequence: legacy.sequence,
+        observed_at_ms: legacy.observed_at_ms,
+        valid_until_ms: legacy.valid_until_ms,
+        kind: ObservationKind::Ready {
+            remaining: None,
+            capabilities,
+        },
+    };
+    assert!(body.len() <= 16384);
+    assert!(matches!(
+        observation.kind,
+        ObservationKind::Ready {
+            remaining: None,
+            ..
+        }
+    ));
+    Ok(observation)
+}
+
 pub(super) fn latest_observation(
     connection: &Connection,
     revision: &str,
 ) -> Result<Option<Observation>, EngineError> {
-    let body: Option<String> = connection
+    let row: Option<(String, i64, String)> = connection
         .query_row(
-            "SELECT body FROM model_gateway_observations
+            "SELECT id, sequence, body FROM model_gateway_observations
          WHERE connection_revision = ?1 ORDER BY sequence DESC LIMIT 1",
             [revision],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(error)?;
-    body.map(|body| serde_json::from_str(&body).map_err(error))
-        .transpose()
+    row.map(|(id, sequence, body)| {
+        let observation = decode_observation(&body)?;
+        if observation.id.as_str() != id
+            || i64::try_from(observation.sequence).ok() != Some(sequence)
+            || connection_revision(&observation.connection)? != revision
+        {
+            return Err(error("gateway_observation_identity"));
+        }
+        Ok(observation)
+    })
+    .transpose()
 }
 
 pub(super) fn insert_observation(

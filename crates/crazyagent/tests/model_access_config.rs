@@ -342,3 +342,98 @@ fallback_allowed = true
     round_trip.validate().unwrap();
     assert_eq!(round_trip, config);
 }
+
+#[test]
+fn quota_policy_default_preserves_legacy_catalog_identity_and_serialization() {
+    use crazyagent::config::ProviderQuotaPolicy;
+    let legacy = load_catalog(HTTP_CATALOG, "").unwrap();
+    assert_eq!(
+        legacy.id.as_str(),
+        "67fdcfb67c9a9426fccb0ffa5660119903c09fec0c4fc567eecb137366b79b87"
+    );
+    assert_eq!(
+        legacy.settings.model_access.as_ref().unwrap().pools[0].provider_quota_policy,
+        ProviderQuotaPolicy::BoundedAttempt
+    );
+    let explicit = load_catalog(
+        &format!("{HTTP_CATALOG}\nprovider_quota_policy = 'bounded_attempt'\n"),
+        "",
+    )
+    .unwrap();
+    assert_eq!(explicit, legacy);
+    let value = serde_json::to_value(&legacy).unwrap();
+    assert!(
+        value["settings"]["model_access"]["pools"][0]
+            .get("provider_quota_policy")
+            .is_none()
+    );
+    assert!(
+        value["descriptors"]["model_access"]["value"]["pools"][0]
+            .get("provider_quota_policy")
+            .is_none()
+    );
+    let decoded: EffectiveConfig = serde_json::from_value(value).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, legacy);
+}
+
+#[test]
+fn quota_policy_strict_is_global_typed_and_changes_only_catalog_identity() {
+    use crazyagent::config::ProviderQuotaPolicy;
+    let legacy = load_catalog(HTTP_CATALOG, "").unwrap();
+    let strict = load_catalog(
+        &format!("{HTTP_CATALOG}\nprovider_quota_policy = 'strict'\n"),
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        strict.settings.model_access.as_ref().unwrap().pools[0].provider_quota_policy,
+        ProviderQuotaPolicy::Strict
+    );
+    assert_ne!(strict.id, legacy.id);
+    assert_eq!(strict.settings.routing, legacy.settings.routing);
+    assert_eq!(strict.descriptors.len(), legacy.descriptors.len());
+    let descriptor = &strict.descriptors["model_access"];
+    assert_eq!(descriptor.origin, Origin::Global);
+    assert_eq!(descriptor.scope, SettingScope::Global);
+    assert_eq!(descriptor.effect_timing, EffectTiming::NewTask);
+    assert_eq!(
+        descriptor.value["pools"][0]["provider_quota_policy"],
+        "strict"
+    );
+    let decoded: EffectiveConfig =
+        serde_json::from_slice(&serde_json::to_vec(&strict).unwrap()).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, strict);
+    assert_eq!(
+        load_catalog(
+            "",
+            &format!("{HTTP_CATALOG}\nprovider_quota_policy = 'strict'\n")
+        )
+        .unwrap_err()
+        .0,
+        "model_access_requires_global_scope"
+    );
+}
+
+#[test]
+fn quota_policy_rejects_unknown_values_and_untyped_catalog_fields() {
+    for value in ["'available'", "'unlimited'", "'Strict'", "true", "0", "{}"] {
+        assert_eq!(
+            load_catalog(
+                &format!("{HTTP_CATALOG}\nprovider_quota_policy = {value}\n"),
+                ""
+            )
+            .unwrap_err()
+            .0,
+            "invalid_configuration_format"
+        );
+    }
+    assert!(
+        load_catalog(
+            &format!("{HTTP_CATALOG}\nprovider_quota_policy = 'strict'\nquota_remaining = 1\n"),
+            ""
+        )
+        .is_err()
+    );
+}

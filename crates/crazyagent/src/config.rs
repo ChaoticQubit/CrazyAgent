@@ -121,6 +121,22 @@ pub struct AccountPool {
     pub projects: Vec<CredentialRef>,
     pub roles: Vec<CredentialRef>,
     pub fallback_allowed: bool,
+    #[serde(default, skip_serializing_if = "ProviderQuotaPolicy::is_default")]
+    pub provider_quota_policy: ProviderQuotaPolicy,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderQuotaPolicy {
+    #[default]
+    BoundedAttempt,
+    Strict,
+}
+
+impl ProviderQuotaPolicy {
+    fn is_default(&self) -> bool {
+        *self == Self::BoundedAttempt
+    }
 }
 
 impl ModelAccess {

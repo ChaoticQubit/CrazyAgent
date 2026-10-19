@@ -1,4 +1,4 @@
-use crate::config::{EffectiveConfig, ModelConnection};
+use crate::config::{EffectiveConfig, ModelConnection, ProviderQuotaPolicy};
 use crate::coordination::Role;
 use crate::engine::EngineError;
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, RequestId, TaskId};
@@ -17,7 +17,8 @@ const ATTEMPTS_MAX: usize = 64;
 #[serde(deny_unknown_fields)]
 pub enum ObservationKind {
     Ready {
-        remaining: Option<ResourceBudget>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining: Option<Quota>,
         capabilities: Vec<String>,
     },
     QuotaExhausted {
@@ -56,7 +57,6 @@ pub enum Health {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Quota {
     Unknown,
-    Known { remaining: ResourceBudget },
     Exhausted,
 }
 
@@ -236,7 +236,7 @@ pub fn connection_state(
             capabilities,
         } => {
             state.health = Health::Ready;
-            state.quota = remaining.map_or(Quota::Unknown, |remaining| Quota::Known { remaining });
+            state.quota = remaining.unwrap_or(Quota::Unknown);
             state.capabilities = capabilities;
         }
         ObservationKind::QuotaExhausted { .. } => {
@@ -341,7 +341,11 @@ fn live_connection(
     Ok(())
 }
 
-fn eligible(state: &ConnectionState, route: &RouteRequest) -> Result<(), EngineError> {
+fn eligible(
+    state: &ConnectionState,
+    route: &RouteRequest,
+    policy: ProviderQuotaPolicy,
+) -> Result<(), EngineError> {
     match state.health {
         Health::Unknown => return Err(error("gateway_health_unknown")),
         Health::InvalidAuthentication => return Err(error("gateway_invalid_authentication")),
@@ -350,12 +354,11 @@ fn eligible(state: &ConnectionState, route: &RouteRequest) -> Result<(), EngineE
         Health::Ready => {}
     }
     match &state.quota {
-        Quota::Unknown => return Err(error("gateway_quota_unknown")),
-        Quota::Exhausted => return Err(error("gateway_quota_exhausted")),
-        Quota::Known { remaining } if !route.resources.fits(remaining) => {
-            return Err(error("gateway_capacity_exhausted"));
+        Quota::Unknown if policy == ProviderQuotaPolicy::Strict => {
+            return Err(error("gateway_quota_unknown"));
         }
-        Quota::Known { .. } => {}
+        Quota::Exhausted => return Err(error("gateway_quota_exhausted")),
+        Quota::Unknown => {}
     }
     if state.cooldown_until_ms.is_some() {
         return Err(error("gateway_cooldown"));
@@ -368,7 +371,8 @@ fn eligible(state: &ConnectionState, route: &RouteRequest) -> Result<(), EngineE
         return Err(error("gateway_capability_unavailable"));
     }
     assert_eq!(state.health, Health::Ready);
-    assert!(matches!(state.quota, Quota::Known { .. }));
+    assert_eq!(state.quota, Quota::Unknown);
+    assert_eq!(policy, ProviderQuotaPolicy::BoundedAttempt);
     Ok(())
 }
 
@@ -455,6 +459,13 @@ pub fn begin_attempt(
         && live_pool.fallback_allowed
         && pinned.settings.routing.fallback_allowed
         && current.settings.routing.fallback_allowed;
+    let policy = if pool.provider_quota_policy == ProviderQuotaPolicy::Strict
+        || live_pool.provider_quota_policy == ProviderQuotaPolicy::Strict
+    {
+        ProviderQuotaPolicy::Strict
+    } else {
+        ProviderQuotaPolicy::BoundedAttempt
+    };
     if !previous.is_empty() && !fallback {
         return Err(error("gateway_fallback_denied"));
     }
@@ -495,7 +506,7 @@ pub fn begin_attempt(
             continue;
         }
         let state = connection_state(tx, connection, now_ms)?;
-        if let Err(failure) = eligible(&state, &request.route) {
+        if let Err(failure) = eligible(&state, &request.route, policy) {
             if same_account && state.quota == Quota::Exhausted {
                 quota_fallback = true;
             }
@@ -513,7 +524,7 @@ pub fn begin_attempt(
             connection: connection.clone(),
             connection_revision: connection_revision(connection)?,
             selected_at_ms: now_ms,
-            reasons: vec![reason.into(), "observed_capacity_checked".into()],
+            reasons: vec![reason.into(), "bounded_attempt_quota_unknown".into()],
             completion: None,
         };
         persistence::insert_attempt(tx, &attempt)?;
