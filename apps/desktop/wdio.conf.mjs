@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
@@ -8,6 +8,8 @@ const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
 assert(app && isAbsolute(app), "built native test application required");
 assert(evidence && isAbsolute(evidence), "private native evidence directory required");
 assert(Number.isInteger(port) && port > 1024 && port < 65536, "owned test port required");
+const run = basename(evidence);
+assert(/^[A-Za-z0-9_-]{1,64}$/.test(run), "bounded owned observation run required");
 
 export const config = {
   runner: "local",
@@ -20,10 +22,14 @@ export const config = {
     embeddedPort: port,
     appArgs: [],
     startTimeout: 20000,
+    captureBackendLogs: true,
+    backendLogLevel: "info",
+    env: { CRAZYAGENT_NATIVE_REFRESH_OBSERVE: run },
   }]],
   framework: "mocha",
   reporters: ["spec"],
   logLevel: "warn",
+  logLevels: { "tauri-service": "info" },
   outputDir: join(evidence, "webdriver"),
   connectionRetryCount: 0,
   connectionRetryTimeout: 10000,

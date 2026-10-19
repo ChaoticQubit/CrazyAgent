@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { installRefresh } from "./refresh-barrier.mjs";
 
 const execute = promisify(execFile);
 const id = process.env.CRAZYAGENT_DESKTOP_TEST_BASELINE;
@@ -70,7 +71,9 @@ async function inspectClosedBoundary() {
 
 async function inspectAfterRendererReload() {
   const { browser } = globalThis;
-  await browser.execute(() => { window.location.reload(); });
+  const run = basename(evidence);
+  installRefresh(browser, evidence, run, 8000);
+  await browser.refresh();
   await browser.waitUntil(async () => await browser.execute((id) => {
     const row = document.querySelector(`[data-baseline-id="${id}"]`);
     return row instanceof HTMLButtonElement && !row.disabled;

@@ -219,7 +219,7 @@ export function documentReadiness(token, url) {
     document.querySelector(".sidebar-footer")?.textContent.trim() === "Owner connected";
 }
 
-export function installRefresh(browser, evidence, run) {
+export function installRefresh(browser, evidence, run, timeoutMs = 15000) {
   assert.equal(typeof browser.overwriteCommand, "function");
   const read = createNavigationReader(evidence, run);
   let dispatched = false;
@@ -228,7 +228,7 @@ export function installRefresh(browser, evidence, run) {
     dispatched = true;
     const token = randomUUID();
     let url;
-    return refreshBarrier({ read,
+    return refreshBarrier({ read, timeoutMs,
       mark: async () => {
         url = read().url;
         assert.equal(await this.execute(markDocument, token), true, "old document marker required");
