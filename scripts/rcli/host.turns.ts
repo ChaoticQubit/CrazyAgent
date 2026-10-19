@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
 import { identifier, type Control, type EventBody } from "./host.codec.ts";
 import { SdkMessageProjection } from "./host.messages.ts";
+import { normalizeSdkObservation, observationRecord } from "./host.observations.ts";
 type InputFrame = Extract<EventBody, { kind: "input" }>;
 type PendingInput = {
 id: string;
@@ -107,6 +108,7 @@ this.awaitingStart = turnId;
 event(event: AgentEvent): EventBody[] {
 this.check();
 if (this.disposed) reject();
+observationRecord(event);
 switch (event.type) {
 case "turn:start": {
 if (this.awaitingStart === null || this.sdkIds.size >= 4096) reject();
@@ -167,7 +169,7 @@ if (!pending || !pending.awaitingResponse || event.response.id !== pending.id ||
 turn.input = null;
 return [];
 }
-default: return [];
+default: return [normalizeSdkObservation(event)];
 }
 }
 complete(turnId: string, status: TurnStatus): EventBody[] {

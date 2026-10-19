@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 import type { MessageFrame } from "./host.messages.ts";
+import { validateObservationFrame, type ObservationFrame } from "./host.observations.ts";
 
 const FRAME_MAX = 65_536;
 const QUEUE_MAX = 64;
@@ -24,6 +25,7 @@ export type Control = {
 };
 export type EventBody =
   | MessageFrame
+  | ObservationFrame
   | { kind: "ready" }
   | { kind: "output"; turn_id: string; text: string }
   | { kind: "input"; turn_id: string; prompt_id: string; question: string; choices: string[] }
@@ -207,6 +209,10 @@ export async function* readControls(source: AsyncIterable<Uint8Array>, sessionId
 function eventBody(value: unknown): EventBody {
   const body = record(value);
   switch (body.kind) {
+    case "tool_observation":
+    case "usage_observation":
+    case "observation_gap":
+      return validateObservationFrame(body);
     case "ready":
       exact(body, ["kind"]);
       return { kind: "ready" };
