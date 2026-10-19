@@ -46,12 +46,34 @@ pub enum TurnOutcome {
     Incomplete,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitStatus {
+    Allowed,
+    AllowedWarning,
+    Rejected,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
     ProtocolInitialized,
     ThreadStarted,
     TurnStarted,
+    AccountRateLimitsRead {
+        id: NativeRequestId,
+        account_id: Option<String>,
+        ordinary_usage_allowed: Option<bool>,
+    },
+    RateLimitObserved {
+        status: RateLimitStatus,
+        resets_at_unix_secs: Option<u64>,
+        rate_limit_type: Option<String>,
+        utilization: Option<f64>,
+        overage_status: Option<RateLimitStatus>,
+        overage_resets_at_unix_secs: Option<u64>,
+        overage_disabled_reason: Option<String>,
+    },
     Initialized {
         model: String,
         capabilities: Vec<String>,

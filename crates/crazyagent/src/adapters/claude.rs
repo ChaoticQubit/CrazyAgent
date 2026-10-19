@@ -1,5 +1,6 @@
 use super::events::{
-    Capability, EventKind, HarnessEvent, Provenance, Support, TokenUsage, TurnOutcome,
+    Capability, EventKind, HarnessEvent, Provenance, RateLimitStatus, Support, TokenUsage,
+    TurnOutcome,
 };
 use super::{NativeAction, NativeHarness};
 use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
@@ -232,6 +233,7 @@ impl ClaudeProtocol {
         let session = identifier(field(value, "session_id")?)?;
         let uuid = identifier(field(value, "uuid")?)?;
         let native_user_message_uuid = optional_text(value, "user_message_uuid")?;
+        let session_wide = message_type == "rate_limit_event";
         if self.seen_events.contains(uuid) {
             return Err(ProtocolError::StaleMessage);
         }
@@ -271,6 +273,7 @@ impl ClaudeProtocol {
                     self.require_active()?;
                     vec![result(value)?]
                 }
+                "rate_limit_event" => vec![rate_limit(value)?],
                 _ => vec![EventKind::Unsupported {
                     message_type: message_type.to_owned(),
                     subtype,
@@ -285,10 +288,12 @@ impl ClaudeProtocol {
             .into_iter()
             .map(|kind| HarnessEvent {
                 provenance: self.provenance.clone(),
-                request_id: self.active_request.clone(),
+                request_id: self.active_request.clone().filter(|_| !session_wide),
                 native_session_id: native_session_id.clone(),
                 native_event_id: uuid.to_owned(),
-                native_user_message_uuid: native_user_message_uuid.clone(),
+                native_user_message_uuid: native_user_message_uuid
+                    .clone()
+                    .filter(|_| !session_wide),
                 kind,
             })
             .collect();
@@ -405,6 +410,79 @@ fn result(value: &Value) -> Result<EventKind, ProtocolError> {
         usage,
         estimated_cost_usd,
     })
+}
+
+fn rate_limit(value: &Value) -> Result<EventKind, ProtocolError> {
+    let info = field(value, "rate_limit_info")?;
+    if !info.is_object() {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    let utilization = info
+        .get("utilization")
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or(ProtocolError::InvalidMessage)
+        })
+        .transpose()?;
+    Ok(EventKind::RateLimitObserved {
+        status: rate_limit_status(field(info, "status")?)?,
+        resets_at_unix_secs: optional_count(info, "resetsAt")?,
+        rate_limit_type: info.get("rateLimitType").map(rate_limit_type).transpose()?,
+        utilization,
+        overage_status: info
+            .get("overageStatus")
+            .map(rate_limit_status)
+            .transpose()?,
+        overage_resets_at_unix_secs: optional_count(info, "overageResetsAt")?,
+        overage_disabled_reason: info
+            .get("overageDisabledReason")
+            .map(overage_disabled_reason)
+            .transpose()?,
+    })
+}
+
+fn rate_limit_status(value: &Value) -> Result<RateLimitStatus, ProtocolError> {
+    match value.as_str().ok_or(ProtocolError::InvalidMessage)? {
+        "allowed" => Ok(RateLimitStatus::Allowed),
+        "allowed_warning" => Ok(RateLimitStatus::AllowedWarning),
+        "rejected" => Ok(RateLimitStatus::Rejected),
+        _ => Err(ProtocolError::Unsupported),
+    }
+}
+
+fn rate_limit_type(value: &Value) -> Result<String, ProtocolError> {
+    let value = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
+    match value {
+        "five_hour"
+        | "seven_day"
+        | "seven_day_opus"
+        | "seven_day_sonnet"
+        | "seven_day_overage_included"
+        | "overage" => Ok(value.to_owned()),
+        _ => Err(ProtocolError::Unsupported),
+    }
+}
+
+fn overage_disabled_reason(value: &Value) -> Result<String, ProtocolError> {
+    let value = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
+    match value {
+        "overage_not_provisioned"
+        | "org_level_disabled"
+        | "org_level_disabled_until"
+        | "out_of_credits"
+        | "seat_tier_level_disabled"
+        | "member_level_disabled"
+        | "seat_tier_zero_credit_limit"
+        | "group_zero_credit_limit"
+        | "member_zero_credit_limit"
+        | "org_service_level_disabled"
+        | "no_limits_configured"
+        | "fetch_error"
+        | "unknown" => Ok(value.to_owned()),
+        _ => Err(ProtocolError::Unsupported),
+    }
 }
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, ProtocolError> {

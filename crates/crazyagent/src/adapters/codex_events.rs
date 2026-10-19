@@ -70,6 +70,21 @@ impl CodexEventBridge {
         let mut observed = self.observation(request_id, EventKind::ProtocolInitialized);
         observed.kind = match event {
             Event::Initialized => EventKind::ProtocolInitialized,
+            Event::AccountRateLimitsRead {
+                id,
+                account_id,
+                ordinary_usage_allowed,
+            } => {
+                if id <= 0 {
+                    return Err(BridgeError::InvalidEvent);
+                }
+                observed.native_thread_id = None;
+                EventKind::AccountRateLimitsRead {
+                    id: NativeRequestId::Number(id),
+                    account_id,
+                    ordinary_usage_allowed,
+                }
+            }
             Event::ThreadStarted { thread_id } => {
                 if thread_id.is_empty()
                     || thread_id.len() > FRAME_BYTES_MAX
@@ -114,12 +129,17 @@ impl CodexEventBridge {
                 method,
                 code,
                 message,
-            } => EventKind::RequestFailed {
-                id: NativeRequestId::Number(id),
-                method: method.into(),
-                code,
-                message,
-            },
+            } => {
+                if method == "account/rateLimits/read" {
+                    observed.native_thread_id = None;
+                }
+                EventKind::RequestFailed {
+                    id: NativeRequestId::Number(id),
+                    method: method.into(),
+                    code,
+                    message,
+                }
+            }
             Event::AgentMessageDelta {
                 turn_id,
                 item_id,
@@ -173,7 +193,9 @@ impl CodexEventBridge {
             &observed,
         )
         .map_err(|_| BridgeError::FrameTooLarge)?;
-        self.native_thread_id = observed.native_thread_id.clone();
+        if observed.native_thread_id.is_some() {
+            self.native_thread_id = observed.native_thread_id.clone();
+        }
         self.assert_consistent();
         Ok(observed)
     }

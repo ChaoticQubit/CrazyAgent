@@ -60,6 +60,11 @@ pub enum ApprovalKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Initialized,
+    AccountRateLimitsRead {
+        id: i64,
+        account_id: Option<String>,
+        ordinary_usage_allowed: Option<bool>,
+    },
     ThreadStarted {
         thread_id: String,
     },
@@ -106,6 +111,7 @@ pub enum Event {
 #[derive(Clone, Debug)]
 enum Operation {
     Initialize,
+    AccountRateLimitsRead,
     ThreadStart { cwd: String },
     TurnStart,
     Interrupt { turn_id: String },
@@ -115,6 +121,7 @@ impl Operation {
     fn method(&self) -> &'static str {
         match self {
             Self::Initialize => "initialize",
+            Self::AccountRateLimitsRead => "account/rateLimits/read",
             Self::ThreadStart { .. } => "thread/start",
             Self::TurnStart => "turn/start",
             Self::Interrupt { .. } => "turn/interrupt",
@@ -231,6 +238,21 @@ impl CodexProtocol {
         self.phase = State::ThreadStarting;
         self.assert_consistent();
         assert!(self.turn.is_none());
+        Ok(bytes)
+    }
+
+    pub fn read_account_rate_limits(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.assert_consistent();
+        if !matches!(self.phase, State::Ready | State::Idle | State::Active) {
+            return Err(ProtocolError::InvalidState);
+        }
+        let phase = self.phase;
+        self.require(phase)?;
+        let bytes = self.request(
+            Operation::AccountRateLimitsRead,
+            json!({"excludeResetCreditDetails":true,"supportsLunaReserve":false}),
+        )?;
+        assert_eq!(self.phase, phase);
         Ok(bytes)
     }
 
@@ -457,7 +479,11 @@ impl CodexProtocol {
         let event = if let Some(error) = error {
             self.remote_error(expected, &operation, error)?
         } else {
-            self.success(&operation, result.ok_or(ProtocolError::InvalidMessage)?)?
+            self.success(
+                expected,
+                &operation,
+                result.ok_or(ProtocolError::InvalidMessage)?,
+            )?
         };
         self.pending = None;
         self.assert_consistent();
@@ -480,7 +506,7 @@ impl CodexProtocol {
             Operation::Initialize => State::New,
             Operation::ThreadStart { .. } if self.thread_id.is_none() => State::Ready,
             Operation::TurnStart if self.turn.is_none() => State::Idle,
-            Operation::Interrupt { .. } => self.phase,
+            Operation::Interrupt { .. } | Operation::AccountRateLimitsRead => self.phase,
             _ => return Err(ProtocolError::InvalidMessage),
         };
         assert!(self.pending.is_some());
@@ -495,6 +521,7 @@ impl CodexProtocol {
 
     fn success(
         &mut self,
+        id: i64,
         operation: &Operation,
         result: Value,
     ) -> Result<Option<Event>, ProtocolError> {
@@ -502,6 +529,7 @@ impl CodexProtocol {
             return Err(ProtocolError::InvalidMessage);
         }
         match operation {
+            Operation::AccountRateLimitsRead => account_rate_limits(id, &result).map(Some),
             Operation::Initialize => {
                 for key in ["userAgent", "platformFamily", "platformOs"] {
                     identifier(&result[key])?;
@@ -750,6 +778,32 @@ fn encode(value: Value) -> Result<Vec<u8>, ProtocolError> {
     assert!(bytes.len() <= FRAME_BYTES_MAX);
     assert_eq!(bytes.last(), Some(&b'\n'));
     Ok(bytes)
+}
+
+fn account_rate_limits(id: i64, result: &Value) -> Result<Event, ProtocolError> {
+    if !result.get("rateLimits").is_some_and(Value::is_object) {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    let account_id = result
+        .get("accountId")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(ProtocolError::InvalidMessage)
+        })
+        .transpose()?;
+    let ordinary_usage_allowed = result
+        .get("ordinaryUsageAllowed")
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_bool().ok_or(ProtocolError::InvalidMessage))
+        .transpose()?;
+    Ok(Event::AccountRateLimitsRead {
+        id,
+        account_id,
+        ordinary_usage_allowed,
+    })
 }
 
 fn identifier(value: &Value) -> Result<String, ProtocolError> {
