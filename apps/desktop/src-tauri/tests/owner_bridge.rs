@@ -11,6 +11,40 @@ use crazyagent_desktop::bridge::NativeBridge;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
+#[tokio::test]
+async fn metadata_reads_expire_prior_approval_inspections_even_when_the_read_fails() {
+    use crazyagent::engine::owner::ModelAccessCollection;
+    let root = tempfile::Builder::new()
+        .prefix("ca-dmeta-approval-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result: Result<(), Box<dyn std::error::Error>> = async {
+        let (initial, _) = inspect_fixture(root.path()).await?;
+        let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+        bridge.connect().await?;
+        let inspected = bridge.inspect(&initial.id).await?;
+        bridge.model_access_page(ModelAccessCollection::Accounts, false).await?;
+        if !matches!(bridge.approve(&inspected.ticket).await, Err(error) if error.code == "stale_selection") {
+            return Err("metadata navigation must expire approval inspection".into());
+        }
+        let inspected = bridge.inspect(&initial.id).await?;
+        bridge.inspect_model_access(ModelAccessCollection::Accounts, "missing").await.unwrap_err();
+        if !matches!(bridge.approve(&inspected.ticket).await, Err(error) if error.code == "stale_selection") || bridge.status().pending {
+            return Err("failed metadata inspection must expire approval authority".into());
+        }
+        Ok(())
+    }.await;
+    let cleanup = service.shutdown().await;
+    assert!(cleanup.is_ok(), "real engine cleanup failed");
+    result.unwrap();
+}
+
 fn baseline() -> BaselineDraft {
     BaselineDraft {
         version: 1,

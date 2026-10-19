@@ -5,8 +5,11 @@ mod native_refresh_observation;
 
 use bridge::{
     ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, HistoryPage,
-    IntentReceipt, NativeBridge, PendingIntent, ProjectDetail, ProjectPage,
+    IntentReceipt, ModelAccessDetail, ModelAccessPage, NativeBridge, PendingIntent, ProjectDetail,
+    ProjectPage,
 };
+use crazyagent::config::ModelAccessEdit;
+use crazyagent::engine::owner::ModelAccessCollection;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -184,6 +187,42 @@ async fn desktop_retry_intent(
     lock(&state)?.retry_intent().await
 }
 
+#[tauri::command]
+async fn desktop_model_access_page(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    collection: ModelAccessCollection,
+    next: bool,
+) -> Result<ModelAccessPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.model_access_page(collection, next).await
+}
+
+#[tauri::command]
+async fn desktop_inspect_model_access(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    collection: ModelAccessCollection,
+    id: String,
+) -> Result<ModelAccessDetail, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.inspect_model_access(collection, &id).await
+}
+
+#[tauri::command]
+async fn desktop_edit_model_access(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    edit: ModelAccessEdit,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .edit_model_access(&ticket, edit, generation)
+        .await
+}
+
 pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
@@ -205,6 +244,9 @@ pub fn run() {
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,
+            desktop_model_access_page,
+            desktop_inspect_model_access,
+            desktop_edit_model_access,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

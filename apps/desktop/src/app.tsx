@@ -1,15 +1,17 @@
 import { useOwnerBrowser } from "./state";
 import { BaselineInspection } from "./screens/baseline";
 import { Conversation } from "./screens/conversation";
+import { ModelAccess } from "./screens/model-access";
 import type { BaselinePage } from "./engine-client";
 
-function Sidebar({ connected, view, approvals, conversation }: { connected: boolean; view: string; approvals: () => Promise<void>; conversation: () => Promise<void> }) {
+function Sidebar({ connected, view, approvals, conversation, settings }: { connected: boolean; view: string; approvals: () => Promise<void>; conversation: () => Promise<void>; settings: () => Promise<void> }) {
   return <aside className="sidebar">
     <div className="brand"><span className="brand-mark" aria-hidden="true">C</span><strong>CrazyAgent</strong></div>
     <p className="eyebrow">Workspace</p>
     <nav aria-label="Workspace views">
       <button className={`nav-item ${view === "approvals" ? "selected" : ""}`} aria-current={view === "approvals" ? "page" : undefined} onClick={() => void approvals()}>Approvals</button>
       <button className={`nav-item ${view === "conversation" ? "selected" : ""}`} aria-current={view === "conversation" ? "page" : undefined} onClick={() => void conversation()}>Conversation</button>
+      <button className={`nav-item ${view === "settings" ? "selected" : ""}`} aria-current={view === "settings" ? "page" : undefined} onClick={() => void settings()}>Settings</button>
       {["Projects", "Knowledge", "Supervision"].map((name) => (
         <button className="nav-item" key={name} disabled title="Unavailable in this build">{name}</button>
       ))}
@@ -42,10 +44,10 @@ function BaselineList({ page, selected, busy, connected, refresh, select }: {
 export function App() {
   const state = useOwnerBrowser();
   return <div className="app-shell">
-    <Sidebar connected={state.connected} view={state.view} approvals={state.showApprovals} conversation={state.showConversation} />
+    <Sidebar connected={state.connected} view={state.view} approvals={state.showApprovals} conversation={state.showConversation} settings={state.showSettings} />
     <main>
       <header className="page-header">
-        <div><p className="eyebrow">Human decisions</p><h1>{state.view === "conversation" ? "Project conversation" : "Approvals"}</h1><p className="muted">{state.view === "conversation" ? "Durable owner messages and explicit versioned briefs from the engine." : "Inspect the engine's verification contract before granting approval."}</p></div>
+        <div><p className="eyebrow">Human decisions</p><h1>{state.view === "settings" ? "Settings" : state.view === "conversation" ? "Project conversation" : "Approvals"}</h1><p className="muted">{state.view === "settings" ? "Model access metadata, published by the authenticated engine owner." : state.view === "conversation" ? "Durable owner messages and explicit versioned briefs from the engine." : "Inspect the engine's verification contract before granting approval."}</p></div>
         <button onClick={() => void state.reconnect()} disabled={state.busy} data-testid="connect-owner">{state.connected ? "Reconnect" : "Connect to engine"}</button>
       </header>
       <div aria-live="polite" aria-atomic="true" className="notice-region">
@@ -54,6 +56,7 @@ export function App() {
         {state.pending && <div className="notice">
           <p>An unresolved owner intent is retained in this native process. New decisions are blocked. Retry preserves its original revision and content.</p>
           {state.intent && <p>Original intent: {state.intent.kind} · {state.intent.project_id ?? state.intent.baseline_id}</p>}
+          {state.intent?.model_access && <pre data-testid="pending-model-access">{JSON.stringify(state.intent.model_access, null, 2)}</pre>}
           <div className="button-row">
             <button disabled={state.busy || !state.connected} onClick={() => void state.reconcile()} data-testid="reconcile-owner">Reconcile intent</button>
             <button disabled={state.busy || !state.connected} onClick={() => void state.retry()} data-testid="retry-owner">Retry exact intent</button>
@@ -61,7 +64,7 @@ export function App() {
         </div>}
         {state.busy && <p role="status" className="muted">Owner request in progress…</p>}
       </div>
-      {state.view === "conversation" ? <Conversation state={state} /> : <section className="baseline-browser" aria-busy={state.busy}>
+      {state.view === "settings" ? <ModelAccess state={state} /> : state.view === "conversation" ? <Conversation state={state} /> : <section className="baseline-browser" aria-busy={state.busy}>
         <BaselineList page={state.page} selected={state.detail?.id} busy={state.busy} connected={state.connected} refresh={state.refresh} select={state.select} />
         {state.detail ? <BaselineInspection detail={state.detail} blocked={state.busy || state.pending || !state.connected} approve={state.approve} revoke={state.revoke} /> : <div className="inspection empty"><h2>Inspect a baseline</h2><p>Select an engine baseline to read its requirements and checks.</p></div>}
       </section>}

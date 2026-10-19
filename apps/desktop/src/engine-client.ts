@@ -77,6 +77,29 @@ export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
   const messages: Record<string, string> = {
+    settings_source_conflict: "Global or project settings changed outside this editor. The engine host must reconcile the configured sources; then refresh and review retained values.",
+    settings_source_replaced: "The configured settings file was replaced. Reconnect after the engine host verifies its source grant.",
+    settings_publication_pending: "The engine has an unresolved durable settings publication. Reconcile the original intent after the engine recovers it.",
+    account_exists: "That account reference already exists. Refresh and inspect it.",
+    connection_exists: "That connection identity already exists. Inspect it before replacing it.",
+    pool_exists: "That pool identity already exists. Inspect it before replacing it.",
+    account_not_found: "That account reference no longer exists. Refresh the metadata.",
+    connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
+    pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
+    model_access_record_not_found: "That metadata identity was not found. Refresh the collection and choose a current record.",
+    owner_revoked: "Desktop owner authority was revoked. The engine host must restore it before reconnecting.",
+    stale_revision: "The engine revision changed. Refresh and review retained values before saving.",
+    stale_model_access: "This metadata form no longer matches its owner snapshot. Refresh and review the retained values before saving.",
+    settings_read_only: "Model metadata is read-only. The engine host must grant writable settings sources before edits can be published.",
+    settings_source_changed: "The settings source changed outside this editor. Refresh and review retained values before saving again.",
+    settings_project_changed: "Project settings changed. Refresh the effective configuration and review retained values.",
+    settings_pending: "The engine has an unresolved settings publication. Reconcile the original intent before another edit.",
+    stale_config: "The effective configuration changed. Refresh and review retained values before saving.",
+    invalid_model_access: "The engine rejected the metadata. Check references, endpoint/protocol/auth compatibility, unique pool members and project/role scope.",
+    model_access_duplicate: "That metadata identity already exists. Refresh and inspect it before replacing it.",
+    model_access_missing: "That metadata identity no longer exists. Refresh before choosing another edit.",
+    model_access_referenced: "This record is still referenced by a connection or pool. Update those records before removal.",
+    model_access_edit_bounds: "The metadata edit exceeds the engine byte limit. Reduce the entered values.",
     invalid_project: "The selected project identity is invalid.",
     draft_generation_limit: "This draft reached its safe generation limit. Preserve it before restarting.",
     conversation_text_bounds: "Text must be nonempty, contain no NUL, and fit within 8192 UTF-8 bytes. The draft was not submitted.",
@@ -134,10 +157,11 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
+  model_access: ModelAccessEdit | null;
 }
 
 export interface IntentReceipt extends PendingIntent {
@@ -176,4 +200,62 @@ export function reconcileIntent(): Promise<IntentReceipt> {
 
 export function retryIntent(): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_retry_intent");
+}
+
+export type ModelAccessCollection = "accounts" | "connections" | "pools";
+
+export type ModelAuthentication = { method: "none" } | { method: "api_key" | "oauth"; credential_ref: string } | { method: "native_managed"; profile_ref: string };
+
+export interface ModelConnection {
+  id: string;
+  provider: string;
+  harness: string;
+  protocol: string;
+  account_ref: string;
+  endpoint: { kind: "http"; url: string } | { kind: "native" };
+  model: { id: string; author: string };
+  auth: ModelAuthentication;
+}
+
+export interface AccountPool {
+  id: string;
+  members: string[];
+  projects: string[];
+  roles: string[];
+  fallback_allowed: boolean;
+}
+
+export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };
+
+export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool };
+
+export interface ModelAccessBasis {
+  ticket: string;
+  collection: ModelAccessCollection;
+  revision: string;
+  config_id: string;
+  source_hash: string;
+  writable: boolean;
+  fresh: boolean;
+}
+
+export interface ModelAccessPage extends ModelAccessBasis {
+  items: ModelAccessRecord[];
+  has_more: boolean;
+}
+
+export interface ModelAccessDetail extends ModelAccessBasis {
+  record: ModelAccessRecord;
+}
+
+export function modelAccessPage(collection: ModelAccessCollection, next = false): Promise<ModelAccessPage> {
+  return invoke<ModelAccessPage>("desktop_model_access_page", { collection, next });
+}
+
+export function inspectModelAccess(collection: ModelAccessCollection, id: string): Promise<ModelAccessDetail> {
+  return invoke<ModelAccessDetail>("desktop_inspect_model_access", { collection, id });
+}
+
+export function editModelAccess(ticket: string, edit: ModelAccessEdit, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_edit_model_access", { ticket, edit, generation });
 }

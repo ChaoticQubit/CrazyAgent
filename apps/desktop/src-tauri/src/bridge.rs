@@ -14,6 +14,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod model_access;
+pub use model_access::{ModelAccessDetail, ModelAccessPage};
+
 const PAGE_SIZE: u8 = 16;
 const PROJECTION_BYTES_MAX: usize = 65_536;
 
@@ -159,6 +162,7 @@ pub struct PendingIntent {
     pub project_id: Option<String>,
     pub baseline_id: Option<String>,
     pub generation: String,
+    pub model_access: Option<crazyagent::config::ModelAccessEdit>,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +190,8 @@ pub struct NativeBridge {
     selected: Option<BaselineSelection>,
     projects_next: Option<OwnerPageCursor>,
     project: Option<ProjectSelection>,
+    model_access: Option<model_access::Selection>,
+    model_access_next: Option<crazyagent::engine::owner::ModelAccessCursor>,
 }
 
 impl NativeBridge {
@@ -199,10 +205,14 @@ impl NativeBridge {
             selected: None,
             projects_next: None,
             project: None,
+            model_access: None,
+            model_access_next: None,
         }
     }
 
     pub async fn connect(&mut self) -> Result<ConnectionStatus, BridgeError> {
+        self.model_access = None;
+        self.model_access_next = None;
         self.next = None;
         self.selected = None;
         self.project = None;
@@ -406,6 +416,7 @@ impl NativeBridge {
             OwnerMutation::Conversation {
                 mutation: ConversationMutation::ReplaceBrief { project_id, .. },
             } => ("brief", Some(project_id.as_str().to_owned()), None),
+            OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
             _ => return Err(failure("unexpected_pending_intent")),
         };
         bounded(Some(PendingIntent {
@@ -413,6 +424,10 @@ impl NativeBridge {
             project_id,
             baseline_id,
             generation: pending.generation().to_string(),
+            model_access: match mutation {
+                OwnerMutation::ModelAccess { edit, .. } => Some(edit.clone()),
+                _ => None,
+            },
         }))
     }
 
@@ -430,6 +445,8 @@ impl NativeBridge {
             .ok_or_else(|| failure("no_pending_intent"))?;
         self.selected = None;
         self.next = None;
+        self.model_access = None;
+        self.model_access_next = None;
         let response = if reconcile {
             self.controller()?.reconcile_pending().await
         } else {
@@ -684,6 +701,25 @@ fn conversation_row(entry: ConversationEntry) -> ConversationRow {
 
 fn rejection_code(code: &str) -> &'static str {
     match code {
+        "settings_source_conflict" => "settings_source_conflict",
+        "settings_source_replaced" => "settings_source_replaced",
+        "settings_publication_pending" => "settings_publication_pending",
+        "account_exists" => "account_exists",
+        "connection_exists" => "connection_exists",
+        "pool_exists" => "pool_exists",
+        "account_not_found" => "account_not_found",
+        "connection_not_found" => "connection_not_found",
+        "pool_not_found" => "pool_not_found",
+        "settings_read_only" => "settings_read_only",
+        "settings_source_changed" => "settings_source_changed",
+        "settings_project_changed" => "settings_project_changed",
+        "settings_pending" => "settings_pending",
+        "stale_config" => "stale_config",
+        "invalid_model_access" => "invalid_model_access",
+        "model_access_duplicate" => "model_access_duplicate",
+        "model_access_missing" => "model_access_missing",
+        "model_access_referenced" => "model_access_referenced",
+        "model_access_edit_bounds" => "model_access_edit_bounds",
         "stale_brief_version" => "stale_brief_version",
         "conversation_capacity" => "conversation_capacity",
         "project_missing" => "project_missing",

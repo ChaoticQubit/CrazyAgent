@@ -3,7 +3,8 @@ use crazyagent::config::resolve_config;
 use crazyagent::engine::Client;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult, OwnerView,
+    ModelAccessCollection, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse,
+    OwnerResult, OwnerView,
 };
 use crazyagent::protocol::*;
 use crazyagent::verification::*;
@@ -101,13 +102,24 @@ async fn await_stop(id: BaselineId) -> FixtureResult<()> {
     }
 }
 
-async fn serve(root: &Path) -> FixtureResult<()> {
+async fn serve(root: &Path, metadata: bool) -> FixtureResult<()> {
     if !root.is_absolute() || std::fs::read_dir(root)?.next().is_some() {
         return Err("fixture requires a new empty absolute directory".into());
     }
-    let config = resolve_config(&root.join("g"), &root.join("p"))?;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let mut service = EngineService::start(root, "e.sock", &config, &stopped).await?;
+    let mut service = if metadata {
+        EngineService::start_with_settings_sources(
+            root,
+            "e.sock",
+            &root.join("g"),
+            &root.join("p"),
+            &stopped,
+        )
+        .await?
+    } else {
+        let config = resolve_config(&root.join("g"), &root.join("p"))?;
+        EngineService::start(root, "e.sock", &config, &stopped).await?
+    };
     let result = match seed(root).await {
         Ok(id) => await_stop(id).await,
         Err(error) => Err(error),
@@ -145,11 +157,50 @@ async fn observe(id: &str) -> FixtureResult<()> {
     }
 }
 
+async fn observe_model_access() -> FixtureResult<()> {
+    let socket =
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").ok_or("native fixture socket is required")?;
+    let client = Client::new(socket.into(), Duration::from_secs(3))?;
+    let (_, mut owner) = OwnerController::attach_configured(client, OwnerClientKind::Tui).await?;
+    let mut records = Vec::new();
+    for collection in [
+        ModelAccessCollection::Accounts,
+        ModelAccessCollection::Connections,
+        ModelAccessCollection::Pools,
+    ] {
+        let state = owner
+            .read(OwnerRead::ModelAccessPage {
+                collection,
+                cursor: None,
+                limit: 16,
+            })
+            .await?;
+        let OwnerData::ModelAccessPage {
+            items,
+            next,
+            writable,
+            ..
+        } = state.data
+        else {
+            return Err("actual metadata page required".into());
+        };
+        if next.is_some() {
+            return Err("native fixture observation exceeds one page".into());
+        }
+        records.push(json!({ "collection": collection, "items": items, "writable": writable, "revision": state.revision.value().to_string() }));
+    }
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|record| record["items"].is_array()));
+    emit(json!({ "collections": records }))
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(3).collect();
     let result = match args.as_slice() {
-        [mode, root] if mode == "serve" => serve(Path::new(root)).await,
+        [mode, root] if mode == "serve" => serve(Path::new(root), false).await,
+        [mode, root] if mode == "serve-model-access" => serve(Path::new(root), true).await,
+        [mode] if mode == "observe-model-access" => observe_model_access().await,
         [mode, id] if mode == "observe" => match id.to_str() {
             Some(id) => observe(id).await,
             None => Err("invalid baseline id".into()),

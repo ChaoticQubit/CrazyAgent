@@ -3,11 +3,15 @@ import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
   revokeBaseline, sendMessage, status,
+  modelAccessPage, inspectModelAccess, editModelAccess,
 } from "./engine-client";
 import type {
   ActionReceipt, BaselineDetail, BaselinePage, HistoryPage, IntentReceipt,
   PendingIntent, ProjectDetail, ProjectPage,
+  ModelAccessCollection, ModelAccessPage, ModelAccessDetail,
 } from "./engine-client";
+import { editFromForm, newForm, formFromRecord, rebaseForm } from "./model-access";
+import type { ModelAccessForm } from "./model-access";
 
 export interface Draft {
   text: string;
@@ -40,7 +44,13 @@ export function useOwnerBrowser() {
   const [historyPage, setHistoryPage] = useState<HistoryPage>();
   const [projectId, setProjectId] = useState("");
   const [drafts, setDrafts] = useState<Record<string, ProjectDrafts>>(() => Object.create(null));
-  const [view, setView] = useState<"approvals" | "conversation">("approvals");
+  const [view, setView] = useState<"approvals" | "conversation" | "settings">("approvals");
+  const [modelCollection, setModelCollection] = useState<ModelAccessCollection>("accounts");
+  const [modelPage, setModelPage] = useState<ModelAccessPage>();
+  const [modelDetail, setModelDetail] = useState<ModelAccessDetail>();
+  const [modelForm, setModelForm] = useState<{ value: ModelAccessForm; generation: number }>();
+  const activeCollection = useRef<ModelAccessCollection>("accounts");
+  const currentModelForm = useRef(modelForm);
   const [connected, setConnected] = useState(false);
   const [pending, setPending] = useState(false);
   const [intent, setIntent] = useState<PendingIntent | null>(null);
@@ -74,6 +84,8 @@ export function useOwnerBrowser() {
     setProjectPage((old) => old ? { ...old, fresh: false } : old);
     setProject((old) => old ? { ...old, fresh: false } : old);
     setHistoryPage((old) => old ? { ...old, fresh: false } : old);
+    setModelPage((old) => old ? { ...old, fresh: false } : old);
+    setModelDetail((old) => old ? { ...old, fresh: false } : old);
   }
 
   async function run(action: () => Promise<void>, clearNotice = false) {
@@ -139,6 +151,7 @@ export function useOwnerBrowser() {
     setConnected(result.connected);
     setPending(result.pending);
     if (activeView.current === "approvals") setPage(await baselines());
+    else if (activeView.current === "settings") await loadModels();
     else {
       setProjectPage(await projects());
       if (activeProject.current) await loadProject(activeProject.current);
@@ -161,6 +174,17 @@ export function useOwnerBrowser() {
   }
 
   async function finishIntent(receipt: IntentReceipt) {
+    if (receipt.kind === "model_access") {
+      setPending(receipt.pending);
+      setNotice(`Model metadata: ${receiptMessage(receipt)}` + (receipt.rejection ? ` ${errorMessage({ code: receipt.rejection })}` : ""));
+      stale();
+      if (receipt.outcome === "applied" && !receipt.pending && String(currentModelForm.current?.generation) === receipt.generation) {
+        currentModelForm.current = undefined;
+        setModelForm(undefined);
+      }
+      if (!receipt.pending && activeView.current === "settings") await loadModels();
+      return;
+    }
     if (receipt.baseline_id) {
       await finishBaseline({ ...receipt, baseline_id: receipt.baseline_id });
       return;
@@ -198,11 +222,26 @@ export function useOwnerBrowser() {
     }
   }
 
+  async function loadModels(next = false) {
+    const collection = activeCollection.current;
+    if (activeView.current !== "settings") return;
+    setModelDetail(undefined);
+    const page = await modelAccessPage(collection, next);
+    if (activeView.current === "settings" && collection === activeCollection.current) setModelPage(page);
+  }
+
+  function retainModelForm(value: ModelAccessForm) {
+    const retained = { value, generation: nextGeneration() };
+    currentModelForm.current = retained;
+    setModelForm(retained);
+  }
+
   useEffect(() => { void run(reconnect); }, []);
 
   return {
     page, detail, connected, pending, intent, busy, error, notice, view,
     projectPage, project, historyPage, projectId, drafts,
+    modelCollection, modelPage, modelDetail, modelForm,
     reconnect: () => run(reconnect),
     refresh: (next = false) => run(() => refresh(next)),
     select: (id: string) => run(async () => setDetail(await inspectBaseline(id))),
@@ -211,12 +250,14 @@ export function useOwnerBrowser() {
     reconcile: () => run(async () => finishIntent(await reconcileIntent()), true),
     retry: () => run(async () => finishIntent(await retryIntent()), true),
     showApprovals: () => {
+      stale();
       activeView.current = "approvals";
       setView("approvals");
       setDetail(undefined);
       return read(() => activeView.current === "approvals" ? refresh() : Promise.resolve());
     },
     showConversation: () => {
+      stale();
       activeView.current = "conversation";
       setView("conversation");
       setDetail((old) => old ? { ...old, fresh: false } : old);
@@ -226,6 +267,69 @@ export function useOwnerBrowser() {
         if (activeProject.current) await loadProject(activeProject.current);
       });
     },
+    showSettings: (collection: ModelAccessCollection = activeCollection.current) => {
+      stale();
+      activeView.current = "settings";
+      activeCollection.current = collection;
+      setView("settings");
+      setModelCollection(collection);
+      setModelPage(undefined);
+      setModelDetail(undefined);
+      return read(() => loadModels());
+    },
+    refreshModels: (next = false) => read(() => loadModels(next)),
+    selectModel: (id: string) => read(async () => {
+      const collection = activeCollection.current;
+      const detail = await inspectModelAccess(collection, id);
+      if (activeView.current === "settings" && collection === activeCollection.current) setModelDetail(detail);
+    }),
+    createModel: () => run(async () => {
+      if (currentModelForm.current || pending || activeView.current !== "settings") return;
+      const collection = activeCollection.current;
+      const page = await modelAccessPage(collection);
+      if (activeView.current !== "settings" || collection !== activeCollection.current) return;
+      setModelPage(page);
+      setModelDetail(undefined);
+      if (page.writable) retainModelForm(newForm(collection, page.ticket));
+    }),
+    editModel: (remove = false) => {
+      if (!modelDetail?.fresh || !modelDetail.writable || currentModelForm.current || pending) return;
+      try { retainModelForm(formFromRecord(modelDetail.record, modelDetail.ticket, remove)); }
+      catch { setError("The metadata form could not be retained. Preserve its values before restarting."); }
+    },
+    changeModelForm: (patch: Partial<ModelAccessForm>) => {
+      const retained = currentModelForm.current;
+      if (!retained) return;
+      const value = { ...retained.value, ...patch };
+      if (JSON.stringify(value).length > 32768 || Object.values(value).some((value) => typeof value === "string" && (value.length > 16384 || value.includes("\0")))) {
+        setError("Metadata edit exceeds the form bounds or contains NUL. Previous values are retained.");
+        return;
+      }
+      try { retainModelForm(value); setError(""); }
+      catch { setError("This draft reached its safe generation limit. Preserve its values before restarting."); }
+    },
+    reviewModelForm: () => run(async () => {
+      const retained = currentModelForm.current;
+      if (!retained || pending) return;
+      const form = retained.value;
+      activeCollection.current = form.collection;
+      setModelCollection(form.collection);
+      const basis = form.action === "create" ? await modelAccessPage(form.collection) : await inspectModelAccess(form.collection, form.id);
+      if (form.action === "create") { setModelPage(basis as ModelAccessPage); setModelDetail(undefined); }
+      else setModelDetail(basis as ModelAccessDetail);
+      if (!basis.writable) throw { code: "settings_read_only" };
+      if (currentModelForm.current === retained) retainModelForm(rebaseForm(form, basis));
+      setNotice("Latest owner metadata loaded. Review the retained values before explicitly saving.");
+    }),
+    discardModelForm: () => { currentModelForm.current = undefined; setModelForm(undefined); },
+    submitModel: () => run(async () => {
+      const retained = currentModelForm.current;
+      if (!retained || pending || activeView.current !== "settings") return;
+      let edit;
+      try { edit = editFromForm(retained.value); }
+      catch (failure) { setError(failure instanceof Error ? failure.message : "Invalid metadata form."); return; }
+      await finishIntent(await editModelAccess(retained.value.ticket, edit, retained.generation));
+    }, true),
     refreshProjects: (next = false) => read(async () => setProjectPage(await projects(next))),
     selectProject: (id: string) => {
       activeProject.current = id;

@@ -21,6 +21,8 @@ const started = new Date().toISOString();
 const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
+const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE ?? "baseline";
+assert(["baseline", "model-access", "model-access-read-only"].includes(suite), "closed native suite required");
 let interrupted = false;
 
 function interrupt() {
@@ -57,6 +59,7 @@ function environment() {
     CRAZYAGENT_DESKTOP_TEST_APP: app,
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture,
     CRAZYAGENT_DESKTOP_TEST_EVIDENCE: evidence,
+    CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
   };
 }
 
@@ -198,7 +201,7 @@ async function execute() {
   const binaries = [binary(app), binary(fixture)];
   const env = environment();
   const port = await unusedPort();
-  const engine = launch("engine", fixture, ["serve", engineRoot], env, 150);
+  const engine = launch("engine", fixture, [suite === "model-access" ? "serve-model-access" : "serve", engineRoot], env, 150);
   let failure = null;
   let code = 1;
   try {
@@ -206,7 +209,7 @@ async function execute() {
     env.CRAZYAGENT_DESKTOP_TEST_BASELINE = state.baseline_id;
     env.CRAZYAGENT_DESKTOP_TEST_PORT = String(port);
     const test = launch("webdriver", process.execPath,
-      [join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run", "wdio.conf.mjs"], env, 120);
+      [join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run", suite === "baseline" ? "wdio.conf.mjs" : "test/native/model-access.wdio.conf.mjs"], env, 120);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
     code = result.code;
