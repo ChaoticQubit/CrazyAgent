@@ -343,6 +343,21 @@ async fn discover_owner(
     Ok((client, identity, binding))
 }
 
+pub(super) fn runner_binding(
+    input: &Path,
+) -> Result<(PathBuf, OwnerConnectionIdentity, NativeBinding), EngineError> {
+    let anchor = Anchor::open(input)?;
+    let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
+    let binding = NativeBinding { anchor, pinned };
+    binding.verify()?;
+    let generation = binding.anchor.path.join(&binding.pinned.value.generation);
+    let identity = OwnerConnectionIdentity {
+        database_instance: binding.pinned.value.db_instance.clone(),
+        engine_epoch: binding.pinned.value.engine_epoch.clone(),
+    };
+    Ok((generation, identity, binding))
+}
+
 pub(super) async fn discover_pair(
     socket: &Path,
     kind: OwnerClientKind,
@@ -413,6 +428,56 @@ fn check_path_length(path: &Path) -> Result<(), EngineError> {
 }
 
 impl EngineService {
+    pub async fn prepare_runner(
+        &mut self,
+        attempt: &crate::worker_dispatch::AttemptRef,
+    ) -> Result<crate::worker_dispatch::PreparedRunner, EngineError> {
+        self.runner_host_ready()?;
+        if attempt.reservation_cursor.value() == 0 {
+            return Err(fail("runner_attempt_cursor_zero"));
+        }
+        let prepared = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .prepare_runner(&self.anchor.path, attempt)
+            .await?;
+        self.runner_host_ready()?;
+        Ok(prepared)
+    }
+
+    pub async fn attach_runner(
+        &mut self,
+        prepared: &crate::worker_dispatch::PreparedRunner,
+    ) -> Result<crate::worker_dispatch::RunnerReady, EngineError> {
+        self.runner_host_ready()?;
+        if prepared.root().parent() != Some(self.anchor.path.as_path()) {
+            return Err(fail("runner_registration_root"));
+        }
+        let ready = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .attach_runner(prepared)
+            .await?;
+        self.runner_host_ready()?;
+        Ok(ready)
+    }
+
+    fn runner_host_ready(&mut self) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let locator = self
+            .locator
+            .as_ref()
+            .ok_or_else(|| fail("owner_locator_missing"))?;
+        locator.verify(&self.anchor)?;
+        check_database(&self.anchor, locator.value.database)?;
+        check_generation(&self.anchor, &locator.value)
+    }
+
     pub async fn start(
         input: &Path,
         ordinary: &str,

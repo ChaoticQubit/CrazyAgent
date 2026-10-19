@@ -16,4 +16,5 @@ pub mod routing;
 pub mod storage;
 pub mod tui;
 pub mod verification;
+pub mod worker_dispatch;
 pub mod worktrees;

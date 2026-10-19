@@ -1,8 +1,14 @@
 use super::*;
+use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
 use crate::storage::Job;
+use crate::worker_dispatch::{
+    AttemptRef, PreparedRunner, RUNNER_BOOTSTRAP_MAX, RUNNERS_MAX, RunnerBootIdentity,
+    RunnerBootstrap, RunnerReady, RunnerReply, RunnerRequest,
+};
 use rustix::fs::{Mode, OFlags};
 use std::fs::File;
+use std::io::Read;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -116,8 +122,12 @@ impl Root {
     }
 
     fn socket_identity(&self) -> Result<Identity, EngineError> {
+        self.socket_identity_at(SOCKET)
+    }
+
+    fn socket_identity_at(&self, name: &str) -> Result<Identity, EngineError> {
         self.verify()?;
-        let m = std::fs::symlink_metadata(self.path.join(SOCKET)).map_err(io_error)?;
+        let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if !m.file_type().is_socket()
             || m.uid() != rustix::process::getuid().as_raw()
             || m.mode() & 0o7777 != 0o600
@@ -151,15 +161,419 @@ struct Slot {
     identity: Identity,
 }
 
+struct PinnedBootstrap {
+    file: File,
+    identity: Identity,
+    bytes: Vec<u8>,
+    value: RunnerBootstrap,
+}
+
+impl PinnedBootstrap {
+    fn read(root: &Root) -> Result<Self, EngineError> {
+        let file = root.open_key("engine-bootstrap", false)?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take((RUNNER_BOOTSTRAP_MAX + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.is_empty() || bytes.len() > RUNNER_BOOTSTRAP_MAX {
+            return Err(failure("runner_bootstrap_bounds"));
+        }
+        let value: RunnerBootstrap =
+            serde_json::from_slice(&bytes).map_err(|_| failure("runner_bootstrap_invalid"))?;
+        value.validate()?;
+        let pinned = Self {
+            identity: Identity::of(&file.metadata().map_err(io_error)?),
+            file,
+            bytes,
+            value,
+        };
+        pinned.verify(root)?;
+        Ok(pinned)
+    }
+
+    fn create(root: &Root, value: RunnerBootstrap) -> Result<Self, EngineError> {
+        value.validate()?;
+        let bytes = serde_json::to_vec(&value).map_err(io_error)?;
+        if bytes.is_empty() || bytes.len() > RUNNER_BOOTSTRAP_MAX {
+            return Err(failure("runner_bootstrap_bounds"));
+        }
+        let file = root.open_key("engine-bootstrap", true)?;
+        file.write_all_at(&bytes, 0).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        let pinned = Self {
+            identity: Identity::of(&file.metadata().map_err(io_error)?),
+            file,
+            bytes,
+            value,
+        };
+        pinned.verify(root)?;
+        root.directory.sync_all().map_err(io_error)?;
+        Ok(pinned)
+    }
+
+    fn verify(&self, root: &Root) -> Result<(), EngineError> {
+        root.verify()?;
+        let actual = self.file.metadata().map_err(io_error)?;
+        let named = rustix::fs::statat(
+            &root.directory,
+            "engine-bootstrap",
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(io_error)?;
+        if !actual.is_file()
+            || actual.uid() != rustix::process::getuid().as_raw()
+            || actual.mode() & 0o7777 != 0o600
+            || actual.nlink() != 1
+            || actual.len() != self.bytes.len() as u64
+            || Identity::of(&actual) != self.identity
+            || named.st_ino != actual.ino()
+            || named.st_dev as u64 != actual.dev()
+        {
+            return Err(failure("runner_bootstrap_replaced_or_unsafe"));
+        }
+        let mut bytes = vec![0; self.bytes.len()];
+        self.file.read_exact_at(&mut bytes, 0).map_err(io_error)?;
+        if bytes != self.bytes {
+            return Err(failure("runner_bootstrap_content_changed"));
+        }
+        Ok(())
+    }
+}
+
+struct RunnerKey {
+    file: File,
+    identity: Identity,
+    token: [u8; 32],
+}
+
+struct RunnerSlot {
+    prepared: PreparedRunner,
+    root: Root,
+    bootstrap: PinnedBootstrap,
+    binding: WorkerBinding,
+    key: Option<RunnerKey>,
+    boot: Option<RunnerBootIdentity>,
+    endpoint: Option<Identity>,
+    active: bool,
+    ready: Option<RunnerReady>,
+}
+
+impl RunnerSlot {
+    fn assert_consistent(&self) {
+        assert_eq!(self.prepared.root, self.root.path);
+        assert_eq!(
+            self.prepared.registration_id,
+            self.bootstrap.value.registration_id
+        );
+        assert_eq!(self.prepared.attempt, self.bootstrap.value.attempt);
+        assert_eq!(self.prepared.slot, self.bootstrap.value.slot);
+        assert_eq!(self.binding.plan_id, self.prepared.attempt.plan_id);
+        assert_eq!(self.binding.task_id, self.prepared.attempt.item_id);
+        assert_eq!(
+            self.binding.attempt_cursor,
+            self.prepared.attempt.reservation_cursor
+        );
+        if self.active {
+            assert!(self.key.is_some() && self.boot.is_some() && self.endpoint.is_some());
+        }
+        if let Some(ready) = &self.ready {
+            assert!(self.active);
+            assert_eq!(ready.registration_id, self.prepared.registration_id);
+            assert_eq!(ready.attempt, self.prepared.attempt);
+            assert_eq!(Some(&ready.boot), self.boot.as_ref());
+        }
+    }
+
+    fn verify(&self, generation: &Root) -> Result<(), EngineError> {
+        self.assert_consistent();
+        self.bootstrap.verify(&self.root)?;
+        if let Some(key) = &self.key {
+            generation.verify_key(
+                &format!("r{:02x}.cap", self.prepared.slot),
+                &key.file,
+                key.identity,
+            )?;
+            let mut observed = [0; 32];
+            key.file.read_exact_at(&mut observed, 0).map_err(io_error)?;
+            if !bool::from(key.token.ct_eq(&observed)) {
+                return Err(failure("runner_capability_content_changed"));
+            }
+        }
+        if let Some(endpoint) = self.endpoint
+            && self.root.socket_identity_at("control.sock")? != endpoint
+        {
+            return Err(failure("runner_control_socket_replaced"));
+        }
+        Ok(())
+    }
+}
+
 struct Authority {
     root: Root,
     socket: Identity,
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
+    runners: Mutex<Vec<Option<RunnerSlot>>>,
     usable: std::sync::atomic::AtomicBool,
 }
 
 impl Authority {
+    fn prepare_runner(
+        &self,
+        anchor: &Path,
+        attempt: &AttemptRef,
+        binding: WorkerBinding,
+    ) -> Result<PreparedRunner, EngineError> {
+        if !self.usable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(failure("runner_runtime_unavailable"));
+        }
+        let parent = Root::open(anchor)?;
+        self.root.verify()?;
+        if self.root.path.parent() != Some(parent.path.as_path()) {
+            return Err(failure("runner_registration_root"));
+        }
+        let mut runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        assert!(runners.len() <= RUNNERS_MAX);
+        for slot in runners.iter().flatten() {
+            if &slot.prepared.attempt == attempt {
+                slot.verify(&self.root)?;
+                if slot.binding != binding {
+                    return Err(failure("runner_attempt_changed"));
+                }
+                return Ok(slot.prepared.clone());
+            }
+            if slot.prepared.attempt.plan_id == attempt.plan_id
+                && slot.prepared.attempt.item_id == attempt.item_id
+            {
+                return Err(failure("runner_attempt_already_registered"));
+            }
+        }
+        if runners.len() == RUNNERS_MAX {
+            return Err(failure("runner_registration_capacity"));
+        }
+        let index = runners.len();
+        let name = format!("r{index:02x}");
+        let path = parent.path.join(&name);
+        if path.as_os_str().len() > 80 || path.components().count() > 32 {
+            return Err(failure("runner_root_path_bounds"));
+        }
+        let registration_id =
+            RequestId::new(format!("runner-{}", random_id()?)).map_err(io_error)?;
+        runners.push(None);
+        rustix::fs::mkdirat(&parent.directory, name.as_str(), Mode::RWXU).map_err(io_error)?;
+        parent.verify()?;
+        let root = Root::open(&path)?;
+        let prepared = PreparedRunner {
+            root: path,
+            registration_id,
+            attempt: attempt.clone(),
+            slot: index as u8,
+        };
+        let bootstrap = PinnedBootstrap::create(
+            &root,
+            RunnerBootstrap {
+                version: 1,
+                registration_id: prepared.registration_id.clone(),
+                attempt: prepared.attempt.clone(),
+                slot: prepared.slot,
+            },
+        )?;
+        let slot = RunnerSlot {
+            prepared: prepared.clone(),
+            root,
+            bootstrap,
+            binding,
+            key: None,
+            boot: None,
+            endpoint: None,
+            active: false,
+            ready: None,
+        };
+        slot.verify(&self.root)?;
+        parent.directory.sync_all().map_err(io_error)?;
+        assert!(runners[index].is_none());
+        runners[index] = Some(slot);
+        assert!(runners.len() <= RUNNERS_MAX);
+        Ok(prepared)
+    }
+
+    fn runner_prepared(&self, prepared: &PreparedRunner) -> Result<(), EngineError> {
+        if !self.usable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(failure("runner_runtime_unavailable"));
+        }
+        let runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners
+            .get(usize::from(prepared.slot))
+            .and_then(Option::as_ref)
+            .ok_or_else(|| failure("runner_registration_missing"))?;
+        if slot.prepared != *prepared {
+            return Err(failure("runner_prepared_identity_changed"));
+        }
+        slot.verify(&self.root)
+    }
+
+    fn observe_runner(
+        &self,
+        prepared: &PreparedRunner,
+        boot: RunnerBootIdentity,
+        endpoint: Identity,
+        binding: &WorkerBinding,
+    ) -> Result<(), EngineError> {
+        self.runner_prepared(prepared)?;
+        boot.validate()?;
+        let mut runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners[usize::from(prepared.slot)].as_mut().unwrap();
+        if slot.binding != *binding {
+            return Err(failure("runner_attempt_changed"));
+        }
+        if slot.boot.as_ref().is_some_and(|original| original != &boot) {
+            return Err(failure("runner_boot_replacement_requires_reconciliation"));
+        }
+        if slot.key.is_some() && !slot.active {
+            return Err(failure("runner_registration_unavailable"));
+        }
+        if slot.root.socket_identity_at("control.sock")? != endpoint {
+            return Err(failure("runner_control_socket_replaced"));
+        }
+        if slot.key.is_none() {
+            let mut token = [0; 32];
+            getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
+            let file = self
+                .root
+                .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
+            slot.key = Some(RunnerKey {
+                identity: Identity::of(&file.metadata().map_err(io_error)?),
+                file,
+                token,
+            });
+            let key = slot.key.as_ref().unwrap();
+            key.file.write_all_at(&key.token, 0).map_err(io_error)?;
+            key.file.sync_all().map_err(io_error)?;
+            self.root.directory.sync_all().map_err(io_error)?;
+        }
+        slot.boot = Some(boot);
+        slot.endpoint = Some(endpoint);
+        slot.verify(&self.root)?;
+        slot.active = true;
+        slot.assert_consistent();
+        Ok(())
+    }
+
+    fn retire_runner(&self, prepared: &PreparedRunner) -> Result<(), EngineError> {
+        let mut runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners
+            .get_mut(usize::from(prepared.slot))
+            .and_then(Option::as_mut)
+            .ok_or_else(|| failure("runner_registration_missing"))?;
+        if slot.prepared != *prepared {
+            return Err(failure("runner_prepared_identity_changed"));
+        }
+        slot.active = false;
+        slot.ready = None;
+        slot.assert_consistent();
+        Ok(())
+    }
+
+    fn authenticate_runner(&self, packet: &[u8; 37]) -> Result<PreparedRunner, EngineError> {
+        if !self.usable.load(std::sync::atomic::Ordering::SeqCst) || &packet[..4] != b"CAR1" {
+            return Err(failure("runner_authentication_failed"));
+        }
+        let runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners
+            .get(usize::from(packet[4]))
+            .and_then(Option::as_ref)
+            .ok_or_else(|| failure("runner_authentication_failed"))?;
+        slot.verify(&self.root)?;
+        let key = slot
+            .key
+            .as_ref()
+            .ok_or_else(|| failure("runner_authentication_failed"))?;
+        if !slot.active || !bool::from(key.token.ct_eq(&packet[5..])) {
+            return Err(failure("runner_authentication_failed"));
+        }
+        if self.root.socket_identity()? != self.socket {
+            return Err(failure("owner_socket_replaced"));
+        }
+        Ok(slot.prepared.clone())
+    }
+
+    fn ready_runner(
+        &self,
+        packet: &[u8; 37],
+        request: RunnerRequest,
+        binding: &WorkerBinding,
+    ) -> Result<RunnerReady, EngineError> {
+        let prepared = self.authenticate_runner(packet)?;
+        let RunnerRequest::Ready {
+            protocol_version,
+            registration_id,
+            boot,
+        } = request;
+        boot.validate()?;
+        let mut runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners[usize::from(prepared.slot)].as_mut().unwrap();
+        if protocol_version != PROTOCOL_VERSION
+            || registration_id != prepared.registration_id
+            || slot.boot.as_ref() != Some(&boot)
+            || slot.binding != *binding
+        {
+            return Err(failure("runner_ready_identity_mismatch"));
+        }
+        let ready = RunnerReady {
+            registration_id,
+            attempt: prepared.attempt,
+            boot,
+            database_instance: self.host.db_instance.clone(),
+            engine_epoch: self.host.engine_epoch.clone(),
+        };
+        if slot
+            .ready
+            .as_ref()
+            .is_some_and(|original| original != &ready)
+        {
+            return Err(failure("runner_ready_identity_mismatch"));
+        }
+        slot.ready = Some(ready.clone());
+        slot.assert_consistent();
+        Ok(ready)
+    }
+
+    fn runner_ready(
+        &self,
+        prepared: &PreparedRunner,
+        ready: &RunnerReady,
+    ) -> Result<(), EngineError> {
+        self.runner_prepared(prepared)?;
+        let runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners[usize::from(prepared.slot)].as_ref().unwrap();
+        if !slot.active || slot.ready.as_ref() != Some(ready) {
+            return Err(failure("runner_ready_unconfirmed"));
+        }
+        Ok(())
+    }
+
     fn authenticate(&self, packet: &[u8; 37]) -> Result<Admission, EngineError> {
         use std::sync::atomic::Ordering;
         if !self.usable.load(Ordering::SeqCst) || &packet[..4] != b"CAO1" {
@@ -230,6 +644,19 @@ impl Authority {
         for (i, slot) in slots.iter().enumerate() {
             self.root.unlink_owned(KEYS[i], slot.identity, false)?;
         }
+        let runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("runner_authority_unavailable"))?;
+        for slot in runners.iter().flatten() {
+            if let Some(key) = &slot.key {
+                self.root.unlink_owned(
+                    &format!("r{:02x}.cap", slot.prepared.slot),
+                    key.identity,
+                    false,
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -240,6 +667,86 @@ pub struct OwnerRuntimeHandle {
 }
 
 impl OwnerRuntimeHandle {
+    pub(crate) async fn prepare_runner(
+        &self,
+        anchor: &Path,
+        attempt: &AttemptRef,
+    ) -> Result<PreparedRunner, EngineError> {
+        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+            .await
+            .map_err(|_| failure("runner_prepare_not_submitted"))?;
+        let binding = self.engine.runner_attempt(attempt).await?;
+        self.authority.prepare_runner(anchor, attempt, binding)
+    }
+
+    pub(crate) async fn attach_runner(
+        &self,
+        prepared: &PreparedRunner,
+    ) -> Result<RunnerReady, EngineError> {
+        self.authority.runner_prepared(prepared)?;
+        let root = Root::open(prepared.root())?;
+        let endpoint = root.socket_identity_at("control.sock")?;
+        let timeout = self.engine.timeout.min(Duration::from_secs(1));
+        let status = runner_control(
+            &root,
+            endpoint,
+            serde_json::json!({
+                "protocol_version": PROTOCOL_VERSION,
+                "command": { "kind": "status" },
+            }),
+            timeout,
+        )
+        .await?;
+        if status["kind"] != "status" {
+            return Err(failure("runner_status_invalid"));
+        }
+        let boot: RunnerBootIdentity = serde_json::from_value(status["identity"].clone())
+            .map_err(|_| failure("runner_status_invalid"))?;
+        boot.validate()?;
+        {
+            let _barrier =
+                tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+                    .await
+                    .map_err(|_| failure("runner_attach_not_submitted"))?;
+            let binding = self.engine.runner_attempt(prepared.attempt()).await?;
+            self.authority
+                .observe_runner(prepared, boot.clone(), endpoint, &binding)?;
+        }
+        let result = async {
+            let reply = runner_control(
+                &root,
+                endpoint,
+                serde_json::json!({
+                    "protocol_version": PROTOCOL_VERSION,
+                    "command": {
+                        "kind": "attach_engine",
+                        "registration_id": prepared.registration_id(),
+                        "boot": boot,
+                    },
+                }),
+                timeout,
+            )
+            .await?;
+            if reply["kind"] != "engine_ready" {
+                return Err(failure("runner_ready_unconfirmed"));
+            }
+            let ready: RunnerReady = serde_json::from_value(reply["identity"].clone())
+                .map_err(|_| failure("runner_ready_invalid"))?;
+            let _barrier =
+                tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+                    .await
+                    .map_err(|_| failure("runner_attach_outcome_unknown"))?;
+            self.engine.runner_attempt(prepared.attempt()).await?;
+            self.authority.runner_ready(prepared, &ready)?;
+            Ok(ready)
+        }
+        .await;
+        if result.is_err() {
+            self.authority.retire_runner(prepared)?;
+        }
+        result
+    }
+
     pub(crate) fn identity(&self) -> HostStamp {
         self.authority.host.clone()
     }
@@ -375,6 +882,7 @@ impl OwnerServer {
                 socket,
                 host: host.clone(),
                 slots: Mutex::new(slots),
+                runners: Mutex::new(Vec::new()),
                 usable: std::sync::atomic::AtomicBool::new(true),
             });
             Ok::<_, EngineError>((listener, authority))
@@ -446,6 +954,83 @@ impl OwnerServer {
 }
 
 impl Engine {
+    async fn runner_read(&self, command: Command) -> Result<Outcome, EngineError> {
+        if !matches!(
+            &command,
+            Command::CoordinationState { .. } | Command::TaskContext { .. }
+        ) {
+            return Err(failure("runner_read_kind"));
+        }
+        let request_id = RequestId::new(crate::memory::hash(
+            &serde_json::to_vec(&command).map_err(io_error)?,
+        ))
+        .map_err(io_error)?;
+        let request = WireRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: ClientId::new("trusted-runner-host").map_err(io_error)?,
+            request_id,
+            expected_revision: Cursor::new(0),
+            command,
+        };
+        Ok(self
+            .owner_job(|reply| Job::Apply(request, reply))
+            .await?
+            .outcome)
+    }
+
+    async fn runner_attempt(&self, attempt: &AttemptRef) -> Result<WorkerBinding, EngineError> {
+        if attempt.reservation_cursor.value() == 0 {
+            return Err(failure("runner_attempt_cursor_zero"));
+        }
+        let Outcome::Coordination { state } = self
+            .runner_read(Command::CoordinationState {
+                plan_id: attempt.plan_id.clone(),
+            })
+            .await?
+        else {
+            return Err(failure("runner_plan_missing"));
+        };
+        if state.plan.id != attempt.plan_id || !state.approved || state.revoked {
+            return Err(failure("runner_plan_unavailable"));
+        }
+        let item = state
+            .plan
+            .tasks
+            .iter()
+            .find(|item| item.id == attempt.item_id)
+            .ok_or_else(|| failure("runner_work_item_missing"))?;
+        let reservation = state
+            .reservations
+            .get(&attempt.item_id)
+            .ok_or_else(|| failure("runner_reservation_missing"))?;
+        let binding = reservation
+            .binding
+            .as_ref()
+            .ok_or_else(|| failure("runner_worker_binding_missing"))?;
+        if item.role != Role::Worker
+            || reservation.cursor != attempt.reservation_cursor
+            || binding.plan_id != attempt.plan_id
+            || binding.task_id != attempt.item_id
+            || binding.attempt_cursor != attempt.reservation_cursor
+            || binding.session_id != item.session_id
+            || binding.config_id != state.plan.scope.config_id
+        {
+            return Err(failure("runner_attempt_mismatch"));
+        }
+        let Outcome::Task { context } = self
+            .runner_read(Command::TaskContext {
+                task_id: state.plan.scope.task_id.clone(),
+            })
+            .await?
+        else {
+            return Err(failure("runner_context_missing"));
+        };
+        if context != state.plan.scope {
+            return Err(failure("runner_context_changed"));
+        }
+        Ok(binding.clone())
+    }
+
     async fn owner_job<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -506,6 +1091,18 @@ async fn serve_owner(
         verify_peer(&stream)?;
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
+        if &auth[..4] == b"CAR1" {
+            let prepared = authority.authenticate_runner(&auth)?;
+            let frame = read_frame(&mut stream).await?;
+            let request: RunnerRequest = serde_json::from_slice(&frame[4..])
+                .map_err(|_| failure("runner_request_invalid"))?;
+            let _barrier = engine.owner_egress.write().await;
+            let binding = engine.runner_attempt(prepared.attempt()).await?;
+            let identity = authority.ready_runner(&auth, request, &binding)?;
+            let frame = encode_frame(&RunnerReply::Ready { identity })
+                .map_err(|_| failure("runner_response_bounds"))?;
+            return stream.write_all(&frame).await.map_err(io_error);
+        }
         let a = authority.authenticate(&auth)?;
         let frame = read_frame(&mut stream).await?;
         let request: OwnerRequest =
@@ -554,6 +1151,135 @@ async fn write_owner_reply(
     });
     let frame = encode_frame(&reply).map_err(|_| failure("owner_response_bounds"))?;
     stream.write_all(&frame).await.map_err(io_error)
+}
+
+async fn runner_control(
+    root: &Root,
+    endpoint: Identity,
+    request: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, EngineError> {
+    tokio::time::timeout(timeout, async {
+        if root.socket_identity_at("control.sock")? != endpoint {
+            return Err(failure("runner_control_socket_replaced"));
+        }
+        let mut stream = UnixStream::connect(root.path.join("control.sock"))
+            .await
+            .map_err(io_error)?;
+        verify_peer(&stream)?;
+        if root.socket_identity_at("control.sock")? != endpoint {
+            return Err(failure("runner_control_socket_replaced"));
+        }
+        let frame = encode_frame(&request).map_err(|_| failure("runner_control_bounds"))?;
+        stream.write_all(&frame).await.map_err(io_error)?;
+        let frame = read_frame(&mut stream).await?;
+        let reply = serde_json::from_slice(&frame[4..])
+            .map_err(|_| failure("runner_control_reply_invalid"))?;
+        if root.socket_identity_at("control.sock")? != endpoint {
+            return Err(failure("runner_control_socket_replaced"));
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|_| failure("runner_control_outcome_unknown"))?
+}
+
+pub fn runner_bootstrap(root: &Path) -> Result<Option<RequestId>, EngineError> {
+    match std::fs::symlink_metadata(root.join("engine-bootstrap")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+        Ok(_) => {}
+    }
+    let root = Root::open(root)?;
+    let pinned = PinnedBootstrap::read(&root)?;
+    if root.path.file_name() != Some(std::ffi::OsStr::new(&format!("r{:02x}", pinned.value.slot))) {
+        return Err(failure("runner_bootstrap_root_mismatch"));
+    }
+    Ok(Some(pinned.value.registration_id))
+}
+
+pub async fn runner_ready(
+    input: &Path,
+    registration_id: &RequestId,
+    boot: &RunnerBootIdentity,
+    timeout: Duration,
+) -> Result<RunnerReady, EngineError> {
+    if timeout.is_zero() || timeout > Duration::from_secs(30) {
+        return Err(failure("owner_timeout_invalid"));
+    }
+    boot.validate()?;
+    tokio::time::timeout(timeout, async {
+        let runtime = Root::open(input)?;
+        let bootstrap = PinnedBootstrap::read(&runtime)?;
+        if &bootstrap.value.registration_id != registration_id
+            || runtime.path.file_name()
+                != Some(std::ffi::OsStr::new(&format!(
+                    "r{:02x}",
+                    bootstrap.value.slot
+                )))
+        {
+            return Err(failure("runner_bootstrap_identity_mismatch"));
+        }
+        let anchor = runtime
+            .path
+            .parent()
+            .ok_or_else(|| failure("runner_registration_root"))?;
+        let (path, engine, binding) = crate::engine::bootstrap::runner_binding(anchor)?;
+        let generation = Root::open(&path)?;
+        let name = format!("r{:02x}.cap", bootstrap.value.slot);
+        let file = generation.open_key(&name, false)?;
+        let identity = Identity::of(&file.metadata().map_err(io_error)?);
+        generation.verify_key(&name, &file, identity)?;
+        let mut token = [0; 32];
+        file.read_exact_at(&mut token, 0).map_err(io_error)?;
+        generation.verify_key(&name, &file, identity)?;
+        let socket = generation.socket_identity()?;
+        let mut stream = UnixStream::connect(generation.path.join(SOCKET))
+            .await
+            .map_err(io_error)?;
+        verify_peer(&stream)?;
+        if generation.socket_identity()? != socket {
+            return Err(failure("owner_socket_replaced"));
+        }
+        bootstrap.verify(&runtime)?;
+        binding.verify()?;
+        let mut packet = [0; 37];
+        packet[..4].copy_from_slice(b"CAR1");
+        packet[4] = bootstrap.value.slot;
+        packet[5..].copy_from_slice(&token);
+        stream.write_all(&packet).await.map_err(io_error)?;
+        let request = RunnerRequest::Ready {
+            protocol_version: PROTOCOL_VERSION,
+            registration_id: registration_id.clone(),
+            boot: boot.clone(),
+        };
+        stream
+            .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
+            .await
+            .map_err(io_error)?;
+        let frame = read_frame(&mut stream).await?;
+        let RunnerReply::Ready { identity: ready } =
+            serde_json::from_slice(&frame[4..]).map_err(|_| failure("runner_ready_invalid"))?;
+        bootstrap.verify(&runtime)?;
+        binding.verify()?;
+        generation.verify_key(&name, &file, identity)?;
+        let mut observed = [0; 32];
+        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
+        if !bool::from(token.ct_eq(&observed)) || generation.socket_identity()? != socket {
+            return Err(failure("runner_capability_changed"));
+        }
+        if ready.registration_id != *registration_id
+            || ready.attempt != bootstrap.value.attempt
+            || ready.boot != *boot
+            || ready.database_instance != engine.database_instance()
+            || ready.engine_epoch != engine.engine_epoch()
+        {
+            return Err(failure("runner_ready_identity_mismatch"));
+        }
+        Ok(ready)
+    })
+    .await
+    .map_err(|_| failure("runner_ready_outcome_unknown"))?
 }
 
 pub struct OwnerClient {

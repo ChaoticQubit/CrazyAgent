@@ -1,6 +1,6 @@
 mod transport;
 
-pub use transport::{OwnerClient, OwnerRuntimeHandle, OwnerServer};
+pub use transport::{OwnerClient, OwnerRuntimeHandle, OwnerServer, runner_bootstrap, runner_ready};
 
 use super::EngineError;
 use crate::coordination::OwnerAction;

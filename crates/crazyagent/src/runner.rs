@@ -2,6 +2,7 @@ use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
 use crazyagent::adapters::NativeAction;
+use crazyagent::worker_dispatch::{RunnerBootIdentity as RunnerIdentity, RunnerReady};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,14 +22,6 @@ const EPOCHS_MAX: usize = 128;
 const CONNECTIONS_MAX: usize = 16;
 const TIMEOUT: Duration = Duration::from_secs(1);
 const JOURNAL_BYTES_MAX: u64 = 1_048_576;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RunnerIdentity {
-    runner_id: RequestId,
-    pid: u32,
-    started_at_unix_ns: String,
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
@@ -167,6 +160,10 @@ struct Request {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Status,
+    AttachEngine {
+        registration_id: RequestId,
+        boot: RunnerIdentity,
+    },
     Claim {
         runner_id: RequestId,
         expected_generation: u64,
@@ -190,6 +187,10 @@ enum Reply {
         operation_count: usize,
         native_admission: &'static str,
         native_identity: Option<RequestId>,
+        engine_registration: Option<RunnerReady>,
+    },
+    EngineReady {
+        identity: RunnerReady,
     },
     Claimed {
         generation: u64,
@@ -215,6 +216,7 @@ struct State {
     journal: Journal,
     endpoint: Option<(u64, u64)>,
     failed: bool,
+    engine_registration: Option<RunnerReady>,
 }
 
 impl State {
@@ -229,6 +231,7 @@ impl State {
             journal,
             endpoint: None,
             failed: false,
+            engine_registration: None,
         };
         state.restore(records)?;
         state.identity = identity.clone();
@@ -255,8 +258,7 @@ impl State {
                     identity,
                 } => {
                     if protocol_version != PROTOCOL_VERSION
-                        || identity.pid == 0
-                        || identity.started_at_unix_ns.parse::<u128>().is_err()
+                        || identity.validate().is_err()
                         || !boots.insert(identity.runner_id.clone())
                     {
                         return Err(invalid("invalid_journal_boot"));
@@ -296,6 +298,10 @@ impl State {
     }
 
     fn assert_consistent(&self) {
+        assert!(self.identity.validate().is_ok());
+        if let Some(ready) = &self.engine_registration {
+            assert_eq!(ready.boot, self.identity);
+        }
         assert_eq!(self.generation, self.epochs.len() as u64);
         assert!(self.epochs.len() <= EPOCHS_MAX);
         assert!(self.operations.len() <= OPERATIONS_MAX);
@@ -323,6 +329,10 @@ impl State {
                 operation_count: self.operations.len(),
                 native_admission: "unavailable",
                 native_identity: None,
+                engine_registration: self.engine_registration.clone(),
+            }),
+            Command::AttachEngine { .. } => Ok(Reply::Error {
+                code: "engine_registration_requires_authenticated_callback",
             }),
             Command::Claim {
                 runner_id,
@@ -525,9 +535,96 @@ async fn read_request(stream: &mut UnixStream) -> io::Result<Request> {
     serde_json::from_slice(&bytes).map_err(invalid)
 }
 
+async fn attach_engine(
+    state: Arc<Mutex<State>>,
+    protocol_version: u16,
+    registration_id: RequestId,
+    boot: RunnerIdentity,
+) -> Reply {
+    if protocol_version != PROTOCOL_VERSION {
+        return Reply::Error {
+            code: "unsupported_version",
+        };
+    }
+    let (root, observed) = {
+        let mut state = state.lock().await;
+        if !matches!(
+            state.apply(Request {
+                protocol_version: PROTOCOL_VERSION,
+                command: Command::Status,
+            }),
+            Ok(Reply::Status { .. })
+        ) {
+            return Reply::Error {
+                code: "journal_unavailable",
+            };
+        }
+        if state.identity != boot {
+            return Reply::Error {
+                code: "runner_identity_mismatch",
+            };
+        }
+        if state
+            .engine_registration
+            .as_ref()
+            .is_some_and(|ready| ready.registration_id != registration_id)
+        {
+            return Reply::Error {
+                code: "engine_registration_conflict",
+            };
+        }
+        (state.journal.root.clone(), state.identity.clone())
+    };
+    let ready =
+        match crazyagent::engine::owner::runner_ready(&root, &registration_id, &observed, TIMEOUT)
+            .await
+        {
+            Ok(ready) => ready,
+            Err(_) => {
+                return Reply::Error {
+                    code: "engine_registration_unavailable",
+                };
+            }
+        };
+    let mut state = state.lock().await;
+    if !matches!(
+        state.apply(Request {
+            protocol_version: PROTOCOL_VERSION,
+            command: Command::Status,
+        }),
+        Ok(Reply::Status { .. })
+    ) {
+        return Reply::Error {
+            code: "journal_unavailable",
+        };
+    }
+    if ready.boot != state.identity
+        || ready.registration_id != registration_id
+        || state
+            .engine_registration
+            .as_ref()
+            .is_some_and(|original| original != &ready)
+    {
+        return Reply::Error {
+            code: "engine_registration_conflict",
+        };
+    }
+    state.engine_registration = Some(ready.clone());
+    state.assert_consistent();
+    Reply::EngineReady { identity: ready }
+}
+
 async fn exchange(mut stream: UnixStream, state: Arc<Mutex<State>>) -> io::Result<()> {
     verify_peer(&stream)?;
     let reply = match read_request(&mut stream).await {
+        Ok(Request {
+            protocol_version,
+            command:
+                Command::AttachEngine {
+                    registration_id,
+                    boot,
+                },
+        }) => attach_engine(state.clone(), protocol_version, registration_id, boot).await,
         Ok(request) => state.lock().await.apply(request).unwrap_or(Reply::Error {
             code: "journal_unavailable",
         }),
@@ -545,6 +642,7 @@ async fn exchange(mut stream: UnixStream, state: Arc<Mutex<State>>) -> io::Resul
 pub async fn run(root: &Path) -> io::Result<()> {
     let directory =
         private_directory(root).map_err(|error| invalid(format!("runner_directory: {error}")))?;
+    let _bootstrap = crazyagent::engine::owner::runner_bootstrap(root).map_err(invalid)?;
     let lock = private_file(&directory, "owner.lock")
         .map_err(|error| invalid(format!("runner_lock_file: {error}")))?;
     flock(&lock, FlockOperation::NonBlockingLockExclusive)
@@ -642,6 +740,14 @@ mod tests {
         let (journal, records) = Journal::open(&directory, &path).unwrap();
         let state = State::new(journal, records).unwrap();
         (root, state)
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: self.identity.validate().is_ok()")]
+    fn internal_boot_invariant_detects_zero_pid() {
+        let (_root, mut state) = real_state();
+        state.identity.pid = 0;
+        state.assert_consistent();
     }
 
     #[test]
