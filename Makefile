@@ -26,7 +26,8 @@ test-node:
 		apps/desktop/test/model-access.test.mjs \
 		apps/desktop/test/native/refresh-barrier.test.mjs \
 		apps/desktop/test/native/config-registration.test.mjs \
-		apps/desktop/test/native/baseline-reload.test.mjs
+		apps/desktop/test/native/baseline-reload.test.mjs \
+		apps/desktop/test/native/run-layout.test.mjs
 
 build:
 	cargo build --workspace --offline
