@@ -54,6 +54,10 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    PrepareWorkerDispatch {
+        attempt: crate::worker_dispatch::AttemptRef,
+        repository_slot: u8,
+    },
     CreateProject {
         project_id: ProjectId,
         spec: ProjectSpec,
@@ -97,6 +101,10 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::PrepareWorkerDispatch { attempt, repository_slot } => {
+                crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
+                return Err(failure("worker_dispatch_not_implemented"));
+            }
             Self::CreateProject { project_id, spec } => {
                 spec.validate().map_err(|e| failure(&e.0))?;
                 Command::CreateProject {
@@ -207,6 +215,9 @@ pub struct OwnerPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerRead {
+    WorkerDispatch {
+        dispatch_id: RequestId,
+    },
     ModelAccessPage {
         collection: ModelAccessCollection,
         cursor: Option<ModelAccessCursor>,
@@ -271,7 +282,8 @@ pub enum OwnerRead {
 impl OwnerRead {
     pub(crate) fn command(&self) -> Result<Option<Command>, EngineError> {
         Ok(Some(match self {
-            Self::Settings
+            Self::WorkerDispatch { .. }
+            | Self::Settings
             | Self::ModelAccessPage { .. }
             | Self::ModelAccessRecord { .. }
             | Self::Page { .. }
@@ -368,6 +380,11 @@ impl OwnerRequest {
         }
         encode_frame(self).map_err(|_| failure("owner_request_bounds"))?;
         match &self.operation {
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::PrepareWorkerDispatch { attempt, repository_slot },
+            } => {
+                crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
+            }
             OwnerOperation::Apply { mutation } => {
                 mutation.command()?;
             }
@@ -495,6 +512,9 @@ pub enum OwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
+    WorkerDispatch {
+        dispatch: Option<Box<crate::worker_dispatch::DispatchView>>,
+    },
     ModelAccessPage {
         collection: ModelAccessCollection,
         source_hash: String,

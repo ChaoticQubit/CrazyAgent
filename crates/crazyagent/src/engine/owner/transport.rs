@@ -1054,6 +1054,22 @@ impl Engine {
         request.validate()?;
         let id = request.request_id.clone();
         let response = match &request.operation {
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::PrepareWorkerDispatch { attempt, .. },
+            } => {
+                let current = self.owner_job(|reply| Job::OwnerRead(a, OwnerRead::Capabilities, reply)).await?;
+                if current.revision != request.expected_revision {
+                    OwnerResponse::Rejected { code: "worker_dispatch_revision_conflict".into() }
+                } else {
+                    self.runner_attempt(attempt).await?;
+                    OwnerResponse::Rejected { code: "worker_dispatch_not_implemented".into() }
+                }
+            }
+            OwnerOperation::Read { query: OwnerRead::WorkerDispatch { .. } } => {
+                let mut state = self.owner_job(|reply| Job::OwnerRead(a, OwnerRead::Capabilities, reply)).await?;
+                state.data = OwnerData::WorkerDispatch { dispatch: None };
+                OwnerResponse::Read { state }
+            }
             OwnerOperation::Apply { .. } => OwnerResponse::Applied {
                 operation: self
                     .owner_job(|reply| Job::OwnerApply(a, request, reply))

@@ -839,3 +839,313 @@ async fn revoked_plan_cannot_attach_the_observed_runner_or_publish_its_capabilit
         assert!(coordination(&client, "after-revoked-attach").await.revoked);
     }).await;
 }
+
+fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> String {
+    let output_path = root.join(format!("git-{label}.stdout"));
+    let error_path = root.join(format!("git-{label}.stderr"));
+    let output = std::fs::OpenOptions::new()
+        .write(true).create_new(true).mode(0o600).open(&output_path).unwrap();
+    let error = std::fs::OpenOptions::new()
+        .write(true).create_new(true).mode(0o600).open(&error_path).unwrap();
+    let mut process = ProcessCommand::new("/usr/bin/git")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-C"])
+        .arg(repository)
+        .args(args)
+        .stdin(Stdio::null()).stdout(output).stderr(error)
+        .spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        match process.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => break Err(io::Error::new(io::ErrorKind::TimedOut, "fixture Git deadline")),
+            Err(error) => break Err(error),
+        }
+    };
+    if result.is_err() {
+        let _ = process.kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reaped = loop {
+            match process.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => break false,
+            }
+        };
+        eprintln!("trusted-runner-auth fixture_git_reaped={reaped} pid={}", process.id());
+        assert!(reaped, "actual fixture Git cleanup failed");
+    }
+    let status = result.unwrap_or_else(|error| panic!("actual fixture Git failed: {error}; {}", error_path.display()));
+    assert!(status.success(), "actual Git {args:?} failed: {status}; {}", error_path.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(&output_path).unwrap().take(65537).read_to_end(&mut bytes).unwrap();
+    assert!(bytes.len() <= 65536, "fixture Git stdout bound");
+    String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+async fn engine_owned_attempt_is_consumed_and_denied_by_real_runner() {
+    use crazyagent::engine::owner::OwnerData;
+    use crazyagent::verification::{BaselineDraft, BaselineOrigin, CandidateSnapshot, CheckKind, CheckSpec, Risk};
+    use crazyagent::worker_dispatch::{DeniedReason, DeniedReceipt, DispatchCancellation, DispatchState, dispatch_id};
+    use crazyagent::worktrees::LeaseState;
+    use sha2::{Digest, Sha256};
+
+    run_case(|context| async move {
+        let repository = context.root.join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        std::fs::set_permissions(&repository, std::fs::Permissions::from_mode(0o700)).unwrap();
+        delivery_git(&context.root, &repository, "init", &["init", "-b", "main"]);
+        let tracked = b"fn sum(a: i32, b: i32) -> i32 { a + b }\n";
+        std::fs::write(repository.join("tracked.rs"), tracked).unwrap();
+        delivery_git(&context.root, &repository, "add", &["add", "tracked.rs"]);
+        delivery_git(&context.root, &repository, "commit", &[
+            "-c", "user.name=Dispatch Test", "-c", "user.email=dispatch@invalid",
+            "commit", "-m", "actual delivery baseline",
+        ]);
+        let head = delivery_git(&context.root, &repository, "head", &["rev-parse", "HEAD"]).trim().to_owned();
+        assert!(matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let snapshot = CandidateSnapshot {
+            files: std::collections::BTreeMap::from([("tracked.rs".into(), std::fs::read(repository.join("tracked.rs")).unwrap())]),
+            head_digest: format!("{:x}", Sha256::digest(head.as_bytes())),
+            target_digest: format!("{:x}", Sha256::digest(tracked)),
+        };
+        let draft = BaselineDraft {
+            version: 1,
+            project_id: ProjectId::new("project-a").unwrap(),
+            origin: BaselineOrigin::Imported,
+            requirements: "Preserve the committed sum implementation and its checks".into(),
+            checks: vec![
+                CheckSpec {
+                    id: RequestId::new("sum-check").unwrap(),
+                    kind: CheckKind::Code,
+                    minimum_risk: Risk::Low,
+                    content: b"assert_eq!(sum(2, 3), 5)".to_vec(),
+                },
+                CheckSpec {
+                    id: RequestId::new("integrity-check").unwrap(),
+                    kind: CheckKind::TestIntegrity,
+                    minimum_risk: Risk::Low,
+                    content: b"reject a changed expected sum".to_vec(),
+                },
+            ],
+            rules: vec![],
+            retry_limit: 0,
+        };
+        let baseline_id = draft.identity().unwrap();
+        let scope = ExecutionContext {
+            project_id: draft.project_id.clone(),
+            task_id: TaskId::new("dispatch-parent").unwrap(),
+            config_id: context.config.id.clone(),
+            snapshot_id: snapshot.identity().unwrap(),
+            baseline_id: baseline_id.clone(),
+            allowed_destinations: context.config.settings.allowed_destinations.clone(),
+            budget_ref: CredentialRef::new("dispatch-budget").unwrap(),
+        };
+        let plan = WorkPlan {
+            id: PlanId::new("dispatch-plan").unwrap(),
+            config_id: context.config.id.clone(),
+            scope: scope.clone(),
+            tasks: vec![WorkItem {
+                id: TaskId::new("dispatch-item").unwrap(),
+                session_id: SessionId::new("dispatch-session").unwrap(),
+                role: Role::Worker,
+                native_descendant: None,
+                pool_ref: Some(CredentialRef::new("worker-pool").unwrap()),
+                route: RouteRequest {
+                    preferred_target: None,
+                    required_target: Some(CredentialRef::new("profile-a").unwrap()),
+                    required_capabilities: vec!["coding".into()],
+                    account_ref: CredentialRef::new("account-a").unwrap(),
+                    budget_ref: scope.budget_ref.clone(),
+                    resources: ResourceBudget::unit(),
+                },
+            }],
+            dependencies: vec![],
+            authority: PlanAuthority::Human,
+        };
+        let (client, owner, engine) = Client::new(context.root.join("e.sock"), Duration::from_secs(2))
+            .unwrap().with_owner(OwnerClientKind::Tui).await.unwrap();
+        let mut revision = 0;
+        for (index, command) in [
+            Command::CreateProject {
+                project_id: scope.project_id.clone(),
+                spec: ProjectSpec {
+                    name: "Real consumed delivery".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            },
+            Command::AdmitRepository {
+                project_id: scope.project_id.clone(),
+                repository: repository.to_str().unwrap().into(),
+            },
+        ].into_iter().enumerate() {
+            let reply = client.request(wire(&format!("delivery-repository-{index}"), revision, command)).await.unwrap();
+            assert_eq!(reply.outcome, Outcome::Applied);
+            revision = reply.revision.value();
+        }
+        for (index, mutation) in [
+            OwnerMutation::ProposeBaseline { draft: draft.clone() },
+            OwnerMutation::ApproveBaseline { baseline_id: baseline_id.clone() },
+        ].into_iter().enumerate() {
+            let reply = owner.request(owner_request(&format!("delivery-baseline-{index}"), revision, OwnerOperation::Apply { mutation })).await.unwrap();
+            let OwnerResponse::Applied { operation } = reply.response else { panic!("real owner baseline mutation required"); };
+            assert_eq!(operation.result, OwnerResult::Applied);
+            revision = operation.current_revision.value();
+        }
+        let baseline = owner.request(owner_request("delivery-baseline-read", 0, OwnerOperation::Read {
+            query: OwnerRead::Baseline { baseline_id: baseline_id.clone() },
+        })).await.unwrap();
+        assert!(matches!(baseline.response, OwnerResponse::Read { state } if
+            matches!(&state.data, OwnerData::Baseline { draft: actual, approved: true, revoked: false, current: true } if actual == &draft)));
+        for (index, command) in [
+            Command::PinTask { context: scope.clone() },
+            Command::ProposePlan { plan: plan.clone() },
+        ].into_iter().enumerate() {
+            let reply = client.request(wire(&format!("delivery-context-{index}"), revision, command)).await.unwrap();
+            assert_eq!(reply.outcome, Outcome::Applied);
+            revision = reply.revision.value();
+        }
+        let parent = client.request(wire("delivery-parent-read", 0, Command::TaskContext { task_id: scope.task_id.clone() })).await.unwrap();
+        assert_eq!(parent.outcome, Outcome::Task { context: scope.clone() });
+        for (index, action) in [
+            OwnerAction::ApprovePlan { plan_id: plan.id.clone() },
+            OwnerAction::Reserve { plan_id: plan.id.clone(), item_id: plan.tasks[0].id.clone() },
+        ].into_iter().enumerate() {
+            let reply = owner.request(owner_request(&format!("delivery-reservation-{index}"), revision, OwnerOperation::Apply {
+                mutation: OwnerMutation::Coordination { action },
+            })).await.unwrap();
+            let OwnerResponse::Applied { operation } = reply.response else { panic!("real owner reservation required"); };
+            assert_eq!(operation.result, OwnerResult::Applied);
+            revision = operation.current_revision.value();
+        }
+        let reserved_reply = client.request(wire("delivery-reserved-read", 0, Command::CoordinationState {
+            plan_id: plan.id.clone(),
+        })).await.unwrap();
+        let Outcome::Coordination { state } = reserved_reply.outcome else { panic!("actual stored plan required"); };
+        let reserved = *state;
+        assert_eq!(reserved.plan, plan);
+        assert!(reserved.approved && !reserved.revoked);
+        assert_ne!(scope.task_id, reserved.plan.tasks[0].id);
+        assert_eq!(reserved.reservations.len(), 1);
+        let reservation = &reserved.reservations[&plan.tasks[0].id];
+        let binding = reservation.binding.as_ref().unwrap();
+        assert_eq!(binding.task_id, plan.tasks[0].id);
+        assert_eq!(binding.session_id, plan.tasks[0].session_id);
+        assert_eq!(binding.config_id, context.config.id);
+        assert_eq!(binding.connection.id.as_str(), "connection-a");
+        assert_eq!(binding.connection.account_ref.as_str(), "account-a");
+        assert_eq!(binding.target_profile_ref.as_str(), "profile-a");
+        assert_eq!(binding.attempt_cursor, reservation.cursor);
+        let attempt = AttemptRef {
+            plan_id: plan.id.clone(),
+            item_id: binding.task_id.clone(),
+            reservation_cursor: reservation.cursor.clone(),
+        };
+        let allocated = client.request(wire("delivery-allocate", revision, Command::AllocateWorktree {
+            task_id: scope.task_id.clone(),
+            repository: repository.to_str().unwrap().into(),
+            owner_session: binding.session_id.clone(),
+            native_descendant: None,
+        })).await.unwrap();
+        assert_eq!(allocated.outcome, Outcome::Applied);
+        revision = allocated.revision.value();
+        let leases = client.request(wire("delivery-lease-read", 0, Command::WorktreeLeases { task_id: scope.task_id.clone() })).await.unwrap();
+        let Outcome::Worktrees { leases } = leases.outcome else { panic!("real worktree lease readback required"); };
+        assert_eq!(leases.len(), 1);
+        let lease = &leases[0];
+        assert_eq!(lease.task_id, scope.task_id);
+        assert_ne!(lease.task_id, attempt.item_id);
+        assert_eq!(lease.owner_session, binding.session_id);
+        assert_eq!(lease.repository, repository.to_str().unwrap());
+        assert_eq!(lease.state, LeaseState::Ready);
+        assert!(lease.native_descendant.is_none());
+        assert!(Path::new(&lease.path).is_dir());
+        assert_eq!(delivery_git(&context.root, Path::new(&lease.path), "lease-head", &["rev-parse", "HEAD"]).trim(), head);
+        assert_eq!(std::fs::read(Path::new(&lease.path).join("tracked.rs")).unwrap(), tracked);
+        let prepared = context.prepared(&attempt).await;
+        let runner = OwnedRunner::start(&prepared).await;
+        let ready = context.service.lock().await.attach_runner(&prepared).await.unwrap();
+        assert_eq!(ready.attempt, attempt);
+        assert_eq!(ready.registration_id, *prepared.registration_id());
+        assert_eq!(ready.database_instance, engine.database_instance());
+        assert_eq!(ready.engine_epoch, engine.engine_epoch());
+        let before_status = runner.status().await;
+        let actual_ready: RunnerReady = serde_json::from_value(before_status["engine_registration"].clone()).unwrap();
+        assert_eq!(actual_ready, ready);
+        assert_eq!(before_status["identity"]["pid"], runner.process.id());
+        assert_eq!(before_status["operation_count"], 0);
+        assert_eq!(before_status["native_admission"], "unavailable");
+        assert!(before_status["native_identity"].is_null());
+        let before_snapshot = client.request(wire("delivery-snapshot-before", 0, Command::Snapshot)).await.unwrap().outcome;
+        let dispatch = dispatch_id(engine.database_instance(), &attempt).unwrap();
+        let prepared_result = owner.request(owner_request("delivery-prepare", revision, OwnerOperation::Apply {
+            mutation: OwnerMutation::PrepareWorkerDispatch { attempt: attempt.clone(), repository_slot: 0 },
+        })).await.unwrap();
+        let readback = owner.request(owner_request("delivery-read", 0, OwnerOperation::Read {
+            query: OwnerRead::WorkerDispatch { dispatch_id: dispatch.clone() },
+        })).await.unwrap();
+        let retained_runner = exchange(&runner.root.join("control.sock"), None, &serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "command": { "kind": "dispatch_status", "dispatch_id": dispatch },
+        })).await.unwrap();
+        let retained_receipt = retained_runner.as_ref()
+            .and_then(|reply| reply.get("receipt"))
+            .map(|receipt| serde_json::from_value::<DeniedReceipt>(receipt.clone()))
+            .transpose();
+        let view = match &readback.response {
+            OwnerResponse::Read { state } => match &state.data {
+                OwnerData::WorkerDispatch { dispatch } => dispatch.as_deref(),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert!(
+            matches!((view, &retained_receipt), (Some(view), Ok(Some(receipt))) if
+                view.state == DispatchState::DeliveredDenied && view.receipt.as_ref() == Some(receipt)),
+            "missing real consumed dispatch receipt: prepare={prepared_result:?}; owner={readback:?}; runner={retained_runner:?}"
+        );
+        let view = view.unwrap();
+        let receipt = retained_receipt.unwrap().unwrap();
+        assert_eq!(view.dispatch_id, dispatch);
+        assert_eq!(view.attempt, attempt);
+        assert_eq!(view.delivery_generation, 1);
+        assert_eq!(view.cancellation, DispatchCancellation::None);
+        assert_eq!(view.binding_digest, format!("{:x}", Sha256::digest(serde_json::to_vec(binding).unwrap())));
+        assert_eq!(view.lease_digest.len(), 64);
+        assert!(view.lease_digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(receipt.dispatch_id, dispatch);
+        assert_eq!(receipt.attempt, attempt);
+        assert_eq!(receipt.delivery_generation, view.delivery_generation);
+        assert_eq!(receipt.database_instance, ready.database_instance);
+        assert_eq!(receipt.offer_engine_epoch, ready.engine_epoch);
+        assert_eq!(receipt.registration_id, ready.registration_id);
+        assert_eq!(receipt.runner_boot_id, ready.boot.runner_id);
+        assert_eq!(Some(&receipt.offer_digest), view.offer_digest.as_ref());
+        assert!(receipt.journal_sequence > 0);
+        assert_eq!(receipt.reason, DeniedReason::NativeRuntimeAdmissionUnavailable);
+        assert!(receipt.native_identity.is_none());
+        assert!(serde_json::to_vec(view).unwrap().len() <= 4096);
+        assert!(serde_json::to_vec(&receipt).unwrap().len() <= 2048);
+        let after_status = runner.status().await;
+        assert_eq!(after_status["operation_count"], 1);
+        assert_eq!(after_status["generation"], receipt.controller_generation);
+        assert_eq!(after_status["identity"], before_status["identity"]);
+        assert_eq!(after_status["native_admission"], "unavailable");
+        assert!(after_status["native_identity"].is_null());
+        assert_eq!(coordination(&client, "delivery-reservation-after").await, reserved);
+        let after_leases = client.request(wire("delivery-lease-after", 0, Command::WorktreeLeases { task_id: scope.task_id.clone() })).await.unwrap();
+        assert_eq!(after_leases.outcome, Outcome::Worktrees { leases });
+        let after_snapshot = client.request(wire("delivery-snapshot-after", 0, Command::Snapshot)).await.unwrap().outcome;
+        assert_eq!(after_snapshot, before_snapshot);
+        assert_eq!(std::fs::read(repository.join("tracked.rs")).unwrap(), tracked);
+    }).await;
+}
