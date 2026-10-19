@@ -94,6 +94,15 @@ def inspect_pty(child, master, slave, label):
           "ps status", topology.returncode, topology.stderr.strip(), flush=True)
 
 
+def clear_screen_cell(cells, row, column):
+    value = cells.pop((row, column), None)
+    if value == "":
+        assert cells.get((row, column - 1)), "wide continuation has no leading cell"
+        del cells[(row, column - 1)]
+    elif value is not None and cells.get((row, column + 1)) == "":
+        del cells[(row, column + 1)]
+
+
 def screen_text(raw, width, height):
     cells = {}
     row, column = 1, 1
@@ -109,6 +118,7 @@ def screen_text(raw, width, height):
             elif code == "J" and values in ("2", "3", ""):
                 cells.clear()
             elif code == "K":
+                clear_screen_cell(cells, row, column)
                 cells = {position: value for position, value in cells.items()
                          if position[0] != row or position[1] < column}
             elif code in "ABCD" and numbers:
@@ -123,8 +133,21 @@ def screen_text(raw, width, height):
         elif token == "\n":
             row += 1
         elif not unicodedata.category(token).startswith("C"):
+            if unicodedata.combining(token):
+                previous = (row, column - 1)
+                if cells.get(previous) == "":
+                    previous = (row, column - 2)
+                if cells.get(previous):
+                    cells[previous] += token
+                continue
+            advance = 2 if unicodedata.east_asian_width(token) in "WF" else 1
+            clear_screen_cell(cells, row, column)
+            if advance == 2:
+                clear_screen_cell(cells, row, column + 1)
             cells[(row, column)] = token
-            column += 0 if unicodedata.combining(token) else (2 if unicodedata.east_asian_width(token) in "WF" else 1)
+            if advance == 2:
+                cells[(row, column + 1)] = ""
+            column += advance
     return "\n".join("".join(cells.get((r, c), " ") for c in range(1, min(width, 300) + 1))
                      for r in range(1, min(height, 120) + 1))
 

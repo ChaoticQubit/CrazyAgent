@@ -3,6 +3,9 @@ mod client;
 mod model_access;
 pub mod views;
 
+#[cfg(test)]
+mod project_creation_tests;
+
 use crate::engine::Client;
 use app::{App, Focus, UiEvent};
 use client::Connection;
@@ -159,6 +162,7 @@ fn event_loop(
                 owner_reconnect = false;
                 if !app.model_access.retry()
                     && !app.retry_conversation()
+                    && !app.retry_creation()
                     && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
                 {
                     app.notice(&error);
@@ -171,6 +175,9 @@ fn event_loop(
                 app.bind_project_request(request_id);
                 snapshot = true;
                 refresh = Instant::now();
+            } else if let Some(job) = app.take_creation_job() {
+                connection.creation(job).map_err(TuiError)?;
+                dirty = true;
             } else if let Some(job) = app.model_access_request().map_err(TuiError)? {
                 connection.model_access(job).map_err(TuiError)?;
                 dirty = true;
@@ -222,7 +229,10 @@ fn event_loop(
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
                     let result = if connection.uncertain() {
                         connection.retry()
-                    } else if app.has_unresolved_conversation() || app.model_access.has_pending() {
+                    } else if app.has_unresolved_conversation()
+                        || app.model_access.has_pending()
+                        || app.has_unresolved_creation()
+                    {
                         owner_reconnect = true;
                         app.notice(
                             "Original owner recovery queued until the native worker is idle",
@@ -273,6 +283,18 @@ fn event_loop(
 }
 
 fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
+    if app.declaration.open
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return match key.code {
+            KeyCode::Char('n') => Some(UiEvent::DeclarationAdd),
+            KeyCode::Char('d') => Some(UiEvent::DeclarationRemove),
+            _ => None,
+        };
+    }
     if app.focus() == Focus::Settings
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key
@@ -316,6 +338,9 @@ fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
         KeyCode::Enter => UiEvent::Submit,
         KeyCode::Esc => UiEvent::Cancel,
         KeyCode::Backspace => UiEvent::Backspace,
+        KeyCode::Char('N') if app.focus() == Focus::Projects && !app.is_creating_project() => {
+            UiEvent::BeginDeclaration
+        }
         KeyCode::Char('n') if app.focus() == Focus::Projects && !app.is_creating_project() => {
             UiEvent::BeginProject
         }

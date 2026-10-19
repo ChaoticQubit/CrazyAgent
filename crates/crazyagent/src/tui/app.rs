@@ -1,6 +1,7 @@
 use super::client::{
     ConversationContext, ConversationEvent, ConversationJob, ConversationQuery,
-    ConversationSubmission, Evidence, MutationDelivery, OwnerEvent, OwnerProgress,
+    ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
+    MutationDelivery, OwnerEvent, OwnerProgress,
 };
 use super::model_access;
 use crate::config::EffectiveConfig;
@@ -49,6 +50,9 @@ pub enum UiEvent {
     SelectionPrevious,
     TaskNext,
     BeginProject,
+    BeginDeclaration,
+    DeclarationAdd,
+    DeclarationRemove,
     Submit,
     Cancel,
     Scroll(i16),
@@ -82,7 +86,110 @@ struct ConversationPending {
     retry_allowed: bool,
 }
 
+pub(super) struct Declaration {
+    pub name: String,
+    pub repositories: Vec<String>,
+    pub field: usize,
+    pub generation: u64,
+    pub open: bool,
+}
+
+impl Default for Declaration {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            repositories: vec![String::new()],
+            field: 0,
+            generation: 1,
+            open: false,
+        }
+    }
+}
+
+impl Declaration {
+    fn active(&mut self) -> &mut String {
+        if self.field == 0 {
+            &mut self.name
+        } else {
+            &mut self.repositories[self.field - 1]
+        }
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.name.len() + self.repositories.iter().map(String::len).sum::<usize>()
+    }
+
+    fn advance(&mut self) -> Result<(), String> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or("Declaration generation exhausted")?;
+        Ok(())
+    }
+
+    fn edit(&mut self, character: Option<char>) -> Result<(), String> {
+        if let Some(character) = character {
+            let limit = if self.field == 0 { 256 } else { 4096 };
+            if character.is_control()
+                || self.active().len() + character.len_utf8() > limit
+                || self.bytes() + character.len_utf8() > 65536
+            {
+                return Err(
+                    "Declaration field or total UTF-8 byte limit reached; input retained".into(),
+                );
+            }
+            self.advance()?;
+            self.active().push(character);
+        } else if !self.active().is_empty() {
+            self.advance()?;
+            self.active().pop();
+        }
+        Ok(())
+    }
+
+    pub(super) fn spec(&self) -> Result<ProjectSpec, String> {
+        let spec = ProjectSpec {
+            name: self.name.clone(),
+            repositories: self.repositories.clone(),
+        };
+        spec.validate().map_err(|e| e.to_string())?;
+        if self.bytes() > 65536
+            || spec.repositories.is_empty()
+            || spec
+                .repositories
+                .iter()
+                .any(|path| !path.starts_with('/') || path.trim().is_empty())
+        {
+            return Err(
+                "Declare 1 to 64 absolute local repository paths; literal input retained".into(),
+            );
+        }
+        Ok(spec)
+    }
+
+    fn assert_consistent(&self) {
+        assert!((1..=64).contains(&self.repositories.len()));
+        assert!(self.field <= self.repositories.len());
+        assert!(self.generation > 0);
+        assert!(self.name.len() <= 256);
+        assert!(self.repositories.iter().all(|path| path.len() <= 4096));
+        assert!(self.bytes() <= 65536);
+    }
+}
+
+struct CreationPending {
+    submission: CreationSubmission,
+    operation: Option<(RequestId, String)>,
+    retry_allowed: bool,
+    committed: Option<Cursor>,
+}
+
 pub struct App {
+    pub(super) declaration: Declaration,
+    navigation_generation: u64,
+    declaration_pending: Option<CreationPending>,
+    creation_job: Option<CreationJob>,
+    snapshot_revision: Option<Cursor>,
     pub(super) model_access: model_access::State,
     focus: Focus,
     draft: String,
@@ -133,6 +240,11 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
+            declaration: Declaration::default(),
+            navigation_generation: 1,
+            declaration_pending: None,
+            creation_job: None,
+            snapshot_revision: None,
             model_access: model_access::State::default(),
             focus: Focus::Conversation,
             draft: String::new(),
@@ -180,7 +292,13 @@ impl App {
     }
 
     pub fn draft(&self) -> &str {
-        if self.creating_project {
+        if self.declaration.open {
+            if self.declaration.field == 0 {
+                &self.declaration.name
+            } else {
+                &self.declaration.repositories[self.declaration.field - 1]
+            }
+        } else if self.creating_project {
             &self.project_draft
         } else if let Some(index) = self.draft_index() {
             let draft = &self.drafts[index];
@@ -223,6 +341,31 @@ impl App {
     }
 
     pub fn reduce(&mut self, event: UiEvent) -> Result<(), String> {
+        if self.declaration.open && self.reduce_declaration(&event)? {
+            self.assert_consistent();
+            return Ok(());
+        }
+        if matches!(event, UiEvent::Submit) && self.declaration_pending.is_some() {
+            return Err("A creation owner intent is unresolved; input retained".into());
+        }
+        if matches!(event, UiEvent::Submit)
+            && self.creating_project
+            && (self.conversation_pending.is_some() || self.conversation_job.is_some())
+        {
+            return Err(
+                "Conversation owner intent unresolved; ordinary project draft retained".into(),
+            );
+        }
+        if matches!(
+            event,
+            UiEvent::FocusNext
+                | UiEvent::FocusPrevious
+                | UiEvent::SelectionNext
+                | UiEvent::SelectionPrevious
+                | UiEvent::BeginProject
+        ) {
+            self.advance_navigation()?;
+        }
         if self.focus == Focus::Settings {
             if matches!(event, UiEvent::Submit) && self.conversation_pending.is_some() {
                 return Err(
@@ -304,6 +447,14 @@ impl App {
                     self.notice("Project name: type a name and press Enter; Esc cancels");
                 }
             }
+            UiEvent::BeginDeclaration => {
+                self.advance_navigation()?;
+                self.declaration.open = true;
+                self.creating_project = false;
+                self.scroll = 0;
+                self.notice("Declare repositories | Tab fields | Ctrl-N add | Ctrl-D remove | Enter create | Esc retain");
+            }
+            UiEvent::DeclarationAdd | UiEvent::DeclarationRemove => {}
             UiEvent::Cancel => {
                 if self.is_editing_brief() {
                     let index = self
@@ -409,13 +560,20 @@ impl App {
         self.connected = true;
         match reply.outcome {
             Outcome::Snapshot { projects, tasks } => {
+                if self.declaration_pending.is_some() && projects.len() > 128 {
+                    return Err("Engine project snapshot exceeds the accepted bound".into());
+                }
+                self.snapshot_revision = Some(self.revision.clone());
                 let selected = self.selected_project().map(|p| p.project_id.clone());
                 let task = self.selected_task().cloned();
                 self.projects = projects;
                 self.tasks = tasks;
                 self.selected = selected
                     .and_then(|id| self.projects.iter().position(|p| p.project_id == id))
-                    .or_else(|| (!self.projects.is_empty()).then_some(0));
+                    .or_else(|| {
+                        (self.declaration_pending.is_none() && !self.projects.is_empty())
+                            .then_some(0)
+                    });
                 self.task = task
                     .as_ref()
                     .and_then(|old| {
@@ -423,6 +581,7 @@ impl App {
                             .position(|new| old.task_id == new.task_id)
                     })
                     .unwrap_or(0);
+                self.join_creation()?;
                 if self.selected_task() != task.as_ref() {
                     self.config = None;
                     self.plan = None;
@@ -497,6 +656,7 @@ impl App {
     }
 
     pub(super) fn reconnect_owner(&mut self) -> Result<(), String> {
+        self.snapshot_revision = None;
         self.model_access.access(None, false);
         self.invalidate_evidence()?;
         self.owner_ready = false;
@@ -536,6 +696,7 @@ impl App {
 
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
+            OwnerEvent::Creation(event) => self.apply_creation(*event)?,
             OwnerEvent::ModelAccess(event) => {
                 self.model_access.apply(*event)?;
                 if self.model_access.disconnected() {
@@ -551,6 +712,7 @@ impl App {
                 identity,
             } => {
                 self.model_access.access(identity.clone(), ready);
+                self.snapshot_revision = None;
                 if let Some(identity) = identity {
                     if self
                         .owner_identity
@@ -567,6 +729,20 @@ impl App {
                 if !ready {
                     self.owner_notice =
                         "Evidence and approvals are disabled; Ctrl-R reconnects".into();
+                } else if let Some(pending) = self
+                    .declaration_pending
+                    .as_ref()
+                    .filter(|p| p.operation.is_some() && p.committed.is_none())
+                {
+                    if self.owner_identity.as_ref().is_some_and(|identity| {
+                        identity.database_instance()
+                            == pending.submission.identity.database_instance()
+                    }) {
+                        self.creation_job = Some(CreationJob {
+                            submission: pending.submission.clone(),
+                            delivery: MutationDelivery::Reconcile,
+                        });
+                    }
                 } else if let Some(pending) = &self.conversation_pending {
                     self.conversation_job = Some(ConversationJob::Mutation {
                         submission: pending.submission.clone(),
@@ -691,6 +867,17 @@ impl App {
     }
 
     pub(super) fn draft_label(&self) -> String {
+        if self.declaration.open {
+            return if self.declaration.field == 0 {
+                "Declared project name".into()
+            } else {
+                format!(
+                    "Repository {} of {} | literal absolute path",
+                    self.declaration.field,
+                    self.declaration.repositories.len()
+                )
+            };
+        }
         if self.creating_project {
             return "Project name".into();
         }
@@ -925,7 +1112,10 @@ impl App {
     }
 
     pub(super) fn model_access_request(&mut self) -> Result<Option<model_access::Job>, String> {
-        if self.conversation_pending.is_some() {
+        if self.conversation_pending.is_some()
+            || self.declaration_pending.is_some()
+            || self.declaration.open
+        {
             return Ok(None);
         }
         self.model_access.request(self.focus == Focus::Settings)
@@ -1140,6 +1330,301 @@ impl App {
         Ok(())
     }
 
+    fn advance_navigation(&mut self) -> Result<(), String> {
+        self.navigation_generation = self
+            .navigation_generation
+            .checked_add(1)
+            .ok_or("Navigation generation exhausted")?;
+        Ok(())
+    }
+
+    fn reduce_declaration(&mut self, event: &UiEvent) -> Result<bool, String> {
+        match event {
+            UiEvent::Character(character) => self.declaration.edit(Some(*character))?,
+            UiEvent::Backspace => self.declaration.edit(None)?,
+            UiEvent::FocusNext | UiEvent::FocusPrevious => {
+                let count = self.declaration.repositories.len() + 1;
+                let delta = if matches!(event, UiEvent::FocusNext) {
+                    1
+                } else {
+                    count - 1
+                };
+                self.declaration.field = (self.declaration.field + delta) % count;
+            }
+            UiEvent::DeclarationAdd => {
+                if self.declaration.repositories.len() == 64 {
+                    return Err("At most 64 repository rows; draft retained".into());
+                }
+                self.declaration.advance()?;
+                self.declaration.repositories.push(String::new());
+                self.declaration.field = self.declaration.repositories.len();
+            }
+            UiEvent::DeclarationRemove => {
+                if self.declaration.repositories.len() > 1 && self.declaration.field > 0 {
+                    self.declaration.advance()?;
+                    self.declaration
+                        .repositories
+                        .remove(self.declaration.field - 1);
+                    self.declaration.field = self
+                        .declaration
+                        .field
+                        .min(self.declaration.repositories.len());
+                }
+            }
+            UiEvent::Cancel => {
+                self.advance_navigation()?;
+                self.declaration.open = false;
+                self.notice("Declaration closed; literal draft and any pending intent retained");
+            }
+            UiEvent::Submit => self.queue_creation()?,
+            UiEvent::SelectionNext | UiEvent::SelectionPrevious | UiEvent::Scroll(_) => {}
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    pub(super) fn queue_creation(&mut self) -> Result<(), String> {
+        let spec = self.declaration.spec()?;
+        if !self.owner_ready {
+            return Err("Owner creation disabled in limited mode; declaration retained".into());
+        }
+        if self.declaration_pending.is_some()
+            || self.conversation_pending.is_some()
+            || self.conversation_job.is_some()
+            || self.model_access.has_pending()
+            || self.pending_creation.is_some()
+            || self.command.is_some()
+        {
+            return Err("An owner or project intent is unresolved; declaration retained".into());
+        }
+        let submission = CreationSubmission {
+            identity: self
+                .owner_identity
+                .clone()
+                .ok_or("Owner identity unavailable")?,
+            generation: self.declaration.generation,
+            navigation: self.navigation_generation,
+            project_id: ProjectId::new(format!(
+                "project-{}",
+                crate::engine::owner::random_id().map_err(|e| e.to_string())?
+            ))
+            .map_err(|e| e.to_string())?,
+            spec,
+        };
+        self.creation_job = Some(CreationJob {
+            submission: submission.clone(),
+            delivery: MutationDelivery::Submit,
+        });
+        self.declaration_pending = Some(CreationPending {
+            submission,
+            operation: None,
+            retry_allowed: false,
+            committed: None,
+        });
+        self.notice("Submitting declared project; first brief remains a separate Ctrl-B action");
+        Ok(())
+    }
+
+    pub(super) fn take_creation_job(&mut self) -> Option<CreationJob> {
+        self.creation_job.take()
+    }
+
+    pub(super) fn has_unresolved_creation(&self) -> bool {
+        self.declaration_pending.is_some()
+    }
+
+    pub(super) fn creation_pending_label(&self) -> Option<String> {
+        self.declaration_pending
+            .as_ref()
+            .map(|pending| match &pending.operation {
+                Some((id, hash)) => format!("Creation operation {} {}", id.as_str(), hash),
+                None => {
+                    "Creation queued; immutable project and repository membership retained".into()
+                }
+            })
+    }
+
+    pub(super) fn retry_creation(&mut self) -> bool {
+        let Some(pending) = self.declaration_pending.as_mut() else {
+            return false;
+        };
+        if !pending.retry_allowed
+            || !self.owner_ready
+            || self.creation_job.is_some()
+            || pending.committed.is_some()
+        {
+            return false;
+        }
+        pending.retry_allowed = false;
+        self.creation_job = Some(CreationJob {
+            submission: pending.submission.clone(),
+            delivery: MutationDelivery::Retry,
+        });
+        self.notice("Retrying exact declared-project intent after an actual not-recorded barrier");
+        true
+    }
+
+    pub(super) fn apply_creation(&mut self, event: CreationEvent) -> Result<(), String> {
+        let pending = self
+            .declaration_pending
+            .as_mut()
+            .ok_or("Creation completion has no retained submission")?;
+        assert_eq!(pending.submission, event.submission);
+        if pending
+            .operation
+            .as_ref()
+            .is_some_and(|op| event.operation.as_ref() != Some(op))
+        {
+            return Err("Creation operation identity changed; original intent retained".into());
+        }
+        pending.operation = event.operation.clone();
+        pending.retry_allowed = false;
+        match event.result {
+            Ok(response) => self.creation_receipt(*response, event.retained)?,
+            Err(problem) => {
+                if !event.retained {
+                    self.declaration_pending = None;
+                }
+                self.owner_ready = false;
+                self.owner_problem = Some(problem.clone());
+                if event.retained {
+                    self.notice("Creation outcome uncertain; exact intent and draft retained; Ctrl-R reconnects");
+                } else {
+                    self.notice(&format!("Creation not submitted: {problem}; literal draft retained; Ctrl-R reconnects"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn creation_receipt(&mut self, response: OwnerResponse, retained: bool) -> Result<(), String> {
+        match response {
+            OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+                let pending = self.declaration_pending.as_mut().unwrap();
+                if retained
+                    || pending.operation.as_ref()
+                        != Some(&(
+                            operation.provenance.operation_id,
+                            operation.provenance.request_hash,
+                        ))
+                {
+                    return Err("Creation receipt provenance mismatch; intent retained".into());
+                }
+                match operation.result {
+                    OwnerResult::Applied => {
+                        pending.committed = Some(operation.provenance.revision_after);
+                        self.notice(
+                            "Project recorded; waiting for exact identity in full snapshot",
+                        );
+                        self.join_creation()?;
+                    }
+                    OwnerResult::Rejected { code } => {
+                        self.declaration_pending = None;
+                        self.notice(&format!(
+                            "Creation recorded rejection: {code}; draft retained"
+                        ));
+                    }
+                    _ => return Err("Unexpected creation result".into()),
+                }
+            }
+            OwnerResponse::NotRecordedAtBarrier { .. } => {
+                if !retained {
+                    return Err("Creation barrier lost its retained intent".into());
+                }
+                self.declaration_pending.as_mut().unwrap().retry_allowed = true;
+                self.notice("Creation not recorded at actual barrier; Ctrl-R explicitly retries exact intent");
+            }
+            OwnerResponse::OutcomeUnknown { operation_id } => {
+                let pending = self.declaration_pending.as_ref().unwrap();
+                if !retained
+                    || !pending
+                        .operation
+                        .as_ref()
+                        .is_some_and(|op| op.0 == operation_id)
+                {
+                    return Err("Creation unknown-outcome identity mismatch".into());
+                }
+                self.notice(
+                    "Creation outcome unknown; Ctrl-R reconnects and reconciles exact intent",
+                );
+            }
+            OwnerResponse::Rejected { code } => {
+                if !retained {
+                    return Err("Creation admission rejection lost its intent".into());
+                }
+                self.notice(&format!(
+                    "Creation admission rejected: {code}; uncertain intent retained"
+                ));
+            }
+            OwnerResponse::Read { .. } => return Err("Unexpected read for creation".into()),
+        }
+        Ok(())
+    }
+
+    fn creation_matches(&self, submission: &CreationSubmission) -> bool {
+        self.declaration.open
+            && self.focus == Focus::Projects
+            && self.declaration.generation == submission.generation
+            && self.navigation_generation == submission.navigation
+            && self.declaration.spec().as_ref() == Ok(&submission.spec)
+            && self.owner_ready
+            && self.owner_identity.as_ref().is_some_and(|identity| {
+                identity.database_instance() == submission.identity.database_instance()
+            })
+    }
+
+    fn join_creation(&mut self) -> Result<(), String> {
+        let Some(pending) = self.declaration_pending.as_ref() else {
+            return Ok(());
+        };
+        let Some(revision) = pending.committed.as_ref() else {
+            return Ok(());
+        };
+        if !self
+            .snapshot_revision
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.value() >= revision.value())
+            || !self.owner_ready
+            || !self.owner_identity.as_ref().is_some_and(|identity| {
+                identity.database_instance() == pending.submission.identity.database_instance()
+            })
+        {
+            return Ok(());
+        }
+        let Some(index) = self
+            .projects
+            .iter()
+            .position(|project| project.project_id == pending.submission.project_id)
+        else {
+            return Ok(());
+        };
+        if self.projects[index].spec != pending.submission.spec {
+            return Err(
+                "Created project identity has different membership; intent retained".into(),
+            );
+        }
+        let select = self.creation_matches(&pending.submission);
+        if select {
+            self.declaration.advance()?;
+            self.declaration = Declaration {
+                generation: self.declaration.generation,
+                ..Declaration::default()
+            };
+            self.selected = Some(index);
+            self.task = 0;
+            self.config = None;
+            self.plan = None;
+            self.unassigned = false;
+            self.edit_requested = None;
+            self.focus = Focus::Conversation;
+            self.scroll = 0;
+            self.invalidate_evidence()?;
+        }
+        self.declaration_pending = None;
+        self.notice("Declared project created; first brief is a separate Ctrl-B action");
+        Ok(())
+    }
+
     pub fn selected_project(&self) -> Option<&StoredProject> {
         self.selected.and_then(|index| self.projects.get(index))
     }
@@ -1156,7 +1641,7 @@ impl App {
     }
 
     pub fn is_creating_project(&self) -> bool {
-        self.creating_project
+        self.creating_project || self.declaration.open
     }
 
     pub fn take_command(&mut self) -> Option<Command> {
@@ -1206,6 +1691,8 @@ impl App {
     }
 
     fn assert_consistent(&self) {
+        self.declaration.assert_consistent();
+        assert!(self.navigation_generation > 0);
         assert!(self.drafts.len() <= 128);
         for draft in &self.drafts {
             assert!(draft.message.len() <= DRAFT_BYTES_MAX && draft.brief.len() <= DRAFT_BYTES_MAX);

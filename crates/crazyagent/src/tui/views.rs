@@ -43,7 +43,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
                 .style(Style::default().fg(Color::Black).bg(Color::Cyan)),
             rows[0],
         );
-        let content = if app.is_creating_project() {
+        let content = if app.declaration.open {
+            declaration_lines(app)
+        } else if app.is_creating_project() {
             format!("Project name: {}", app.draft())
         } else {
             body(app)
@@ -164,6 +166,9 @@ fn owner_problem(app: &App) -> String {
 }
 
 pub fn body(app: &App) -> String {
+    if app.declaration.open {
+        return declaration_lines(app);
+    }
     match app.focus() {
         Focus::Conversation => conversation_lines(app),
         Focus::Projects => project_lines(app),
@@ -285,9 +290,45 @@ fn task_summary(app: &App) -> String {
         .unwrap_or_else(|| "No task in the selected project. Task creation requires an accepted owner brief and baseline.".into())
 }
 
+fn declaration_lines(app: &App) -> String {
+    let draft = &app.declaration;
+    let mut lines = vec![
+        format!("Declared project | {}", app.owner_label()),
+        format!(
+            "Active {}: {}",
+            if draft.field == 0 {
+                "name"
+            } else {
+                "repository"
+            },
+            safe_text(app.draft(), 4096)
+        ),
+        format!("Name: {}", safe_text(&draft.name, 256)),
+    ];
+    for (index, path) in draft.repositories.iter().enumerate() {
+        lines.push(format!(
+            "{} Repository {}: {}",
+            if draft.field == index + 1 { ">" } else { " " },
+            index + 1,
+            safe_text(path, 4096)
+        ));
+    }
+    lines.push(
+        "Tab/Shift-Tab fields | Ctrl-N add | Ctrl-D remove | Enter create | Esc retain".into(),
+    );
+    lines.push("Literal metadata only; no filesystem admission or task launch. First brief: Ctrl-B after creation.".into());
+    if !app.owner_ready {
+        lines.push("Owner submission disabled; literal input remains editable".into());
+    }
+    if let Some(pending) = app.creation_pending_label() {
+        lines.push(pending);
+    }
+    lines.join("\n")
+}
+
 fn project_lines(app: &App) -> String {
     let mut lines = vec![
-        "Projects | n: New project | Up/Down: select project | ]: next task".to_owned(),
+        "Projects | n: New project | N: Declare repositories | Up/Down: select project | ]: next task".to_owned(),
         String::new(),
     ];
     if app.projects.is_empty() {
@@ -317,6 +358,10 @@ fn project_lines(app: &App) -> String {
     }
     lines.push(format!("\n{}", task_summary(app)));
     if let Some(project) = app.selected_project() {
+        lines.push(format!(
+            "Declared repositories: {}",
+            project.spec.repositories.len()
+        ));
         lines.push("\nRepositories recorded in project metadata:".into());
         for repository in &project.spec.repositories {
             lines.push(safe_text(repository, 4096));

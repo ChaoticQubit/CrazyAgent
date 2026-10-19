@@ -8,8 +8,8 @@ use crate::engine::owner::{
 };
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
-    BaselineId, ClientId, Command, ConfigId, Cursor, PROTOCOL_VERSION, ProjectId, RequestId,
-    WireReply, WireRequest,
+    BaselineId, ClientId, Command, ConfigId, Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec,
+    RequestId, WireReply, WireRequest,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ enum WorkerMode {
 }
 
 enum Job {
+    Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect,
     Conversation(Box<ConversationJob>),
@@ -64,6 +65,28 @@ pub(super) enum MutationDelivery {
     Submit,
     Reconcile,
     Retry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CreationSubmission {
+    pub identity: OwnerConnectionIdentity,
+    pub generation: u64,
+    pub navigation: u64,
+    pub project_id: ProjectId,
+    pub spec: ProjectSpec,
+}
+
+#[derive(Clone)]
+pub(super) struct CreationJob {
+    pub submission: CreationSubmission,
+    pub delivery: MutationDelivery,
+}
+
+pub(super) struct CreationEvent {
+    pub submission: CreationSubmission,
+    pub operation: Option<(RequestId, String)>,
+    pub result: Result<Box<OwnerResponse>, String>,
+    pub retained: bool,
 }
 
 #[derive(Clone)]
@@ -111,6 +134,7 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
+    Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
     Access {
         ready: bool,
@@ -205,6 +229,25 @@ impl Connection {
                         break;
                     }
                     match job {
+                        Job::Creation(job) => {
+                            let native = native
+                                .as_mut()
+                                .expect("creation requires paired configuration");
+                            let event = runtime.block_on(native.creation(*job));
+                            if event.result.is_err() {
+                                native.detach();
+                                client = native.ordinary();
+                            }
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Creation(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Wire(request) => {
                             let result = runtime.block_on(client.request(*request));
                             if result.is_err()
@@ -463,6 +506,10 @@ impl Connection {
         self.owner_job(Job::Conversation(Box::new(job)))
     }
 
+    pub(super) fn creation(&mut self, job: CreationJob) -> Result<(), String> {
+        self.owner_job(Job::Creation(Box::new(job)))
+    }
+
     pub(super) fn model_access(&mut self, job: model_access::Job) -> Result<(), String> {
         self.owner_job(Job::ModelAccess(Box::new(job)))
     }
@@ -505,6 +552,9 @@ struct Scan {
 }
 
 struct NativeOwner {
+    creation_pending: Option<CreationSubmission>,
+    creation_operation: Option<(RequestId, String)>,
+    creation_retry_allowed: bool,
     socket: PathBuf,
     timeout: Duration,
     controller: Option<OwnerController>,
@@ -519,6 +569,9 @@ struct NativeOwner {
 impl NativeOwner {
     fn new(socket: PathBuf, timeout: Duration) -> Self {
         Self {
+            creation_pending: None,
+            creation_operation: None,
+            creation_retry_allowed: false,
             socket,
             timeout,
             controller: None,
@@ -672,6 +725,7 @@ impl NativeOwner {
             MutationDelivery::Submit => {
                 if controller.identity() != &submission.basis.identity
                     || controller.pending().is_some()
+                    || self.creation_pending.is_some()
                     || self.model_pending.is_some()
                     || self.conversation_pending.is_some()
                 {
@@ -872,6 +926,7 @@ impl NativeOwner {
         match delivery {
             MutationDelivery::Submit => {
                 if controller.identity() != &submission.identity
+                    || self.creation_pending.is_some()
                     || self.model_pending.is_some()
                     || self.conversation_pending.is_some()
                     || controller.pending().is_some()
@@ -924,6 +979,141 @@ impl NativeOwner {
                 .map_err(|e| bounded_problem(&e.0))
             }
         }
+    }
+
+    async fn creation(&mut self, job: CreationJob) -> CreationEvent {
+        let result = self
+            .mutate_creation(&job.submission, job.delivery)
+            .await
+            .map(Box::new);
+        self.creation_event(job.submission, result)
+    }
+
+    fn creation_event(
+        &mut self,
+        submission: CreationSubmission,
+        result: Result<Box<OwnerResponse>, String>,
+    ) -> CreationEvent {
+        let retained = self.creation_pending.is_some()
+            && self
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller.pending().is_some());
+        let operation = self.creation_operation.clone();
+        assert!(!retained || operation.is_some());
+        self.creation_retry_allowed = retained
+            && matches!(&result, Ok(response) if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. }));
+        if !retained {
+            self.creation_pending = None;
+            self.creation_operation = None;
+        }
+        CreationEvent {
+            submission,
+            operation,
+            result,
+            retained,
+        }
+    }
+
+    async fn prepare_creation(&mut self, submission: &CreationSubmission) -> Result<(), String> {
+        if self.creation_pending.is_some()
+            || self.conversation_pending.is_some()
+            || self.model_pending.is_some()
+        {
+            return Err("creation_cross_kind_pending".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        if controller.identity() != &submission.identity || controller.pending().is_some() {
+            return Err("creation_pending_or_connection_changed".into());
+        }
+        submission.spec.validate().map_err(|e| e.to_string())?;
+        if submission.spec.repositories.is_empty()
+            || submission
+                .spec
+                .repositories
+                .iter()
+                .any(|path| !path.starts_with('/'))
+            || submission.spec.name.len()
+                + submission
+                    .spec
+                    .repositories
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>()
+                > 65536
+        {
+            return Err("creation_requires_declared_absolute_paths".into());
+        }
+        controller
+            .read(OwnerRead::Page {
+                view: OwnerView::Projects,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .map_err(|e| bounded_problem(&e.0))?;
+        let pending = controller
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: submission.project_id.clone(),
+                    spec: submission.spec.clone(),
+                },
+                submission.generation,
+            )
+            .map_err(|e| bounded_problem(&e.0))?;
+        self.creation_operation = Some((
+            pending.request().request_id.clone(),
+            pending.hash().to_owned(),
+        ));
+        self.creation_pending = Some(submission.clone());
+        Ok(())
+    }
+
+    async fn mutate_creation(
+        &mut self,
+        submission: &CreationSubmission,
+        delivery: MutationDelivery,
+    ) -> Result<OwnerResponse, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        if matches!(delivery, MutationDelivery::Submit) {
+            self.prepare_creation(submission).await?;
+        } else {
+            let controller = self
+                .controller
+                .as_ref()
+                .ok_or("trusted_connection_unavailable")?;
+            if self.creation_pending.as_ref() != Some(submission)
+                || controller.pending().is_none()
+                || controller.identity().database_instance()
+                    != submission.identity.database_instance()
+                || (matches!(delivery, MutationDelivery::Retry) && !self.creation_retry_allowed)
+            {
+                return Err("creation_exact_reconcile_or_retry_required".into());
+            }
+        }
+        self.deliver_creation(delivery).await
+    }
+
+    async fn deliver_creation(
+        &mut self,
+        delivery: MutationDelivery,
+    ) -> Result<OwnerResponse, String> {
+        self.creation_retry_allowed = false;
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        match delivery {
+            MutationDelivery::Submit => controller.send_pending().await,
+            MutationDelivery::Reconcile => controller.reconcile_pending().await,
+            MutationDelivery::Retry => controller.retry_pending().await,
+        }
+        .map_err(|e| bounded_problem(&e.0))
     }
 
     async fn step(
@@ -1086,6 +1276,572 @@ fn bounded_problem(problem: &str) -> String {
         problem.to_owned()
     } else {
         "trusted_owner_connection_failed".into()
+    }
+}
+
+#[cfg(test)]
+mod creation_recovery_tests {
+    use super::*;
+    use crate::engine::bootstrap::EngineService;
+    use crate::engine::owner::{OwnerControl, OwnerDecision, OwnerResult};
+    use crate::protocol::Outcome;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RealNative {
+        root: tempfile::TempDir,
+        service: EngineService,
+        native: NativeOwner,
+        _stop: tokio::sync::watch::Sender<bool>,
+    }
+
+    impl RealNative {
+        async fn new() -> Self {
+            let root = tempfile::Builder::new()
+                .prefix("ca-native373-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let config = crate::config::resolve_config(
+                &root.path().join("global"),
+                &root.path().join("project"),
+            )
+            .unwrap();
+            let service = EngineService::start(root.path(), "engine.sock", &config, &stopped)
+                .await
+                .unwrap();
+            let mut native =
+                NativeOwner::new(root.path().join("engine.sock"), Duration::from_secs(2));
+            let (_, access) = native.attach().await;
+            assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+            Self {
+                root,
+                service,
+                native,
+                _stop: stop,
+            }
+        }
+
+        fn submission(&self) -> CreationSubmission {
+            CreationSubmission {
+                identity: self.native.controller.as_ref().unwrap().identity().clone(),
+                generation: 7,
+                navigation: 9,
+                project_id: ProjectId::new("native-target").unwrap(),
+                spec: ProjectSpec {
+                    name: "Native target".into(),
+                    repositories: vec!["/absent/native target".into()],
+                },
+            }
+        }
+
+        async fn queued(&mut self) -> (super::super::app::App, CreationSubmission) {
+            use super::super::app::{App, UiEvent};
+            let (_, access) = self.native.attach().await;
+            let mut app = App::new();
+            app.apply_owner(access).unwrap();
+            app.reduce(UiEvent::FocusNext).unwrap();
+            app.reduce(UiEvent::BeginDeclaration).unwrap();
+            for character in "Native target".chars() {
+                app.reduce(UiEvent::Character(character)).unwrap();
+            }
+            app.reduce(UiEvent::FocusNext).unwrap();
+            for character in "/absent/native target".chars() {
+                app.reduce(UiEvent::Character(character)).unwrap();
+            }
+            app.reduce(UiEvent::Submit).unwrap();
+            let job = app.take_creation_job().unwrap();
+            (app, job.submission)
+        }
+
+        async fn control(&self, decision: OwnerDecision, id: &str) {
+            let runtime = self.service.owner_runtime().unwrap();
+            let result = runtime
+                .control(OwnerControl {
+                    operation_id: RequestId::new(id).unwrap(),
+                    target: OwnerClientKind::Tui,
+                    expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+                    decision,
+                })
+                .await
+                .unwrap();
+            assert_eq!(result.active, decision == OwnerDecision::Reactivate);
+        }
+
+        async fn close(mut self) {
+            drop(self.native);
+            self.service.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_pre_auth_revoke_retains_unknown_intent_then_exact_barrier_retry() {
+        let mut h = RealNative::new().await;
+        let submission = h.submission();
+        h.native.prepare_creation(&submission).await.unwrap();
+        let operation = h.native.creation_operation.clone().unwrap();
+        let request = h
+            .native
+            .controller
+            .as_ref()
+            .unwrap()
+            .pending()
+            .unwrap()
+            .request()
+            .clone();
+        h.control(OwnerDecision::Revoke, "revoke-before-send").await;
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(submission.clone(), result);
+        assert!(event.result.is_err());
+        assert!(event.retained);
+        assert_eq!(event.operation, Some(operation.clone()));
+        assert!(
+            h.native
+                .mutate_creation(&submission, MutationDelivery::Retry)
+                .await
+                .is_err()
+        );
+        h.control(OwnerDecision::Reactivate, "reactivate-before-reconcile")
+            .await;
+        let (_, access) = h.native.attach().await;
+        assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+        let barrier = h
+            .native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Reconcile,
+            })
+            .await;
+        assert!(matches!(
+            barrier.result.as_deref(),
+            Ok(OwnerResponse::NotRecordedAtBarrier { .. })
+        ));
+        assert_eq!(
+            h.native
+                .controller
+                .as_ref()
+                .unwrap()
+                .pending()
+                .unwrap()
+                .request(),
+            &request
+        );
+        let event = h
+            .native
+            .creation(CreationJob {
+                submission,
+                delivery: MutationDelivery::Retry,
+            })
+            .await;
+        assert_eq!(event.operation, Some(operation));
+        assert!(!event.retained);
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+            if operation.result == OwnerResult::Applied)
+        );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn actual_stale_prepared_creation_is_recorded_rejection_without_rebase() {
+        let mut h = RealNative::new().await;
+        let (mut app, submission) = h.queued().await;
+        h.native.prepare_creation(&submission).await.unwrap();
+        let operation = h.native.creation_operation.clone();
+        let reply = h
+            .native
+            .ordinary()
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("competing-owner").unwrap(),
+                request_id: RequestId::new("competing-project").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::CreateProject {
+                    project_id: ProjectId::new("competitor").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Competing project".into(),
+                        repositories: vec![],
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.outcome, Outcome::Applied);
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(submission, result);
+        assert_eq!(event.operation, operation);
+        assert!(!event.retained);
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+            if matches!(operation.result, OwnerResult::Rejected { .. }))
+        );
+        assert!(h.native.creation_pending.is_none());
+        app.apply_owner(OwnerEvent::Creation(Box::new(event)))
+            .unwrap();
+        assert!(app.creation_pending_label().is_none());
+        assert_eq!(app.draft(), "/absent/native target");
+        assert!(app.selected_project().is_none());
+        let db = rusqlite::Connection::open(h.root.path().join("engine.db")).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(db);
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn actual_wrong_database_attach_cannot_replace_pending_creation() {
+        let mut h = RealNative::new().await;
+        let other = RealNative::new().await;
+        let submission = h.submission();
+        h.native.prepare_creation(&submission).await.unwrap();
+        let request = h
+            .native
+            .controller
+            .as_ref()
+            .unwrap()
+            .pending()
+            .unwrap()
+            .request()
+            .clone();
+        h.native.detach();
+        h.native.socket = other.root.path().join("engine.sock");
+        let (_, access) = h.native.attach().await;
+        assert!(matches!(access, OwnerEvent::Access { ready: false, .. }));
+        assert_eq!(
+            h.native
+                .controller
+                .as_ref()
+                .unwrap()
+                .pending()
+                .unwrap()
+                .request(),
+            &request
+        );
+        let result = h
+            .native
+            .creation(CreationJob {
+                submission,
+                delivery: MutationDelivery::Reconcile,
+            })
+            .await;
+        assert!(result.result.is_err());
+        assert!(result.retained);
+        other.close().await;
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn actual_owner_frame_bound_rejects_escaped_content_before_retaining_an_operation() {
+        let mut h = RealNative::new().await;
+        let mut submission = h.submission();
+        submission.spec.name = "x".into();
+        submission.spec.repositories = vec![format!("/{}", "\"".repeat(4095)); 15];
+        submission
+            .spec
+            .repositories
+            .push(format!("/{}", "\"".repeat(4094)));
+        assert_eq!(
+            submission.spec.name.len()
+                + submission
+                    .spec
+                    .repositories
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>(),
+            65536
+        );
+        submission.spec.validate().unwrap();
+        let error = h.native.prepare_creation(&submission).await.unwrap_err();
+        assert!(error.contains("owner_request_bounds"), "{error}");
+        assert!(h.native.controller.as_ref().unwrap().pending().is_none());
+        assert!(h.native.creation_pending.is_none());
+        assert!(h.native.creation_operation.is_none());
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn actual_prepared_intent_trips_missing_operation_invariant() {
+        let mut h = RealNative::new().await;
+        let submission = h.submission();
+        h.native.prepare_creation(&submission).await.unwrap();
+        h.native.detach();
+        let result = h
+            .native
+            .mutate_creation(&submission, MutationDelivery::Reconcile)
+            .await
+            .map(Box::new);
+        assert!(result.is_err());
+        h.native.creation_operation = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.native.creation_event(submission, result)
+        }));
+        assert!(result.is_err());
+        h.close().await;
+    }
+
+    fn creation_table_counts(db: &rusqlite::Connection) -> std::collections::BTreeMap<String, i64> {
+        let mut statement = db
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+            .unwrap();
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(names.len() <= 128);
+        names
+            .into_iter()
+            .map(|name| {
+                assert!(
+                    name.bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                );
+                let count = db
+                    .query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                (name, count)
+            })
+            .collect()
+    }
+
+    fn read_committed_creation(
+        db: &rusqlite::Connection,
+        id: &RequestId,
+    ) -> Option<(crate::engine::owner::OwnerProvenance, OwnerResult)> {
+        use rusqlite::OptionalExtension;
+        assert!(db.is_autocommit());
+        let row = db
+            .query_row(
+                "SELECT owner_id,request_hash,engine_epoch,admitted_epoch,resulting_epoch,revision_before,revision_after,result,event_cursor FROM owner_operations WHERE origin='native_owner' AND operation_id=?1",
+                [id.as_str()],
+                |row| {
+                    let hash: Vec<u8> = row.get(1)?;
+                    assert_eq!(hash.len(), 32);
+                    Ok((
+                        crate::engine::owner::OwnerProvenance {
+                            origin: "native_owner".into(),
+                            owner_id: row.get(0)?,
+                            operation_id: id.clone(),
+                            request_hash: hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+                            engine_epoch: row.get(2)?,
+                            admitted_epoch: row.get(3)?,
+                            resulting_epoch: row.get(4)?,
+                            revision_before: Cursor::new(row.get::<_, i64>(5)?.try_into().unwrap()),
+                            revision_after: Cursor::new(row.get::<_, i64>(6)?.try_into().unwrap()),
+                            event_cursor: row
+                        .get::<_, Option<i64>>(8)?
+                        .map(|cursor| Cursor::new(cursor.try_into().unwrap())),
+                        },
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap();
+        assert!(db.is_autocommit());
+        row.map(|(provenance, bytes)| (provenance, serde_json::from_slice(&bytes).unwrap()))
+    }
+
+    async fn drop_creation_delivery_after_commit(
+        native: &mut NativeOwner,
+        db: &rusqlite::Connection,
+        id: &RequestId,
+    ) -> Result<(crate::engine::owner::OwnerProvenance, OwnerResult), String> {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let mut delivery = Box::pin(native.deliver_creation(MutationDelivery::Submit));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for _ in 0..100_000 {
+            if std::time::Instant::now() >= deadline {
+                return Err("real committed receipt exceeded two-second deadline".into());
+            }
+            if let Some(receipt) = read_committed_creation(db, id) {
+                drop(delivery);
+                return Ok(receipt);
+            }
+            let polled = delivery
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
+            if let Poll::Ready(result) = polled {
+                return Err(format!("delivery settled before cancellation: {result:?}"));
+            }
+            tokio::task::yield_now().await;
+        }
+        Err("real committed receipt exceeded 100000 delivery polls".into())
+    }
+
+    fn assert_exact_uncertain_creation(
+        native: &NativeOwner,
+        submission: &CreationSubmission,
+        request: &crate::engine::owner::OwnerRequest,
+        hash: &str,
+    ) {
+        let pending = native.controller.as_ref().unwrap().pending().unwrap();
+        assert!(pending.uncertain());
+        assert_eq!(pending.request(), request);
+        assert_eq!(pending.hash(), hash);
+        assert_eq!(pending.generation(), submission.generation);
+        let retained = native.creation_pending.as_ref().unwrap();
+        assert_eq!(retained.identity, submission.identity);
+        assert_eq!(retained.generation, submission.generation);
+        assert_eq!(retained.navigation, submission.navigation);
+        assert_eq!(retained.project_id, submission.project_id);
+        assert_eq!(retained.spec, submission.spec);
+        assert_eq!(
+            native.creation_operation.as_ref(),
+            Some(&(request.request_id.clone(), hash.to_owned()))
+        );
+        assert!(!native.creation_retry_allowed);
+    }
+
+    async fn restart_creation_service(h: &mut RealNative) {
+        let identity = h.native.controller.as_ref().unwrap().identity().clone();
+        h.native.detach();
+        h.service.shutdown().await.unwrap();
+        let config = crate::config::resolve_config(
+            &h.root.path().join("global"),
+            &h.root.path().join("project"),
+        )
+        .unwrap();
+        h.service =
+            EngineService::start(h.root.path(), "engine.sock", &config, &h._stop.subscribe())
+                .await
+                .unwrap();
+        let (_, access) = h.native.attach().await;
+        assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+        let current = h.native.controller.as_ref().unwrap().identity();
+        assert_eq!(current.database_instance(), identity.database_instance());
+        assert_ne!(current.engine_epoch(), identity.engine_epoch());
+    }
+
+    async fn assert_exact_creation_snapshot(native: &NativeOwner, submission: &CreationSubmission) {
+        let reply = native
+            .ordinary()
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("lost-ack-observer").unwrap(),
+                request_id: RequestId::new("lost-ack-snapshot").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::Snapshot,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.revision, Cursor::new(1));
+        let Outcome::Snapshot { projects, tasks } = reply.outcome else {
+            panic!("real snapshot was not returned");
+        };
+        assert!(tasks.is_empty());
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project_id, submission.project_id);
+        assert_eq!(projects[0].spec, submission.spec);
+    }
+
+    async fn reconcile_committed_creation(
+        native: &mut NativeOwner,
+        submission: &CreationSubmission,
+        request: &crate::engine::owner::OwnerRequest,
+        hash: &str,
+        receipt: &(crate::engine::owner::OwnerProvenance, OwnerResult),
+    ) {
+        let event = native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Reconcile,
+            })
+            .await;
+        let Ok(OwnerResponse::Committed { operation }) = event.result.as_deref() else {
+            panic!(
+                "actual reconciliation did not return Committed: {:?}",
+                event.result
+            );
+        };
+        assert_eq!(operation.result, receipt.1);
+        assert_eq!(operation.provenance, receipt.0);
+        assert!(operation.historical_replay);
+        assert_eq!(operation.current_revision, Cursor::new(1));
+        assert_eq!(
+            event.operation,
+            Some((request.request_id.clone(), hash.to_owned()))
+        );
+        assert!(!event.retained);
+        assert!(native.controller.as_ref().unwrap().pending().is_none());
+        assert!(native.creation_pending.is_none());
+        assert!(native.creation_operation.is_none());
+        assert!(!native.creation_retry_allowed);
+        assert!(
+            native
+                .mutate_creation(submission, MutationDelivery::Retry)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn actual_committed_creation_loses_ack_then_reconciles_without_retry() {
+        let mut h = RealNative::new().await;
+        let (_, submission) = h.queued().await;
+        h.native.prepare_creation(&submission).await.unwrap();
+        let pending = h.native.controller.as_ref().unwrap().pending().unwrap();
+        let request = pending.request().clone();
+        let hash = pending.hash().to_owned();
+        let db = rusqlite::Connection::open_with_flags(
+            h.root.path().join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut expected = creation_table_counts(&db);
+        for table in ["projects", "events", "owner_operations"] {
+            assert_eq!(expected[table], 0);
+            *expected.get_mut(table).unwrap() += 1;
+        }
+        let receipt = match drop_creation_delivery_after_commit(
+            &mut h.native,
+            &db,
+            &request.request_id,
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                drop(db);
+                h.close().await;
+                panic!("{error}");
+            }
+        };
+        assert_eq!(receipt.1, OwnerResult::Applied);
+        assert_eq!(receipt.0.operation_id, request.request_id);
+        assert_eq!(receipt.0.request_hash, hash);
+        assert_eq!(receipt.0.engine_epoch, submission.identity.engine_epoch());
+        assert_eq!(receipt.0.revision_before, Cursor::new(0));
+        assert_eq!(receipt.0.revision_after, Cursor::new(1));
+        assert_eq!(receipt.0.event_cursor, Some(Cursor::new(1)));
+        assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
+        assert_eq!(creation_table_counts(&db), expected);
+        restart_creation_service(&mut h).await;
+        assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
+        assert_eq!(
+            read_committed_creation(&db, &request.request_id),
+            Some(receipt.clone())
+        );
+        reconcile_committed_creation(&mut h.native, &submission, &request, &hash, &receipt).await;
+        assert_eq!(creation_table_counts(&db), expected);
+        *expected.get_mut("operations").unwrap() += 1;
+        assert_exact_creation_snapshot(&h.native, &submission).await;
+        assert_eq!(creation_table_counts(&db), expected);
+        drop(db);
+        h.close().await;
     }
 }
 

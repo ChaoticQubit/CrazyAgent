@@ -445,3 +445,22 @@ async fn real_wire_data_preserves_selection_and_scopes_configuration() {
     service.await.unwrap().unwrap();
     engine.close().await.unwrap();
 }
+
+#[test]
+fn shared_screen_decoder_preserves_terminal_cells() {
+    let output = Command::new("python3")
+        .env_remove("PYTHONOPTIMIZE")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/qualification/test_tui_flow.py"
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
