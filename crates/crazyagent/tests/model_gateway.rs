@@ -1209,3 +1209,260 @@ fn quota_policy_fresh_ready_unknown_preserves_active_cooldown() {
     assert_eq!(read_attempt(&tx, &blocked.id).unwrap(), None);
     tx.commit().unwrap();
 }
+
+#[test]
+fn cooldown_history_preserves_maximum_exact_expiry_and_negative_health() {
+    let config = load_config(CATALOG);
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    let first = Observation {
+        kind: ObservationKind::RateLimited {
+            retry_at_ms: Some(700),
+        },
+        ..observation(&config, 0, 1)
+    };
+    let second = Observation {
+        observed_at_ms: 200,
+        kind: ObservationKind::RateLimited {
+            retry_at_ms: Some(400),
+        },
+        ..observation(&config, 0, 2)
+    };
+    let tx = database.transaction().unwrap();
+    observe(&tx, &config, &first).unwrap();
+    observe(&tx, &config, &second).unwrap();
+    tx.commit().unwrap();
+    let negative = connection_state(&database, &second.connection, 700).unwrap();
+    assert_eq!(negative.cooldown_until_ms, None);
+    assert_eq!(negative.health, Health::RateLimited);
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        begin_attempt(
+            &tx,
+            &config,
+            &config,
+            &request("negative-expiry", None),
+            700
+        )
+        .unwrap_err()
+        .0,
+        "gateway_rate_limited"
+    );
+    let fresh = Observation {
+        observed_at_ms: 300,
+        ..observation(&config, 0, 3)
+    };
+    observe(&tx, &config, &fresh).unwrap();
+    tx.commit().unwrap();
+    let active = connection_state(&database, &fresh.connection, 699).unwrap();
+    assert_eq!(active.health, Health::Ready);
+    assert_eq!(active.quota, Quota::Unknown);
+    assert_eq!(active.cooldown_until_ms, Some(700));
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        begin_attempt(&tx, &config, &config, &request("before-expiry", None), 699)
+            .unwrap_err()
+            .0,
+        "gateway_cooldown"
+    );
+    assert_eq!(
+        connection_state(&tx, &fresh.connection, 700)
+            .unwrap()
+            .cooldown_until_ms,
+        None
+    );
+    assert!(begin_attempt(&tx, &config, &config, &request("exact-expiry", None), 700).is_ok());
+    assert_eq!(
+        connection_state(&tx, &fresh.connection, 10000)
+            .unwrap()
+            .health,
+        Health::Unknown
+    );
+}
+
+#[test]
+fn cooldown_history_enforces_exact_256_and_257_row_boundary() {
+    let config = load_config(CATALOG);
+    for historical in [256_u64, 257] {
+        let mut database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        let tx = database.transaction().unwrap();
+        for sequence in 1..=historical + 1 {
+            let mut event = observation(&config, 0, sequence);
+            if sequence == 1 {
+                event.kind = ObservationKind::RateLimited {
+                    retry_at_ms: Some(500),
+                };
+            }
+            observe(&tx, &config, &event).unwrap();
+        }
+        observe(&tx, &config, &observation(&config, 1, 1)).unwrap();
+        tx.commit().unwrap();
+        let model = &config.settings.model_access.as_ref().unwrap().connections[0];
+        let expected = if historical == 256 {
+            assert_eq!(
+                connection_state(&database, model, 200)
+                    .unwrap()
+                    .cooldown_until_ms,
+                Some(500)
+            );
+            "gateway_cooldown"
+        } else {
+            assert_eq!(
+                connection_state(&database, model, 200).unwrap_err().0,
+                "gateway_cooldown_history_limit"
+            );
+            "gateway_cooldown_history_limit"
+        };
+        let requested = request("bounded-history", None);
+        let tx = database.transaction().unwrap();
+        assert_eq!(
+            begin_attempt(&tx, &config, &config, &requested, 200)
+                .unwrap_err()
+                .0,
+            expected
+        );
+        assert_eq!(read_attempt(&tx, &requested.id).unwrap(), None);
+    }
+}
+
+#[test]
+fn cooldown_history_old_cutoff_proves_expiry_before_extra_history() {
+    let config = load_config(CATALOG);
+    let now = 86_400_100;
+    for recent in [0_u64, 255] {
+        let mut database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        let tx = database.transaction().unwrap();
+        for sequence in 1..=301 + recent {
+            let mut event = observation(&config, 0, sequence);
+            if sequence > 300 {
+                event.observed_at_ms = now;
+                event.valid_until_ms = now + 10000;
+            }
+            if sequence == 1 {
+                event.kind = ObservationKind::RateLimited {
+                    retry_at_ms: Some(500),
+                };
+            }
+            if sequence == 300 {
+                insert_legacy_observation(
+                    &tx,
+                    &event,
+                    &legacy_ready_body(&event, Some(ResourceBudget::zero())),
+                );
+            } else {
+                observe(&tx, &config, &event).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let model = &config.settings.model_access.as_ref().unwrap().connections[0];
+        let state = connection_state(&database, model, now).unwrap();
+        assert_eq!(state.health, Health::Ready);
+        assert_eq!(state.quota, Quota::Unknown);
+        assert_eq!(state.cooldown_until_ms, None);
+        let tx = database.transaction().unwrap();
+        assert!(begin_attempt(&tx, &config, &config, &request("old-history", None), now).is_ok());
+    }
+}
+
+#[test]
+fn cooldown_history_expired_middle_does_not_hide_older_active_deadline() {
+    let config = load_config(CATALOG);
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    let tx = database.transaction().unwrap();
+    let first = Observation {
+        valid_until_ms: 1000,
+        kind: ObservationKind::RateLimited {
+            retry_at_ms: Some(900),
+        },
+        ..observation(&config, 0, 1)
+    };
+    let middle = Observation {
+        observed_at_ms: 200,
+        valid_until_ms: 250,
+        ..observation(&config, 0, 2)
+    };
+    let latest = Observation {
+        observed_at_ms: 300,
+        ..observation(&config, 0, 3)
+    };
+    for event in [&first, &middle, &latest] {
+        observe(&tx, &config, event).unwrap();
+    }
+    tx.commit().unwrap();
+    let state = connection_state(&database, &latest.connection, 500).unwrap();
+    assert_eq!(state.health, Health::Ready);
+    assert_eq!(state.quota, Quota::Unknown);
+    assert_eq!(state.cooldown_until_ms, Some(900));
+    let tx = database.transaction().unwrap();
+    assert_eq!(
+        begin_attempt(&tx, &config, &config, &request("expired-middle", None), 500)
+            .unwrap_err()
+            .0,
+        "gateway_cooldown"
+    );
+}
+
+#[test]
+fn cooldown_history_rejects_historical_identity_bounds_and_time_corruption() {
+    let config = load_config(CATALOG);
+    for (case, expected) in [
+        (0, "gateway_observation_identity"),
+        (1, "gateway_observation_identity"),
+        (2, "gateway_observation_identity"),
+        (3, "gateway_observation_bounds"),
+        (4, "gateway_observation_stale"),
+    ] {
+        let mut database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        let historical = Observation {
+            kind: ObservationKind::RateLimited {
+                retry_at_ms: Some(500),
+            },
+            ..observation(&config, 0, 1)
+        };
+        let latest = Observation {
+            observed_at_ms: 200,
+            ..observation(&config, 0, 2)
+        };
+        let tx = database.transaction().unwrap();
+        observe(&tx, &config, &historical).unwrap();
+        observe(&tx, &config, &latest).unwrap();
+        tx.commit().unwrap();
+        let mut body = serde_json::to_value(&historical).unwrap();
+        match case {
+            0 => body["id"] = serde_json::json!("different-observation"),
+            1 => body["sequence"] = serde_json::json!(2),
+            2 => body["connection"]["provider"] = serde_json::json!("changed-provider"),
+            3 => body["valid_until_ms"] = serde_json::json!(86_400_101_u64),
+            4 => body["observed_at_ms"] = serde_json::json!(300),
+            _ => unreachable!(),
+        }
+        database
+            .execute(
+                "UPDATE model_gateway_observations SET body = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::to_string(&body).unwrap(),
+                    historical.id.as_str()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            connection_state(&database, &latest.connection, 400)
+                .unwrap_err()
+                .0,
+            expected
+        );
+        let requested = request("corrupt-history", None);
+        let tx = database.transaction().unwrap();
+        assert_eq!(
+            begin_attempt(&tx, &config, &config, &requested, 400)
+                .unwrap_err()
+                .0,
+            expected
+        );
+        assert_eq!(read_attempt(&tx, &requested.id).unwrap(), None);
+    }
+}

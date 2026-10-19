@@ -1221,19 +1221,25 @@ async fn owner_settings_lists_catalog_with_knowledge() {
 }
 
 fn quota_policy_catalog() -> String {
-    let catalog = crazyagent::config::ModelAccess {
-        accounts: vec![reference("account")],
-        connections: vec![connection()],
-        pools: vec![crazyagent::config::AccountPool {
-            id: reference("pool"),
-            members: vec![reference("connection")],
-            projects: vec![reference("project")],
-            roles: vec![reference("worker")],
-            fallback_allowed: false,
-            provider_quota_policy: crazyagent::config::ProviderQuotaPolicy::BoundedAttempt,
-        }],
-    };
-    toml::to_string(&serde_json::json!({"model_access": catalog})).unwrap()
+    r#"[model_access]
+accounts = ["account"]
+[[model_access.connections]]
+id = "connection"
+provider = "self-hosted"
+harness = "gateway"
+protocol = "openai-compatible"
+account_ref = "account"
+endpoint = { kind = "http", url = "http://127.0.0.1:1234/v1" }
+model = { id = "model", author = "model-author" }
+auth = { method = "none" }
+[[model_access.pools]]
+id = "pool"
+members = ["connection"]
+projects = ["project"]
+roles = ["worker"]
+fallback_allowed = false
+"#
+    .into()
 }
 
 #[tokio::test]
