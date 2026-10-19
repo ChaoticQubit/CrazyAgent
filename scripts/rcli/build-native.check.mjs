@@ -63,7 +63,7 @@ try {
   assert.equal(lock.entry, null);
   assert.equal(lock.closure.complete, false);
   assert.equal(lock.compiler_arguments_qualified, false);
-  assert.equal(lock.host_files.find(row => row.path.endsWith("host.ts")).sha256, "da984405a980e56f692294fb6f2b5bed2d9a74bee2b75777d70e4480befaebae");
+  assert.equal(lock.host_files.find(row => row.path.endsWith("host.ts")).sha256, "65d5d6d4f6185cfa9e0ea1638f6d8885f3720443185bfdc4914af6726f72a67e");
   console.log("PASS real pinned-file acceptance and missing/hash/size/mode/symlink/hardlink rejection");
   console.log("PASS actual source replacement and mutation detected through owned open descriptors");
   console.log("PASS private staging and unchanged files/output on admission rejection");

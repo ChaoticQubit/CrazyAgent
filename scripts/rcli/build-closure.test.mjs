@@ -80,3 +80,24 @@ test("mutation of trusted manifest ownership trips the asynchronous count invari
     await assert.rejects(pending, /build_closure_count_invariant/);
   } finally { await rm(root, { recursive: true }); }
 });
+
+test("current host pins verify actual project files without admitting execution", async () => {
+  const root = await realpath(new URL("../../", import.meta.url));
+  const lock = JSON.parse(await readFile(new URL("./source-lock.json", import.meta.url), "utf8"));
+  const result = await inspectClosure(root, {
+    complete: false, files: lock.host_files, assets: [], licenses: [], missing: lock.closure.missing,
+  });
+  assert.equal(result.status, "STATIC_INPUTS_INCOMPLETE");
+  assert.equal(result.execution_allowed, false);
+  assert.deepEqual(lock.host_files.map(({ path }) => path).sort(), [
+    "scripts/rcli/entry.ts",
+    "scripts/rcli/host.runtime.ts",
+    "scripts/rcli/host.ts",
+    "scripts/rcli/host.codec.ts",
+    "scripts/rcli/host.turns.ts",
+    "scripts/rcli/host.messages.ts",
+    "scripts/rcli/host.observations.ts",
+    "scripts/rcli/host.test.ts",
+    "scripts/rcli/host.construction.test.ts",
+  ].sort());
+});
