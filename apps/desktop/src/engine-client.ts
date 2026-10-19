@@ -236,6 +236,7 @@ export interface AccountPool {
   projects: string[];
   roles: string[];
   fallback_allowed: boolean;
+  provider_quota_policy?: "bounded_attempt" | "strict";
 }
 
 export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };

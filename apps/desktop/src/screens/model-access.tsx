@@ -28,6 +28,8 @@ function MetadataForm({ state }: { state: State }) {
     </>}
     {!removing && form.collection === "pools" && <>
       {text("members", "Connection references, comma separated", 8318)}{text("projects", "Project references, comma separated", 8318)}{text("roles", "Role references, comma separated", 8318)}
+      <label>Provider quota policy<select value={form.providerQuotaPolicy} aria-describedby="model-quota-policy-help" onChange={(event) => state.changeModelForm({ providerQuotaPolicy: event.target.value as ModelAccessForm["providerQuotaPolicy"] })} data-testid="model-field-providerQuotaPolicy"><option value="bounded_attempt">Bounded attempt (default)</option><option value="strict">Strict quota</option></select></label>
+      <p id="model-quota-policy-help" className="muted">A bounded attempt allows an initial selection when numeric provider quota is unknown. Strict quota blocks that selection; numeric quota is currently unavailable. Both modes require genuine fresh readiness and independent engine admission for execution.</p>
       <label className="checkbox-label"><input type="checkbox" checked={form.fallback} onChange={(event) => state.changeModelForm({ fallback: event.target.checked })} data-testid="model-field-fallback" />Allow configured fallback</label>
     </>}
     {removing && <p>Remove this inspected identity from the configuration? The engine checks dependencies before publication.</p>}

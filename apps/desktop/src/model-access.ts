@@ -1,4 +1,4 @@
-import type { ModelAccessCollection, ModelAccessRecord, ModelAccessEdit, ModelAuthentication, ModelConnection } from "./engine-client.ts";
+import type { AccountPool, ModelAccessCollection, ModelAccessRecord, ModelAccessEdit, ModelAuthentication, ModelConnection } from "./engine-client.ts";
 
 export interface ModelAccessForm {
   collection: ModelAccessCollection;
@@ -19,10 +19,16 @@ export interface ModelAccessForm {
   projects: string;
   roles: string;
   fallback: boolean;
+  providerQuotaPolicy: NonNullable<AccountPool["provider_quota_policy"]>;
 }
 
 export function newForm(collection: ModelAccessCollection, ticket: string): ModelAccessForm {
-  return { collection, ticket, action: "create", id: "", provider: "", harness: "", protocol: "", account: "", endpoint: "http", url: "", model: "", author: "", auth: "none", credential: "", members: "", projects: "", roles: "", fallback: false };
+  return { collection, ticket, action: "create", id: "", provider: "", harness: "", protocol: "", account: "", endpoint: "http", url: "", model: "", author: "", auth: "none", credential: "", members: "", projects: "", roles: "", fallback: false, providerQuotaPolicy: "bounded_attempt" };
+}
+
+function quotaPolicy(value: unknown): ModelAccessForm["providerQuotaPolicy"] {
+  if (value !== "bounded_attempt" && value !== "strict") throw new Error("Provider quota policy must be bounded_attempt or strict.");
+  return value;
 }
 
 export function recordId(record: ModelAccessRecord): string {
@@ -42,7 +48,7 @@ export function formFromRecord(record: ModelAccessRecord, ticket: string, remove
   }
   if (record.kind === "pool") {
     const p = record.pool;
-    return { ...form, members: p.members.join(", "), projects: p.projects.join(", "), roles: p.roles.join(", "), fallback: p.fallback_allowed };
+    return { ...form, members: p.members.join(", "), projects: p.projects.join(", "), roles: p.roles.join(", "), fallback: p.fallback_allowed, providerQuotaPolicy: quotaPolicy(p.provider_quota_policy === undefined ? "bounded_attempt" : p.provider_quota_policy) };
   }
   return form;
 }
@@ -66,7 +72,8 @@ export function editFromForm(form: ModelAccessForm): ModelAccessEdit {
   }
   if (form.action === "remove") return { kind: form.collection === "connections" ? "remove_connection" : "remove_pool", id };
   if (form.collection === "pools") {
-    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, members: references(form.members), projects: references(form.projects), roles: references(form.roles), fallback_allowed: form.fallback } };
+    const policy = quotaPolicy(form.providerQuotaPolicy);
+    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, members: references(form.members), projects: references(form.projects), roles: references(form.roles), fallback_allowed: form.fallback, ...(policy === "strict" ? { provider_quota_policy: policy } : {}) } };
   }
   if (!/^[A-Za-z0-9_.:/@+-]{1,256}$/.test(form.model)) throw new Error("Model ID requires 1 to 256 safe ASCII model identifier characters.");
   if (form.endpoint === "native" && form.protocol !== "native") throw new Error("Native endpoints require the native protocol.");
