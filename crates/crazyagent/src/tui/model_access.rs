@@ -2,7 +2,7 @@ use super::app::UiEvent;
 use super::client::MutationDelivery;
 use crate::config::{
     AccountPool, ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint,
-    ModelReference,
+    ModelReference, ProviderQuotaPolicy,
 };
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
@@ -820,7 +820,18 @@ fn record_lines(record: &ModelAccessRecord) -> Vec<String> {
                 refs(&pool.roles),
                 pool.fallback_allowed
             ),
+            format!(
+                "Provider quota policy: {}",
+                provider_quota_policy_name(pool.provider_quota_policy)
+            ),
         ],
+    }
+}
+
+fn provider_quota_policy_name(policy: ProviderQuotaPolicy) -> &'static str {
+    match policy {
+        ProviderQuotaPolicy::BoundedAttempt => "bounded_attempt",
+        ProviderQuotaPolicy::Strict => "strict",
     }
 }
 
@@ -875,6 +886,7 @@ impl Form {
                 ("Project IDs", &[], 16384),
                 ("Role IDs", &[], 16384),
                 ("Fallback allowed", &["false", "true"], 256),
+                ("Provider quota policy", &["bounded_attempt", "strict"], 256),
             ],
         };
         Self {
@@ -944,6 +956,7 @@ impl Form {
                     refs(&pool.projects),
                     refs(&pool.roles),
                     pool.fallback_allowed.to_string(),
+                    provider_quota_policy_name(pool.provider_quota_policy).into(),
                 ],
             ),
         };
@@ -1065,6 +1078,11 @@ impl Form {
                     projects: references(2)?,
                     roles: references(3)?,
                     fallback_allowed: value(4) == "true",
+                    provider_quota_policy: match value(5).as_str() {
+                        "bounded_attempt" => ProviderQuotaPolicy::BoundedAttempt,
+                        "strict" => ProviderQuotaPolicy::Strict,
+                        _ => return Err("Unsupported provider quota policy".into()),
+                    },
                 };
                 if self.replace {
                     ModelAccessEdit::ReplacePool { pool }
@@ -1122,6 +1140,15 @@ impl Form {
                 displayed
             ));
         }
+        if self.collection == ModelAccessCollection::Pools {
+            lines.push(
+                "Strict blocks unknown provider quota; numeric quota is currently unavailable."
+                    .into(),
+            );
+            lines.push(
+                "Bounded attempt still requires fresh readiness and execution admission.".into(),
+            );
+        }
         lines.push("Reference IDs only; never paste keys/tokens".into());
         lines.push("Tab fields | arrows choices | Enter save | Esc retain".into());
         lines
@@ -1142,5 +1169,321 @@ impl Form {
             assert!(!field.value.chars().any(char::is_control));
             assert!(field.choices.is_empty() || field.choices.contains(&field.value.as_str()));
         }
+    }
+}
+
+#[cfg(test)]
+mod quota_policy_tests {
+    use super::*;
+    use crate::client_controller::OwnerController;
+    use crate::engine::Client;
+    use crate::engine::bootstrap::EngineService;
+    use crate::engine::owner::{OwnerClientKind, OwnerMutation};
+    use serde_json::{Value, json};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    async fn owner_basis() -> (
+        tempfile::TempDir,
+        EngineService,
+        OwnerController,
+        tokio::sync::watch::Sender<bool>,
+        Basis,
+    ) {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui563-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        let project = root.path().join("project.toml");
+        std::fs::write(&global, "version = 1\n[model_access]\naccounts = []\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "engine.sock",
+            &global,
+            &project,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let (_, mut owner) = OwnerController::attach_configured(
+            Client::new(root.path().join("engine.sock"), Duration::from_secs(2)).unwrap(),
+            OwnerClientKind::Tui,
+        )
+        .await
+        .unwrap();
+        let page = owner
+            .read(OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 16,
+            })
+            .await
+            .unwrap();
+        let OwnerData::ModelAccessPage {
+            source_hash,
+            writable,
+            ..
+        } = page.data
+        else {
+            panic!("actual pool page required")
+        };
+        let basis = Basis {
+            identity: owner.identity().clone(),
+            revision: page.revision,
+            config_id: page.config_id,
+            source_hash,
+            writable,
+        };
+        assert!(basis.writable);
+        (root, service, owner, stop, basis)
+    }
+
+    fn pool_value(policy: Option<&str>) -> Value {
+        let mut pool = json!({
+            "id": "quota-pool",
+            "members": ["connection-1"],
+            "projects": ["project-1"],
+            "roles": ["leader"],
+            "fallback_allowed": false
+        });
+        if let Some(policy) = policy {
+            pool["provider_quota_policy"] = json!(policy);
+        }
+        pool
+    }
+
+    fn pool_form(basis: Basis) -> Form {
+        let mut form = Form::new(ModelAccessCollection::Pools, basis);
+        for (label, value) in [
+            ("Pool ID", "quota-pool"),
+            ("Member connection IDs", "connection-1"),
+            ("Project IDs", "project-1"),
+            ("Role IDs", "leader"),
+        ] {
+            form.selected = form
+                .fields
+                .iter()
+                .position(|field| field.label == label)
+                .unwrap();
+            for character in value.chars() {
+                form.character(character).unwrap();
+            }
+        }
+        form.assert_consistent();
+        form
+    }
+
+    fn policy_index(form: &Form) -> usize {
+        let index = form
+            .fields
+            .iter()
+            .position(|field| field.choices.contains(&"bounded_attempt"))
+            .expect("pool form must expose provider_quota_policy bounded_attempt/strict choices");
+        assert_eq!(form.fields[index].choices, &["bounded_attempt", "strict"]);
+        assert!(!form.fields[index].locked);
+        index
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pool_quota_default_is_visible_and_omitted_from_create() {
+        let (_root, mut service, owner, _stop, basis) = owner_basis().await;
+        let mut form = pool_form(basis);
+        let index = policy_index(&form);
+        assert_eq!(form.fields[index].value, "bounded_attempt");
+        form.selected = index;
+        assert!(form.render(false).join("\n").contains("bounded_attempt"));
+        let ModelAccessEdit::CreatePool { pool } = form.edit().unwrap() else {
+            panic!("actual create-pool edit required")
+        };
+        assert_eq!(serde_json::to_value(pool).unwrap(), pool_value(None));
+        drop(owner);
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pool_quota_choices_are_closed_and_invalid_edits_are_rejected() {
+        let (_root, mut service, owner, _stop, basis) = owner_basis().await;
+        let mut form = pool_form(basis);
+        let index = policy_index(&form);
+        form.selected = index;
+        form.character('x').unwrap();
+        form.backspace();
+        assert_eq!(form.fields[index].value, "bounded_attempt");
+        for (forward, expected) in [
+            (true, "strict"),
+            (true, "bounded_attempt"),
+            (false, "strict"),
+            (false, "bounded_attempt"),
+        ] {
+            form.choose(forward);
+            assert_eq!(form.fields[index].value, expected);
+            let ModelAccessEdit::CreatePool { pool } = form.edit().unwrap() else {
+                panic!("actual create-pool edit required")
+            };
+            let policy = if expected == "strict" {
+                Some("strict")
+            } else {
+                None
+            };
+            assert_eq!(serde_json::to_value(pool).unwrap(), pool_value(policy));
+        }
+        for unsupported in ["", "unlimited", "available", "Strict"] {
+            form.fields[index].value = unsupported.into();
+            assert!(
+                form.edit().is_err(),
+                "unsupported quota policy {unsupported:?}"
+            );
+        }
+        drop(owner);
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pool_quota_inspect_and_replace_preserve_policy_and_other_fields() {
+        let (_root, mut service, owner, _stop, basis) = owner_basis().await;
+        for (encoded, effective) in [
+            (None, "bounded_attempt"),
+            (Some("bounded_attempt"), "bounded_attempt"),
+            (Some("strict"), "strict"),
+        ] {
+            let record: ModelAccessRecord = serde_json::from_value(json!({
+                "kind": "pool",
+                "pool": pool_value(encoded)
+            }))
+            .unwrap();
+            assert!(record_lines(&record).join("\n").contains(effective));
+            let mut form = Form::replace(record, basis.clone()).unwrap();
+            let index = policy_index(&form);
+            assert!(form.fields[0].locked);
+            assert_eq!(form.fields[index].value, effective);
+            form.selected = index;
+            let rendered = form.render(false).join("\n").to_lowercase();
+            assert!(rendered.contains(effective));
+            assert!(rendered.contains("strict") && rendered.contains("quota"));
+            assert!(rendered.contains("unknown") || rendered.contains("unavailable"));
+            let ModelAccessEdit::ReplacePool { pool } = form.edit().unwrap() else {
+                panic!("actual replace-pool edit required")
+            };
+            let policy = if effective == "strict" {
+                Some("strict")
+            } else {
+                None
+            };
+            assert_eq!(serde_json::to_value(pool).unwrap(), pool_value(policy));
+        }
+        drop(owner);
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pool_quota_rebase_retains_unsaved_choices_after_actual_owner_refresh() {
+        let (_root, mut service, mut owner, _stop, basis) = owner_basis().await;
+        let mut drafts = Vec::new();
+        for policy in ["bounded_attempt", "strict"] {
+            let mut form = pool_form(basis.clone());
+            let index = policy_index(&form);
+            form.selected = index;
+            if policy == "strict" {
+                form.choose(true);
+            }
+            assert_eq!(form.fields[index].value, policy);
+            drafts.push((policy, form));
+        }
+        owner
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: basis.config_id.clone(),
+                    expected_source_hash: basis.source_hash.clone(),
+                    edit: ModelAccessEdit::AddAccount {
+                        account_ref: CredentialRef::new("quota-rebase-account").unwrap(),
+                    },
+                },
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            owner.send_pending().await.unwrap(),
+            OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+        ));
+        for (policy, form) in drafts {
+            let retained_fields: Vec<_> = form
+                .fields
+                .iter()
+                .map(|field| (field.label, field.value.clone()))
+                .collect();
+            let selected = form.selected;
+            let mut state = State::default();
+            state.access(Some(owner.identity().clone()), true);
+            state.collection = ModelAccessCollection::Pools;
+            state.basis = Some(basis.clone());
+            state.needs_page = false;
+            state.form = Some(form);
+            state.reduce(&UiEvent::HistoryFirst).unwrap();
+            assert!(state.rebase);
+            let Job::Read {
+                identity,
+                generation,
+                query,
+            } = state.request(true).unwrap().unwrap()
+            else {
+                panic!("actual first-page refresh required")
+            };
+            let reply = owner.read(query.clone()).await.unwrap();
+            assert!(reply.revision.value() > basis.revision.value());
+            assert_ne!(reply.config_id, basis.config_id);
+            let OwnerData::ModelAccessPage {
+                source_hash,
+                writable,
+                items,
+                ..
+            } = &reply.data
+            else {
+                panic!("actual refreshed pool page required")
+            };
+            assert!(items.is_empty());
+            assert_ne!(source_hash, &basis.source_hash);
+            let current = Basis {
+                identity: identity.clone(),
+                revision: reply.revision.clone(),
+                config_id: reply.config_id.clone(),
+                source_hash: source_hash.clone(),
+                writable: *writable,
+            };
+            state
+                .apply(Event::Read {
+                    identity,
+                    generation,
+                    query,
+                    result: Ok(Box::new(reply)),
+                })
+                .unwrap();
+            assert!(!state.rebase);
+            assert!(state.pending.is_none());
+            let form = state.form.as_ref().unwrap();
+            assert_eq!(form.basis, current);
+            assert_eq!(form.selected, selected);
+            assert_eq!(
+                form.fields
+                    .iter()
+                    .map(|field| (field.label, field.value.clone()))
+                    .collect::<Vec<_>>(),
+                retained_fields
+            );
+            let ModelAccessEdit::CreatePool { pool } = form.edit().unwrap() else {
+                panic!("retained actual create-pool edit required")
+            };
+            let encoded = if policy == "strict" {
+                Some("strict")
+            } else {
+                None
+            };
+            assert_eq!(serde_json::to_value(pool).unwrap(), pool_value(encoded));
+        }
+        drop(owner);
+        service.shutdown().await.unwrap();
     }
 }
