@@ -62,10 +62,23 @@ pub enum RunnerRequest {
         registration_id: RequestId,
         boot: RunnerBootIdentity,
     },
-    Offer { protocol_version: u16, dispatch_id: RequestId, delivery_generation: u64 },
-    ReportDenied { protocol_version: u16, receipt: DeniedReceipt },
-    Reconcile { protocol_version: u16, dispatch_id: RequestId },
-    ReportFence { protocol_version: u16, receipt: FenceReceipt },
+    Offer {
+        protocol_version: u16,
+        dispatch_id: RequestId,
+        delivery_generation: u64,
+    },
+    ReportDenied {
+        protocol_version: u16,
+        receipt: DeniedReceipt,
+    },
+    Reconcile {
+        protocol_version: u16,
+        dispatch_id: RequestId,
+    },
+    ReportFence {
+        protocol_version: u16,
+        receipt: FenceReceipt,
+    },
 }
 
 pub(crate) const RUNNERS_MAX: usize = 128;
@@ -191,15 +204,20 @@ pub fn dispatch_id(
 ) -> Result<RequestId, crate::engine::EngineError> {
     validate_prepare(attempt, 0)?;
     if !crate::engine::owner::is_hex_id(database_instance) {
-        return Err(crate::engine::EngineError("worker_dispatch_database".into()));
+        return Err(crate::engine::EngineError(
+            "worker_dispatch_database".into(),
+        ));
     }
     let mut bytes = b"crazyagent-worker-dispatch-v1".to_vec();
-    bytes.extend(serde_json::to_vec(&(
-        database_instance,
-        &attempt.plan_id,
-        &attempt.item_id,
-        &attempt.reservation_cursor,
-    )).map_err(|error| crate::engine::EngineError(error.to_string()))?);
+    bytes.extend(
+        serde_json::to_vec(&(
+            database_instance,
+            &attempt.plan_id,
+            &attempt.item_id,
+            &attempt.reservation_cursor,
+        ))
+        .map_err(|error| crate::engine::EngineError(error.to_string()))?,
+    );
     RequestId::new(crate::memory::hash(&bytes))
         .map_err(|error| crate::engine::EngineError(error.to_string()))
 }
@@ -252,11 +270,20 @@ pub struct AdmissionCheckOffer {
 impl AdmissionCheckOffer {
     pub fn digest(&self) -> Result<String, crate::engine::EngineError> {
         let mut bytes = b"crazyagent-admission-check-offer-v1".to_vec();
-        bytes.extend(serde_json::to_vec(&(
-            &self.dispatch_id, &self.attempt, self.delivery_generation,
-            &self.database_instance, &self.engine_epoch, &self.registration_id,
-            &self.runner_boot_id, &self.binding, &self.lease_seal,
-        )).map_err(|error| crate::engine::EngineError(error.to_string()))?);
+        bytes.extend(
+            serde_json::to_vec(&(
+                &self.dispatch_id,
+                &self.attempt,
+                self.delivery_generation,
+                &self.database_instance,
+                &self.engine_epoch,
+                &self.registration_id,
+                &self.runner_boot_id,
+                &self.binding,
+                &self.lease_seal,
+            ))
+            .map_err(|error| crate::engine::EngineError(error.to_string()))?,
+        );
         Ok(crate::memory::hash(&bytes))
     }
 
@@ -270,7 +297,10 @@ impl AdmissionCheckOffer {
             || self.binding.session_id != self.lease_seal.owner_session
             || self.lease_seal.native_descendant.is_some()
             || self.offer_digest != self.digest()?
-            || serde_json::to_vec(self).map_err(|e| crate::engine::EngineError(e.to_string()))?.len() > DISPATCH_OFFER_BYTES_MAX
+            || serde_json::to_vec(self)
+                .map_err(|e| crate::engine::EngineError(e.to_string()))?
+                .len()
+                > DISPATCH_OFFER_BYTES_MAX
         {
             return Err(crate::engine::EngineError("dispatch_offer_invalid".into()));
         }
@@ -309,11 +339,21 @@ pub struct FenceReceipt {
 impl RunnerRequest {
     pub fn protocol_version(&self) -> u16 {
         match self {
-            Self::Ready { protocol_version, .. }
-            | Self::Offer { protocol_version, .. }
-            | Self::ReportDenied { protocol_version, .. }
-            | Self::Reconcile { protocol_version, .. }
-            | Self::ReportFence { protocol_version, .. } => *protocol_version,
+            Self::Ready {
+                protocol_version, ..
+            }
+            | Self::Offer {
+                protocol_version, ..
+            }
+            | Self::ReportDenied {
+                protocol_version, ..
+            }
+            | Self::Reconcile {
+                protocol_version, ..
+            }
+            | Self::ReportFence {
+                protocol_version, ..
+            } => *protocol_version,
         }
     }
 }
@@ -321,14 +361,20 @@ impl RunnerRequest {
 impl DeniedReceipt {
     pub fn validate(&self) -> Result<(), crate::engine::EngineError> {
         if !(1..=DISPATCH_GENERATIONS_MAX).contains(&self.delivery_generation)
-            || self.controller_generation == 0 || self.journal_sequence == 0
+            || self.controller_generation == 0
+            || self.journal_sequence == 0
             || self.native_identity.is_some()
             || !crate::engine::owner::is_hex_id(&self.offer_engine_epoch)
             || !crate::engine::owner::is_hex_id(&self.offer_digest)
             || self.dispatch_id != dispatch_id(&self.database_instance, &self.attempt)?
-            || serde_json::to_vec(self).map_err(|e| crate::engine::EngineError(e.to_string()))?.len() > DISPATCH_RECEIPT_BYTES_MAX
+            || serde_json::to_vec(self)
+                .map_err(|e| crate::engine::EngineError(e.to_string()))?
+                .len()
+                > DISPATCH_RECEIPT_BYTES_MAX
         {
-            return Err(crate::engine::EngineError("dispatch_receipt_invalid".into()));
+            return Err(crate::engine::EngineError(
+                "dispatch_receipt_invalid".into(),
+            ));
         }
         Ok(())
     }

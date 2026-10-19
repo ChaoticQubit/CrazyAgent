@@ -671,7 +671,9 @@ impl App {
     }
 
     fn sync_dispatch(&mut self) -> Result<(), String> {
-        let selected = self.owner_identity.as_ref()
+        let selected = self
+            .owner_identity
+            .as_ref()
             .zip(self.selected_task())
             .zip(self.plan.as_deref())
             .filter(|((_, task), plan)| &plan.plan.scope == *task);
@@ -687,7 +689,8 @@ impl App {
         } else {
             (None, Vec::new())
         };
-        self.dispatch.select(selection, attempts, self.owner_ready, self.revision.clone())
+        self.dispatch
+            .select(selection, attempts, self.owner_ready, self.revision.clone())
     }
 
     pub(super) fn dispatch_request(&mut self) -> Result<Option<dispatch::Query>, String> {
@@ -737,7 +740,9 @@ impl App {
                 if let Some(problem) = self.dispatch.apply(*event) {
                     self.owner_ready = false;
                     self.owner_problem = Some(problem.clone());
-                    self.notice(&format!("Dispatch readback unavailable; limited mode. {problem}"));
+                    self.notice(&format!(
+                        "Dispatch readback unavailable; limited mode. {problem}"
+                    ));
                 }
             }
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,

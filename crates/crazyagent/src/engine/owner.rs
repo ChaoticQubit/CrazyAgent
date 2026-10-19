@@ -1,6 +1,8 @@
 mod transport;
 
-pub use transport::{OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready};
+pub use transport::{
+    OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
+};
 
 use super::EngineError;
 use crate::coordination::OwnerAction;
@@ -58,9 +60,16 @@ pub enum OwnerMutation {
         attempt: crate::worker_dispatch::AttemptRef,
         repository_slot: u8,
     },
-    CancelWorkerDispatch { dispatch_id: RequestId },
-    ReconcileWorkerDispatch { dispatch_id: RequestId },
-    ResumeWorkerDispatch { dispatch_id: RequestId, expected_delivery_generation: u64 },
+    CancelWorkerDispatch {
+        dispatch_id: RequestId,
+    },
+    ReconcileWorkerDispatch {
+        dispatch_id: RequestId,
+    },
+    ResumeWorkerDispatch {
+        dispatch_id: RequestId,
+        expected_delivery_generation: u64,
+    },
     CreateProject {
         project_id: ProjectId,
         spec: ProjectSpec,
@@ -104,12 +113,18 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
-            Self::PrepareWorkerDispatch { attempt, repository_slot } => {
+            Self::PrepareWorkerDispatch {
+                attempt,
+                repository_slot,
+            } => {
                 crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
                 return Err(failure("owner_dispatch_requires_host"));
             }
-            Self::CancelWorkerDispatch { .. } | Self::ReconcileWorkerDispatch { .. }
-            | Self::ResumeWorkerDispatch { .. } => return Err(failure("owner_dispatch_requires_host")),
+            Self::CancelWorkerDispatch { .. }
+            | Self::ReconcileWorkerDispatch { .. }
+            | Self::ResumeWorkerDispatch { .. } => {
+                return Err(failure("owner_dispatch_requires_host"));
+            }
             Self::CreateProject { project_id, spec } => {
                 spec.validate().map_err(|e| failure(&e.0))?;
                 Command::CreateProject {
@@ -386,13 +401,29 @@ impl OwnerRequest {
         encode_frame(self).map_err(|_| failure("owner_request_bounds"))?;
         match &self.operation {
             OwnerOperation::Apply {
-                mutation: OwnerMutation::PrepareWorkerDispatch { attempt, repository_slot },
+                mutation:
+                    OwnerMutation::PrepareWorkerDispatch {
+                        attempt,
+                        repository_slot,
+                    },
             } => {
                 crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
             }
-            OwnerOperation::Apply { mutation: OwnerMutation::CancelWorkerDispatch { .. } | OwnerMutation::ReconcileWorkerDispatch { .. } } => {}
-            OwnerOperation::Apply { mutation: OwnerMutation::ResumeWorkerDispatch { expected_delivery_generation, .. } } => {
-                if !(1..crate::worker_dispatch::DISPATCH_GENERATIONS_MAX).contains(expected_delivery_generation) {
+            OwnerOperation::Apply {
+                mutation:
+                    OwnerMutation::CancelWorkerDispatch { .. }
+                    | OwnerMutation::ReconcileWorkerDispatch { .. },
+            } => {}
+            OwnerOperation::Apply {
+                mutation:
+                    OwnerMutation::ResumeWorkerDispatch {
+                        expected_delivery_generation,
+                        ..
+                    },
+            } => {
+                if !(1..crate::worker_dispatch::DISPATCH_GENERATIONS_MAX)
+                    .contains(expected_delivery_generation)
+                {
                     return Err(failure("dispatch_delivery_generation"));
                 }
             }

@@ -131,7 +131,10 @@ impl Journal {
         if next > JOURNAL_BYTES_MAX {
             return Err(invalid("journal_capacity"));
         }
-        let sequence = self.sequence.checked_add(1).ok_or_else(|| invalid("journal_sequence_overflow"))?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("journal_sequence_overflow"))?;
         self.file.write_all(&bytes)?;
         self.file.sync_all()?;
         self.bytes = next;

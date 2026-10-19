@@ -844,19 +844,36 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
     let output_path = root.join(format!("git-{label}.stdout"));
     let error_path = root.join(format!("git-{label}.stderr"));
     let output = std::fs::OpenOptions::new()
-        .write(true).create_new(true).mode(0o600).open(&output_path).unwrap();
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&output_path)
+        .unwrap();
     let error = std::fs::OpenOptions::new()
-        .write(true).create_new(true).mode(0o600).open(&error_path).unwrap();
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&error_path)
+        .unwrap();
     let mut process = ProcessCommand::new("/usr/bin/git")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-C"])
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+        ])
         .arg(repository)
         .args(args)
-        .stdin(Stdio::null()).stdout(output).stderr(error)
-        .spawn().unwrap();
+        .stdin(Stdio::null())
+        .stdout(output)
+        .stderr(error)
+        .spawn()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let result = loop {
         match process.try_wait() {
@@ -864,7 +881,12 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Ok(None) => break Err(io::Error::new(io::ErrorKind::TimedOut, "fixture Git deadline")),
+            Ok(None) => {
+                break Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "fixture Git deadline",
+                ));
+            }
             Err(error) => break Err(error),
         }
     };
@@ -880,13 +902,29 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
                 _ => break false,
             }
         };
-        eprintln!("trusted-runner-auth fixture_git_reaped={reaped} pid={}", process.id());
+        eprintln!(
+            "trusted-runner-auth fixture_git_reaped={reaped} pid={}",
+            process.id()
+        );
         assert!(reaped, "actual fixture Git cleanup failed");
     }
-    let status = result.unwrap_or_else(|error| panic!("actual fixture Git failed: {error}; {}", error_path.display()));
-    assert!(status.success(), "actual Git {args:?} failed: {status}; {}", error_path.display());
+    let status = result.unwrap_or_else(|error| {
+        panic!(
+            "actual fixture Git failed: {error}; {}",
+            error_path.display()
+        )
+    });
+    assert!(
+        status.success(),
+        "actual Git {args:?} failed: {status}; {}",
+        error_path.display()
+    );
     let mut bytes = Vec::new();
-    std::fs::File::open(&output_path).unwrap().take(65537).read_to_end(&mut bytes).unwrap();
+    std::fs::File::open(&output_path)
+        .unwrap()
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .unwrap();
     assert!(bytes.len() <= 65536, "fixture Git stdout bound");
     String::from_utf8(bytes).unwrap()
 }
@@ -894,8 +932,12 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
 #[tokio::test]
 async fn engine_owned_attempt_is_consumed_and_denied_by_real_runner() {
     use crazyagent::engine::owner::OwnerData;
-    use crazyagent::verification::{BaselineDraft, BaselineOrigin, CandidateSnapshot, CheckKind, CheckSpec, Risk};
-    use crazyagent::worker_dispatch::{DeniedReason, DeniedReceipt, DispatchCancellation, DispatchState, dispatch_id};
+    use crazyagent::verification::{
+        BaselineDraft, BaselineOrigin, CandidateSnapshot, CheckKind, CheckSpec, Risk,
+    };
+    use crazyagent::worker_dispatch::{
+        DeniedReason, DeniedReceipt, DispatchCancellation, DispatchState, dispatch_id,
+    };
     use crazyagent::worktrees::LeaseState;
     use sha2::{Digest, Sha256};
 

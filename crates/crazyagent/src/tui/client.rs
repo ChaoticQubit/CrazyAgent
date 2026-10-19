@@ -351,21 +351,27 @@ impl Connection {
                             if let Err(problem) = &event.result {
                                 native.detach();
                                 client = native.ordinary();
-                                if owner_replies.send(OwnerReply {
-                                    finished: false,
-                                    event: OwnerEvent::Access {
-                                        ready: false,
-                                        problem: problem.clone(),
-                                        identity: None,
-                                    },
-                                }).is_err() {
+                                if owner_replies
+                                    .send(OwnerReply {
+                                        finished: false,
+                                        event: OwnerEvent::Access {
+                                            ready: false,
+                                            problem: problem.clone(),
+                                            identity: None,
+                                        },
+                                    })
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
-                            if owner_replies.send(OwnerReply {
-                                finished: true,
-                                event: OwnerEvent::Dispatch(Box::new(event)),
-                            }).is_err() {
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Dispatch(Box::new(event)),
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -677,22 +683,30 @@ impl NativeOwner {
         if !self.ready {
             return Err("dispatch_owner_unavailable".into());
         }
-        let controller = self.controller.as_mut().ok_or("dispatch_owner_unavailable")?;
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("dispatch_owner_unavailable")?;
         if controller.identity().database_instance() != query.selection.database
             || controller.identity().engine_epoch() != query.selection.epoch
         {
             return Err("dispatch_owner_identity_changed".into());
         }
         let expected = crate::worker_dispatch::dispatch_id(
-            controller.identity().database_instance(), &query.attempt,
-        ).map_err(|error| bounded_problem(&error.0))?;
+            controller.identity().database_instance(),
+            &query.attempt,
+        )
+        .map_err(|error| bounded_problem(&error.0))?;
         if expected != query.dispatch_id || query.attempt.plan_id != query.selection.plan_id {
             return Err("dispatch_attempt_identity_changed".into());
         }
         assert_eq!(expected, query.dispatch_id);
-        controller.read(OwnerRead::WorkerDispatch {
-            dispatch_id: query.dispatch_id.clone(),
-        }).await.map_err(|error| bounded_problem(&error.0))
+        controller
+            .read(OwnerRead::WorkerDispatch {
+                dispatch_id: query.dispatch_id.clone(),
+            })
+            .await
+            .map_err(|error| bounded_problem(&error.0))
     }
 
     async fn model_access(&mut self, job: model_access::Job) -> model_access::Event {

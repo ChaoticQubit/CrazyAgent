@@ -32,7 +32,12 @@ fn attempt(index: usize) -> AttemptRef {
 fn state(count: usize) -> State {
     let mut state = State::default();
     state
-        .select(Some(selection()), (0..count).map(attempt).collect(), true, Cursor::new(30))
+        .select(
+            Some(selection()),
+            (0..count).map(attempt).collect(),
+            true,
+            Cursor::new(30),
+        )
         .unwrap();
     state
 }
@@ -117,7 +122,10 @@ fn actual_plan_reservation_selects_item_instead_of_parent_task() {
         reservations: [(item.id, reservation)].into(),
         messages: vec![],
     };
-    assert_eq!(reserved_attempts(&selected.task, &plan).unwrap(), vec![attempt(0)]);
+    assert_eq!(
+        reserved_attempts(&selected.task, &plan).unwrap(),
+        vec![attempt(0)]
+    );
     assert_ne!(attempt(0).item_id, selected.task.task_id);
     plan.plan.scope.task_id = TaskId::new("another-parent").unwrap();
     assert!(reserved_attempts(&selected.task, &plan).is_err());
@@ -129,12 +137,24 @@ fn dispatch_poll_is_single_pending_and_round_robins_all_sixteen_attempts() {
     for index in 0..17 {
         let query = state.request().unwrap();
         assert_eq!(query.attempt, attempt(index % 16));
-        assert_eq!(query.dispatch_id, dispatch_id(&selection().database, &query.attempt).unwrap());
+        assert_eq!(
+            query.dispatch_id,
+            dispatch_id(&selection().database, &query.attempt).unwrap()
+        );
         assert!(state.request().is_none());
         state.complete(&query, Cursor::new(30), None).unwrap();
     }
     assert_eq!(state.rows.len(), 16);
-    assert!(State::default().select(Some(selection()), (0..17).map(attempt).collect(), true, Cursor::new(30)).is_err());
+    assert!(
+        State::default()
+            .select(
+                Some(selection()),
+                (0..17).map(attempt).collect(),
+                true,
+                Cursor::new(30)
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -156,11 +176,23 @@ fn every_dispatch_state_and_cancellation_is_rendered_without_claiming_execution(
         (DispatchState::Queued, "Queued: committed outbox"),
         (DispatchState::RunnerUnavailable, "Unavailable: runner"),
         (DispatchState::Offered, "Uncertain: offer sent"),
-        (DispatchState::OutcomeUnknown, "Uncertain: delivery outcome unknown"),
-        (DispatchState::ReconciliationRequired, "Uncertain: reconciliation required"),
+        (
+            DispatchState::OutcomeUnknown,
+            "Uncertain: delivery outcome unknown",
+        ),
+        (
+            DispatchState::ReconciliationRequired,
+            "Uncertain: reconciliation required",
+        ),
         (DispatchState::NotConsumed, "Not consumed"),
-        (DispatchState::BlockedRecovery, "Unavailable: recovery blocked"),
-        (DispatchState::CancelledBeforeOffer, "Cancelled before offer"),
+        (
+            DispatchState::BlockedRecovery,
+            "Unavailable: recovery blocked",
+        ),
+        (
+            DispatchState::CancelledBeforeOffer,
+            "Cancelled before offer",
+        ),
         (DispatchState::DeliveredDenied, "Delivered, denied"),
     ];
     for (status, expected) in cases {
@@ -172,7 +204,9 @@ fn every_dispatch_state_and_cancellation_is_rendered_without_claiming_execution(
             view(&query, status)
         };
         value.cancellation = DispatchCancellation::Requested;
-        state.complete(&query, Cursor::new(30), Some(value)).unwrap();
+        state
+            .complete(&query, Cursor::new(30), Some(value))
+            .unwrap();
         let rendered = state.lines();
         assert!(rendered.contains(expected), "{rendered}");
         assert!(rendered.contains("Cancellation requested; completion is not confirmed"));
@@ -190,13 +224,20 @@ fn delivered_denial_requires_matching_retained_receipt_and_no_native_identity() 
         match corruption {
             0 => value.receipt = None,
             1 => value.receipt.as_mut().unwrap().database_instance = "f".repeat(64),
-            2 => value.receipt.as_mut().unwrap().native_identity = Some(RequestId::new("unit-native").unwrap()),
+            2 => {
+                value.receipt.as_mut().unwrap().native_identity =
+                    Some(RequestId::new("unit-native").unwrap())
+            }
             3 => value.receipt.as_mut().unwrap().attempt = attempt(1),
             4 => value.receipt.as_mut().unwrap().delivery_generation += 1,
             5 => value.receipt.as_mut().unwrap().offer_digest = "f".repeat(64),
             _ => unreachable!(),
         }
-        assert!(state.complete(&query, Cursor::new(30), Some(value)).is_err());
+        assert!(
+            state
+                .complete(&query, Cursor::new(30), Some(value))
+                .is_err()
+        );
         assert!(!state.lines().contains("Delivered, denied"));
         assert!(state.lines().contains("Uncertain"));
     }
@@ -216,8 +257,12 @@ fn selection_attempt_and_epoch_replacement_ignore_old_completion() {
             3 => attempts[0].reservation_cursor = Cursor::new(31),
             _ => unreachable!(),
         }
-        state.select(Some(next), attempts, true, Cursor::new(31)).unwrap();
-        state.complete(&query, Cursor::new(32), Some(denied(&query))).unwrap();
+        state
+            .select(Some(next), attempts, true, Cursor::new(31))
+            .unwrap();
+        state
+            .complete(&query, Cursor::new(32), Some(denied(&query)))
+            .unwrap();
         assert!(!state.lines().contains("Delivered, denied"));
         assert!(state.request().is_some());
     }
@@ -227,14 +272,24 @@ fn selection_attempt_and_epoch_replacement_ignore_old_completion() {
 fn limited_mode_retains_stale_readback_and_stops_owner_polling() {
     let mut state = state(1);
     let query = state.request().unwrap();
-    state.complete(&query, Cursor::new(30), Some(view(&query, DispatchState::Queued))).unwrap();
-    state.select(Some(selection()), vec![attempt(0)], false, Cursor::new(30)).unwrap();
+    state
+        .complete(
+            &query,
+            Cursor::new(30),
+            Some(view(&query, DispatchState::Queued)),
+        )
+        .unwrap();
+    state
+        .select(Some(selection()), vec![attempt(0)], false, Cursor::new(30))
+        .unwrap();
     assert!(state.request().is_none());
     let rendered = state.lines();
     assert!(rendered.contains("limited mode"));
     assert!(rendered.contains("STALE"));
     assert!(rendered.contains("Queued: committed outbox"));
-    state.select(Some(selection()), vec![attempt(0)], true, Cursor::new(31)).unwrap();
+    state
+        .select(Some(selection()), vec![attempt(0)], true, Cursor::new(31))
+        .unwrap();
     let query = state.request().unwrap();
     state.complete(&query, Cursor::new(30), None).unwrap();
     assert!(state.lines().contains("STALE"));
@@ -245,12 +300,17 @@ fn limited_mode_retains_stale_readback_and_stops_owner_polling() {
 fn plan_and_supervision_use_the_actual_dispatch_renderer() {
     let mut state = state(1);
     let query = state.request().unwrap();
-    state.complete(&query, Cursor::new(30), Some(denied(&query))).unwrap();
+    state
+        .complete(&query, Cursor::new(30), Some(denied(&query)))
+        .unwrap();
     let mut app = crate::tui::app::App::new();
     for _ in 0..3 {
         app.reduce(crate::tui::app::UiEvent::FocusNext).unwrap();
     }
-    for expected_focus in [crate::tui::app::Focus::Plan, crate::tui::app::Focus::Supervision] {
+    for expected_focus in [
+        crate::tui::app::Focus::Plan,
+        crate::tui::app::Focus::Supervision,
+    ] {
         app.dispatch = state.clone();
         assert_eq!(app.focus(), expected_focus);
         let rendered = crate::tui::views::body(&app);

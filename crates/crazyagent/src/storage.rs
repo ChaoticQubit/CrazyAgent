@@ -12,7 +12,10 @@ mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
-    WorkerDispatch(Box<worker_dispatch::DispatchJob>, oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>),
+    WorkerDispatch(
+        Box<worker_dispatch::DispatchJob>,
+        oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>,
+    ),
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
     OwnerControl(
@@ -105,7 +108,11 @@ impl Storage {
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::WorkerDispatch(job, reply) => {
-                            let result = if readonly { Err(error("dispatch_readonly")) } else { worker_dispatch::execute(&mut connection, &config, *job) };
+                            let result = if readonly {
+                                Err(error("dispatch_readonly"))
+                            } else {
+                                worker_dispatch::execute(&mut connection, &config, *job)
+                            };
                             let _ = reply.send(result);
                         }
                         Job::OwnerStart(reply) => {
@@ -711,7 +718,13 @@ fn persist_event(
     request: &WireRequest,
     revision: u64,
 ) -> Result<(), EngineError> {
-    persist_event_ids(tx, config, &request.request_id, &request.client_id, revision)
+    persist_event_ids(
+        tx,
+        config,
+        &request.request_id,
+        &request.client_id,
+        revision,
+    )
 }
 
 fn persist_event_ids(

@@ -470,7 +470,9 @@ impl NativeBridge {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
                 match operation.result {
                     OwnerResult::Applied => ActionOutcome::Applied,
-                    OwnerResult::DispatchPrepared { .. } => return Err(failure("unexpected_reply")),
+                    OwnerResult::DispatchPrepared { .. } => {
+                        return Err(failure("unexpected_reply"));
+                    }
                     OwnerResult::Rejected { code } => {
                         rejection = Some(rejection_code(&code));
                         ActionOutcome::Rejected
