@@ -1,6 +1,7 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::engine::owner::*;
+use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -12,6 +13,16 @@ mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    GatewayObserve(
+        HostStamp,
+        Box<Observation>,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    GatewayConnectionState(
+        HostStamp,
+        CredentialRef,
+        oneshot::Sender<Result<ConnectionState, EngineError>>,
+    ),
     WorkerDispatch(
         Box<worker_dispatch::DispatchJob>,
         oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>,
@@ -107,6 +118,22 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::GatewayObserve(host, observation, reply) => {
+                            let result = if readonly {
+                                Err(error("gateway_readonly"))
+                            } else {
+                                gateway_observe(&mut connection, &config, &host, &observation)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::GatewayConnectionState(host, id, reply) => {
+                            let _ = reply.send(gateway_connection_state(
+                                &mut connection,
+                                &config,
+                                &host,
+                                &id,
+                            ));
+                        }
                         Job::WorkerDispatch(job, reply) => {
                             let result = if readonly {
                                 Err(error("dispatch_readonly"))
@@ -326,6 +353,7 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         crate::worktrees::initialize(&connection)?;
         crate::worktrees::reconcile(&connection)?;
         worker_dispatch::initialize(&connection)?;
+        model_gateway::initialize(&connection)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -333,6 +361,53 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         metadata.ino()
     );
     Ok((connection, lock))
+}
+
+fn gateway_observe(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    observation: &Observation,
+) -> Result<(), EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_host(&tx, host)?;
+    model_gateway::observe(&tx, config, observation)?;
+    tx.commit().map_err(error)
+}
+
+fn gateway_connection_state(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    id: &CredentialRef,
+) -> Result<ConnectionState, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let connection = config
+        .settings
+        .model_access
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .connections
+                .iter()
+                .find(|connection| &connection.id == id)
+        })
+        .ok_or_else(|| error("gateway_connection_missing"))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| error("gateway_time_bounds"))?
+        .as_millis();
+    let now_ms = u64::try_from(now_ms)
+        .ok()
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or_else(|| error("gateway_time_bounds"))?;
+    let state = model_gateway::connection_state(&tx, connection, now_ms)?;
+    tx.commit().map_err(error)?;
+    Ok(state)
 }
 
 fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
@@ -1624,6 +1699,46 @@ fn read_owner_page(
 mod owner_actor_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn gateway_actor_schema_initialization_is_writable_only() {
+        let (_root, path, _) = fixture();
+        let (db, lock) = open_database(&path, false).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('model_gateway_observations','model_gateway_attempts')",
+                [],
+                |row| row.get::<_, i64>(0)
+            ).unwrap(),
+            2
+        );
+        db.execute_batch(
+            "DROP TABLE model_gateway_attempts; DROP TABLE model_gateway_observations;",
+        )
+        .unwrap();
+        drop(db);
+        drop(lock);
+        let (db, lock) = open_database(&path, true).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'model_gateway_%'",
+                [],
+                |row| row.get::<_, i64>(0)
+            ).unwrap(),
+            0
+        );
+        drop(db);
+        drop(lock);
+        let (db, _lock) = open_database(&path, false).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('model_gateway_observations','model_gateway_attempts')",
+                [],
+                |row| row.get::<_, i64>(0)
+            ).unwrap(),
+            2
+        );
+    }
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, EffectiveConfig) {
         let root = tempfile::tempdir().unwrap();

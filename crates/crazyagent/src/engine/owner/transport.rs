@@ -1,6 +1,7 @@
 use super::*;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
+use crate::model_gateway::{ConnectionState, Observation};
 use crate::storage::Job;
 use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
@@ -712,6 +713,43 @@ pub struct OwnerRuntimeHandle {
 }
 
 impl OwnerRuntimeHandle {
+    /// Persists a bounded observation under this trusted host incarnation.
+    /// Takes exact source identity, connection, sequence and freshness evidence.
+    /// Returns after commit; an uncertain result requires retrying identical bytes.
+    pub async fn observe_model_connection(
+        &self,
+        observation: &Observation,
+    ) -> Result<(), EngineError> {
+        if serde_json::to_vec(observation).map_err(io_error)?.len() > 16_384 {
+            return Err(failure("gateway_record_bounds"));
+        }
+        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+            .await
+            .map_err(|_| failure("gateway_observe_not_submitted"))?;
+        self.engine
+            .owner_job(|reply| {
+                Job::GatewayObserve(self.identity(), Box::new(observation.clone()), reply)
+            })
+            .await
+    }
+
+    /// Reads observed state for an exact connection in the actor's current catalog.
+    /// Takes a connection ID under this trusted host and uses the actor's clock.
+    /// Returns unknown health and quota when supporting observations are absent or stale.
+    pub async fn model_connection_state(
+        &self,
+        connection_id: &CredentialRef,
+    ) -> Result<ConnectionState, EngineError> {
+        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+            .await
+            .map_err(|_| failure("gateway_read_not_submitted"))?;
+        self.engine
+            .owner_job(|reply| {
+                Job::GatewayConnectionState(self.identity(), connection_id.clone(), reply)
+            })
+            .await
+    }
+
     pub(crate) async fn prepare_runner(
         &self,
         anchor: &Path,
@@ -2189,7 +2227,334 @@ impl OwnerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{EffectiveConfig, ModelConnection, resolve_config};
+    use crate::engine::bootstrap::EngineService;
+    use crate::model_gateway::{Health, Observation, ObservationKind, Quota};
+    use std::future::Future;
     use std::os::unix::fs::PermissionsExt;
+
+    const GATEWAY_ACTOR_CATALOG: &str = r#"
+allowed_destinations = ["sandbox-profile"]
+[routing]
+approved_accounts = ["account-a"]
+[model_access]
+accounts = ["account-a"]
+[[model_access.connections]]
+id = "connection-a"
+provider = "provider-a"
+harness = "codex"
+protocol = "native"
+account_ref = "account-a"
+endpoint = { kind = "native" }
+model = { id = "gateway-test-model", author = "test-author" }
+auth = { method = "native_managed", profile_ref = "opaque-test-profile" }
+[[model_access.pools]]
+id = "worker-pool"
+members = ["connection-a"]
+projects = ["project-a"]
+roles = ["worker"]
+fallback_allowed = false
+"#;
+
+    struct GatewayActorCase {
+        root: PathBuf,
+        config: EffectiveConfig,
+        service: tokio::sync::Mutex<Option<EngineService>>,
+    }
+
+    impl GatewayActorCase {
+        async fn host(&self) -> OwnerRuntimeHandle {
+            let service = self.service.lock().await;
+            let host = service.as_ref().unwrap().owner_runtime().unwrap();
+            OwnerRuntimeHandle {
+                engine: host.engine.clone(),
+                authority: host.authority.clone(),
+            }
+        }
+
+        async fn restart(&self) {
+            let mut service = self.service.lock().await.take().unwrap();
+            service.shutdown().await.unwrap();
+            let restarted = gateway_actor_start(&self.root, &self.config).await;
+            *self.service.lock().await = Some(restarted);
+        }
+
+        fn connection(&self) -> ModelConnection {
+            self.config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap()
+                .connections[0]
+                .clone()
+        }
+    }
+
+    fn gateway_actor_config(root: &Path, text: &str) -> EffectiveConfig {
+        let global = root.join("global.toml");
+        std::fs::write(&global, text).unwrap();
+        resolve_config(&global, &root.join("project.toml")).unwrap()
+    }
+
+    async fn gateway_actor_start(root: &Path, config: &EffectiveConfig) -> EngineService {
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        EngineService::start(root, "e.sock", config, &stopped)
+            .await
+            .unwrap()
+    }
+
+    async fn gateway_actor_case<F, T>(case: F)
+    where
+        F: FnOnce(Arc<GatewayActorCase>) -> T,
+        T: Future<Output = ()> + Send + 'static,
+    {
+        let root = tempfile::Builder::new()
+            .prefix("ca-gateway-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = gateway_actor_config(root.path(), GATEWAY_ACTOR_CATALOG);
+        let service = gateway_actor_start(root.path(), &config).await;
+        let context = Arc::new(GatewayActorCase {
+            root: root.path().to_owned(),
+            config,
+            service: tokio::sync::Mutex::new(Some(service)),
+        });
+        let mut task = tokio::spawn(case(context.clone()));
+        let (outcome, timed_out) =
+            match tokio::time::timeout(Duration::from_secs(45), &mut task).await {
+                Ok(outcome) => (outcome, false),
+                Err(_) => {
+                    task.abort();
+                    (task.await, true)
+                }
+            };
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+            if let Some(mut service) = context.service.lock().await.take() {
+                service.shutdown().await
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        let closed = matches!(&cleanup, Ok(Ok(())));
+        if timed_out || outcome.is_err() || !closed {
+            eprintln!(
+                "gateway actor failure retained at {}",
+                root.keep().display()
+            );
+        }
+        assert!(closed, "gateway EngineService cleanup failed: {cleanup:?}");
+        assert!(!timed_out, "gateway actor case exceeded 45 seconds");
+        if let Err(error) = outcome {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("gateway actor case cancelled: {error}");
+        }
+    }
+
+    fn gateway_actor_unknown(connection: ModelConnection, id: &str, sequence: u64) -> Observation {
+        Observation {
+            id: RequestId::new(id).unwrap(),
+            connection,
+            sequence,
+            observed_at_ms: 1,
+            valid_until_ms: 60_001,
+            kind: ObservationKind::Unknown,
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_actor_observation_survives_engine_service_restart() {
+        gateway_actor_case(|context| async move {
+            let host = context.host().await;
+            let connection = context.connection();
+            let absent = host.model_connection_state(&connection.id).await.unwrap();
+            assert_eq!(absent.health, Health::Unknown);
+            assert_eq!(absent.quota, Quota::Unknown);
+            assert_eq!(absent.observed_at_ms, None);
+            assert_eq!(absent.valid_until_ms, None);
+            let observation = gateway_actor_unknown(connection.clone(), "synthetic-unknown", 1);
+            host.observe_model_connection(&observation).await.unwrap();
+            let first = host.model_connection_state(&connection.id).await.unwrap();
+            assert_eq!(first.health, Health::Unknown);
+            assert_eq!(first.quota, Quota::Unknown);
+            assert_eq!(first.observed_at_ms, Some(observation.observed_at_ms));
+            assert_eq!(first.valid_until_ms, Some(observation.valid_until_ms));
+            assert_eq!(first.cooldown_until_ms, None);
+            assert!(first.capabilities.is_empty());
+            let old_stamp = host.identity();
+            context.restart().await;
+            let current = context.host().await;
+            assert_eq!(old_stamp.db_instance, current.identity().db_instance);
+            assert_ne!(old_stamp.engine_epoch, current.identity().engine_epoch);
+            assert_eq!(
+                current
+                    .model_connection_state(&connection.id)
+                    .await
+                    .unwrap(),
+                first
+            );
+            current
+                .observe_model_connection(&observation)
+                .await
+                .unwrap();
+            assert_eq!(
+                current
+                    .model_connection_state(&connection.id)
+                    .await
+                    .unwrap(),
+                first
+            );
+            let mut conflict = observation.clone();
+            conflict.valid_until_ms += 1;
+            assert_eq!(
+                current
+                    .observe_model_connection(&conflict)
+                    .await
+                    .unwrap_err()
+                    .0,
+                "gateway_observation_conflict"
+            );
+            let stale = gateway_actor_unknown(connection.clone(), "old-host-write", 2);
+            assert_eq!(
+                current
+                    .engine
+                    .owner_job(|reply| {
+                        Job::GatewayObserve(old_stamp.clone(), Box::new(stale), reply)
+                    })
+                    .await
+                    .unwrap_err()
+                    .0,
+                "owner_runtime_stale"
+            );
+            assert_eq!(
+                current
+                    .engine
+                    .owner_job(|reply| {
+                        Job::GatewayConnectionState(old_stamp, connection.id.clone(), reply)
+                    })
+                    .await
+                    .unwrap_err()
+                    .0,
+                "owner_runtime_stale"
+            );
+            assert_eq!(
+                current
+                    .model_connection_state(&connection.id)
+                    .await
+                    .unwrap(),
+                first
+            );
+            let db = rusqlite::Connection::open(context.root.join("engine.db")).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM model_gateway_observations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT COUNT(*) FROM model_gateway_attempts", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_actor_current_connection_revision_and_removal_are_fenced() {
+        gateway_actor_case(|context| async move {
+            let host = context.host().await;
+            let connection = context.connection();
+            let original = gateway_actor_unknown(connection.clone(), "old-revision", 1);
+            host.observe_model_connection(&original).await.unwrap();
+            let changed = gateway_actor_config(
+                &context.root,
+                &GATEWAY_ACTOR_CATALOG.replace("test-author", "changed-author"),
+            );
+            let replacement =
+                changed.settings.model_access.as_ref().unwrap().connections[0].clone();
+            assert_ne!(replacement, connection);
+            host.engine.update_config(changed).await.unwrap();
+            let state = host.model_connection_state(&connection.id).await.unwrap();
+            assert_eq!(state.health, Health::Unknown);
+            assert_eq!(state.quota, Quota::Unknown);
+            assert_eq!(state.observed_at_ms, None);
+            let stale = gateway_actor_unknown(connection.clone(), "stale-connection", 2);
+            assert_eq!(
+                host.observe_model_connection(&stale).await.unwrap_err().0,
+                "gateway_observation_connection_changed"
+            );
+            let current = gateway_actor_unknown(replacement, "current-revision", 1);
+            host.observe_model_connection(&current).await.unwrap();
+            assert_eq!(
+                host.model_connection_state(&connection.id)
+                    .await
+                    .unwrap()
+                    .observed_at_ms,
+                Some(current.observed_at_ms)
+            );
+            let removed = gateway_actor_config(&context.root, "");
+            host.engine.update_config(removed).await.unwrap();
+            assert_eq!(
+                host.model_connection_state(&connection.id)
+                    .await
+                    .unwrap_err()
+                    .0,
+                "gateway_connection_missing"
+            );
+            assert_eq!(
+                host.observe_model_connection(&current).await.unwrap_err().0,
+                "gateway_observation_connection_changed"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_actor_sqlite_failure_rolls_back_and_releases_transaction() {
+        gateway_actor_case(|context| async move {
+            let host = context.host().await;
+            let connection = context.connection();
+            let first = gateway_actor_unknown(connection.clone(), "retained-unknown", 1);
+            host.observe_model_connection(&first).await.unwrap();
+            let expected = host.model_connection_state(&connection.id).await.unwrap();
+            let db = rusqlite::Connection::open(context.root.join("engine.db")).unwrap();
+            db.execute_batch("CREATE TRIGGER gateway_actor_abort AFTER INSERT ON model_gateway_observations BEGIN SELECT RAISE(ABORT, 'gateway_actor_injected_abort'); END;").unwrap();
+            let next = gateway_actor_unknown(connection.clone(), "after-abort", 2);
+            assert!(host.observe_model_connection(&next).await.unwrap_err().0.contains("gateway_actor_injected_abort"));
+            assert_eq!(host.model_connection_state(&connection.id).await.unwrap(), expected);
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM model_gateway_observations", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            db.execute_batch("DROP TRIGGER gateway_actor_abort;").unwrap();
+            host.observe_model_connection(&next).await.unwrap();
+            for sequence in [1, i64::MAX as u64 + 1] {
+                let rejected = gateway_actor_unknown(connection.clone(), "invalid-sequence", sequence);
+                assert!(host.observe_model_connection(&rejected).await.is_err());
+            }
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM model_gateway_observations", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+            host.observe_model_connection(&next).await.unwrap();
+        }).await;
+    }
+
+    #[test]
+    fn gateway_actor_observation_writes_have_no_worker_or_owner_wire_operation() {
+        let operation = serde_json::json!({ "kind": "ObserveModelConnection" });
+        assert!(serde_json::from_value::<OwnerMutation>(operation.clone()).is_err());
+        assert!(serde_json::from_value::<Command>(operation).is_err());
+        assert!(
+            serde_json::from_value::<RunnerRequest>(serde_json::json!({
+                "kind": "ObserveModelConnection",
+                "protocol_version": PROTOCOL_VERSION
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn cleanup_preserves_hardlinked_capability() {
