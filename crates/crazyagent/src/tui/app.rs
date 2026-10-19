@@ -3,7 +3,7 @@ use super::client::{
     ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
     MutationDelivery, OwnerEvent, OwnerProgress,
 };
-use super::model_access;
+use super::{dispatch, model_access};
 use crate::config::EffectiveConfig;
 use crate::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
@@ -191,6 +191,7 @@ pub struct App {
     creation_job: Option<CreationJob>,
     snapshot_revision: Option<Cursor>,
     pub(super) model_access: model_access::State,
+    pub(super) dispatch: dispatch::State,
     focus: Focus,
     draft: String,
     project_draft: String,
@@ -246,6 +247,7 @@ impl App {
             creation_job: None,
             snapshot_revision: None,
             model_access: model_access::State::default(),
+            dispatch: dispatch::State::default(),
             focus: Focus::Conversation,
             draft: String::new(),
             project_draft: String::new(),
@@ -531,6 +533,7 @@ impl App {
             self.edit_requested = None;
             self.invalidate_evidence()?;
         }
+        self.sync_dispatch()?;
         self.assert_consistent();
         Ok(())
     }
@@ -629,6 +632,7 @@ impl App {
         {
             self.invalidate_evidence()?;
         }
+        self.sync_dispatch()?;
         self.assert_consistent();
         Ok(())
     }
@@ -662,7 +666,39 @@ impl App {
         self.owner_ready = false;
         self.owner_problem = None;
         self.owner_notice = "Reconnecting to the original configured engine endpoint".into();
+        self.sync_dispatch()?;
         Ok(())
+    }
+
+    fn sync_dispatch(&mut self) -> Result<(), String> {
+        let selected = self.owner_identity.as_ref()
+            .zip(self.selected_task())
+            .zip(self.plan.as_deref())
+            .filter(|((_, task), plan)| &plan.plan.scope == *task);
+        let (selection, attempts) = if let Some(((identity, task), plan)) = selected {
+            let attempts = dispatch::reserved_attempts(task, plan)?;
+            let selection = dispatch::Selection {
+                database: identity.database_instance().to_owned(),
+                epoch: identity.engine_epoch().to_owned(),
+                task: task.clone(),
+                plan_id: plan.plan.id.clone(),
+            };
+            (Some(selection), attempts)
+        } else {
+            (None, Vec::new())
+        };
+        self.dispatch.select(selection, attempts, self.owner_ready, self.revision.clone())
+    }
+
+    pub(super) fn dispatch_request(&mut self) -> Result<Option<dispatch::Query>, String> {
+        self.sync_dispatch()?;
+        if !matches!(self.focus, Focus::Plan | Focus::Supervision)
+            || self.is_creating_project()
+            || self.snapshot_revision.as_ref() != Some(&self.revision)
+        {
+            return Ok(None);
+        }
+        Ok(self.dispatch.request())
     }
 
     pub(super) fn owner_continuation(&self) -> bool {
@@ -696,6 +732,14 @@ impl App {
 
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
+            OwnerEvent::Dispatch(event) => {
+                self.sync_dispatch()?;
+                if let Some(problem) = self.dispatch.apply(*event) {
+                    self.owner_ready = false;
+                    self.owner_problem = Some(problem.clone());
+                    self.notice(&format!("Dispatch readback unavailable; limited mode. {problem}"));
+                }
+            }
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
             OwnerEvent::ModelAccess(event) => {
                 self.model_access.apply(*event)?;
@@ -764,6 +808,7 @@ impl App {
                         self.owner_problem = Some(problem);
                         self.owner_notice =
                             "Evidence and approvals are disabled; Ctrl-R reconnects".into();
+                        self.sync_dispatch()?;
                         return Ok(());
                     }
                 };
@@ -803,6 +848,7 @@ impl App {
                 }
             }
         }
+        self.sync_dispatch()?;
         Ok(())
     }
 

@@ -1,5 +1,6 @@
 pub mod app;
 mod client;
+mod dispatch;
 mod model_access;
 pub mod views;
 
@@ -124,6 +125,7 @@ fn event_loop(
     let mut dirty = true;
     let mut snapshot = true;
     let mut owner_refresh = Instant::now();
+    let mut dispatch_refresh = Instant::now();
     let mut owner_reconnect = false;
     loop {
         if stopped.load(Ordering::Relaxed) {
@@ -198,6 +200,12 @@ fn event_loop(
             } else if Instant::now() >= owner_refresh {
                 if let Some(job) = app.conversation_request().map_err(TuiError)? {
                     connection.conversation(job).map_err(TuiError)?;
+                    dirty = true;
+                } else if Instant::now() >= dispatch_refresh
+                    && let Some(query) = app.dispatch_request().map_err(TuiError)?
+                {
+                    connection.dispatch(query).map_err(TuiError)?;
+                    dispatch_refresh = Instant::now() + Duration::from_secs(1);
                     dirty = true;
                 } else if let Some((project, generation, first)) =
                     app.evidence_request().map_err(TuiError)?

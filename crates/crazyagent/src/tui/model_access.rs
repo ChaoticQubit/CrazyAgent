@@ -540,6 +540,9 @@ impl State {
                                         "Unexpected verification result for metadata".into()
                                     );
                                 }
+                                OwnerResult::DispatchPrepared { .. } => {
+                                    return Err("Unexpected dispatch result for metadata".into());
+                                }
                             }
                         }
                         OwnerResponse::NotRecordedAtBarrier { .. } => {

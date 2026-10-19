@@ -1,4 +1,4 @@
-use super::model_access;
+use super::{dispatch, model_access};
 use crate::client_controller::OwnerController;
 use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
@@ -33,6 +33,7 @@ enum Job {
     Reconnect,
     Conversation(Box<ConversationJob>),
     ModelAccess(Box<model_access::Job>),
+    Dispatch(Box<dispatch::Query>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -136,6 +137,7 @@ pub(super) enum OwnerProgress {
 pub(super) enum OwnerEvent {
     Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
+    Dispatch(Box<dispatch::Event>),
     Access {
         ready: bool,
         problem: String,
@@ -341,6 +343,32 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Dispatch(query) => {
+                            let native = native
+                                .as_mut()
+                                .expect("dispatch read requires paired configuration");
+                            let event = runtime.block_on(native.dispatch(*query));
+                            if let Err(problem) = &event.result {
+                                native.detach();
+                                client = native.ordinary();
+                                if owner_replies.send(OwnerReply {
+                                    finished: false,
+                                    event: OwnerEvent::Access {
+                                        ready: false,
+                                        problem: problem.clone(),
+                                        identity: None,
+                                    },
+                                }).is_err() {
+                                    break;
+                                }
+                            }
+                            if owner_replies.send(OwnerReply {
+                                finished: true,
+                                event: OwnerEvent::Dispatch(Box::new(event)),
+                            }).is_err() {
+                                break;
+                            }
+                        }
                         Job::Evidence {
                             project,
                             generation,
@@ -514,6 +542,10 @@ impl Connection {
         self.owner_job(Job::ModelAccess(Box::new(job)))
     }
 
+    pub(super) fn dispatch(&mut self, query: dispatch::Query) -> Result<(), String> {
+        self.owner_job(Job::Dispatch(Box::new(query)))
+    }
+
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
         if self.busy() {
             return Err("A native request is still pending".into());
@@ -634,6 +666,33 @@ impl NativeOwner {
                 )
             }
         }
+    }
+
+    async fn dispatch(&mut self, query: dispatch::Query) -> dispatch::Event {
+        let result = self.read_dispatch(&query).await;
+        dispatch::Event { query, result }
+    }
+
+    async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {
+        if !self.ready {
+            return Err("dispatch_owner_unavailable".into());
+        }
+        let controller = self.controller.as_mut().ok_or("dispatch_owner_unavailable")?;
+        if controller.identity().database_instance() != query.selection.database
+            || controller.identity().engine_epoch() != query.selection.epoch
+        {
+            return Err("dispatch_owner_identity_changed".into());
+        }
+        let expected = crate::worker_dispatch::dispatch_id(
+            controller.identity().database_instance(), &query.attempt,
+        ).map_err(|error| bounded_problem(&error.0))?;
+        if expected != query.dispatch_id || query.attempt.plan_id != query.selection.plan_id {
+            return Err("dispatch_attempt_identity_changed".into());
+        }
+        assert_eq!(expected, query.dispatch_id);
+        controller.read(OwnerRead::WorkerDispatch {
+            dispatch_id: query.dispatch_id.clone(),
+        }).await.map_err(|error| bounded_problem(&error.0))
     }
 
     async fn model_access(&mut self, job: model_access::Job) -> model_access::Event {
@@ -1278,6 +1337,10 @@ fn bounded_problem(problem: &str) -> String {
         "trusted_owner_connection_failed".into()
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_wiring_tests.rs"]
+mod dispatch_wiring_tests;
 
 #[cfg(test)]
 mod creation_recovery_tests {

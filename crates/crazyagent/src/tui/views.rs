@@ -173,8 +173,8 @@ pub fn body(app: &App) -> String {
         Focus::Conversation => conversation_lines(app),
         Focus::Projects => project_lines(app),
         Focus::Settings => settings_lines(app),
-        Focus::Plan => plan_lines(app),
-        Focus::Supervision => format!("Supervision\n\n{}\n\n{}\n\nChild status, pause/resume/cancel and native terminal attachment are unavailable: protected owner APIs and an admitted native runtime are required. No terminal input ownership is held by this client.", task_summary(app), plan_lines(app)),
+        Focus::Plan => format!("{}\n\n{}", app.dispatch.lines(), plan_lines(app)),
+        Focus::Supervision => format!("Supervision\n\n{}\n\n{}\n\n{}\n\nChild status, pause/resume/cancel and native terminal attachment are unavailable: protected owner APIs and an admitted native runtime are required. No terminal input ownership is held by this client.", app.dispatch.lines(), task_summary(app), plan_lines(app)),
         Focus::Memory => "Memory inbox\n\nUnavailable: owner-scoped nomination and promotion APIs are required. No empty inbox or approved promotion is inferred from a worker snapshot.".into(),
         Focus::Evidence => evidence_lines(app),
     }
