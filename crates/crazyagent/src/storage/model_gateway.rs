@@ -1,6 +1,8 @@
 use super::*;
 use rusqlite::{OptionalExtension, params};
 
+const COOLDOWN_HISTORY_MAX_ROWS: i64 = 256;
+
 pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -88,6 +90,22 @@ fn decode_observation(body: &str) -> Result<Observation, EngineError> {
     Ok(observation)
 }
 
+fn decode_observation_row(
+    id: &str,
+    sequence: i64,
+    body: &str,
+    revision: &str,
+) -> Result<Observation, EngineError> {
+    let observation = decode_observation(body)?;
+    if observation.id.as_str() != id
+        || i64::try_from(observation.sequence).ok() != Some(sequence)
+        || connection_revision(&observation.connection)? != revision
+    {
+        return Err(error("gateway_observation_identity"));
+    }
+    Ok(observation)
+}
+
 pub(super) fn latest_observation(
     connection: &Connection,
     revision: &str,
@@ -101,17 +119,52 @@ pub(super) fn latest_observation(
         )
         .optional()
         .map_err(error)?;
-    row.map(|(id, sequence, body)| {
-        let observation = decode_observation(&body)?;
-        if observation.id.as_str() != id
-            || i64::try_from(observation.sequence).ok() != Some(sequence)
-            || connection_revision(&observation.connection)? != revision
-        {
-            return Err(error("gateway_observation_identity"));
+    row.map(|(id, sequence, body)| decode_observation_row(&id, sequence, &body, revision))
+        .transpose()
+}
+
+pub(super) fn active_cooldown(
+    connection: &Connection,
+    revision: &str,
+    latest: &Observation,
+    now_ms: u64,
+) -> Result<Option<u64>, EngineError> {
+    let sequence =
+        i64::try_from(latest.sequence).map_err(|_| error("gateway_observation_bounds"))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, sequence, body FROM model_gateway_observations
+             WHERE connection_revision = ?1 AND sequence < ?2
+             ORDER BY sequence DESC LIMIT ?3",
+        )
+        .map_err(error)?;
+    let mut rows = statement
+        .query(params![revision, sequence, COOLDOWN_HISTORY_MAX_ROWS + 1])
+        .map_err(error)?;
+    let mut examined = 0;
+    let mut newer_observed_at_ms = latest.observed_at_ms;
+    let expired_before = now_ms.checked_sub(OBSERVATION_LIFETIME_MAX_MS);
+    let mut cooldown = retry_at(&latest.kind).filter(|until| now_ms < *until);
+    while let Some(row) = rows.next().map_err(error)? {
+        if examined >= COOLDOWN_HISTORY_MAX_ROWS {
+            return Err(error("gateway_cooldown_history_limit"));
         }
-        Ok(observation)
-    })
-    .transpose()
+        let id: String = row.get(0).map_err(error)?;
+        let sequence: i64 = row.get(1).map_err(error)?;
+        let body: String = row.get(2).map_err(error)?;
+        let observation = decode_observation_row(&id, sequence, &body, revision)?;
+        validate_observation(&observation)?;
+        if observation.observed_at_ms > newer_observed_at_ms {
+            return Err(error("gateway_observation_stale"));
+        }
+        examined += 1;
+        newer_observed_at_ms = observation.observed_at_ms;
+        cooldown = cooldown.max(retry_at(&observation.kind).filter(|until| now_ms < *until));
+        if expired_before.is_some_and(|cutoff| observation.observed_at_ms <= cutoff) {
+            return Ok(cooldown);
+        }
+    }
+    Ok(cooldown)
 }
 
 pub(super) fn insert_observation(

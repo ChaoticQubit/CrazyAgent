@@ -213,7 +213,8 @@ pub fn connection_state(
     model: &ModelConnection,
     now_ms: u64,
 ) -> Result<ConnectionState, EngineError> {
-    let observation = persistence::latest_observation(connection, &connection_revision(model)?)?;
+    let revision = connection_revision(model)?;
+    let observation = persistence::latest_observation(connection, &revision)?;
     let mut state = ConnectionState {
         health: Health::Unknown,
         quota: Quota::Unknown,
@@ -229,7 +230,8 @@ pub fn connection_state(
     if now_ms < observation.observed_at_ms || now_ms >= observation.valid_until_ms {
         return Ok(state);
     }
-    state.cooldown_until_ms = retry_at(&observation.kind).filter(|until| now_ms < *until);
+    state.cooldown_until_ms =
+        persistence::active_cooldown(connection, &revision, &observation, now_ms)?;
     match observation.kind {
         ObservationKind::Ready {
             remaining,
