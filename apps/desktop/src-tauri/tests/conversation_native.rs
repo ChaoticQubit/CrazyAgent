@@ -14,7 +14,7 @@ use crazyagent::verification::{BaselineDraft, BaselineOrigin, CheckKind, CheckSp
 use serde_json::{Value, json};
 use std::error::Error;
 use std::fs::{File, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -217,6 +217,53 @@ fn group(command: &mut ProcessCommand, evidence: &Path, name: &str) -> TestResul
     Ok(OwnedProcess { child, pid })
 }
 
+fn check_backend_logs(evidence: &Path) -> TestResult<()> {
+    let owner = std::fs::symlink_metadata(evidence)?;
+    if !owner.is_dir() || owner.permissions().mode() & 0o077 != 0 {
+        return Err("private owned native evidence directory required".into());
+    }
+    let directory = evidence.join("webdriver");
+    let metadata = match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != owner.uid()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("private owned native backend directory required".into());
+    }
+    let mut count = 0_u8;
+    let mut bytes = 0_u64;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        count += 1;
+        if count > 16 {
+            return Err("native backend log entry bound".into());
+        }
+        let name = entry.file_name();
+        let name = name.to_str().ok_or("native backend log name required")?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !name.starts_with("wdio")
+            || !name.ends_with(".log")
+            || name.len() > 128
+            || !metadata.is_file()
+            || metadata.uid() != owner.uid()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("private regular owned native backend log required".into());
+        }
+        bytes = bytes
+            .checked_add(metadata.len())
+            .ok_or("native backend log size overflow")?;
+        if bytes > 4 * 1024 * 1024 {
+            return Err("native backend log byte bound".into());
+        }
+    }
+    Ok(())
+}
+
 async fn window_case(
     root: &Path,
     evidence: &Path,
@@ -288,6 +335,7 @@ async fn window_case(
                     return Err("native output bound".into());
                 }
             }
+            check_backend_logs(evidence)?;
             let path = evidence.join(format!("request-{next}.json"));
             if path.exists() {
                 if next > 64 || std::fs::metadata(&path)?.len() > 4096 {
@@ -388,7 +436,8 @@ async fn window_case(
     }
     .await;
     let cleaned = driver.finish();
-    let report = json!({"driver_pid": driver_pid, "driver_group_absent": driver.absent(), "owned_cleanup_ok": cleaned, "app_path": app, "mode": mode, "actions": actions, "exit": outcome.as_ref().ok(), "error": outcome.as_ref().err().map(ToString::to_string)});
+    let backend_logs = check_backend_logs(evidence);
+    let report = json!({"driver_pid": driver_pid, "driver_group_absent": driver.absent(), "owned_cleanup_ok": cleaned, "app_path": app, "mode": mode, "actions": actions, "exit": outcome.as_ref().ok(), "error": outcome.as_ref().err().map(ToString::to_string), "backend_log_bounds_error": backend_logs.as_ref().err().map(ToString::to_string)});
     std::fs::write(
         evidence.join("completion.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -399,6 +448,7 @@ async fn window_case(
     if outcome? != Some(0) {
         return Err(format!("native workflow failed; evidence {}", evidence.display()).into());
     }
+    backend_logs?;
     Ok(report)
 }
 
@@ -409,6 +459,7 @@ fn evidence(mode: &str) -> TestResult<PathBuf> {
     let unique = tempfile::Builder::new()
         .prefix(mode)
         .tempdir_in(directory)?;
+    std::fs::set_permissions(unique.path(), Permissions::from_mode(0o700))?;
     Ok(unique.keep())
 }
 

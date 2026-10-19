@@ -1,5 +1,8 @@
 pub mod bridge;
 
+#[cfg(feature = "native-webdriver")]
+mod native_refresh_observation;
+
 use bridge::{
     ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, HistoryPage,
     IntentReceipt, NativeBridge, PendingIntent, ProjectDetail, ProjectPage,
@@ -220,7 +223,24 @@ pub fn run() {
             Ok(())
         });
     #[cfg(feature = "native-webdriver")]
-    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    let builder = {
+        let observer = native_refresh_observation::NativeObserver::from_environment();
+        builder
+            .on_page_load(move |webview, payload| {
+                if let Some(observer) = &observer {
+                    let phase = match payload.event() {
+                        tauri::webview::PageLoadEvent::Started => {
+                            native_refresh_observation::Phase::Started
+                        }
+                        tauri::webview::PageLoadEvent::Finished => {
+                            native_refresh_observation::Phase::Finished
+                        }
+                    };
+                    observer.observe(webview.label(), payload.url().as_str(), phase);
+                }
+            })
+            .plugin(tauri_plugin_wdio_webdriver::init())
+    };
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
