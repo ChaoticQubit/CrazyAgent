@@ -524,6 +524,7 @@ mod tests {
             Ok(_) => panic!("unregistered runner authenticated"),
             Err(failure) => failure,
         };
+        let failure = (failure,);
         let error_bytes = size_of_val(&failure);
         let budget_bytes = 2 * size_of::<usize>();
         assert!(
@@ -531,7 +532,7 @@ mod tests {
             "authentication error uses {error_bytes} bytes; two-word budget is {budget_bytes} bytes"
         );
         assert_eq!(
-            serde_json::to_value(&failure).unwrap(),
+            serde_json::to_value(failure.0).unwrap(),
             serde_json::json!("engine_registration_unavailable")
         );
     }
