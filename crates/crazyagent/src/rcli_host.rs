@@ -93,6 +93,27 @@ struct RawEvent {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum EventBody {
     Ready {},
+    MessageStarted {
+        turn_id: RequestId,
+        message_id: RequestId,
+    },
+    MessageDelta {
+        turn_id: RequestId,
+        message_id: RequestId,
+        text: String,
+    },
+    MessageReset {
+        turn_id: RequestId,
+        message_id: RequestId,
+    },
+    MessageDiscarded {
+        turn_id: RequestId,
+        message_id: RequestId,
+    },
+    MessageFinished {
+        turn_id: RequestId,
+        message_id: RequestId,
+    },
     Output {
         turn_id: RequestId,
         text: String,
@@ -125,7 +146,9 @@ impl RawEvent {
             ));
         }
         match &self.event {
-            EventBody::Output { text, .. } => bounded_text(text, 16384)?,
+            EventBody::Output { text, .. } | EventBody::MessageDelta { text, .. } => {
+                bounded_text(text, 16384)?;
+            }
             EventBody::Input {
                 question, choices, ..
             } => {
@@ -137,7 +160,12 @@ impl RawEvent {
                     bounded_text(choice, 1024)?;
                 }
             }
-            EventBody::Ready {} | EventBody::Completed { .. } => {}
+            EventBody::Ready {}
+            | EventBody::MessageStarted { .. }
+            | EventBody::MessageReset { .. }
+            | EventBody::MessageDiscarded { .. }
+            | EventBody::MessageFinished { .. }
+            | EventBody::Completed { .. } => {}
         }
         Ok(())
     }
