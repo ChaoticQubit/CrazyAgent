@@ -8,6 +8,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
+mod settings;
+
 pub(crate) enum Job {
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
@@ -52,6 +54,25 @@ impl Storage {
         config: EffectiveConfig,
         readonly: bool,
     ) -> Result<Self, EngineError> {
+        Ok(Self::open_inner(path, config, readonly, None).await?.0)
+    }
+
+    pub(crate) async fn open_with_settings_sources(
+        path: &Path,
+        global: &Path,
+        project: &Path,
+    ) -> Result<(Self, EffectiveConfig), EngineError> {
+        let sources = settings::SettingsSources::open(global, project)?;
+        let config = sources.config()?;
+        Self::open_inner(path, config, false, Some(sources)).await
+    }
+
+    async fn open_inner(
+        path: &Path,
+        config: EffectiveConfig,
+        readonly: bool,
+        mut sources: Option<settings::SettingsSources>,
+    ) -> Result<(Self, EffectiveConfig), EngineError> {
         let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
         let path = path.to_path_buf();
         let (ready_send, ready_receive) = oneshot::channel();
@@ -59,16 +80,25 @@ impl Storage {
             .name("crazyagent-sqlite".into())
             .spawn(move || {
                 let (mut connection, lock) = match open_database(&path, readonly) {
-                    Ok(database) => {
-                        let _ = ready_send.send(Ok(()));
-                        database
-                    }
+                    Ok(database) => database,
                     Err(e) => {
+                        drop(sources.take());
                         let _ = ready_send.send(Err(e));
                         return;
                     }
                 };
                 let mut config = config;
+                if !readonly
+                    && let Err(e) =
+                        settings::recover(&mut connection, &mut config, sources.as_ref())
+                {
+                    drop(connection);
+                    drop(lock);
+                    drop(sources.take());
+                    let _ = ready_send.send(Err(e));
+                    return;
+                }
+                let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
@@ -101,6 +131,25 @@ impl Storage {
                             ));
                         }
                         Job::OwnerApply(admission, request, reply) => {
+                            if matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::ModelAccess { .. }
+                                }
+                            ) {
+                                let _ = reply.send(settings::apply(
+                                    &mut connection,
+                                    &mut config,
+                                    sources.as_ref(),
+                                    &admission,
+                                    &request,
+                                ));
+                                continue;
+                            }
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
                             let _ = reply.send(owner_apply(
                                 &mut connection,
                                 &config,
@@ -110,6 +159,37 @@ impl Storage {
                             ));
                         }
                         Job::OwnerRead(admission, query, reply) => {
+                            if matches!(
+                                query,
+                                OwnerRead::ModelAccessPage { .. }
+                                    | OwnerRead::ModelAccessRecord { .. }
+                            ) {
+                                let _ = reply.send(settings::read(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &admission,
+                                    &query,
+                                ));
+                                continue;
+                            }
+                            if matches!(query, OwnerRead::Capabilities) && sources.is_some() {
+                                let result =
+                                    owner_read(&mut connection, &config, &path, &admission, &query)
+                                        .and_then(|mut state| {
+                                            if let OwnerData::Capabilities {
+                                                settings_persistence,
+                                                ..
+                                            } = &mut state.data
+                                            {
+                                                *settings_persistence =
+                                                    !settings::pending(&connection)?;
+                                            }
+                                            Ok(state)
+                                        });
+                                let _ = reply.send(result);
+                                continue;
+                            }
                             let _ = reply.send(owner_read(
                                 &mut connection,
                                 &config,
@@ -127,10 +207,20 @@ impl Storage {
                             ));
                         }
                         Job::Apply(request, reply) => {
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
                         Job::Config(next, reply) => {
-                            let result = store_config(&connection, &next);
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                if sources.is_some() {
+                                    Err(error("settings_sources_host_fixed"))
+                                } else {
+                                    store_config(&connection, &next)
+                                }
+                            });
                             if result.is_ok() {
                                 config = next;
                             }
@@ -142,6 +232,7 @@ impl Storage {
                             }
                             drop(connection);
                             drop(lock);
+                            drop(sources.take());
                             let _ = reply.send(());
                             break;
                         }
@@ -149,8 +240,8 @@ impl Storage {
                 }
             })
             .map_err(error)?;
-        ready_receive.await.map_err(error)??;
-        Ok(Self { sender })
+        let config = ready_receive.await.map_err(error)??;
+        Ok((Self { sender }, config))
     }
 }
 
@@ -263,7 +354,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS configs (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);")
+            CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL CHECK(length(body)<=262144));")
         .map_err(error)?;
     assert!(connection.is_autocommit());
     Ok(())
@@ -278,7 +370,10 @@ fn apply(
     path: &Path,
     request: WireRequest,
 ) -> Result<WireReply, EngineError> {
-    if matches!(request.command, Command::OwnerConversation { .. }) {
+    if matches!(
+        request.command,
+        Command::OwnerConversation { .. } | Command::OwnerModelAccess { .. }
+    ) {
         return Err(error("owner_authentication_required"));
     }
     if request.client_id.as_str().starts_with("owner:") {
@@ -436,6 +531,9 @@ fn execute(
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     match command {
+        Command::OwnerModelAccess { .. } => Ok(Outcome::Rejected {
+            code: "settings_read_only".into(),
+        }),
         Command::OwnerConversation { mutation } => {
             crate::conversation::apply(tx, mutation, revision)
         }
@@ -1120,6 +1218,11 @@ fn owner_reconcile(
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = Cursor::new(owner_revision(&tx)?);
+    if settings::reconcile_pending(&tx, a, id, hash)? {
+        return Ok(OwnerResponse::OutcomeUnknown {
+            operation_id: id.clone(),
+        });
+    }
     Ok(
         match owner_lookup(&tx, "native_owner", &a.owner_id, id, hash)? {
             Some((provenance, bytes)) => OwnerResponse::Committed {
@@ -1240,7 +1343,8 @@ fn owner_read(
         OwnerRead::Settings => {
             let names: Vec<_> = config.descriptors.keys().cloned().collect();
             assert!(!names.is_empty());
-            assert!(names.len() <= 25);
+            assert!(config.validate().is_ok());
+            assert!(names.len() <= 25 + usize::from(config.settings.model_access.is_some()));
             OwnerData::Settings { names }
         }
         OwnerRead::Setting { name } => read_owner_setting(config, name)?,
@@ -1300,7 +1404,8 @@ fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData,
         .get(name)
         .ok_or_else(|| error("owner_setting_not_found"))?;
     assert_eq!(descriptor.name, name);
-    assert!(config.descriptors.len() <= 25);
+    assert!(config.validate().is_ok());
+    assert!(config.descriptors.len() <= 25 + usize::from(config.settings.model_access.is_some()));
     Ok(OwnerData::Setting {
         descriptor: Box::new(descriptor.clone()),
     })

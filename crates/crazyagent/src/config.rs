@@ -52,6 +52,32 @@ pub struct ModelAccess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelAccessEdit {
+    AddAccount { account_ref: CredentialRef },
+    RemoveAccount { account_ref: CredentialRef },
+    CreateConnection { connection: ModelConnection },
+    ReplaceConnection { connection: ModelConnection },
+    RemoveConnection { id: CredentialRef },
+    CreatePool { pool: AccountPool },
+    ReplacePool { pool: AccountPool },
+    RemovePool { id: CredentialRef },
+}
+
+impl ModelAccessEdit {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if serde_json::to_vec(self)
+            .map_err(|_| ConfigError("model_access_encoding".into()))?
+            .len()
+            > 32768
+        {
+            return Err(ConfigError("model_access_edit_bounds".into()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConnection {
     pub id: CredentialRef,
@@ -298,10 +324,20 @@ struct RoutingFile {
 }
 
 pub fn resolve_config(global: &Path, project: &Path) -> Result<EffectiveConfig, ConfigError> {
+    resolve_files(read_config(global)?, read_config(project)?)
+}
+
+pub(crate) fn resolve_config_bytes(
+    global: &str,
+    project: &str,
+) -> Result<EffectiveConfig, ConfigError> {
+    resolve_files(parse_config(global)?, parse_config(project)?)
+}
+
+fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveConfig, ConfigError> {
     let mut settings = Settings::default();
     let mut origins = BTreeMap::new();
-    for (path, origin) in [(global, Origin::Global), (project, Origin::Project)] {
-        let file = read_config(path)?;
+    for (file, origin) in [(global, Origin::Global), (project, Origin::Project)] {
         if origin == Origin::Project && file.model_access.is_some() {
             return Err(ConfigError("model_access_requires_global_scope".into()));
         }
@@ -382,14 +418,104 @@ fn read_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     if bytes.len() > 65536 {
         return Err(ConfigError("configuration exceeds 64 KiB".into()));
     }
+    parse_config(&bytes)
+}
+
+fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
+    if bytes.len() > 65536 {
+        return Err(ConfigError("configuration exceeds 64 KiB".into()));
+    }
     let config: ConfigFile =
-        toml::from_str(&bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
+        toml::from_str(bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
     if config.version.is_some_and(|v| v != 1) {
         return Err(ConfigError("unsupported config version".into()));
     }
     assert!(bytes.len() <= 65536);
     assert!(config.version.is_none_or(|v| v == 1));
     Ok(config)
+}
+
+pub(crate) fn edit_model_access(
+    global: &str,
+    project: &str,
+    edit: &ModelAccessEdit,
+) -> Result<(String, EffectiveConfig), ConfigError> {
+    edit.validate()?;
+    let mut catalog = resolve_config_bytes(global, project)?
+        .settings
+        .model_access
+        .unwrap_or_default();
+    match edit {
+        ModelAccessEdit::AddAccount { account_ref } => {
+            if catalog.accounts.contains(account_ref) {
+                return Err(ConfigError("account_exists".into()));
+            }
+            catalog.accounts.push(account_ref.clone());
+        }
+        ModelAccessEdit::RemoveAccount { account_ref } => {
+            let index = catalog
+                .accounts
+                .iter()
+                .position(|a| a == account_ref)
+                .ok_or_else(|| ConfigError("account_not_found".into()))?;
+            catalog.accounts.remove(index);
+        }
+        ModelAccessEdit::CreateConnection { connection } => {
+            if catalog.connections.iter().any(|c| c.id == connection.id) {
+                return Err(ConfigError("connection_exists".into()));
+            }
+            catalog.connections.push(connection.clone());
+        }
+        ModelAccessEdit::ReplaceConnection { connection } => {
+            let value = catalog
+                .connections
+                .iter_mut()
+                .find(|c| c.id == connection.id)
+                .ok_or_else(|| ConfigError("connection_not_found".into()))?;
+            *value = connection.clone();
+        }
+        ModelAccessEdit::RemoveConnection { id } => {
+            let index = catalog
+                .connections
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or_else(|| ConfigError("connection_not_found".into()))?;
+            catalog.connections.remove(index);
+        }
+        ModelAccessEdit::CreatePool { pool } => {
+            if catalog.pools.iter().any(|p| p.id == pool.id) {
+                return Err(ConfigError("pool_exists".into()));
+            }
+            catalog.pools.push(pool.clone());
+        }
+        ModelAccessEdit::ReplacePool { pool } => {
+            let value = catalog
+                .pools
+                .iter_mut()
+                .find(|p| p.id == pool.id)
+                .ok_or_else(|| ConfigError("pool_not_found".into()))?;
+            *value = pool.clone();
+        }
+        ModelAccessEdit::RemovePool { id } => {
+            let index = catalog
+                .pools
+                .iter()
+                .position(|p| p.id == *id)
+                .ok_or_else(|| ConfigError("pool_not_found".into()))?;
+            catalog.pools.remove(index);
+        }
+    }
+    catalog.validate()?;
+    let mut document = global
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| ConfigError("invalid_configuration_format".into()))?;
+    let catalog_document = toml_edit::ser::to_document(&catalog)
+        .map_err(|_| ConfigError("model_access_encoding".into()))?;
+    document["model_access"] = toml_edit::Item::Table(catalog_document.into_table());
+    let bytes = document.to_string();
+    let config = resolve_config_bytes(&bytes, project)?;
+    assert_eq!(config.settings.model_access, Some(catalog));
+    Ok((bytes, config))
 }
 
 fn apply_file(

@@ -388,6 +388,32 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub async fn open_with_settings_sources(
+        path: &Path,
+        global: &Path,
+        project: &Path,
+    ) -> Result<Self, EngineError> {
+        Ok(Self::open_settings(path, global, project).await?.0)
+    }
+
+    async fn open_settings(
+        path: &Path,
+        global: &Path,
+        project: &Path,
+    ) -> Result<(Self, EffectiveConfig), EngineError> {
+        let (storage, config) = Storage::open_with_settings_sources(path, global, project).await?;
+        let timeout = Duration::from_millis(config.settings.timeout_ms);
+        Ok((
+            Self {
+                storage,
+                input: Mutex::default(),
+                timeout,
+                owner_egress: tokio::sync::RwLock::new(()),
+            },
+            config,
+        ))
+    }
+
     pub async fn open(path: &Path, config: EffectiveConfig) -> Result<Self, EngineError> {
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let timeout = Duration::from_millis(config.settings.timeout_ms);

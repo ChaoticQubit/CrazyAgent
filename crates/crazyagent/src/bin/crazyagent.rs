@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
-crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME\n\
+crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings]\n\
 crazyagent tui SOCKET\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
@@ -81,18 +81,25 @@ fn main() -> ExitCode {
 }
 
 fn run_engine(args: &[OsString]) -> Result<(), String> {
-    if args.len() != 5 {
+    let writable = args.len() == 6 && args[5] == "--writable-settings";
+    if args.len() != 5 && !writable {
         return Err(
-            "usage: crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME".into(),
+            "usage: crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings]".into(),
         );
     }
     let runtime_dir = Path::new(&args[1]);
     let socket_name = args[4].to_str().ok_or("invalid socket name")?;
     crazyagent::protocol::SessionId::new(socket_name).map_err(|e| e.to_string())?;
-    assert_eq!(args.len(), 5);
+    assert!((5..=6).contains(&args.len()));
     assert!(!socket_name.contains('/'));
-    let config = crazyagent::config::resolve_config(Path::new(&args[2]), Path::new(&args[3]))
-        .map_err(|e| e.to_string())?;
+    let config = if writable {
+        None
+    } else {
+        Some(
+            crazyagent::config::resolve_config(Path::new(&args[2]), Path::new(&args[3]))
+                .map_err(|e| e.to_string())?,
+        )
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -114,13 +121,24 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             stop.send_replace(true);
         });
         let result = async {
-            let mut service = crazyagent::engine::bootstrap::EngineService::start(
-                runtime_dir,
-                socket_name,
-                &config,
-                &stopped,
-            )
-            .await
+            let mut service = if writable {
+                crazyagent::engine::bootstrap::EngineService::start_with_settings_sources(
+                    runtime_dir,
+                    socket_name,
+                    Path::new(&args[2]),
+                    Path::new(&args[3]),
+                    &stopped,
+                )
+                .await
+            } else {
+                crazyagent::engine::bootstrap::EngineService::start(
+                    runtime_dir,
+                    socket_name,
+                    config.as_ref().unwrap(),
+                    &stopped,
+                )
+                .await
+            }
             .map_err(|e| e.to_string())?;
             tokio::task::yield_now().await;
             let ready = service

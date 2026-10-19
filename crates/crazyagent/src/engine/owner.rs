@@ -25,7 +25,7 @@ impl OwnerClientKind {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Admission {
     pub(crate) db_instance: String,
     pub(crate) engine_epoch: String,
@@ -54,6 +54,11 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    ModelAccess {
+        expected_config_id: ConfigId,
+        expected_source_hash: String,
+        edit: crate::config::ModelAccessEdit,
+    },
     Conversation {
         mutation: crate::conversation::ConversationMutation,
     },
@@ -88,6 +93,21 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::ModelAccess {
+                expected_config_id,
+                expected_source_hash,
+                edit,
+            } => {
+                if !is_hex_id(expected_source_hash) {
+                    return Err(failure("settings_source_hash"));
+                }
+                edit.validate().map_err(|e| failure(&e.0))?;
+                Command::OwnerModelAccess {
+                    expected_config_id: expected_config_id.clone(),
+                    expected_source_hash: expected_source_hash.clone(),
+                    edit: edit.clone(),
+                }
+            }
             Self::Conversation { mutation } => {
                 mutation.validate()?;
                 Command::OwnerConversation {
@@ -176,6 +196,15 @@ pub struct OwnerPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerRead {
+    ModelAccessPage {
+        collection: ModelAccessCollection,
+        cursor: Option<ModelAccessCursor>,
+        limit: u8,
+    },
+    ModelAccessRecord {
+        collection: ModelAccessCollection,
+        id: CredentialRef,
+    },
     Settings,
     Setting {
         name: String,
@@ -232,6 +261,8 @@ impl OwnerRead {
     pub(crate) fn command(&self) -> Result<Option<Command>, EngineError> {
         Ok(Some(match self {
             Self::Settings
+            | Self::ModelAccessPage { .. }
+            | Self::ModelAccessRecord { .. }
             | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
@@ -331,6 +362,19 @@ impl OwnerRequest {
             }
             OwnerOperation::Read { query } => {
                 query.command()?;
+                if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
+                    if !(1..=16).contains(limit) {
+                        return Err(failure("model_access_page_limit"));
+                    }
+                    if let Some(cursor) = cursor
+                        && (!is_hex_id(&cursor.source_hash)
+                            || !is_hex_id(&cursor.owner_id)
+                            || !is_hex_id(&cursor.db_instance)
+                            || !is_hex_id(&cursor.engine_epoch))
+                    {
+                        return Err(failure("model_access_cursor"));
+                    }
+                }
                 if let OwnerRead::ConversationHistory {
                     project_id,
                     cursor,
@@ -440,6 +484,18 @@ pub enum OwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
+    ModelAccessPage {
+        collection: ModelAccessCollection,
+        source_hash: String,
+        writable: bool,
+        items: Vec<ModelAccessRecord>,
+        next: Option<ModelAccessCursor>,
+    },
+    ModelAccessRecord {
+        source_hash: String,
+        writable: bool,
+        record: ModelAccessRecord,
+    },
     Settings {
         names: Vec<String>,
     },
@@ -475,6 +531,52 @@ pub enum OwnerData {
         merge_execution: bool,
         settings_persistence: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAccessCollection {
+    Accounts,
+    Connections,
+    Pools,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelAccessRecord {
+    Account {
+        account_ref: CredentialRef,
+    },
+    Connection {
+        connection: crate::config::ModelConnection,
+    },
+    Pool {
+        pool: crate::config::AccountPool,
+    },
+}
+
+impl ModelAccessRecord {
+    pub fn id(&self) -> &CredentialRef {
+        match self {
+            Self::Account { account_ref } => account_ref,
+            Self::Connection { connection } => &connection.id,
+            Self::Pool { pool } => &pool.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAccessCursor {
+    pub db_instance: String,
+    pub owner_id: String,
+    pub engine_epoch: String,
+    pub owner_epoch: i64,
+    pub config_id: ConfigId,
+    pub at_revision: Cursor,
+    pub source_hash: String,
+    pub collection: ModelAccessCollection,
+    pub after_id: CredentialRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

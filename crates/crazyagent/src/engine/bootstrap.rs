@@ -426,6 +426,51 @@ impl EngineService {
         check_path_length(&anchor.path.join("o00000000/owner.sock"))?;
         let previous = PinnedLocator::read(&anchor)?;
         let engine = Arc::new(Engine::open(&anchor.path.join("engine.db"), config.clone()).await?);
+        Self::start_engine(
+            anchor,
+            engine,
+            ordinary,
+            config,
+            previous.as_ref(),
+            shutdown,
+        )
+        .await
+    }
+
+    pub async fn start_with_settings_sources(
+        input: &Path,
+        ordinary: &str,
+        global: &Path,
+        project: &Path,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<Self, EngineError> {
+        cancelled(shutdown)?;
+        socket_name(ordinary)?;
+        let anchor = Anchor::open(input)?;
+        check_path_length(&anchor.path.join(ordinary))?;
+        check_path_length(&anchor.path.join("o00000000/owner.sock"))?;
+        let previous = PinnedLocator::read(&anchor)?;
+        let (engine, config) =
+            Engine::open_settings(&anchor.path.join("engine.db"), global, project).await?;
+        Self::start_engine(
+            anchor,
+            Arc::new(engine),
+            ordinary,
+            &config,
+            previous.as_ref(),
+            shutdown,
+        )
+        .await
+    }
+
+    async fn start_engine(
+        anchor: Anchor,
+        engine: Arc<Engine>,
+        ordinary: &str,
+        config: &EffectiveConfig,
+        previous: Option<&PinnedLocator>,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<Self, EngineError> {
         let mut service = Self {
             anchor,
             engine,
@@ -439,7 +484,7 @@ impl EngineService {
             closed: false,
         };
         if let Err(error) = service
-            .start_inner(ordinary, config, previous.as_ref(), shutdown)
+            .start_inner(ordinary, config, previous, shutdown)
             .await
         {
             let cleanup = service.shutdown().await;

@@ -124,6 +124,12 @@ pub struct ExecutionContext {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
     #[serde(skip_deserializing)]
+    OwnerModelAccess {
+        expected_config_id: ConfigId,
+        expected_source_hash: String,
+        edit: crate::config::ModelAccessEdit,
+    },
+    #[serde(skip_deserializing)]
     OwnerConversation {
         mutation: crate::conversation::ConversationMutation,
     },
