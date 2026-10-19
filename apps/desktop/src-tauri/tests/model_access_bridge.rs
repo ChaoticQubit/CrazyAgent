@@ -187,6 +187,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
             projects: vec![reference("project")],
             roles: vec![reference("builder")],
             fallback_allowed: false,
+            provider_quota_policy: crazyagent::config::ProviderQuotaPolicy::BoundedAttempt,
         };
         applied(&h.submit(CreatePool { pool: pool.clone() }, 4).await?)?;
         let rejected = h
