@@ -837,11 +837,19 @@ fn quota_policy_never_bypasses_health_identity_or_authority_guards() {
 }
 
 fn quota_config_with_capacity(capacity: &ResourceBudget) -> EffectiveConfig {
-    let routing = toml::to_string(&serde_json::json!({"routing": {
-        "approved_accounts": ["account-a", "account-b"],
-        "global_capacity": capacity, "project_capacity": capacity, "task_capacity": capacity
-    }}))
-    .unwrap();
+    let budget = format!(
+        "slots = {}\ncpu_millis = {}\nmemory_mib = {}\nprocesses = {}\noutput_bytes = {}\nwall_time_ms = {}\nspend_microunits = {}\n",
+        capacity.slots,
+        capacity.cpu_millis,
+        capacity.memory_mib,
+        capacity.processes,
+        capacity.output_bytes,
+        capacity.wall_time_ms,
+        capacity.spend_microunits
+    );
+    let routing = format!(
+        "[routing]\napproved_accounts = [\"account-a\", \"account-b\"]\n[routing.global_capacity]\n{budget}\n[routing.project_capacity]\n{budget}\n[routing.task_capacity]\n{budget}"
+    );
     load_config(&CATALOG.replacen(
         "[routing]\napproved_accounts = [\"account-a\", \"account-b\"]",
         &routing,
