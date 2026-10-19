@@ -1237,3 +1237,487 @@ async fn controller_preserves_actual_unavailable_verification_outcome() {
     );
     assert!(state.attempts[0].1.accepts(&state.current).is_err());
 }
+
+mod project_creation {
+    use super::*;
+    use crazyagent::client_controller::OwnerController;
+    use crazyagent::engine::owner::{OwnerApplied, OwnerControl, OwnerDecision, OwnerSummary};
+
+    fn root() -> tempfile::TempDir {
+        let root = tempfile::Builder::new()
+            .prefix("ca-create-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+
+    fn specification(root: &Path) -> ProjectSpec {
+        ProjectSpec {
+            name: "Inventory 日本".into(),
+            repositories: vec![root.join("declared-only").to_str().unwrap().into()],
+        }
+    }
+
+    fn mutation(spec: &ProjectSpec) -> OwnerMutation {
+        serde_json::from_value(serde_json::json!({
+            "kind": "CreateProject",
+            "project_id": "created-project",
+            "spec": spec
+        }))
+        .expect("closed owner CreateProject must deserialize before controller execution")
+    }
+
+    async fn start(root: &Path) -> EngineService {
+        let config = crazyagent::config::resolve_config(
+            &root.join("global.toml"),
+            &root.join("project.toml"),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        EngineService::start(root, "engine.sock", &config, &stopped)
+            .await
+            .unwrap()
+    }
+
+    async fn owner(root: &Path, kind: OwnerClientKind) -> OwnerClient {
+        OwnerClient::discover(root, kind, Duration::from_secs(2))
+            .await
+            .unwrap()
+            .0
+    }
+
+    fn applied(response: OwnerResponse) -> OwnerApplied {
+        let OwnerResponse::Applied { operation } = response else {
+            panic!("actual owner applied receipt required: {response:?}");
+        };
+        assert_eq!(operation.result, OwnerResult::Applied);
+        assert_eq!(operation.provenance.origin, "native_owner");
+        operation
+    }
+
+    fn side_effect_counts(root: &Path) -> [i64; 6] {
+        let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        db.query_row(
+            "SELECT (SELECT COUNT(*) FROM tasks), (SELECT COUNT(*) FROM configs),
+            (SELECT COUNT(*) FROM repository_admissions),
+            (SELECT COUNT(*) FROM worktree_leases),
+            (SELECT COUNT(*) FROM settings_publication),
+            (SELECT COUNT(*) FROM verification_baselines)",
+            [],
+            |row| {
+                Ok([
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ])
+            },
+        )
+        .unwrap()
+    }
+
+    async fn assert_snapshot(root: &Path, spec: &ProjectSpec, revision: u64) {
+        let ordinary = Client::new(root.join("engine.sock"), Duration::from_secs(2)).unwrap();
+        let snapshot = ordinary
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("creation-observer").unwrap(),
+                request_id: RequestId::new("creation-snapshot").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::Snapshot,
+            })
+            .await
+            .unwrap();
+        assert_eq!(snapshot.revision, Cursor::new(revision));
+        let Outcome::Snapshot { projects, tasks } = snapshot.outcome else {
+            panic!("actual ordinary project snapshot required");
+        };
+        assert!(tasks.is_empty());
+        assert_eq!(
+            projects,
+            vec![StoredProject {
+                project_id: ProjectId::new("created-project").unwrap(),
+                spec: spec.clone(),
+            }]
+        );
+    }
+
+    async fn empty_controller(root: &Path, timeout: Duration) -> OwnerController {
+        let mut controller = OwnerController::attach(root, OwnerClientKind::Desktop, timeout)
+            .await
+            .unwrap();
+        let initial = controller
+            .read_page(OwnerView::Projects, None, None)
+            .await
+            .unwrap();
+        assert_eq!(initial.revision, Cursor::new(0));
+        assert!(matches!(initial.data, OwnerData::Page { items, next: None } if items.is_empty()));
+        controller
+    }
+
+    async fn assert_project_page(controller: &mut OwnerController, spec: &ProjectSpec) {
+        let page = controller
+            .read_page(OwnerView::Projects, None, None)
+            .await
+            .unwrap();
+        assert_eq!(page.revision, Cursor::new(1));
+        assert_eq!(
+            page.data,
+            OwnerData::Page {
+                items: vec![OwnerSummary::Project {
+                    project_id: ProjectId::new("created-project").unwrap(),
+                    name: spec.name.clone(),
+                    repository_count: 1,
+                }],
+                next: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_creates_project_with_matching_receipt_and_no_execution() {
+        let root = root();
+        let spec = specification(root.path());
+        let create = mutation(&spec);
+        let mut service = start(root.path()).await;
+        let before = side_effect_counts(root.path());
+        let mut controller = empty_controller(root.path(), Duration::from_secs(2)).await;
+        let config_id = controller.view().unwrap().state.config_id.clone();
+        let submitted = controller
+            .begin_mutation(create.clone(), 341)
+            .unwrap()
+            .clone();
+        assert_eq!(submitted.generation(), 341);
+        assert!(!submitted.uncertain());
+        assert!(controller.begin_mutation(create, 342).is_err());
+        assert_eq!(controller.pending(), Some(&submitted));
+        let operation = applied(controller.send_pending().await.unwrap());
+        assert_eq!(
+            operation.provenance.operation_id,
+            submitted.request().request_id
+        );
+        assert_eq!(operation.provenance.request_hash, submitted.hash());
+        assert_eq!(operation.provenance.revision_before, Cursor::new(0));
+        assert_eq!(operation.provenance.revision_after, Cursor::new(1));
+        assert_eq!(operation.provenance.event_cursor, Some(Cursor::new(1)));
+        assert!(!operation.historical_replay);
+        assert!(controller.pending().is_none());
+        assert_project_page(&mut controller, &spec).await;
+        assert_eq!(controller.view().unwrap().state.config_id, config_id);
+        let brief = controller
+            .read(OwnerRead::CurrentBrief {
+                project_id: ProjectId::new("created-project").unwrap(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            brief.data,
+            OwnerData::CurrentBrief { brief: None, .. }
+        ));
+        assert_snapshot(root.path(), &spec, 1).await;
+        assert_eq!(side_effect_counts(root.path()), before);
+        for path in ["declared-only", "global.toml", "project.toml", "worktrees"] {
+            assert!(!root.path().join(path).exists(), "creation produced {path}");
+        }
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_project_creation_lost_ack_retries_exact_intent_once() {
+        let root = root();
+        let spec = specification(root.path());
+        let create = mutation(&spec);
+        let mut process = OwnedCli::start(root.path());
+        process.ready(root.path()).await;
+        let before = side_effect_counts(root.path());
+        let mut controller = empty_controller(root.path(), Duration::from_millis(200)).await;
+        let submitted = controller
+            .begin_mutation(create.clone(), 343)
+            .unwrap()
+            .clone();
+        let observer = owner(root.path(), OwnerClientKind::Desktop).await;
+        process.pause();
+        let timed_out = controller.send_pending().await.is_err();
+        let retained = controller.pending().cloned();
+        let blocked = controller.begin_mutation(create, 344).is_err();
+        process.resume();
+        let receipt = real_receipt(&observer, submitted.request()).await;
+        let replay = controller.retry_pending().await;
+        let settled = controller.pending().is_none();
+        assert_snapshot(root.path(), &spec, 1).await;
+        let after = side_effect_counts(root.path());
+        assert!(process.finish());
+        assert!(timed_out);
+        assert!(blocked);
+        let retained = retained.expect("lost acknowledgement must retain exact creation intent");
+        assert_eq!(retained.request(), submitted.request());
+        assert_eq!(retained.hash(), submitted.hash());
+        assert_eq!(retained.generation(), 343);
+        assert!(retained.uncertain());
+        assert_eq!(receipt.result, OwnerResult::Applied);
+        let replay = applied(replay.unwrap());
+        assert!(replay.historical_replay);
+        assert_eq!(replay.provenance, receipt.provenance);
+        assert_eq!(
+            replay.provenance.operation_id,
+            submitted.request().request_id
+        );
+        assert_eq!(replay.provenance.request_hash, submitted.hash());
+        assert_eq!(replay.current_revision, Cursor::new(1));
+        assert_eq!(after, before);
+        assert!(settled);
+        let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        let effects: (i64, i64) = db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM events),
+                (SELECT COUNT(*) FROM owner_operations WHERE origin='native_owner')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(effects, (1, 1));
+    }
+
+    async fn assert_changed_retry_rejected(
+        client: &OwnerClient,
+        first: &OwnerRequest,
+        spec: &ProjectSpec,
+    ) {
+        let mut changed = first.clone();
+        changed.expected_revision = Cursor::new(1);
+        assert!(matches!(
+            client.request(changed).await.unwrap().response,
+            OwnerResponse::Rejected { code } if code == "operation_identity_conflict"
+        ));
+        let mut changed_spec = spec.clone();
+        changed_spec.name = "Changed under same operation identity".into();
+        let changed = request(
+            "create-project",
+            Cursor::new(0),
+            OwnerOperation::Apply {
+                mutation: mutation(&changed_spec),
+            },
+        );
+        assert!(matches!(
+            client.request(changed).await.unwrap().response,
+            OwnerResponse::Rejected { code } if code == "operation_identity_conflict"
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_project_creation_rejects_stale_revision_and_changed_retry() {
+        let root = root();
+        let spec = specification(root.path());
+        let create = mutation(&spec);
+        let mut service = start(root.path()).await;
+        let client = owner(root.path(), OwnerClientKind::Desktop).await;
+        let first = request(
+            "create-project",
+            Cursor::new(0),
+            OwnerOperation::Apply { mutation: create },
+        );
+        let original = applied(client.request(first.clone()).await.unwrap().response);
+        assert_changed_retry_rejected(&client, &first, &spec).await;
+        let mut stale = serde_json::to_value(&first).unwrap();
+        stale["request_id"] = "stale-create".into();
+        stale["operation"]["mutation"]["project_id"] = "stale-project".into();
+        let stale: OwnerRequest = serde_json::from_value(stale).unwrap();
+        let OwnerResponse::Applied { operation } = client.request(stale).await.unwrap().response
+        else {
+            panic!("recorded stale-revision rejection required");
+        };
+        assert_eq!(
+            operation.result,
+            OwnerResult::Rejected {
+                code: "stale_revision".into()
+            }
+        );
+        assert_eq!(operation.provenance.revision_before, Cursor::new(1));
+        assert_eq!(operation.provenance.revision_after, Cursor::new(1));
+        assert_eq!(operation.provenance.event_cursor, None);
+        let duplicate = request("duplicate-project", Cursor::new(1), first.operation.clone());
+        let OwnerResponse::Applied { operation } =
+            client.request(duplicate).await.unwrap().response
+        else {
+            panic!("recorded duplicate-project rejection required");
+        };
+        assert_eq!(
+            operation.result,
+            OwnerResult::Rejected {
+                code: "project_exists".into()
+            }
+        );
+        let replay = applied(client.request(first).await.unwrap().response);
+        assert!(replay.historical_replay);
+        assert_eq!(replay.provenance, original.provenance);
+        assert_snapshot(root.path(), &spec, 1).await;
+        service.shutdown().await.unwrap();
+    }
+
+    async fn control_owner(service: &EngineService, id: &str, decision: OwnerDecision) {
+        let host = service.owner_runtime().unwrap();
+        let result = host
+            .control(OwnerControl {
+                operation_id: RequestId::new(id).unwrap(),
+                target: OwnerClientKind::Desktop,
+                expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+                decision,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.active, decision == OwnerDecision::Reactivate);
+        assert_eq!(
+            result.owner_epoch,
+            host.epoch(OwnerClientKind::Desktop).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_project_creation_scopes_receipts_and_denies_revoked_owner() {
+        let root = root();
+        let spec = specification(root.path());
+        let create = mutation(&spec);
+        let mut service = start(root.path()).await;
+        let desktop = owner(root.path(), OwnerClientKind::Desktop).await;
+        let tui = owner(root.path(), OwnerClientKind::Tui).await;
+        let first = request(
+            "owner-create",
+            Cursor::new(0),
+            OwnerOperation::Apply { mutation: create },
+        );
+        let original = applied(desktop.request(first.clone()).await.unwrap().response);
+        let query = request(
+            "creation-reconcile",
+            Cursor::new(0),
+            OwnerOperation::Reconcile {
+                operation_id: first.request_id.clone(),
+                expected_hash: Some(first.mutation_hash().unwrap()),
+            },
+        );
+        assert!(matches!(
+            tui.request(query.clone()).await.unwrap().response,
+            OwnerResponse::NotRecordedAtBarrier { revision } if revision == Cursor::new(1)
+        ));
+        control_owner(&service, "revoke-creator", OwnerDecision::Revoke).await;
+        assert!(desktop.request(first.clone()).await.is_err());
+        assert!(desktop.request(query.clone()).await.is_err());
+        assert!(
+            OwnerClient::discover(
+                root.path(),
+                OwnerClientKind::Desktop,
+                Duration::from_secs(2)
+            )
+            .await
+            .is_err()
+        );
+        let mut denied = first.clone();
+        denied.request_id = RequestId::new("revoked-create").unwrap();
+        denied.expected_revision = Cursor::new(1);
+        assert!(desktop.request(denied).await.is_err());
+        control_owner(&service, "reactivate-creator", OwnerDecision::Reactivate).await;
+        assert!(desktop.request(first.clone()).await.is_err());
+        let current = owner(root.path(), OwnerClientKind::Desktop).await;
+        let OwnerResponse::Committed { operation } = current.request(query).await.unwrap().response
+        else {
+            panic!("reactivated owner must read the existing exact receipt");
+        };
+        assert_eq!(operation.provenance, original.provenance);
+        assert_eq!(operation.result, original.result);
+        let replay = applied(current.request(first).await.unwrap().response);
+        assert!(replay.historical_replay);
+        assert_eq!(replay.provenance, original.provenance);
+        assert_snapshot(root.path(), &spec, 1).await;
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_rejects_invalid_project_before_retaining_intent() {
+        let root = root();
+        let mut invalid = specification(root.path());
+        invalid.name = " \u{2003} ".into();
+        let create = mutation(&invalid);
+        let mut service = start(root.path()).await;
+        let before = side_effect_counts(root.path());
+        let mut controller = empty_controller(root.path(), Duration::from_secs(2)).await;
+        assert!(controller.begin_mutation(create, 345).is_err());
+        assert!(controller.pending().is_none());
+        let page = controller
+            .read_page(OwnerView::Projects, None, None)
+            .await
+            .unwrap();
+        assert_eq!(page.revision, Cursor::new(0));
+        assert!(matches!(page.data, OwnerData::Page { items, next: None } if items.is_empty()));
+        assert_eq!(side_effect_counts(root.path()), before);
+        service.shutdown().await.unwrap();
+    }
+
+    async fn assert_first_brief(
+        controller: &mut OwnerController,
+        provenance: &crazyagent::engine::owner::OwnerProvenance,
+    ) {
+        let state = controller
+            .read(OwnerRead::CurrentBrief {
+                project_id: ProjectId::new("created-project").unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.revision, Cursor::new(2));
+        let OwnerData::CurrentBrief {
+            project_id,
+            brief: Some(brief),
+        } = state.data
+        else {
+            panic!("actual first brief required for the newly created project");
+        };
+        assert_eq!(project_id, ProjectId::new("created-project").unwrap());
+        assert_eq!(brief.text, "First explicit project brief 🦀");
+        assert_eq!(
+            brief.content,
+            crazyagent::conversation::ConversationContent::Brief { version: 1 }
+        );
+        assert_eq!(&brief.provenance, provenance);
+    }
+
+    #[tokio::test]
+    async fn created_project_first_brief_reopens_for_other_client_after_restart() {
+        let root = root();
+        let spec = specification(root.path());
+        let create = mutation(&spec);
+        let mut service = start(root.path()).await;
+        let before = side_effect_counts(root.path());
+        let mut controller = empty_controller(root.path(), Duration::from_secs(2)).await;
+        controller.begin_mutation(create, 346).unwrap();
+        applied(controller.send_pending().await.unwrap());
+        assert_project_page(&mut controller, &spec).await;
+        controller
+            .begin_mutation(
+                OwnerMutation::Conversation {
+                    mutation: crazyagent::conversation::ConversationMutation::ReplaceBrief {
+                        project_id: ProjectId::new("created-project").unwrap(),
+                        expected_version: 0,
+                        text: "First explicit project brief 🦀".into(),
+                    },
+                },
+                347,
+            )
+            .unwrap();
+        let written = applied(controller.send_pending().await.unwrap());
+        assert_eq!(written.provenance.revision_before, Cursor::new(1));
+        assert_eq!(written.provenance.revision_after, Cursor::new(2));
+        assert_first_brief(&mut controller, &written.provenance).await;
+        service.shutdown().await.unwrap();
+        let mut service = start(root.path()).await;
+        let mut tui =
+            OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_first_brief(&mut tui, &written.provenance).await;
+        assert_snapshot(root.path(), &spec, 2).await;
+        assert_eq!(side_effect_counts(root.path()), before);
+        assert!(!root.path().join("declared-only").exists());
+        service.shutdown().await.unwrap();
+    }
+}

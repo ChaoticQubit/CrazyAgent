@@ -108,6 +108,28 @@ pub struct ProjectSpec {
     pub repositories: Vec<String>,
 }
 
+impl ProjectSpec {
+    /// Validates a project name and explicit repository declarations.
+    /// Takes an untrusted specification without accessing its paths.
+    /// Returns the existing validation error and preserves empty-list compatibility.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.name.trim().is_empty()
+            || self.name.len() > 256
+            || self.name.chars().any(char::is_control)
+            || self.repositories.len() > 64
+            || self.repositories.iter().any(|p| {
+                p.is_empty()
+                    || p.len() > 4096
+                    || p.chars().any(char::is_control)
+                    || p.contains("://")
+            })
+        {
+            return Err(ProtocolError("invalid project specification".into()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionContext {
@@ -240,19 +262,7 @@ impl WireRequest {
                 draft.validate().map_err(|e| ProtocolError(e.to_string()))?;
             }
             Command::CreateProject { spec, .. } => {
-                if spec.name.trim().is_empty()
-                    || spec.name.len() > 256
-                    || spec.name.chars().any(char::is_control)
-                    || spec.repositories.len() > 64
-                    || spec.repositories.iter().any(|p| {
-                        p.is_empty()
-                            || p.len() > 4096
-                            || p.chars().any(char::is_control)
-                            || p.contains("://")
-                    })
-                {
-                    return Err(ProtocolError("invalid project specification".into()));
-                }
+                spec.validate()?;
             }
             Command::PinTask { context } if context.allowed_destinations.len() > 64 => {
                 return Err(ProtocolError("too many destinations".into()));

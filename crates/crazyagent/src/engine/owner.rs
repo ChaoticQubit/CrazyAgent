@@ -54,6 +54,10 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    CreateProject {
+        project_id: ProjectId,
+        spec: ProjectSpec,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -93,6 +97,13 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::CreateProject { project_id, spec } => {
+                spec.validate().map_err(|e| failure(&e.0))?;
+                Command::CreateProject {
+                    project_id: project_id.clone(),
+                    spec: spec.clone(),
+                }
+            }
             Self::ModelAccess {
                 expected_config_id,
                 expected_source_hash,
