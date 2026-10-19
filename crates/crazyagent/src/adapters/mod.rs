@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod claude;
 pub mod codex;
+pub mod codex_events;
 pub mod events;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

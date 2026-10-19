@@ -49,6 +49,9 @@ pub enum TurnOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    ProtocolInitialized,
+    ThreadStarted,
+    TurnStarted,
     Initialized {
         model: String,
         capabilities: Vec<String>,
@@ -66,6 +69,34 @@ pub enum EventKind {
         input: Value,
     },
     AssistantError {
+        code: String,
+    },
+    AssistantDelta {
+        item_id: String,
+        text: String,
+    },
+    InterruptAcknowledged,
+    RequestFailed {
+        id: NativeRequestId,
+        method: String,
+        code: i64,
+        message: String,
+    },
+    TurnError {
+        message: String,
+        will_retry: bool,
+    },
+    ApprovalRequired {
+        id: NativeRequestId,
+        approval: Approval,
+        params: Value,
+    },
+    UnsupportedRequest {
+        id: NativeRequestId,
+        method: String,
+    },
+    Disconnected,
+    ProtocolFailure {
         code: String,
     },
     TurnFinished {
@@ -94,4 +125,49 @@ pub struct HarnessEvent {
     pub native_event_id: String,
     pub native_user_message_uuid: Option<String>,
     pub kind: EventKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum NativeRequestId {
+    Number(i64),
+    Text(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    Command,
+    FileChange,
+    Permissions,
+}
+
+/// Carries observed harness facts with caller-bound local provenance.
+/// Missing native identifiers remain unknown rather than aliasing local IDs.
+/// These records grant no execution, authentication or approval authority.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ObservedEvent {
+    pub provenance: Provenance,
+    pub request_id: Option<RequestId>,
+    pub native_session_id: Option<String>,
+    pub native_thread_id: Option<String>,
+    pub native_turn_id: Option<String>,
+    pub native_event_id: Option<String>,
+    pub native_user_message_uuid: Option<String>,
+    pub kind: EventKind,
+}
+
+impl From<HarnessEvent> for ObservedEvent {
+    fn from(event: HarnessEvent) -> Self {
+        Self {
+            provenance: event.provenance,
+            request_id: event.request_id,
+            native_session_id: Some(event.native_session_id),
+            native_thread_id: None,
+            native_turn_id: None,
+            native_event_id: Some(event.native_event_id),
+            native_user_message_uuid: event.native_user_message_uuid,
+            kind: event.kind,
+        }
+    }
 }
