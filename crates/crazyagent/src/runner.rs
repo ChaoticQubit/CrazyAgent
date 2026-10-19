@@ -2,7 +2,10 @@ use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
 use crazyagent::adapters::NativeAction;
-use crazyagent::worker_dispatch::{RunnerBootIdentity as RunnerIdentity, RunnerReady};
+use crazyagent::worker_dispatch::{
+    AdmissionCheckOffer, DeniedReceipt, FenceOrder, FenceReceipt,
+    RunnerBootIdentity as RunnerIdentity, RunnerReady,
+};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +19,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinSet;
+
+#[path = "runner/dispatch.rs"]
+mod dispatch;
 
 const OPERATIONS_MAX: usize = 128;
 const EPOCHS_MAX: usize = 128;
@@ -43,6 +49,14 @@ enum Record {
         epoch: ControllerEpoch,
         action: NativeAction,
     },
+    DispatchDenied {
+        offer: Box<AdmissionCheckOffer>,
+        receipt: Box<DeniedReceipt>,
+    },
+    DispatchFence {
+        order: FenceOrder,
+        receipt: Box<FenceReceipt>,
+    },
 }
 
 struct Journal {
@@ -50,6 +64,7 @@ struct Journal {
     directory: File,
     root: PathBuf,
     bytes: u64,
+    sequence: u64,
 }
 
 impl Journal {
@@ -68,6 +83,7 @@ impl Journal {
             directory: directory.try_clone()?,
             root: root.to_owned(),
             bytes: bytes.len() as u64,
+            sequence: records.len() as u64,
         };
         journal.verify()?;
         assert!(journal.bytes <= JOURNAL_BYTES_MAX);
@@ -115,9 +131,11 @@ impl Journal {
         if next > JOURNAL_BYTES_MAX {
             return Err(invalid("journal_capacity"));
         }
+        let sequence = self.sequence.checked_add(1).ok_or_else(|| invalid("journal_sequence_overflow"))?;
         self.file.write_all(&bytes)?;
         self.file.sync_all()?;
         self.bytes = next;
+        self.sequence = sequence;
         self.verify()?;
         assert!(self.bytes <= JOURNAL_BYTES_MAX);
         assert_eq!(self.file.metadata()?.len(), next);
@@ -175,6 +193,15 @@ enum Command {
         operation_id: RequestId,
         action: NativeAction,
     },
+    Deliver {
+        dispatch_id: RequestId,
+    },
+    Reconcile {
+        dispatch_id: RequestId,
+    },
+    DispatchStatus {
+        dispatch_id: RequestId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -202,6 +229,12 @@ enum Reply {
         reason: &'static str,
         native_identity: Option<RequestId>,
     },
+    DispatchStatus {
+        dispatch_id: RequestId,
+        state: &'static str,
+        receipt: Option<Box<DeniedReceipt>>,
+        fence: Option<Box<FenceReceipt>>,
+    },
     Error {
         code: &'static str,
     },
@@ -213,6 +246,8 @@ struct State {
     controller: Option<ControllerEpoch>,
     epochs: BTreeSet<ControllerEpoch>,
     operations: BTreeMap<RequestId, NativeAction>,
+    denials: BTreeMap<(RequestId, u64), (AdmissionCheckOffer, DeniedReceipt)>,
+    fences: BTreeMap<(RequestId, u64), (FenceOrder, FenceReceipt)>,
     journal: Journal,
     endpoint: Option<(u64, u64)>,
     failed: bool,
@@ -228,6 +263,8 @@ impl State {
             controller: None,
             epochs: BTreeSet::new(),
             operations: BTreeMap::new(),
+            denials: BTreeMap::new(),
+            fences: BTreeMap::new(),
             journal,
             endpoint: None,
             failed: false,
@@ -248,7 +285,7 @@ impl State {
 
     fn restore(&mut self, records: Vec<Record>) -> io::Result<()> {
         let mut boots = BTreeSet::new();
-        for record in records {
+        for (index, record) in records.into_iter().enumerate() {
             if boots.is_empty() && !matches!(record, Record::Started { .. }) {
                 return Err(invalid("journal_missing_boot_identity"));
             }
@@ -269,7 +306,7 @@ impl State {
                 Record::Endpoint { device, inode } => self.endpoint = Some((device, inode)),
                 Record::Claimed { generation, epoch } => {
                     if generation != self.generation + 1
-                        || self.epochs.len() >= EPOCHS_MAX
+                        || self.epochs.len() + self.fences.len() >= EPOCHS_MAX
                         || !self.epochs.insert(epoch.clone())
                     {
                         return Err(invalid("invalid_journal_epoch"));
@@ -283,11 +320,17 @@ impl State {
                     action,
                 } => {
                     if self.controller.as_ref() != Some(&epoch)
-                        || self.operations.len() >= OPERATIONS_MAX
+                        || self.operation_count() >= OPERATIONS_MAX
                         || self.operations.insert(operation, action).is_some()
                     {
                         return Err(invalid("invalid_journal_operation"));
                     }
+                }
+                Record::DispatchDenied { offer, receipt } => {
+                    self.restore_denied(*offer, *receipt, index as u64 + 1)?;
+                }
+                Record::DispatchFence { order, receipt } => {
+                    self.restore_fence(order, *receipt, index as u64 + 1)?;
                 }
             }
             self.assert_consistent();
@@ -304,7 +347,8 @@ impl State {
         }
         assert_eq!(self.generation, self.epochs.len() as u64);
         assert!(self.epochs.len() <= EPOCHS_MAX);
-        assert!(self.operations.len() <= OPERATIONS_MAX);
+        assert!(self.operation_count() <= OPERATIONS_MAX);
+        self.dispatch_invariants();
         if let Some(epoch) = &self.controller {
             assert!(self.epochs.contains(epoch));
         }
@@ -326,7 +370,7 @@ impl State {
                 identity: self.identity.clone(),
                 controller_epoch: self.controller.clone(),
                 generation: self.generation,
-                operation_count: self.operations.len(),
+                operation_count: self.operation_count(),
                 native_admission: "unavailable",
                 native_identity: None,
                 engine_registration: self.engine_registration.clone(),
@@ -334,6 +378,10 @@ impl State {
             Command::AttachEngine { .. } => Ok(Reply::Error {
                 code: "engine_registration_requires_authenticated_callback",
             }),
+            Command::Deliver { .. } | Command::Reconcile { .. } => Ok(Reply::Error {
+                code: "dispatch_requires_authenticated_callback",
+            }),
+            Command::DispatchStatus { dispatch_id } => Ok(self.dispatch_status(&dispatch_id)),
             Command::Claim {
                 runner_id,
                 expected_generation,
@@ -374,7 +422,7 @@ impl State {
                 code: "retired_controller",
             });
         }
-        if self.epochs.len() == EPOCHS_MAX {
+        if self.epochs.len() + self.fences.len() == EPOCHS_MAX {
             return Ok(Reply::Error {
                 code: "epoch_capacity",
             });
@@ -419,7 +467,7 @@ impl State {
                 });
             }
         } else {
-            if self.operations.len() == OPERATIONS_MAX {
+            if self.operation_count() == OPERATIONS_MAX {
                 return Ok(Reply::Error {
                     code: "operation_capacity",
                 });
@@ -598,20 +646,7 @@ async fn attach_engine(
             code: "journal_unavailable",
         };
     }
-    if ready.boot != state.identity
-        || ready.registration_id != registration_id
-        || state
-            .engine_registration
-            .as_ref()
-            .is_some_and(|original| original != &ready)
-    {
-        return Reply::Error {
-            code: "engine_registration_conflict",
-        };
-    }
-    state.engine_registration = Some(ready.clone());
-    state.assert_consistent();
-    Reply::EngineReady { identity: ready }
+    state.register_engine(&registration_id, ready)
 }
 
 async fn exchange(mut stream: UnixStream, state: Arc<Mutex<State>>) -> io::Result<()> {
@@ -625,6 +660,14 @@ async fn exchange(mut stream: UnixStream, state: Arc<Mutex<State>>) -> io::Resul
                     boot,
                 },
         }) => attach_engine(state.clone(), protocol_version, registration_id, boot).await,
+        Ok(Request {
+            protocol_version,
+            command: Command::Deliver { dispatch_id },
+        }) => dispatch::deliver(state.clone(), protocol_version, dispatch_id).await,
+        Ok(Request {
+            protocol_version,
+            command: Command::Reconcile { dispatch_id },
+        }) => dispatch::reconcile(state.clone(), protocol_version, dispatch_id).await,
         Ok(request) => state.lock().await.apply(request).unwrap_or(Reply::Error {
             code: "journal_unavailable",
         }),
