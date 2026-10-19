@@ -28,7 +28,8 @@ test-node:
 		apps/desktop/test/native/refresh-barrier.test.mjs \
 		apps/desktop/test/native/config-registration.test.mjs \
 		apps/desktop/test/native/baseline-reload.test.mjs \
-		apps/desktop/test/native/run-layout.test.mjs
+		apps/desktop/test/native/run-layout.test.mjs \
+		apps/desktop/test/native/log-producers.test.mjs
 
 build:
 	cargo build --workspace --offline
