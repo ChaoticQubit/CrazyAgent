@@ -389,28 +389,30 @@ impl State {
     }
 }
 
-async fn authenticate(state: &Arc<Mutex<State>>) -> Result<(RunnerClient, RunnerReady), Reply> {
+async fn authenticate(
+    state: &Arc<Mutex<State>>,
+) -> Result<(RunnerClient, RunnerReady), &'static str> {
     let (root, previous) = {
         let mut state = state.lock().await;
-        state.journal_available().map_err(error)?;
+        state.journal_available()?;
         let ready = state
             .engine_registration
             .clone()
-            .ok_or_else(|| error("engine_registration_unavailable"))?;
+            .ok_or("engine_registration_unavailable")?;
         (state.journal.root.clone(), ready)
     };
     let client = RunnerClient::new(&root, &previous.registration_id, &previous.boot, TIMEOUT)
-        .map_err(|_| error("engine_registration_unavailable"))?;
+        .map_err(|_| "engine_registration_unavailable")?;
     let ready = client
         .ready()
         .await
-        .map_err(|_| error("engine_registration_unavailable"))?;
+        .map_err(|_| "engine_registration_unavailable")?;
     {
         let mut state = state.lock().await;
-        if let reply @ Reply::Error { .. } =
+        if let Reply::Error { code } =
             state.register_engine(&previous.registration_id, ready.clone())
         {
-            return Err(reply);
+            return Err(code);
         }
     }
     Ok((client, ready))
@@ -437,7 +439,7 @@ pub(super) async fn deliver(
     }
     let (client, ready) = match authenticate(&state).await {
         Ok(authenticated) => authenticated,
-        Err(reply) => return reply,
+        Err(code) => return error(code),
     };
     let (retained, generation) = {
         let state = state.lock().await;
@@ -479,7 +481,7 @@ pub(super) async fn reconcile(
     }
     let (client, ready) = match authenticate(&state).await {
         Ok(authenticated) => authenticated,
-        Err(reply) => return reply,
+        Err(code) => return error(code),
     };
     let order = match client.reconcile(&dispatch_id).await {
         Ok(order) => order,
@@ -496,4 +498,41 @@ pub(super) async fn reconcile(
         return error("dispatch_outcome_unknown");
     }
     status(&state, dispatch_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Journal, private_directory};
+    use super::*;
+    use std::mem::{size_of, size_of_val};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_registration_returns_compact_authentication_code() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-auth-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let directory = private_directory(&path).unwrap();
+        let (journal, records) = Journal::open(&directory, &path).unwrap();
+        let state = State::new(journal, records).unwrap();
+        assert!(state.engine_registration.is_none());
+        let state = Arc::new(Mutex::new(state));
+        let failure = match authenticate(&state).await {
+            Ok(_) => panic!("unregistered runner authenticated"),
+            Err(failure) => failure,
+        };
+        let error_bytes = size_of_val(&failure);
+        let budget_bytes = 2 * size_of::<usize>();
+        assert!(
+            error_bytes <= budget_bytes,
+            "authentication error uses {error_bytes} bytes; two-word budget is {budget_bytes} bytes"
+        );
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!("engine_registration_unavailable")
+        );
+    }
 }
