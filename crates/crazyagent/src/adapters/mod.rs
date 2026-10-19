@@ -1,7 +1,9 @@
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use serde::{Deserialize, Serialize};
 
+pub mod claude;
 pub mod codex;
+pub mod events;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
