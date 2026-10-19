@@ -2,6 +2,7 @@ use super::client::{
     ConversationContext, ConversationEvent, ConversationJob, ConversationQuery,
     ConversationSubmission, Evidence, MutationDelivery, OwnerEvent, OwnerProgress,
 };
+use super::model_access;
 use crate::config::EffectiveConfig;
 use crate::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
@@ -82,6 +83,7 @@ struct ConversationPending {
 }
 
 pub struct App {
+    pub(super) model_access: model_access::State,
     focus: Focus,
     draft: String,
     project_draft: String,
@@ -131,6 +133,7 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
+            model_access: model_access::State::default(),
             focus: Focus::Conversation,
             draft: String::new(),
             project_draft: String::new(),
@@ -220,6 +223,23 @@ impl App {
     }
 
     pub fn reduce(&mut self, event: UiEvent) -> Result<(), String> {
+        if self.focus == Focus::Settings {
+            if matches!(event, UiEvent::Submit) && self.conversation_pending.is_some() {
+                return Err(
+                    "A conversation owner intent is unresolved; metadata values retained".into(),
+                );
+            }
+            if self.model_access.reduce(&event)? {
+                let notice = self.model_access.notice.clone();
+                self.notice(&notice);
+                self.scroll = 0;
+                self.assert_consistent();
+                return Ok(());
+            }
+        }
+        if matches!(event, UiEvent::Submit) && self.model_access.has_pending() {
+            return Err("Metadata owner intent is unresolved; conversation draft retained".into());
+        }
         let previous_project = self
             .selected_project()
             .map(|project| project.project_id.clone());
@@ -415,6 +435,9 @@ impl App {
                     .is_some_and(|task| task.config_id == config.id)
                 {
                     self.config = Some(config);
+                    if !self.model_access.explicit {
+                        self.model_access.pinned = true;
+                    }
                 }
             }
             Outcome::Coordination { state } => {
@@ -474,6 +497,7 @@ impl App {
     }
 
     pub(super) fn reconnect_owner(&mut self) -> Result<(), String> {
+        self.model_access.access(None, false);
         self.invalidate_evidence()?;
         self.owner_ready = false;
         self.owner_problem = None;
@@ -512,11 +536,21 @@ impl App {
 
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
+            OwnerEvent::ModelAccess(event) => {
+                self.model_access.apply(*event)?;
+                if self.model_access.disconnected() {
+                    self.owner_ready = false;
+                    self.owner_problem = Some("metadata_owner_connection_unavailable".into());
+                }
+                let notice = self.model_access.notice.clone();
+                self.notice(&notice);
+            }
             OwnerEvent::Access {
                 ready,
                 problem,
                 identity,
             } => {
+                self.model_access.access(identity.clone(), ready);
                 if let Some(identity) = identity {
                     if self
                         .owner_identity
@@ -888,6 +922,13 @@ impl App {
 
     pub(super) fn take_conversation_job(&mut self) -> Option<ConversationJob> {
         self.conversation_job.take()
+    }
+
+    pub(super) fn model_access_request(&mut self) -> Result<Option<model_access::Job>, String> {
+        if self.conversation_pending.is_some() {
+            return Ok(None);
+        }
+        self.model_access.request(self.focus == Focus::Settings)
     }
 
     pub(super) fn retry_conversation(&mut self) -> bool {

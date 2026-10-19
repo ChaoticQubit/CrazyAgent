@@ -1,3 +1,4 @@
+use super::model_access;
 use crate::client_controller::OwnerController;
 use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
@@ -30,6 +31,7 @@ enum Job {
     Wire(Box<WireRequest>),
     Reconnect,
     Conversation(Box<ConversationJob>),
+    ModelAccess(Box<model_access::Job>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -109,6 +111,7 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
+    ModelAccess(Box<model_access::Event>),
     Access {
         ready: bool,
         problem: String,
@@ -238,6 +241,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::ModelAccess(job) => {
+                            let native = native
+                                .as_mut()
+                                .expect("metadata requires paired configuration");
+                            let event = runtime.block_on(native.model_access(*job));
+                            let failed = matches!(
+                                &event,
+                                model_access::Event::Read { result: Err(_), .. }
+                                    | model_access::Event::Mutation {
+                                        result: Err(_),
+                                        retained: true,
+                                        ..
+                                    }
+                            );
+                            if failed {
+                                native.detach();
+                                client = native.ordinary();
+                            }
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::ModelAccess(Box::new(event)),
                                 })
                                 .is_err()
                             {
@@ -432,6 +463,10 @@ impl Connection {
         self.owner_job(Job::Conversation(Box::new(job)))
     }
 
+    pub(super) fn model_access(&mut self, job: model_access::Job) -> Result<(), String> {
+        self.owner_job(Job::ModelAccess(Box::new(job)))
+    }
+
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
         if self.busy() {
             return Err("A native request is still pending".into());
@@ -477,6 +512,8 @@ struct NativeOwner {
     scan: Option<Scan>,
     conversation_pending: Option<ConversationSubmission>,
     conversation_operation: Option<(RequestId, String)>,
+    model_pending: Option<model_access::Submission>,
+    model_operation: Option<(RequestId, String)>,
 }
 
 impl NativeOwner {
@@ -489,6 +526,8 @@ impl NativeOwner {
             scan: None,
             conversation_pending: None,
             conversation_operation: None,
+            model_pending: None,
+            model_operation: None,
         }
     }
 
@@ -544,6 +583,162 @@ impl NativeOwner {
         }
     }
 
+    async fn model_access(&mut self, job: model_access::Job) -> model_access::Event {
+        match job {
+            model_access::Job::Read {
+                identity,
+                generation,
+                query,
+            } => {
+                let result = self
+                    .read_model_access(&identity, query.clone())
+                    .await
+                    .map(Box::new);
+                model_access::Event::Read {
+                    identity,
+                    generation,
+                    query,
+                    result,
+                }
+            }
+            model_access::Job::Mutation {
+                submission,
+                delivery,
+            } => {
+                let result = self
+                    .mutate_model_access(&submission, delivery)
+                    .await
+                    .map(Box::new);
+                let retained = self.model_pending.is_some()
+                    && self
+                        .controller
+                        .as_ref()
+                        .is_some_and(|controller| controller.pending().is_some());
+                let operation = self.model_operation.clone();
+                assert!(!retained || operation.is_some());
+                if !retained {
+                    self.model_pending = None;
+                    self.model_operation = None;
+                }
+                model_access::Event::Mutation {
+                    submission,
+                    operation,
+                    result,
+                    retained,
+                }
+            }
+        }
+    }
+
+    async fn read_model_access(
+        &mut self,
+        identity: &OwnerConnectionIdentity,
+        query: OwnerRead,
+    ) -> Result<OwnerReadReply, String> {
+        if !self.ready
+            || !matches!(
+                query,
+                OwnerRead::ModelAccessPage { .. } | OwnerRead::ModelAccessRecord { .. }
+            )
+        {
+            return Err("metadata_owner_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("metadata_owner_unavailable")?;
+        if controller.identity() != identity {
+            return Err("metadata_owner_identity_changed".into());
+        }
+        controller
+            .read(query)
+            .await
+            .map_err(|error| bounded_problem(&error.0))
+    }
+
+    async fn mutate_model_access(
+        &mut self,
+        submission: &model_access::Submission,
+        delivery: MutationDelivery,
+    ) -> Result<OwnerResponse, String> {
+        if !self.ready {
+            return Err("metadata_owner_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("metadata_owner_unavailable")?;
+        match delivery {
+            MutationDelivery::Submit => {
+                if controller.identity() != &submission.basis.identity
+                    || controller.pending().is_some()
+                    || self.model_pending.is_some()
+                    || self.conversation_pending.is_some()
+                {
+                    return Err("metadata_pending_or_owner_changed".into());
+                }
+                let collection = match &submission.edit {
+                    crate::config::ModelAccessEdit::AddAccount { .. }
+                    | crate::config::ModelAccessEdit::RemoveAccount { .. } => {
+                        crate::engine::owner::ModelAccessCollection::Accounts
+                    }
+                    crate::config::ModelAccessEdit::CreateConnection { .. }
+                    | crate::config::ModelAccessEdit::ReplaceConnection { .. }
+                    | crate::config::ModelAccessEdit::RemoveConnection { .. } => {
+                        crate::engine::owner::ModelAccessCollection::Connections
+                    }
+                    _ => crate::engine::owner::ModelAccessCollection::Pools,
+                };
+                let fresh = controller
+                    .read(OwnerRead::ModelAccessPage {
+                        collection,
+                        cursor: None,
+                        limit: 1,
+                    })
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))?;
+                if fresh.revision != submission.basis.revision
+                    || fresh.config_id != submission.basis.config_id
+                    || !submission.basis.writable
+                    || !matches!(&fresh.data, OwnerData::ModelAccessPage { source_hash, writable: true, .. } if source_hash == &submission.basis.source_hash)
+                {
+                    return Err("metadata_stale_form; refresh and review retained values".into());
+                }
+                let pending = controller
+                    .begin_mutation(
+                        OwnerMutation::ModelAccess {
+                            expected_config_id: submission.basis.config_id.clone(),
+                            expected_source_hash: submission.basis.source_hash.clone(),
+                            edit: submission.edit.clone(),
+                        },
+                        submission.generation,
+                    )
+                    .map_err(|error| bounded_problem(&error.0))?;
+                self.model_operation = Some((
+                    pending.request().request_id.clone(),
+                    pending.hash().to_owned(),
+                ));
+                self.model_pending = Some(submission.clone());
+                controller
+                    .send_pending()
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
+            }
+            MutationDelivery::Reconcile | MutationDelivery::Retry => {
+                if self.model_pending.as_ref() != Some(submission) || controller.pending().is_none()
+                {
+                    return Err("metadata_original_pending_context_required".into());
+                }
+                match delivery {
+                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
+                    MutationDelivery::Retry => controller.retry_pending().await,
+                    MutationDelivery::Submit => unreachable!(),
+                }
+                .map_err(|error| bounded_problem(&error.0))
+            }
+        }
+    }
+
     async fn conversation(&mut self, job: ConversationJob) -> ConversationEvent {
         match job {
             ConversationJob::Read { context, query } => {
@@ -560,7 +755,7 @@ impl NativeOwner {
                     .map(Box::new);
                 let pending = self.controller.as_ref().and_then(|c| c.pending());
                 let operation = self.conversation_operation.clone();
-                let retained = pending.is_some();
+                let retained = pending.is_some() && self.conversation_pending.is_some();
                 assert!(!retained || (self.conversation_pending.is_some() && operation.is_some()));
                 if !retained {
                     self.conversation_pending = None;
@@ -677,6 +872,7 @@ impl NativeOwner {
         match delivery {
             MutationDelivery::Submit => {
                 if controller.identity() != &submission.identity
+                    || self.model_pending.is_some()
                     || self.conversation_pending.is_some()
                     || controller.pending().is_some()
                 {

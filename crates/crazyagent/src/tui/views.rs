@@ -115,7 +115,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             .block(Block::bordered().title(title)),
         rows[1],
     );
-    let label = app.draft_label();
+    let label = if app.focus() == Focus::Settings {
+        "Model-access fields are above; conversation draft retained".into()
+    } else {
+        app.draft_label()
+    };
     let draft = app
         .draft()
         .chars()
@@ -323,13 +327,23 @@ fn project_lines(app: &App) -> String {
 }
 
 fn settings_lines(app: &App) -> String {
+    let (width, height) = app.viewport();
+    let compact = width > 0 && (width < 60 || height < 12);
+    if !app.model_access.pinned && app.config.is_none() {
+        return app.model_access.render(compact);
+    }
     let Some(config) = &app.config else {
         return format!(
-            "Settings and provenance\n\n{}\n\nSelect a task to read its pinned effective configuration. Canonical global/project settings editing is unavailable until the owner settings API exists.",
+            "Pinned settings and provenance | 1 Accounts | 2 Connections | 3 Pools\n\n{}\n\nSelect a task to read its immutable pinned effective configuration. Model-access metadata edits apply to new task configurations.",
             task_summary(app)
         );
     };
     let mut lines = vec![
+        if app.model_access.pinned {
+            String::new()
+        } else {
+            app.model_access.render(compact)
+        },
         format!(
             "Task-scoped effective configuration: {}",
             config.id.as_str()
@@ -347,7 +361,7 @@ fn settings_lines(app: &App) -> String {
         ));
     }
     lines.push(
-        "\nEditing global/project settings requires the authenticated owner settings API.".into(),
+        "\n1 Accounts | 2 Connections | 3 Pools. Pinned task configuration is immutable.".into(),
     );
     lines.join("\n")
 }

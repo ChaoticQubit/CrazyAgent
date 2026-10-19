@@ -1,5 +1,6 @@
 pub mod app;
 mod client;
+mod model_access;
 pub mod views;
 
 use crate::engine::Client;
@@ -156,7 +157,8 @@ fn event_loop(
         if !connection.busy() {
             if owner_reconnect {
                 owner_reconnect = false;
-                if !app.retry_conversation()
+                if !app.model_access.retry()
+                    && !app.retry_conversation()
                     && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
                 {
                     app.notice(&error);
@@ -169,6 +171,9 @@ fn event_loop(
                 app.bind_project_request(request_id);
                 snapshot = true;
                 refresh = Instant::now();
+            } else if let Some(job) = app.model_access_request().map_err(TuiError)? {
+                connection.model_access(job).map_err(TuiError)?;
+                dirty = true;
             } else if let Some(job) = app.take_conversation_job() {
                 connection.conversation(job).map_err(TuiError)?;
                 dirty = true;
@@ -217,7 +222,7 @@ fn event_loop(
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
                     let result = if connection.uncertain() {
                         connection.retry()
-                    } else if app.has_unresolved_conversation() {
+                    } else if app.has_unresolved_conversation() || app.model_access.has_pending() {
                         owner_reconnect = true;
                         app.notice(
                             "Original owner recovery queued until the native worker is idle",
@@ -242,7 +247,10 @@ fn event_loop(
                         app.notice(&error);
                     }
                     if previous_focus != app.focus()
-                        && matches!(app.focus(), Focus::Evidence | Focus::Conversation)
+                        && matches!(
+                            app.focus(),
+                            Focus::Evidence | Focus::Conversation | Focus::Settings
+                        )
                     {
                         owner_refresh = Instant::now();
                     }
@@ -265,6 +273,18 @@ fn event_loop(
 }
 
 fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
+    if app.focus() == Focus::Settings
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return match key.code {
+            KeyCode::Char('n') => Some(UiEvent::HistoryNext),
+            KeyCode::Char('p') => Some(UiEvent::HistoryFirst),
+            _ => None,
+        };
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && !key
             .modifiers
