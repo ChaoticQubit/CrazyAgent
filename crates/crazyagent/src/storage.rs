@@ -9,8 +9,10 @@ use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
 mod settings;
+pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    WorkerDispatch(Box<worker_dispatch::DispatchJob>, oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>),
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
     OwnerControl(
@@ -102,11 +104,18 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::WorkerDispatch(job, reply) => {
+                            let result = if readonly { Err(error("dispatch_readonly")) } else { worker_dispatch::execute(&mut connection, &config, *job) };
+                            let _ = reply.send(result);
+                        }
                         Job::OwnerStart(reply) => {
                             let result = if readonly || owner_runtime.is_some() {
                                 Err(error("owner_runtime_unavailable_or_busy"))
                             } else {
-                                owner_start(&mut connection)
+                                owner_start(&mut connection).and_then(|started| {
+                                    worker_dispatch::restart(&mut connection, &config)?;
+                                    Ok(started)
+                                })
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
@@ -309,6 +318,7 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         crate::verification::initialize(&connection)?;
         crate::worktrees::initialize(&connection)?;
         crate::worktrees::reconcile(&connection)?;
+        worker_dispatch::initialize(&connection)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -701,10 +711,20 @@ fn persist_event(
     request: &WireRequest,
     revision: u64,
 ) -> Result<(), EngineError> {
+    persist_event_ids(tx, config, &request.request_id, &request.client_id, revision)
+}
+
+fn persist_event_ids(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    request_id: &RequestId,
+    client_id: &ClientId,
+    revision: u64,
+) -> Result<(), EngineError> {
     let event = Event {
         cursor: Cursor::new(revision),
-        request_id: request.request_id.clone(),
-        client_id: request.client_id.clone(),
+        request_id: request_id.clone(),
+        client_id: client_id.clone(),
     };
     tx.execute("UPDATE state SET revision=?1 WHERE id=1", [revision as i64])
         .map_err(error)?;
@@ -1340,6 +1360,9 @@ fn owner_read(
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
     let data = match query {
+        OwnerRead::WorkerDispatch { dispatch_id } => OwnerData::WorkerDispatch {
+            dispatch: worker_dispatch::load(&tx, dispatch_id)?.map(|record| Box::new(record.view)),
+        },
         OwnerRead::Settings => {
             let names: Vec<_> = config.descriptors.keys().cloned().collect();
             assert!(!names.is_empty());

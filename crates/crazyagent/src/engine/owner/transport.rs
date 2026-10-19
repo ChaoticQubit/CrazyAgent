@@ -2,10 +2,8 @@ use super::*;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
 use crate::storage::Job;
-use crate::worker_dispatch::{
-    AttemptRef, PreparedRunner, RUNNER_BOOTSTRAP_MAX, RUNNERS_MAX, RunnerBootIdentity,
-    RunnerBootstrap, RunnerReady, RunnerReply, RunnerRequest,
-};
+use crate::worker_dispatch::*;
+use crate::storage::worker_dispatch::{DispatchJob, DispatchResult, DispatchSnapshot, DispatchRecord};
 use rustix::fs::{Mode, OFlags};
 use std::fs::File;
 use std::io::Read;
@@ -524,7 +522,7 @@ impl Authority {
             protocol_version,
             registration_id,
             boot,
-        } = request;
+        } = request else { return Err(failure("runner_ready_required")); };
         boot.validate()?;
         let mut runners = self
             .runners
@@ -572,6 +570,30 @@ impl Authority {
             return Err(failure("runner_ready_unconfirmed"));
         }
         Ok(())
+    }
+
+    fn ready_for_attempt(&self, attempt: &AttemptRef) -> Result<Option<RunnerReady>, EngineError> {
+        let runners = self.runners.lock().map_err(|_| failure("runner_authority_unavailable"))?;
+        for slot in runners.iter().flatten() {
+            if &slot.prepared.attempt == attempt {
+                slot.verify(&self.root)?;
+                return Ok(slot.ready.clone().filter(|_| slot.active));
+            }
+        }
+        Ok(None)
+    }
+
+    fn admitted_runner(&self, packet: &[u8; 37]) -> Result<RunnerReady, EngineError> {
+        let prepared = self.authenticate_runner(packet)?;
+        self.ready_for_attempt(&prepared.attempt)?.ok_or_else(|| failure("runner_ready_required"))
+    }
+
+    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, Identity), EngineError> {
+        let runners = self.runners.lock().map_err(|_| failure("runner_authority_unavailable"))?;
+        let slot = runners.iter().flatten().find(|slot| slot.prepared.registration_id == ready.registration_id).ok_or_else(|| failure("runner_registration_missing"))?;
+        slot.verify(&self.root)?;
+        if !slot.active || slot.ready.as_ref() != Some(ready) { return Err(failure("runner_ready_changed")); }
+        Ok((Root::open(&slot.root.path)?, slot.endpoint.ok_or_else(|| failure("runner_endpoint_missing"))?))
     }
 
     fn authenticate(&self, packet: &[u8; 37]) -> Result<Admission, EngineError> {
@@ -922,7 +944,7 @@ impl OwnerServer {
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut clients = tokio::task::JoinSet::new();
-        let result = loop {
+        let result = 'accept: loop {
             tokio::select! {
                 _ = &mut stop => break Ok(()),
                 result=clients.join_next(), if !clients.is_empty() => {
@@ -930,6 +952,9 @@ impl OwnerServer {
                 }
                 accepted=self.listener.accept() => {
                     let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
+                    while let Some(completed) = clients.try_join_next() {
+                        if let Err(error) = completed { break 'accept Err(io_error(error)); }
+                    }
                     if clients.len()>=2 {drop(stream);continue;}
                     let engine=self.engine.clone();let authority=self.authority.clone();let timeout=self.timeout;
                     clients.spawn(async move { serve_owner(stream,engine,authority,timeout).await; });
@@ -1050,25 +1075,48 @@ impl Engine {
         &self,
         a: Admission,
         request: OwnerRequest,
+        ready: Option<RunnerReady>,
     ) -> Result<OwnerReply, EngineError> {
         request.validate()?;
         let id = request.request_id.clone();
         let response = match &request.operation {
             OwnerOperation::Apply {
-                mutation: OwnerMutation::PrepareWorkerDispatch { attempt, .. },
+                mutation: OwnerMutation::PrepareWorkerDispatch { attempt, repository_slot },
             } => {
-                let current = self.owner_job(|reply| Job::OwnerRead(a, OwnerRead::Capabilities, reply)).await?;
-                if current.revision != request.expected_revision {
-                    OwnerResponse::Rejected { code: "worker_dispatch_revision_conflict".into() }
-                } else {
-                    self.runner_attempt(attempt).await?;
-                    OwnerResponse::Rejected { code: "worker_dispatch_not_implemented".into() }
+                let hash = request.mutation_hash()?;
+                let replay = self.owner_job(|reply| Job::OwnerReconcile(a.clone(), id.clone(), Some(hash), reply)).await?;
+                match replay {
+                    OwnerResponse::Committed { mut operation } => {
+                        operation.historical_replay = true;
+                        OwnerResponse::Applied { operation }
+                    }
+                    OwnerResponse::NotRecordedAtBarrier { .. } => {
+                        let DispatchResult::Snapshot(snapshot) = self.dispatch_job(DispatchJob::Inspect(a.clone(), attempt.clone(), *repository_slot)).await? else { return Err(failure("dispatch_snapshot_result")); };
+                        let observed = observe_dispatch(*snapshot, self.timeout).await?;
+                        let DispatchResult::Prepared(operation) = self.dispatch_job(DispatchJob::Prepare(a, Box::new(request.clone()), Box::new(observed), ready)).await? else { return Err(failure("dispatch_prepare_result")); };
+                        OwnerResponse::Applied { operation: *operation }
+                    }
+                    other => other,
                 }
             }
-            OwnerOperation::Read { query: OwnerRead::WorkerDispatch { .. } } => {
-                let mut state = self.owner_job(|reply| Job::OwnerRead(a, OwnerRead::Capabilities, reply)).await?;
-                state.data = OwnerData::WorkerDispatch { dispatch: None };
-                OwnerResponse::Read { state }
+            OwnerOperation::Apply { mutation: OwnerMutation::CancelWorkerDispatch { .. } | OwnerMutation::ReconcileWorkerDispatch { .. } | OwnerMutation::ResumeWorkerDispatch { .. } } => {
+                let hash = request.mutation_hash()?;
+                let replay = self.owner_job(|reply| Job::OwnerReconcile(a.clone(), id.clone(), Some(hash), reply)).await?;
+                match replay {
+                    OwnerResponse::Committed { mut operation } => {
+                        operation.historical_replay = true;
+                        OwnerResponse::Applied { operation }
+                    }
+                    OwnerResponse::NotRecordedAtBarrier { .. } => {
+                        let observed = if let OwnerOperation::Apply { mutation: OwnerMutation::ResumeWorkerDispatch { dispatch_id, .. } } = &request.operation {
+                            let record = self.dispatch_row(dispatch_id).await?.ok_or_else(|| failure("dispatch_missing"))?;
+                            Some(Box::new(observe_dispatch(record.snapshot, self.timeout).await?))
+                        } else { None };
+                        let DispatchResult::Prepared(operation) = self.dispatch_job(DispatchJob::Change(a, Box::new(request.clone()), observed)).await? else { return Err(failure("dispatch_change_result")); };
+                        OwnerResponse::Applied { operation: *operation }
+                    }
+                    other => other,
+                }
             }
             OwnerOperation::Apply { .. } => OwnerResponse::Applied {
                 operation: self
@@ -1095,6 +1143,78 @@ impl Engine {
             response,
         })
     }
+
+    async fn dispatch_job(&self, job: DispatchJob) -> Result<DispatchResult, EngineError> {
+        self.owner_job(|reply| Job::WorkerDispatch(Box::new(job), reply)).await
+    }
+
+    async fn dispatch_row(&self, id: &RequestId) -> Result<Option<DispatchRecord>, EngineError> {
+        let DispatchResult::Row(record) = self.dispatch_job(DispatchJob::Lookup(id.clone())).await? else { return Err(failure("dispatch_lookup_result")); };
+        Ok(record.map(|record| *record))
+    }
+
+    async fn drive_dispatch(&self, id: &RequestId, authority: &Authority, reconcile: bool) -> Result<(), EngineError> {
+        let _driver = self.dispatch_drive.try_lock().map_err(|_| failure("dispatch_driver_busy"))?;
+        let record = self.dispatch_row(id).await?.ok_or_else(|| failure("dispatch_missing"))?;
+        if record.view.receipt.is_some() || record.view.state == DispatchState::CancelledBeforeOffer { return Ok(()); }
+        if !reconcile && (record.notification_attempted || record.fenced || record.view.state != DispatchState::Queued) { return Ok(()); }
+        if reconcile && !record.fenced { return Err(failure("dispatch_reconcile_requires_fence")); }
+        let Some(ready) = &record.ready else { return Ok(()); };
+        let (root, endpoint) = match authority.delivery_target(ready) {
+            Ok(target) => target,
+            Err(error) => {
+                if !reconcile && !record.notification_attempted { self.dispatch_job(DispatchJob::Mark(id.clone(), DispatchState::RunnerUnavailable)).await?; }
+                return Err(error);
+            }
+        };
+        if !reconcile { self.dispatch_job(DispatchJob::Mark(id.clone(), DispatchState::Queued)).await?; }
+        let result = runner_control(&root, endpoint, serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "command": { "kind": if reconcile { "reconcile" } else { "deliver" }, "dispatch_id": id },
+        }), self.timeout.min(Duration::from_secs(1))).await;
+        let after = self.dispatch_row(id).await?.ok_or_else(|| failure("dispatch_missing"))?;
+        if !reconcile && after.view.receipt.is_none() {
+            self.dispatch_job(DispatchJob::Mark(id.clone(), DispatchState::OutcomeUnknown)).await?;
+        }
+        result.map(|_| ())
+    }
+
+    async fn dispatch_runner(&self, authority: &Authority, auth: &[u8; 37], request: RunnerRequest) -> Result<RunnerReply, EngineError> {
+        if request.protocol_version() != PROTOCOL_VERSION { return Err(failure("runner_protocol_version")); }
+        if matches!(&request, RunnerRequest::Ready { .. }) {
+            let _barrier = self.owner_egress.write().await;
+            let prepared = authority.authenticate_runner(auth)?;
+            let binding = self.runner_attempt(prepared.attempt()).await?;
+            let identity = authority.ready_runner(auth, request, &binding)?;
+            self.dispatch_job(DispatchJob::Register(authority.host.clone(), identity.clone())).await?;
+            return Ok(RunnerReply::Ready { identity });
+        }
+        let ready = authority.admitted_runner(auth)?;
+        let observed = match &request {
+            RunnerRequest::Offer { dispatch_id, .. } => {
+                let record = self.dispatch_row(dispatch_id).await?.ok_or_else(|| failure("dispatch_missing"))?;
+                if record.ready.as_ref() != Some(&ready) { return Err(failure("dispatch_registration_mismatch")); }
+                Some(Box::new(observe_dispatch(record.snapshot, self.timeout).await?))
+            }
+            RunnerRequest::ReportFence { receipt, .. } if receipt.outcome == FenceOutcome::NotRecordedAtBarrier => {
+                let record = self.dispatch_row(&receipt.dispatch_id).await?.ok_or_else(|| failure("dispatch_missing"))?;
+                if record.ready.as_ref() != Some(&ready) { return Err(failure("dispatch_registration_mismatch")); }
+                observe_dispatch(record.snapshot, self.timeout).await.ok().map(Box::new)
+            }
+            _ => None,
+        };
+        let _barrier = self.owner_egress.write().await;
+        if authority.admitted_runner(auth)? != ready { return Err(failure("runner_ready_changed")); }
+        let job = match request {
+            RunnerRequest::Offer { dispatch_id, delivery_generation, .. } => DispatchJob::Offer(ready, dispatch_id, delivery_generation, observed.ok_or_else(|| failure("dispatch_observation_missing"))?),
+            RunnerRequest::ReportDenied { receipt, .. } => DispatchJob::Report(ready, Box::new(receipt)),
+            RunnerRequest::Reconcile { dispatch_id, .. } => DispatchJob::Fence(ready, dispatch_id),
+            RunnerRequest::ReportFence { receipt, .. } => DispatchJob::ReportFence(ready, Box::new(receipt), observed),
+            RunnerRequest::Ready { .. } => return Err(failure("runner_ready_required")),
+        };
+        let DispatchResult::Reply(reply) = self.dispatch_job(job).await? else { return Err(failure("dispatch_runner_result")); };
+        Ok(reply)
+    }
 }
 
 async fn serve_owner(
@@ -1108,14 +1228,14 @@ async fn serve_owner(
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
         if &auth[..4] == b"CAR1" {
-            let prepared = authority.authenticate_runner(&auth)?;
+            authority.authenticate_runner(&auth)?;
             let frame = read_frame(&mut stream).await?;
             let request: RunnerRequest = serde_json::from_slice(&frame[4..])
                 .map_err(|_| failure("runner_request_invalid"))?;
+            let reply = engine.dispatch_runner(&authority, &auth, request).await?;
             let _barrier = engine.owner_egress.write().await;
-            let binding = engine.runner_attempt(prepared.attempt()).await?;
-            let identity = authority.ready_runner(&auth, request, &binding)?;
-            let frame = encode_frame(&RunnerReply::Ready { identity })
+            authority.admitted_runner(&auth)?;
+            let frame = encode_frame(&reply)
                 .map_err(|_| failure("runner_response_bounds"))?;
             return stream.write_all(&frame).await.map_err(io_error);
         }
@@ -1126,10 +1246,33 @@ async fn serve_owner(
         request.validate()?;
         let id = request.request_id.clone();
         let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
+        let foreground = matches!(&request.operation, OwnerOperation::Apply { mutation: OwnerMutation::PrepareWorkerDispatch { .. } | OwnerMutation::CancelWorkerDispatch { .. } | OwnerMutation::ReconcileWorkerDispatch { .. } | OwnerMutation::ResumeWorkerDispatch { .. } });
+        if foreground {
+            let reconcile = matches!(&request.operation, OwnerOperation::Apply { mutation: OwnerMutation::ReconcileWorkerDispatch { .. } });
+            let deliver = matches!(&request.operation, OwnerOperation::Apply { mutation: OwnerMutation::PrepareWorkerDispatch { .. } | OwnerMutation::ResumeWorkerDispatch { .. } });
+            let mut result = {
+                let _barrier = engine.owner_egress.write().await;
+                let current = authority.authenticate(&auth)?;
+                if current != a { return Err(failure("owner_grant_stale_or_revoked")); }
+                let ready = if let OwnerOperation::Apply { mutation: OwnerMutation::PrepareWorkerDispatch { attempt, .. } } = &request.operation { authority.ready_for_attempt(attempt)? } else { None };
+                engine.dispatch_owner(a.clone(), request, ready).await
+            };
+            if let Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. }) = &result
+                && !operation.historical_replay && (deliver || reconcile)
+                && let OwnerResult::DispatchPrepared { dispatch_id } = &operation.result
+            {
+                let _ = engine.drive_dispatch(dispatch_id, &authority, reconcile).await;
+            }
+            let _barrier = engine.owner_egress.write().await;
+            if authority.authenticate(&auth)? != a { return Err(failure("owner_grant_stale_or_revoked")); }
+            let current = engine.owner_job(|reply| Job::OwnerRead(a, OwnerRead::Capabilities, reply)).await?;
+            if let Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. }) = &mut result { operation.current_revision = current.revision; }
+            return write_owner_reply(&mut stream, result, id, mutation).await;
+        }
         let _barrier = engine.owner_egress.write().await;
         write_owner_reply(
             &mut stream,
-            engine.dispatch_owner(a, request).await,
+            engine.dispatch_owner(a, request, None).await,
             id,
             mutation,
         )
@@ -1200,6 +1343,161 @@ async fn runner_control(
     .map_err(|_| failure("runner_control_outcome_unknown"))?
 }
 
+fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), EngineError> {
+    if !path.is_absolute() || path.components().count() > 64 || std::fs::canonicalize(path).map_err(io_error)? != path {
+        return Err(failure("dispatch_path_not_canonical"));
+    }
+    for ancestor in path.ancestors() {
+        if std::fs::symlink_metadata(ancestor).map_err(io_error)?.file_type().is_symlink() { return Err(failure("dispatch_symlink_path")); }
+    }
+    let file = File::from(rustix::fs::open(path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).map_err(io_error)?);
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_dir() || metadata.uid() != rustix::process::getuid().as_raw() || metadata.mode() & 0o022 != 0
+        || metadata.dev() != expected.device || metadata.ino() != expected.inode
+    { return Err(failure("dispatch_filesystem_identity_changed")); }
+    Ok(())
+}
+
+fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+    let file = File::from(rustix::fs::open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).map_err(io_error)?);
+    let before = file.metadata().map_err(io_error)?;
+    if !before.is_file() || before.uid() != rustix::process::getuid().as_raw() || before.mode() & 0o022 != 0
+        || before.nlink() != 1 || before.len() > limit as u64
+    { return Err(failure("dispatch_file_untrusted_or_capacity")); }
+    let mut bytes = Vec::new();
+    (&file).take((limit + 1) as u64).read_to_end(&mut bytes).map_err(io_error)?;
+    let after = file.metadata().map_err(io_error)?;
+    let linked = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if bytes.len() > limit || Identity::of(&after) != Identity::of(&before) || Identity::of(&linked) != Identity::of(&before)
+        || after.len() != before.len() || after.mtime() != before.mtime() || after.mtime_nsec() != before.mtime_nsec()
+    { return Err(failure("dispatch_file_changed")); }
+    Ok(bytes)
+}
+
+fn dispatch_config(path: &Path) -> Result<(), EngineError> {
+    let mut pending = vec![path.join(".git")];
+    let mut visited = 0;
+    while let Some(entry) = pending.pop() {
+        visited += 1;
+        if visited > 8192 { return Err(failure("dispatch_git_metadata_capacity")); }
+        let metadata = std::fs::symlink_metadata(&entry).map_err(io_error)?;
+        if metadata.uid() != rustix::process::getuid().as_raw() || metadata.mode() & 0o022 != 0
+            || (!metadata.is_dir() && (!metadata.is_file() || metadata.nlink() != 1))
+        { return Err(failure("dispatch_git_metadata_untrusted")); }
+        if metadata.is_dir() {
+            for child in std::fs::read_dir(&entry).map_err(io_error)? {
+                pending.push(child.map_err(io_error)?.path());
+                if pending.len() > 8192 { return Err(failure("dispatch_git_metadata_capacity")); }
+            }
+        }
+    }
+    let bytes = dispatch_file(&path.join(".git/config"), 65536)?;
+    let text = std::str::from_utf8(&bytes).map_err(io_error)?;
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') { continue; }
+        if line.contains('\\') || line.contains('\0') { return Err(failure("dispatch_git_config_unsupported")); }
+        if line.starts_with('[') {
+            let value = line.strip_prefix('[').and_then(|v| v.strip_suffix(']')).ok_or_else(|| failure("dispatch_git_config_unsupported"))?.to_ascii_lowercase();
+            section = if matches!(value.as_str(), "core" | "user" | "init") { value }
+                else if value.starts_with("remote \"") && value.ends_with('"') { "remote".into() }
+                else if value.starts_with("branch \"") && value.ends_with('"') { "branch".into() }
+                else { return Err(failure("dispatch_git_config_unsupported")); };
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(|| failure("dispatch_git_config_unsupported"))?;
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        let allowed = match (section.as_str(), key.as_str()) {
+            ("core", "repositoryformatversion") => value == "0",
+            ("core", "bare") => value == "false",
+            ("core", "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode") => matches!(value, "true" | "false"),
+            ("user", "name" | "email") | ("init", "defaultbranch") | ("remote", "url" | "fetch") | ("branch", "remote" | "merge") => true,
+            _ => false,
+        };
+        if !allowed { return Err(failure("dispatch_git_config_unsupported")); }
+    }
+    for name in ["objects/info/alternates", "objects/info/http-alternates", "shallow", "info/grafts", "config.worktree", "commondir"] {
+        match std::fs::symlink_metadata(path.join(".git").join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(failure("dispatch_git_metadata_unsupported")),
+        }
+    }
+    Ok(())
+}
+
+fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
+    let repository = Path::new(&seal.repository);
+    let target = Path::new(&seal.path);
+    dispatch_directory(repository, &seal.admission_root)?;
+    dispatch_directory(&repository.join(".git"), &seal.admission_metadata)?;
+    dispatch_directory(target, &seal.directory)?;
+    dispatch_config(repository)?;
+    let pointer = dispatch_file(&target.join(".git"), 4096)?;
+    let pointer = std::str::from_utf8(&pointer).map_err(io_error)?;
+    let metadata = PathBuf::from(pointer.strip_prefix("gitdir: ").and_then(|value| value.strip_suffix('\n')).ok_or_else(|| failure("dispatch_git_pointer_invalid"))?);
+    if metadata.parent() != Some(repository.join(".git/worktrees").as_path()) { return Err(failure("dispatch_git_metadata_escape")); }
+    dispatch_directory(&metadata, &seal.metadata)?;
+    if dispatch_file(&metadata.join("commondir"), 32)? != b"../..\n"
+        || dispatch_file(&metadata.join("gitdir"), 4096)? != format!("{}/.git\n", seal.path).as_bytes()
+        || dispatch_file(&metadata.join("HEAD"), 256)? != format!("ref: refs/heads/{}\n", seal.branch).as_bytes()
+    { return Err(failure("dispatch_git_backlink_or_branch_changed")); }
+    match std::fs::symlink_metadata(metadata.join("config.worktree")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(failure("dispatch_git_metadata_unsupported")),
+    }
+    Ok(metadata)
+}
+
+struct DispatchGit(std::process::Child);
+
+impl Drop for DispatchGit {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+async fn observe_dispatch(snapshot: DispatchSnapshot, timeout: Duration) -> Result<DispatchSnapshot, EngineError> {
+    let metadata = dispatch_files(&snapshot.seal)?;
+    let mut child = DispatchGit(std::process::Command::new("/usr/bin/git")
+        .env_clear().env("PATH", "/usr/bin:/bin").env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1").env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["--no-replace-objects", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never"])
+        .arg("--git-dir").arg(&metadata).arg("--work-tree").arg(&snapshot.seal.path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+        .spawn().map_err(io_error)?);
+    let mut output = child.0.stdout.take().ok_or_else(|| failure("dispatch_git_stdout_missing"))?;
+    rustix::fs::fcntl_setfl(&output, OFlags::NONBLOCK).map_err(io_error)?;
+    let started = std::time::Instant::now();
+    let mut bytes = Vec::new();
+    let mut eof = false;
+    loop {
+        if started.elapsed() >= timeout { return Err(failure("dispatch_git_head_outcome_unknown")); }
+        let mut buffer = [0; 129];
+        match Read::read(&mut output, &mut buffer[..129 - bytes.len()]) {
+            Ok(0) => eof = true,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > 128 { return Err(failure("dispatch_git_head_capacity")); }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(io_error(error)),
+        }
+        if let Some(status) = child.0.try_wait().map_err(io_error)? && eof {
+            if !status.success() { return Err(failure("dispatch_git_head_unavailable")); }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let actual = std::str::from_utf8(&bytes).map_err(io_error)?.trim_end();
+    if actual != snapshot.seal.head || dispatch_files(&snapshot.seal)? != metadata { return Err(failure("dispatch_git_head_or_identity_changed")); }
+    Ok(snapshot)
+}
+
 pub fn runner_bootstrap(root: &Path) -> Result<Option<RequestId>, EngineError> {
     match std::fs::symlink_metadata(root.join("engine-bootstrap")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1220,82 +1518,118 @@ pub async fn runner_ready(
     boot: &RunnerBootIdentity,
     timeout: Duration,
 ) -> Result<RunnerReady, EngineError> {
-    if timeout.is_zero() || timeout > Duration::from_secs(30) {
-        return Err(failure("owner_timeout_invalid"));
+    RunnerClient::new(input, registration_id, boot, timeout)?.ready().await
+}
+
+pub struct RunnerClient {
+    root: PathBuf,
+    registration_id: RequestId,
+    boot: RunnerBootIdentity,
+    timeout: Duration,
+}
+
+impl RunnerClient {
+    pub fn new(root: &Path, registration_id: &RequestId, boot: &RunnerBootIdentity, timeout: Duration) -> Result<Self, EngineError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(30) { return Err(failure("owner_timeout_invalid")); }
+        boot.validate()?;
+        if runner_bootstrap(root)?.as_ref() != Some(registration_id) { return Err(failure("runner_bootstrap_identity_mismatch")); }
+        Ok(Self { root: root.to_owned(), registration_id: registration_id.clone(), boot: boot.clone(), timeout })
     }
-    boot.validate()?;
-    tokio::time::timeout(timeout, async {
-        let runtime = Root::open(input)?;
-        let bootstrap = PinnedBootstrap::read(&runtime)?;
-        if &bootstrap.value.registration_id != registration_id
-            || runtime.path.file_name()
-                != Some(std::ffi::OsStr::new(&format!(
-                    "r{:02x}",
-                    bootstrap.value.slot
-                )))
-        {
-            return Err(failure("runner_bootstrap_identity_mismatch"));
+
+    async fn exchange(&self, request: RunnerRequest) -> Result<RunnerReply, EngineError> {
+        tokio::time::timeout(self.timeout, async {
+            let runtime = Root::open(&self.root)?;
+            let bootstrap = PinnedBootstrap::read(&runtime)?;
+            if bootstrap.value.registration_id != self.registration_id
+                || runtime.path.file_name() != Some(std::ffi::OsStr::new(&format!("r{:02x}", bootstrap.value.slot)))
+            { return Err(failure("runner_bootstrap_identity_mismatch")); }
+            let anchor = runtime.path.parent().ok_or_else(|| failure("runner_registration_root"))?;
+            let (path, engine, binding) = crate::engine::bootstrap::runner_binding(anchor)?;
+            let generation = Root::open(&path)?;
+            let name = format!("r{:02x}.cap", bootstrap.value.slot);
+            let file = generation.open_key(&name, false)?;
+            let identity = Identity::of(&file.metadata().map_err(io_error)?);
+            generation.verify_key(&name, &file, identity)?;
+            let mut token = [0; 32];
+            file.read_exact_at(&mut token, 0).map_err(io_error)?;
+            let socket = generation.socket_identity()?;
+            let mut stream = UnixStream::connect(generation.path.join(SOCKET)).await.map_err(io_error)?;
+            verify_peer(&stream)?;
+            if generation.socket_identity()? != socket { return Err(failure("owner_socket_replaced")); }
+            bootstrap.verify(&runtime)?;
+            binding.verify()?;
+            generation.verify_key(&name, &file, identity)?;
+            let mut packet = [0; 37];
+            packet[..4].copy_from_slice(b"CAR1");
+            packet[4] = bootstrap.value.slot;
+            packet[5..].copy_from_slice(&token);
+            stream.write_all(&packet).await.map_err(io_error)?;
+            stream.write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?).await.map_err(io_error)?;
+            let frame = read_frame(&mut stream).await?;
+            let reply: RunnerReply = serde_json::from_slice(&frame[4..]).map_err(|_| failure("runner_response_invalid"))?;
+            let mut trailing = [0; 1];
+            if stream.read(&mut trailing).await.map_err(io_error)? != 0 { return Err(failure("runner_response_trailing_bytes")); }
+            bootstrap.verify(&runtime)?;
+            binding.verify()?;
+            generation.verify_key(&name, &file, identity)?;
+            let mut observed = [0; 32];
+            file.read_exact_at(&mut observed, 0).map_err(io_error)?;
+            if !bool::from(token.ct_eq(&observed)) || generation.socket_identity()? != socket { return Err(failure("runner_capability_changed")); }
+            if let RunnerReply::Ready { identity: ready } = &reply
+                && (ready.registration_id != self.registration_id || ready.attempt != bootstrap.value.attempt || ready.boot != self.boot
+                    || ready.database_instance != engine.database_instance() || ready.engine_epoch != engine.engine_epoch())
+            { return Err(failure("runner_ready_identity_mismatch")); }
+            if let RunnerReply::Offer { offer } = &reply {
+                offer.validate()?;
+                if offer.registration_id != self.registration_id || offer.attempt != bootstrap.value.attempt || offer.runner_boot_id != self.boot.runner_id
+                    || offer.database_instance != engine.database_instance() || offer.engine_epoch != engine.engine_epoch()
+                { return Err(failure("runner_offer_identity_mismatch")); }
+            }
+            if let RunnerReply::Rejected { code } = &reply { return Err(failure(code)); }
+            Ok(reply)
+        }).await.map_err(|_| failure("runner_exchange_outcome_unknown"))?
+    }
+
+    pub async fn ready(&self) -> Result<RunnerReady, EngineError> {
+        match self.exchange(RunnerRequest::Ready { protocol_version: PROTOCOL_VERSION, registration_id: self.registration_id.clone(), boot: self.boot.clone() }).await? {
+            RunnerReply::Ready { identity } => Ok(identity),
+            _ => Err(failure("runner_ready_invalid")),
         }
-        let anchor = runtime
-            .path
-            .parent()
-            .ok_or_else(|| failure("runner_registration_root"))?;
-        let (path, engine, binding) = crate::engine::bootstrap::runner_binding(anchor)?;
-        let generation = Root::open(&path)?;
-        let name = format!("r{:02x}.cap", bootstrap.value.slot);
-        let file = generation.open_key(&name, false)?;
-        let identity = Identity::of(&file.metadata().map_err(io_error)?);
-        generation.verify_key(&name, &file, identity)?;
-        let mut token = [0; 32];
-        file.read_exact_at(&mut token, 0).map_err(io_error)?;
-        generation.verify_key(&name, &file, identity)?;
-        let socket = generation.socket_identity()?;
-        let mut stream = UnixStream::connect(generation.path.join(SOCKET))
-            .await
-            .map_err(io_error)?;
-        verify_peer(&stream)?;
-        if generation.socket_identity()? != socket {
-            return Err(failure("owner_socket_replaced"));
+    }
+
+    pub async fn offer(&self, dispatch_id: &RequestId, delivery_generation: u64) -> Result<AdmissionCheckOffer, EngineError> {
+        if !(1..=DISPATCH_GENERATIONS_MAX).contains(&delivery_generation) { return Err(failure("dispatch_delivery_generation")); }
+        match self.exchange(RunnerRequest::Offer { protocol_version: PROTOCOL_VERSION, dispatch_id: dispatch_id.clone(), delivery_generation }).await? {
+            RunnerReply::Offer { offer } if offer.dispatch_id == *dispatch_id && offer.delivery_generation == delivery_generation => Ok(*offer),
+            _ => Err(failure("runner_offer_invalid")),
         }
-        bootstrap.verify(&runtime)?;
-        binding.verify()?;
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAR1");
-        packet[4] = bootstrap.value.slot;
-        packet[5..].copy_from_slice(&token);
-        stream.write_all(&packet).await.map_err(io_error)?;
-        let request = RunnerRequest::Ready {
-            protocol_version: PROTOCOL_VERSION,
-            registration_id: registration_id.clone(),
-            boot: boot.clone(),
-        };
-        stream
-            .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
-            .await
-            .map_err(io_error)?;
-        let frame = read_frame(&mut stream).await?;
-        let RunnerReply::Ready { identity: ready } =
-            serde_json::from_slice(&frame[4..]).map_err(|_| failure("runner_ready_invalid"))?;
-        bootstrap.verify(&runtime)?;
-        binding.verify()?;
-        generation.verify_key(&name, &file, identity)?;
-        let mut observed = [0; 32];
-        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
-        if !bool::from(token.ct_eq(&observed)) || generation.socket_identity()? != socket {
-            return Err(failure("runner_capability_changed"));
+    }
+
+    pub async fn report_denied(&self, receipt: &DeniedReceipt) -> Result<(), EngineError> {
+        receipt.validate()?;
+        match self.exchange(RunnerRequest::ReportDenied { protocol_version: PROTOCOL_VERSION, receipt: receipt.clone() }).await? {
+            RunnerReply::DeniedRecorded { dispatch_id } if dispatch_id == receipt.dispatch_id => Ok(()),
+            _ => Err(failure("runner_report_invalid")),
         }
-        if ready.registration_id != *registration_id
-            || ready.attempt != bootstrap.value.attempt
-            || ready.boot != *boot
-            || ready.database_instance != engine.database_instance()
-            || ready.engine_epoch != engine.engine_epoch()
-        {
-            return Err(failure("runner_ready_identity_mismatch"));
+    }
+
+    pub async fn reconcile(&self, dispatch_id: &RequestId) -> Result<FenceOrder, EngineError> {
+        match self.exchange(RunnerRequest::Reconcile { protocol_version: PROTOCOL_VERSION, dispatch_id: dispatch_id.clone() }).await? {
+            RunnerReply::Fence { order } if order.dispatch_id == *dispatch_id && order.registration_id == self.registration_id
+                && order.runner_boot_id == self.boot.runner_id && (1..=DISPATCH_GENERATIONS_MAX).contains(&order.delivery_generation) => Ok(order),
+            _ => Err(failure("runner_fence_invalid")),
         }
-        Ok(ready)
-    })
-    .await
-    .map_err(|_| failure("runner_ready_outcome_unknown"))?
+    }
+
+    pub async fn report_fence(&self, receipt: &FenceReceipt) -> Result<(), EngineError> {
+        if serde_json::to_vec(receipt).map_err(io_error)?.len() > DISPATCH_RECEIPT_BYTES_MAX || receipt.journal_sequence == 0
+            || receipt.registration_id != self.registration_id || receipt.runner_boot_id != self.boot.runner_id
+        { return Err(failure("runner_fence_receipt_invalid")); }
+        match self.exchange(RunnerRequest::ReportFence { protocol_version: PROTOCOL_VERSION, receipt: receipt.clone() }).await? {
+            RunnerReply::FenceRecorded { dispatch_id } if dispatch_id == receipt.dispatch_id => Ok(()),
+            _ => Err(failure("runner_fence_report_invalid")),
+        }
+    }
 }
 
 pub struct OwnerClient {

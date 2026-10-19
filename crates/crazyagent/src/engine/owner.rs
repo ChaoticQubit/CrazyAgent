@@ -1,6 +1,6 @@
 mod transport;
 
-pub use transport::{OwnerClient, OwnerRuntimeHandle, OwnerServer, runner_bootstrap, runner_ready};
+pub use transport::{OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready};
 
 use super::EngineError;
 use crate::coordination::OwnerAction;
@@ -58,6 +58,9 @@ pub enum OwnerMutation {
         attempt: crate::worker_dispatch::AttemptRef,
         repository_slot: u8,
     },
+    CancelWorkerDispatch { dispatch_id: RequestId },
+    ReconcileWorkerDispatch { dispatch_id: RequestId },
+    ResumeWorkerDispatch { dispatch_id: RequestId, expected_delivery_generation: u64 },
     CreateProject {
         project_id: ProjectId,
         spec: ProjectSpec,
@@ -103,8 +106,10 @@ impl OwnerMutation {
         Ok(match self {
             Self::PrepareWorkerDispatch { attempt, repository_slot } => {
                 crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
-                return Err(failure("worker_dispatch_not_implemented"));
+                return Err(failure("owner_dispatch_requires_host"));
             }
+            Self::CancelWorkerDispatch { .. } | Self::ReconcileWorkerDispatch { .. }
+            | Self::ResumeWorkerDispatch { .. } => return Err(failure("owner_dispatch_requires_host")),
             Self::CreateProject { project_id, spec } => {
                 spec.validate().map_err(|e| failure(&e.0))?;
                 Command::CreateProject {
@@ -385,6 +390,12 @@ impl OwnerRequest {
             } => {
                 crate::worker_dispatch::validate_prepare(attempt, *repository_slot)?;
             }
+            OwnerOperation::Apply { mutation: OwnerMutation::CancelWorkerDispatch { .. } | OwnerMutation::ReconcileWorkerDispatch { .. } } => {}
+            OwnerOperation::Apply { mutation: OwnerMutation::ResumeWorkerDispatch { expected_delivery_generation, .. } } => {
+                if !(1..crate::worker_dispatch::DISPATCH_GENERATIONS_MAX).contains(expected_delivery_generation) {
+                    return Err(failure("dispatch_delivery_generation"));
+                }
+            }
             OwnerOperation::Apply { mutation } => {
                 mutation.command()?;
             }
@@ -445,6 +456,7 @@ impl OwnerRequest {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerResult {
     Applied,
+    DispatchPrepared { dispatch_id: RequestId },
     VerificationUnavailable { attempt_id: RequestId },
     Rejected { code: String },
 }

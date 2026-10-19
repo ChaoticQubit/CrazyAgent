@@ -385,6 +385,7 @@ pub struct Engine {
     input: Mutex<InputState>,
     timeout: Duration,
     owner_egress: tokio::sync::RwLock<()>,
+    dispatch_drive: tokio::sync::Mutex<()>,
 }
 
 impl Engine {
@@ -409,6 +410,7 @@ impl Engine {
                 input: Mutex::default(),
                 timeout,
                 owner_egress: tokio::sync::RwLock::new(()),
+                dispatch_drive: tokio::sync::Mutex::new(()),
             },
             config,
         ))
@@ -422,6 +424,7 @@ impl Engine {
             input: Mutex::default(),
             timeout,
             owner_egress: tokio::sync::RwLock::new(()),
+            dispatch_drive: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -433,6 +436,7 @@ impl Engine {
             input: Mutex::default(),
             timeout,
             owner_egress: tokio::sync::RwLock::new(()),
+            dispatch_drive: tokio::sync::Mutex::new(()),
         })
     }
 

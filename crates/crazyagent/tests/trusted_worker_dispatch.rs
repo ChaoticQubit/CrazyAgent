@@ -1141,7 +1141,11 @@ async fn engine_owned_attempt_is_consumed_and_denied_by_real_runner() {
         assert_eq!(after_status["identity"], before_status["identity"]);
         assert_eq!(after_status["native_admission"], "unavailable");
         assert!(after_status["native_identity"].is_null());
-        assert_eq!(coordination(&client, "delivery-reservation-after").await, reserved);
+        let after_reserved = client.request(wire("delivery-reservation-after", 0, Command::CoordinationState {
+            plan_id: plan.id.clone(),
+        })).await.unwrap();
+        let Outcome::Coordination { state } = after_reserved.outcome else { panic!("actual stored plan required"); };
+        assert_eq!(*state, reserved);
         let after_leases = client.request(wire("delivery-lease-after", 0, Command::WorktreeLeases { task_id: scope.task_id.clone() })).await.unwrap();
         assert_eq!(after_leases.outcome, Outcome::Worktrees { leases });
         let after_snapshot = client.request(wire("delivery-snapshot-after", 0, Command::Snapshot)).await.unwrap().outcome;
