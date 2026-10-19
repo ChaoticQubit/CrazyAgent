@@ -549,3 +549,525 @@ async fn actual_window_queued_late_delivery_preserves_identical_and_other_projec
         evidence.display()
     );
 }
+
+fn project_private_directory(path: &Path) -> TestResult<()> {
+    std::fs::create_dir(path)?;
+    std::fs::set_permissions(path, Permissions::from_mode(0o700))?;
+    assert_eq!(
+        std::fs::symlink_metadata(path)?.permissions().mode() & 0o777,
+        0o700
+    );
+    Ok(())
+}
+
+fn project_write(path: &Path, value: &Value) -> TestResult<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let bytes = serde_json::to_vec_pretty(value)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("project evidence JSON byte bound".into());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&bytes)?;
+    assert_eq!(file.metadata()?.len(), bytes.len() as u64);
+    assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+    Ok(())
+}
+
+fn project_no_effects(root: &Path, specs: &[ProjectSpec]) -> TestResult<()> {
+    for path in specs
+        .iter()
+        .flat_map(|spec| spec.repositories.iter().map(PathBuf::from))
+        .chain(
+            [
+                "g",
+                "p",
+                "worktrees",
+                "repositories",
+                "tasks",
+                "baselines",
+                "runs",
+            ]
+            .map(|name| root.join(name)),
+        )
+    {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(format!("unexpected creation effect at {}", path.display()).into()),
+        }
+    }
+    Ok(())
+}
+
+async fn project_observation(ordinary: &Client, owner: &mut OwnerController) -> TestResult<Value> {
+    use crazyagent::engine::owner::OwnerView;
+
+    let reply = ordinary
+        .request(WireRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: ClientId::new("native-project-readback")?,
+            request_id: RequestId::new("native-project-snapshot")?,
+            expected_revision: Cursor::new(0),
+            command: Command::Snapshot,
+        })
+        .await?;
+    let Outcome::Snapshot {
+        mut projects,
+        tasks,
+    } = reply.outcome
+    else {
+        return Err("actual bound ordinary Snapshot required".into());
+    };
+    if !tasks.is_empty() || projects.len() > 2 {
+        return Err("project creation must retain zero tasks and at most two projects".into());
+    }
+    let baselines = owner.read_page(OwnerView::Baselines, None, Some(1)).await?;
+    let OwnerData::Page { items, next } = baselines.data else {
+        return Err("actual baseline page required".into());
+    };
+    if !items.is_empty() || next.is_some() {
+        return Err("project creation and first brief must retain zero baselines".into());
+    }
+    projects.sort_by(|left, right| left.project_id.as_str().cmp(right.project_id.as_str()));
+    let mut rows = Vec::new();
+    for project in projects {
+        let current = owner
+            .read(OwnerRead::CurrentBrief {
+                project_id: project.project_id.clone(),
+            })
+            .await?;
+        let OwnerData::CurrentBrief { brief, .. } = current.data else {
+            return Err("actual current project brief required".into());
+        };
+        let brief = match brief {
+            Some(entry) => match entry.content {
+                ConversationContent::Brief { version } => {
+                    json!({"version": version.to_string(), "text": entry.text})
+                }
+                _ => return Err("current brief must have actual brief content".into()),
+            },
+            None => Value::Null,
+        };
+        let history = owner
+            .read(OwnerRead::ConversationHistory {
+                project_id: project.project_id.clone(),
+                cursor: None,
+                limit: 2,
+            })
+            .await?;
+        let OwnerData::ConversationHistory { page } = history.data else {
+            return Err("actual project history required".into());
+        };
+        if page.next.is_some() || page.entries.len() > 1 {
+            return Err("only one explicit first brief is allowed in actual history".into());
+        }
+        rows.push(json!({"id": project.project_id.as_str(), "spec": project.spec, "brief": brief, "history": page.entries}));
+    }
+    Ok(json!({"projects": rows, "tasks": tasks, "baselines": items}))
+}
+
+fn project_cli(argv: &[std::ffi::OsString], phase: &Path) -> TestResult<OwnedProcess> {
+    if argv.len() != 6 || !Path::new(&argv[0]).is_absolute() {
+        return Err("one exact absolute CLI engine argv required".into());
+    }
+    project_private_directory(&phase.join("engine-home"))?;
+    project_private_directory(&phase.join("engine-tmp"))?;
+    let mut command = ProcessCommand::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", phase.join("engine-home"))
+        .env("TMPDIR", phase.join("engine-tmp"))
+        .env("LANG", "en_US.UTF-8")
+        .env("NO_COLOR", "1");
+    project_write(
+        &phase.join("engine-launch.json"),
+        &json!({
+            "argv": argv,
+            "environment": command.get_envs().collect::<Vec<_>>(),
+            "inherited_environment_cleared": true,
+        }),
+    )?;
+    let process = group(&mut command, phase, "engine")?;
+    for name in ["engine.stdout", "engine.stderr"] {
+        std::fs::set_permissions(phase.join(name), Permissions::from_mode(0o600))?;
+    }
+    assert_eq!(process.pid, process.child.id());
+    Ok(process)
+}
+
+async fn project_ready(
+    root: &Path,
+    cli: &mut OwnedProcess,
+) -> TestResult<(Client, OwnerController)> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if cli.child.try_wait()?.is_some() {
+            return Err("actual CLI exited before owner readiness".into());
+        }
+        if let Ok(pair) = OwnerController::attach_configured(
+            Client::new(root.join("e.sock"), Duration::from_millis(200))?,
+            OwnerClientKind::Tui,
+        )
+        .await
+        {
+            return Ok(pair);
+        }
+        if Instant::now() >= deadline {
+            return Err("actual CLI project readiness deadline".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn project_stop(cli: &mut OwnedProcess, root: &Path, phase: &Path) -> TestResult<()> {
+    let signalled = cli.signal("-TERM");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut status = None;
+    while Instant::now() < deadline {
+        status = cli.child.try_wait()?;
+        if status.is_some() && cli.absent() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let graceful = signalled && status.is_some_and(|status| status.success()) && cli.absent();
+    let cleanup = cli.finish();
+    let socket_absent = !root.join("e.sock").try_exists()?;
+    project_write(
+        &phase.join("engine-cleanup.json"),
+        &json!({"pid": cli.pid, "term_requested": signalled, "graceful": graceful,
+            "exit": status.and_then(|status| status.code()), "group_absent": cli.absent(),
+            "cleanup_ok": cleanup, "socket_absent": socket_absent}),
+    )?;
+    if !cleanup || !cli.absent() || !socket_absent || !graceful {
+        return Err("actual engine must exit gracefully with its group and socket absent".into());
+    }
+    Ok(())
+}
+
+fn project_phase_bounds(phase: &Path) -> TestResult<()> {
+    check_backend_logs(phase)?;
+    let mut bytes = 0_u64;
+    let mut count = 0_u16;
+    for entry in std::fs::read_dir(phase)? {
+        let entry = entry?;
+        let info = std::fs::symlink_metadata(entry.path())?;
+        if info.is_dir() {
+            if entry.file_name() == "webdriver" {
+                for log in std::fs::read_dir(entry.path())? {
+                    bytes += std::fs::symlink_metadata(log?.path())?.len();
+                }
+            }
+            continue;
+        }
+        count += 1;
+        if !info.is_file() || info.permissions().mode() & 0o077 != 0 || count > 200 {
+            return Err("private project phase file admission".into());
+        }
+        let name = entry.file_name();
+        let name = name.to_str().ok_or("project evidence name required")?;
+        let limit = if name.ends_with(".stdout") || name.ends_with(".stderr") {
+            4 * 1024 * 1024
+        } else if name.ends_with(".png") {
+            2 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
+        if info.len() > limit {
+            return Err("project phase file byte bound".into());
+        }
+        bytes = bytes
+            .checked_add(info.len())
+            .ok_or("project evidence byte overflow")?;
+    }
+    if bytes > 26 * 1024 * 1024 {
+        return Err("project phase aggregate evidence bound".into());
+    }
+    Ok(())
+}
+
+async fn project_phase(
+    root: &Path,
+    phase: &Path,
+    input: &Value,
+    ordinary: &Client,
+    owner: &mut OwnerController,
+    specs: &[ProjectSpec],
+) -> TestResult<Value> {
+    let app_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("desktop root required")?
+        .to_path_buf();
+    let node = std::env::var("CRAZYAGENT_NODE")?;
+    let app = std::env::var("CRAZYAGENT_DESKTOP_TEST_APP")?;
+    if !Path::new(&node).is_absolute() || !Path::new(&app).is_absolute() {
+        return Err("absolute native app and installed Node required".into());
+    }
+    project_write(&phase.join("input.json"), input)?;
+    for name in ["home", "tmp", "webdriver"] {
+        project_private_directory(&phase.join(name))?;
+    }
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let mut command = ProcessCommand::new(&node);
+    command
+        .current_dir(&app_root)
+        .env_clear()
+        .env("PATH", "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", phase.join("home"))
+        .env("TMPDIR", phase.join("tmp"))
+        .env("LANG", "en_US.UTF-8")
+        .env("NO_COLOR", "1")
+        .env("CRAZYAGENT_DESKTOP_SOCKET", root.join("e.sock"))
+        .env("CRAZYAGENT_DESKTOP_TEST_APP", &app)
+        .env("CRAZYAGENT_DESKTOP_TEST_PORT", port.to_string())
+        .env("CRAZYAGENT_DESKTOP_TEST_EVIDENCE", phase)
+        .arg("--import")
+        .arg(app_root.join("test/native/private-log-preload.mjs"))
+        .arg(app_root.join("node_modules/@wdio/cli/bin/wdio.js"))
+        .args(["run", "test/native/projects.wdio.conf.mjs"]);
+    let invocation = json!({"program": command.get_program(),
+        "args": command.get_args().collect::<Vec<_>>(),
+        "environment": command.get_envs().collect::<Vec<_>>(),
+        "inherited_environment_cleared": true});
+    let mut driver = group(&mut command, phase, "webdriver")?;
+    for name in ["webdriver.stdout", "webdriver.stderr"] {
+        std::fs::set_permissions(phase.join(name), Permissions::from_mode(0o600))?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut next = 1_u8;
+    let mut actions = Vec::new();
+    let outcome: TestResult<_> = async {
+        loop {
+            project_phase_bounds(phase)?;
+            project_no_effects(root, specs)?;
+            if let Some(status) = driver.child.try_wait()? {
+                return Ok(status.code());
+            }
+            if Instant::now() >= deadline {
+                return Err("native project phase ninety-second deadline".into());
+            }
+            let request = phase.join(format!("request-{next}.json"));
+            if request.try_exists()? {
+                if next > 64 || std::fs::symlink_metadata(&request)?.len() > 4096 {
+                    return Err("project request bounds".into());
+                }
+                let value: Value = serde_json::from_slice(&std::fs::read(&request)?)?;
+                if value != json!({"action": "snapshot"}) {
+                    return Err("closed actual project observation request required".into());
+                }
+                let actual = project_observation(ordinary, owner).await?;
+                actions.push(json!({"sequence": next, "actual_observation": actual}));
+                let temporary = phase.join(format!("reply-{next}.pending"));
+                project_write(&temporary, &actual)?;
+                std::fs::rename(temporary, phase.join(format!("reply-{next}.json")))?;
+                next += 1;
+                assert_eq!(usize::from(next) - 1, actions.len());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    .await;
+    let cleaned = driver.finish();
+    let mut port_error = None;
+    let closed = match std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(500),
+    ) {
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => true,
+        Ok(_) => false,
+        Err(error) => {
+            port_error = Some(error.to_string());
+            false
+        }
+    };
+    project_write(
+        &phase.join("completion.json"),
+        &json!({"driver_pid": driver.pid, "driver_group_absent": driver.absent(),
+            "cleanup_ok": cleaned, "port": port, "port_closed": closed, "port_error": port_error, "app_path": app,
+            "exit": outcome.as_ref().ok(), "error": outcome.as_ref().err().map(ToString::to_string),
+            "invocation": invocation, "actions": actions}),
+    )?;
+    if !cleaned || !driver.absent() || !closed {
+        return Err("actual native app/driver group and embedded port must disappear".into());
+    }
+    if outcome? != Some(0) {
+        return Err("actual project form WDIO phase failed".into());
+    }
+    project_phase_bounds(phase)?;
+    let result = phase.join("ui-result.json");
+    if std::fs::symlink_metadata(&result)?.len() > 1024 * 1024 {
+        return Err("actual UI result byte bound".into());
+    }
+    let proof: Value = serde_json::from_slice(&std::fs::read(result)?)?;
+    if proof["phase"] != input["phase"] {
+        return Err("actual UI proof phase must match its owned lifetime".into());
+    }
+    Ok(proof)
+}
+
+async fn project_lifetime(
+    root: &Path,
+    phase: &Path,
+    argv: &[std::ffi::OsString],
+    input: &Value,
+    specs: &[ProjectSpec],
+) -> TestResult<Value> {
+    let mut cli = project_cli(argv, phase)?;
+    let outcome: TestResult<_> = async {
+        let (ordinary, mut owner) = project_ready(root, &mut cli).await?;
+        let initial = project_observation(&ordinary, &mut owner).await?;
+        project_no_effects(root, specs)?;
+        if input["phase"] == "create" {
+            if initial["projects"] != json!([]) {
+                return Err("actual initial engine must have zero projects".into());
+            }
+        } else if initial != input["persisted"] {
+            return Err("real engine restart must preserve exact recorded state".into());
+        }
+        project_write(&phase.join("initial-observation.json"), &initial)?;
+        let proof = project_phase(root, phase, input, &ordinary, &mut owner, specs).await?;
+        let actual = project_observation(&ordinary, &mut owner).await?;
+        if proof["actual"] != actual || actual["projects"].as_array().unwrap().len() != 2 {
+            return Err("actual UI proof must match independent two-project readback".into());
+        }
+        for spec in specs {
+            if !actual["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["spec"] == json!(spec))
+            {
+                return Err("actual stored project must preserve its exact input spec".into());
+            }
+        }
+        let second = actual["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["spec"] == json!(&specs[1]))
+            .ok_or("actual second project missing")?;
+        if proof["selected_id"] != second["id"]
+            || second["brief"] != json!({"version": "1", "text": input["first_brief"]})
+        {
+            return Err(
+                "actual selected second project must alone own explicit brief version one".into(),
+            );
+        }
+        let first = actual["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["spec"] == json!(&specs[0]))
+            .ok_or("actual first project missing")?;
+        if first["id"] == second["id"]
+            || first["brief"] != Value::Null
+            || first["history"] != json!([])
+        {
+            return Err(
+                "first project negative control must remain distinct with no brief/history".into(),
+            );
+        }
+        project_no_effects(root, specs)?;
+        Ok(proof)
+    }
+    .await;
+    let cleanup = project_stop(&mut cli, root, phase).await;
+    let bounded = project_phase_bounds(phase);
+    project_write(
+        &phase.join("lifetime.json"),
+        &json!({"argv": argv, "engine_pid": cli.pid, "outcome": outcome.as_ref().ok(),
+            "error": outcome.as_ref().err().map(ToString::to_string),
+            "cleanup_error": cleanup.as_ref().err().map(ToString::to_string),
+            "bounds_error": bounded.as_ref().err().map(ToString::to_string)}),
+    )?;
+    let proof = outcome?;
+    cleanup?;
+    bounded?;
+    Ok(proof)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_window_project_creation_first_brief_and_restart() {
+    let run = evidence("projects-").unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("ca-pn-")
+        .tempdir_in("/tmp")
+        .unwrap()
+        .keep();
+    std::fs::set_permissions(&root, Permissions::from_mode(0o700)).unwrap();
+    let cli = std::env::var_os("CRAZYAGENT_TEST_CLI").expect("actual built CLI required");
+    let argv = vec![
+        cli,
+        "engine".into(),
+        root.clone().into_os_string(),
+        root.join("g").into_os_string(),
+        root.join("p").into_os_string(),
+        "e.sock".into(),
+    ];
+    let specs = [
+        ProjectSpec {
+            name: "Native first project".into(),
+            repositories: vec![
+                root.join("absent first ").display().to_string(),
+                root.join("absent second").display().to_string(),
+            ],
+        },
+        ProjectSpec {
+            name: "Native second project".into(),
+            repositories: vec![
+                root.join("absent third").display().to_string(),
+                root.join("absent quatrième").display().to_string(),
+            ],
+        },
+    ];
+    let first_brief = "Explicit first brief from the real native project form workflow.";
+    project_write(
+        &run.join("runtime.json"),
+        &json!({"root": root, "argv": argv, "specs": specs}),
+    )
+    .unwrap();
+    let outcome: TestResult<_> = async {
+        project_no_effects(&root, &specs)?;
+        let mut prior = Value::Null;
+        let mut identities = Vec::new();
+        for name in ["create", "restart"] {
+            let phase = run.join(name);
+            project_private_directory(&phase)?;
+            let input = json!({"phase": name, "specs": specs, "first_brief": first_brief, "persisted": prior});
+            let proof = project_lifetime(&root, &phase, &argv, &input, &specs).await?;
+            let identity = proof["app_identity"].as_str().ok_or("actual native app lifetime identity missing")?;
+            assert!(!identity.is_empty());
+            identities.push(identity.to_owned());
+            if name == "restart" {
+                assert_eq!(proof["actual"], prior);
+                assert_ne!(identities[0], identities[1], "actual native app lifetimes must differ");
+            }
+            prior = proof["actual"].clone();
+        }
+        assert_eq!(identities.len(), 2);
+        assert!(!root.join("e.sock").try_exists()?);
+        project_no_effects(&root, &specs)?;
+        Ok(json!({"identities": identities, "persisted": prior}))
+    }
+    .await;
+    project_write(
+        &run.join("completion.json"),
+        &json!({"runtime": root, "argv": argv, "outcome": outcome.as_ref().ok(),
+            "error": outcome.as_ref().err().map(ToString::to_string),
+            "scope": "two form projects, one first brief, full native app and CLI restart; no off-first-page UI claim"}),
+    ).unwrap();
+    assert!(
+        outcome.is_ok(),
+        "actual native project creation/restart failed: {outcome:?}; {}",
+        run.display()
+    );
+}
