@@ -221,14 +221,10 @@ fn run_case(root: &Path) {
     expected.provider_quota_policy = ProviderQuotaPolicy::Strict;
     assert_eq!(strict_access.pools, vec![expected]);
 
-    let default_toml: toml::Value = std::str::from_utf8(&read_bounded(&created, STREAM_MAX))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let strict_toml: toml::Value = std::str::from_utf8(&read_bounded(&global, STREAM_MAX))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let default_toml: toml::Table =
+        toml::from_str(std::str::from_utf8(&read_bounded(&created, STREAM_MAX)).unwrap()).unwrap();
+    let strict_toml: toml::Table =
+        toml::from_str(std::str::from_utf8(&read_bounded(&global, STREAM_MAX)).unwrap()).unwrap();
     let default_pools = default_toml["model_access"]["pools"].as_array().unwrap();
     let strict_pools = strict_toml["model_access"]["pools"].as_array().unwrap();
     assert_eq!(default_pools.len(), 1);
