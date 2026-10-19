@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { createRunDirectories } from "./run-layout.mjs";
 
@@ -210,7 +210,8 @@ async function execute() {
     env.CRAZYAGENT_DESKTOP_TEST_BASELINE = state.baseline_id;
     env.CRAZYAGENT_DESKTOP_TEST_PORT = String(port);
     const test = launch("webdriver", process.execPath,
-      [join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run", suite === "baseline" ? "wdio.conf.mjs" : "test/native/model-access.wdio.conf.mjs"], env, 120);
+      ["--import", pathToFileURL(join(appRoot, "test/native/private-log-preload.mjs")).href,
+        join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run", suite === "baseline" ? "wdio.conf.mjs" : "test/native/model-access.wdio.conf.mjs"], env, 120);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
     code = result.code;
