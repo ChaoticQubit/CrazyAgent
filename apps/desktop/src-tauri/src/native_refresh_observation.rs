@@ -306,8 +306,20 @@ mod tests {
     #[test]
     fn rejected_callback_diagnostics_are_bounded_and_do_not_copy_external_payload() {
         for (window, url, reason, admitted_window, admitted_asset) in [
-            ("private-window", "tauri://localhost/", Failure::Window, false, true),
-            ("main", "tauri://localhost/?private-query#private-fragment", Failure::Url, true, false),
+            (
+                "private-window",
+                "tauri://localhost/",
+                Failure::Window,
+                false,
+                true,
+            ),
+            (
+                "main",
+                "tauri://localhost/?private-query#private-fragment",
+                Failure::Url,
+                true,
+                false,
+            ),
         ] {
             let mut state = state();
             assert_eq!(state.record(window, url, Phase::Started, 1, 2), Err(reason));
@@ -329,12 +341,19 @@ mod tests {
     #[test]
     fn lifecycle_failure_diagnostics_preserve_pending_facts_and_terminal_rejection() {
         let mut state = state();
-        state.record("main", "tauri://localhost/", Phase::Started, 1, 2).unwrap();
-        let reason = state.record("main", "tauri://localhost/", Phase::Started, 2, 3).unwrap_err();
+        state
+            .record("main", "tauri://localhost/", Phase::Started, 1, 2)
+            .unwrap();
+        let reason = state
+            .record("main", "tauri://localhost/", Phase::Started, 2, 3)
+            .unwrap_err();
         assert_eq!(reason, Failure::Overlap);
         let record = state.failure_record(reason, Phase::Started, "main", "tauri://localhost/");
         assert!(record.contains("\"sequence\":1,\"generation\":1,\"pending\":true"));
-        assert_eq!(state.record("main", "tauri://localhost/", Phase::Finished, 3, 4), Err(Failure::AlreadyInvalid));
+        assert_eq!(
+            state.record("main", "tauri://localhost/", Phase::Finished, 3, 4),
+            Err(Failure::AlreadyInvalid)
+        );
     }
 
     fn state() -> Observation {
