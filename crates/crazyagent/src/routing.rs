@@ -1,4 +1,4 @@
-use crate::config::EffectiveConfig;
+use crate::config::{EffectiveConfig, ModelConnection};
 use crate::coordination::Role;
 use crate::protocol::{ConfigId, CredentialRef, ProjectId};
 use serde::{Deserialize, Serialize};
@@ -270,6 +270,32 @@ pub(crate) fn validate_pool_scope(
         return Err(RouteError("route_pool_account_denied".into()));
     }
     Ok(())
+}
+
+pub(crate) fn select_pool_connection<'a>(
+    config: &'a EffectiveConfig,
+    pool_ref: &CredentialRef,
+    project: &ProjectId,
+    role: &Role,
+    account: &CredentialRef,
+) -> Result<&'a ModelConnection, RouteError> {
+    validate_pool_scope(config, pool_ref, project, role, account)?;
+    let catalog = config.settings.model_access.as_ref().unwrap();
+    let pool = catalog
+        .pools
+        .iter()
+        .find(|pool| &pool.id == pool_ref)
+        .unwrap();
+    let mut matching = catalog.connections.iter().filter(|connection| {
+        &connection.account_ref == account && pool.members.contains(&connection.id)
+    });
+    let connection = matching
+        .next()
+        .ok_or_else(|| RouteError("route_pool_account_denied".into()))?;
+    if matching.next().is_some() {
+        return Err(RouteError("route_pool_connection_ambiguous".into()));
+    }
+    Ok(connection)
 }
 
 struct AdmittedTarget {

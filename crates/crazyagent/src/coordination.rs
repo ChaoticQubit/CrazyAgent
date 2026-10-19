@@ -1,4 +1,4 @@
-use crate::config::EffectiveConfig;
+use crate::config::{EffectiveConfig, ModelConnection};
 use crate::engine::EngineError;
 use crate::protocol::*;
 use crate::routing::{
@@ -54,6 +54,40 @@ pub struct WorkPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WorkerBinding {
+    pub plan_id: PlanId,
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    pub pool_ref: CredentialRef,
+    pub target_profile_ref: CredentialRef,
+    pub connection: ModelConnection,
+    pub config_id: ConfigId,
+    pub budget_ref: CredentialRef,
+    pub resources: ResourceBudget,
+    pub attempt_cursor: Cursor,
+}
+
+impl WorkerBinding {
+    fn assert_consistent(&self, plan: &WorkPlan, item: &WorkItem, reservation: &Reservation) {
+        assert_eq!(item.role, Role::Worker);
+        assert_eq!(self.plan_id, plan.id);
+        assert_eq!(self.task_id, item.id);
+        assert_eq!(self.session_id, item.session_id);
+        assert_eq!(Some(&self.pool_ref), item.pool_ref.as_ref());
+        assert_eq!(
+            Some(&self.target_profile_ref),
+            item.route.required_target.as_ref()
+        );
+        assert_eq!(self.connection.account_ref, item.route.account_ref);
+        assert_eq!(self.config_id, reservation.config_id);
+        assert_eq!(self.budget_ref, reservation.budget_ref);
+        assert_eq!(self.resources, reservation.resources);
+        assert_eq!(self.attempt_cursor, reservation.cursor);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reservation {
     pub resources: ResourceBudget,
     pub config_id: ConfigId,
@@ -64,6 +98,8 @@ pub struct Reservation {
     pub budget_ref: CredentialRef,
     pub cursor: Cursor,
     pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<WorkerBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +173,9 @@ impl PlanState {
                 reservation.provenance,
                 "engine_planning_hold_not_native_dispatch"
             );
+            if let Some(binding) = &reservation.binding {
+                binding.assert_consistent(&self.plan, task, reservation);
+            }
         }
         assert!(
             self.messages
@@ -614,6 +653,20 @@ fn next_allocation(
             {
                 continue;
             }
+            if item.role == Role::Worker
+                && item.route.required_target.is_some()
+                && let Some(pool_ref) = &item.pool_ref
+                && crate::routing::select_pool_connection(
+                    &pinned,
+                    pool_ref,
+                    &state.plan.scope.project_id,
+                    &item.role,
+                    &item.route.account_ref,
+                )
+                .is_err()
+            {
+                continue;
+            }
             queue.push((
                 QueueEntry {
                     project_id: state.plan.scope.project_id.clone(),
@@ -632,6 +685,40 @@ fn next_allocation(
         .first()
         .and_then(|first| queue.iter().find(|(entry, _, _)| entry == first))
         .map(|(_, plan, item)| (plan.clone(), item.clone())))
+}
+
+fn worker_binding(
+    plan: &WorkPlan,
+    item: &WorkItem,
+    pinned: &EffectiveConfig,
+    cursor: &Cursor,
+) -> Result<Option<WorkerBinding>, crate::routing::RouteError> {
+    if item.role != Role::Worker {
+        return Ok(None);
+    }
+    let (Some(pool_ref), Some(target_profile_ref)) = (&item.pool_ref, &item.route.required_target)
+    else {
+        return Ok(None);
+    };
+    let connection = crate::routing::select_pool_connection(
+        pinned,
+        pool_ref,
+        &plan.scope.project_id,
+        &item.role,
+        &item.route.account_ref,
+    )?;
+    Ok(Some(WorkerBinding {
+        plan_id: plan.id.clone(),
+        task_id: item.id.clone(),
+        session_id: item.session_id.clone(),
+        pool_ref: pool_ref.clone(),
+        target_profile_ref: target_profile_ref.clone(),
+        connection: connection.clone(),
+        config_id: plan.config_id.clone(),
+        budget_ref: item.route.budget_ref.clone(),
+        resources: item.route.resources.clone(),
+        attempt_cursor: cursor.clone(),
+    }))
 }
 
 fn reserve(
@@ -657,6 +744,11 @@ fn reserve(
         return rejected("dependencies_unfinished");
     }
     let pinned = pinned_config(tx, &state.plan.config_id)?;
+    let cursor = Cursor::new(revision + 1);
+    let binding = match worker_binding(&state.plan, item, &pinned, &cursor) {
+        Ok(binding) => binding,
+        Err(error) => return rejected(error.0),
+    };
     let states = all_plans(tx)?;
     if !fits_capacity(&totals(&states, &state.plan)?, item, config, &pinned)? {
         return rejected("resource_budget_exhausted");
@@ -674,8 +766,9 @@ fn reserve(
             scheduling: config.settings.routing.scheduling.clone(),
             priority_weight: pinned.settings.routing.priority_weight,
             budget_ref: state.plan.scope.budget_ref.clone(),
-            cursor: Cursor::new(revision + 1),
+            cursor,
             provenance: "engine_planning_hold_not_native_dispatch".into(),
+            binding,
         },
     );
     let outcome = save(tx, &state)?;
@@ -889,6 +982,88 @@ fn mailbox(
 mod tests {
     use super::*;
 
+    fn worker_bound_state() -> PlanState {
+        let mut state = state();
+        let item = &mut state.plan.tasks[0];
+        let pool = CredentialRef::new("pool").unwrap();
+        let target = CredentialRef::new("profile").unwrap();
+        item.pool_ref = Some(pool.clone());
+        item.route.required_target = Some(target.clone());
+        state.plan.scope.allowed_destinations.push(target.clone());
+        let binding = WorkerBinding {
+            plan_id: state.plan.id.clone(),
+            task_id: item.id.clone(),
+            session_id: item.session_id.clone(),
+            pool_ref: pool,
+            target_profile_ref: target,
+            connection: serde_json::from_value(serde_json::json!({
+                "id": "connection", "provider": "service", "harness": "rcli",
+                "protocol": "openai-compatible", "account_ref": "account",
+                "endpoint": { "kind": "http", "url": "http://127.0.0.1:11434/v1" },
+                "model": { "id": "model", "author": "author" },
+                "auth": { "method": "none" }
+            }))
+            .unwrap(),
+            config_id: state.plan.config_id.clone(),
+            budget_ref: item.route.budget_ref.clone(),
+            resources: item.route.resources.clone(),
+            attempt_cursor: Cursor::new(2),
+        };
+        state.reservations.insert(
+            item.id.clone(),
+            Reservation {
+                resources: item.route.resources.clone(),
+                config_id: state.plan.config_id.clone(),
+                shared_config_id: state.plan.config_id.clone(),
+                shared_capacity: ResourceBudget::unit(),
+                scheduling: SchedulingPolicy::FairShare,
+                priority_weight: 1,
+                budget_ref: item.route.budget_ref.clone(),
+                cursor: Cursor::new(2),
+                provenance: "engine_planning_hold_not_native_dispatch".into(),
+                binding: Some(binding),
+            },
+        );
+        state.assert_consistent();
+        assert_eq!(state.reservations.len(), 1);
+        state
+    }
+
+    #[test]
+    fn persisted_worker_binding_invariants_detect_identity_drift() {
+        for variant in 0..13 {
+            let mut state = worker_bound_state();
+            let item_id = state.plan.tasks[0].id.clone();
+            let binding = state
+                .reservations
+                .get_mut(&item_id)
+                .unwrap()
+                .binding
+                .as_mut()
+                .unwrap();
+            match variant {
+                0 => binding.plan_id = PlanId::new("other-plan").unwrap(),
+                1 => binding.task_id = TaskId::new("other-item").unwrap(),
+                2 => binding.session_id = SessionId::new("other-session").unwrap(),
+                3 => binding.pool_ref = CredentialRef::new("other-pool").unwrap(),
+                4 => binding.target_profile_ref = CredentialRef::new("other-target").unwrap(),
+                5 => binding.connection.account_ref = CredentialRef::new("other-account").unwrap(),
+                6 => binding.config_id = ConfigId::new("other-config").unwrap(),
+                7 => binding.budget_ref = CredentialRef::new("other-budget").unwrap(),
+                8 => binding.resources = ResourceBudget::zero(),
+                9 => binding.attempt_cursor = Cursor::new(3),
+                10 => state.plan.tasks[0].role = Role::ProjectLeader,
+                11 => state.plan.tasks[0].pool_ref = None,
+                12 => state.plan.tasks[0].route.required_target = None,
+                _ => unreachable!(),
+            }
+            assert!(
+                std::panic::catch_unwind(|| state.assert_consistent()).is_err(),
+                "worker binding invariant must reject variant {variant}"
+            );
+        }
+    }
+
     fn state() -> PlanState {
         let config_id = ConfigId::new("config").unwrap();
         let scope = ExecutionContext {
@@ -958,6 +1133,7 @@ mod tests {
                 budget_ref: item.route.budget_ref.clone(),
                 cursor: Cursor::new(2),
                 provenance: "engine_planning_hold_not_native_dispatch".into(),
+                binding: None,
             },
         );
         state.assert_consistent();
