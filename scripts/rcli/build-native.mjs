@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -5,7 +6,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAX_BYTES = 128 * 1024 * 1024;
-const LOCK_SHA256 = "8034786a0654f14fcacacd809ac5479afc90d7f6a8f5a527587f2cf4a9ed792a";
+const LOCK_SHA256 = "ba08b1e8961fdeeeed4af501ea2f627bbeaa7f3e39842eb9f124e0d5afe8cd5a";
 
 function fail(message) {
   throw new Error(message);
@@ -91,6 +92,46 @@ async function contained(root, pin) {
   return readPinned(await openPinned(join(root, pin.path), pin));
 }
 
+export async function inspectClosure(root, closure) {
+  const groups = ["files", "assets", "licenses"];
+  if (!closure || typeof closure.complete !== "boolean" ||
+      !groups.every(key => Array.isArray(closure[key])) ||
+      !Array.isArray(closure.missing) || closure.missing.length > 64 ||
+      closure.missing.some(value => typeof value !== "string" || !value.isWellFormed() ||
+        value.length === 0 || Buffer.byteLength(value) > 1024) ||
+      closure.complete !== (closure.missing.length === 0) ||
+      closure.files.length === 0 || closure.complete && closure.licenses.length === 0) {
+    fail("build_closure_rejected");
+  }
+  const count = groups.reduce((total, key) => total + closure[key].length, 0);
+  if (count > 4096) fail("build_closure_rejected");
+  const seen = new Set();
+  const counts = {};
+  let bytes = 0;
+  for (const key of groups) {
+    counts[key] = closure[key].length;
+    for (const pin of closure[key]) {
+      if (!pin || typeof pin.path !== "string" || seen.has(pin.path)) {
+        fail("build_closure_rejected");
+      }
+      if (!Number.isSafeInteger(pin.bytes) || pin.bytes < 1 || pin.bytes > MAX_BYTES) {
+        fail("build_pin_invalid");
+      }
+      bytes += pin.bytes;
+      if (bytes > MAX_BYTES) fail("build_closure_rejected");
+      await contained(root, pin);
+      seen.add(pin.path);
+    }
+  }
+  assert.equal(seen.size, count, "build_closure_count_invariant");
+  assert(Number.isSafeInteger(bytes) && bytes > 0, "build_closure_bytes_invariant");
+  return {
+    status: closure.complete ? "STATIC_INPUTS_VERIFIED" : "STATIC_INPUTS_INCOMPLETE",
+    complete: closure.complete, execution_allowed: false,
+    counts, bytes, missing: [...closure.missing],
+  };
+}
+
 async function inspectInputs(input, lock) {
   for (const pin of lock.sdk_files) await contained(input.sdk, pin);
   for (const pin of lock.host_files) await contained(input.project, pin);
@@ -104,7 +145,7 @@ async function inspectInputs(input, lock) {
     const stat = await lstat(path);
     await contained(input.sdk, { path: item.path, sha256: item.package_json_sha256, bytes: stat.size });
   }
-  for (const pin of [...lock.closure.files, ...lock.closure.assets, ...lock.closure.licenses]) await contained(input.sdk, pin);
+  await inspectClosure(input.sdk, lock.closure);
   const alias = join(input.project, ".local-state/tools/rcli-source");
   const metadata = await lstat(alias);
   if (!metadata.isSymbolicLink() || metadata.uid !== process.getuid() || await realpath(alias) !== input.sdk) fail("build_sdk_alias_rejected");
