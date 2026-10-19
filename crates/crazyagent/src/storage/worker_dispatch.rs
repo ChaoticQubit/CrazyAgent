@@ -733,7 +733,7 @@ fn report_fence(
             {
                 return Err(error("dispatch_fence_denial_mismatch"));
             }
-            report(tx, config, ready, denied)?;
+            report(tx, config, ready, denied.as_ref())?;
         }
         FenceOutcome::NotRecordedAtBarrier => {
             if record.view.receipt.is_some() {

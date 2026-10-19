@@ -78,7 +78,7 @@ impl State {
             match &receipt.outcome {
                 FenceOutcome::Denied { receipt: denial } => {
                     let (offer, retained) = self.denials.get(&(id.clone(), *generation)).unwrap();
-                    assert_eq!(denial, retained);
+                    assert_eq!(denial.as_ref(), retained);
                     assert_eq!(order.offer_digest.as_ref(), Some(&offer.offer_digest));
                     assert!(denial.journal_sequence < receipt.journal_sequence);
                 }
@@ -260,7 +260,7 @@ impl State {
                 return Err("dispatch_fence_conflict");
             }
             Ok(FenceOutcome::Denied {
-                receipt: receipt.clone(),
+                receipt: Box::new(receipt.clone()),
             })
         } else if order.runner_boot_id == self.identity.runner_id
             && self.next_generation(&order.dispatch_id, order.delivery_generation)

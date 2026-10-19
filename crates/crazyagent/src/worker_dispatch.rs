@@ -321,7 +321,7 @@ pub struct FenceOrder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FenceOutcome {
-    Denied { receipt: DeniedReceipt },
+    Denied { receipt: Box<DeniedReceipt> },
     NotRecordedAtBarrier,
 }
 
