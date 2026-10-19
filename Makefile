@@ -25,6 +25,7 @@ test-node:
 		scripts/rcli/host.observations.test.mjs \
 		scripts/rcli/build-closure.test.mjs \
 		apps/desktop/test/model-access.test.mjs \
+		apps/desktop/test/projects.test.mjs \
 		apps/desktop/test/native/refresh-barrier.test.mjs \
 		apps/desktop/test/native/config-registration.test.mjs \
 		apps/desktop/test/native/baseline-reload.test.mjs \
