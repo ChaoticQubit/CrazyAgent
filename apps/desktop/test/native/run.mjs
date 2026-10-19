@@ -9,6 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
+import { createRunDirectories } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -48,7 +49,7 @@ function binary(path) {
 }
 
 function environment() {
-  for (const name of ["home", "tmp"]) mkdirSync(join(evidence, name), { mode: 0o700 });
+  createRunDirectories(evidence);
   return {
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
     HOME: join(evidence, "home"),
