@@ -16,6 +16,9 @@ fn main() {
         "desktop_pending_intent",
         "desktop_reconcile_intent",
         "desktop_retry_intent",
+        "desktop_model_access_page",
+        "desktop_inspect_model_access",
+        "desktop_edit_model_access",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

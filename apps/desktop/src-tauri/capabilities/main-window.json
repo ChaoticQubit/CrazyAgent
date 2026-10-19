@@ -20,6 +20,9 @@
     "allow-desktop-replace-brief",
     "allow-desktop-pending-intent",
     "allow-desktop-reconcile-intent",
-    "allow-desktop-retry-intent"
+    "allow-desktop-retry-intent",
+    "allow-desktop-model-access-page",
+    "allow-desktop-inspect-model-access",
+    "allow-desktop-edit-model-access"
   ]
 }
