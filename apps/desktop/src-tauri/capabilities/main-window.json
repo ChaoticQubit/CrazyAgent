@@ -14,6 +14,7 @@
     "allow-desktop-reconcile",
     "allow-desktop-retry",
     "allow-desktop-projects",
+    "allow-desktop-create-project",
     "allow-desktop-open-project",
     "allow-desktop-history",
     "allow-desktop-send-message",

@@ -9,6 +9,7 @@ fn main() {
         "desktop_reconcile",
         "desktop_retry",
         "desktop_projects",
+        "desktop_create_project",
         "desktop_open_project",
         "desktop_history",
         "desktop_send_message",

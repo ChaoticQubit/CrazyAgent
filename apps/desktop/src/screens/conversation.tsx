@@ -5,6 +5,16 @@ export function displayText(text: string): string {
     (value) => `\\u${value.codePointAt(0)!.toString(16).padStart(4, "0")}`);
 }
 
+export function ProjectList({ state }: { state: ReturnType<typeof useOwnerBrowser> }) {
+  return <div className="baseline-list">
+      <div className="section-heading"><h2>Projects</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProjects()}>Refresh projects</button></div>
+      <p className="muted">{state.projectPage?.fresh ? "Projects from the engine" : "Project list is stale or unavailable"}</p>
+      {state.projectPage?.items.map((row) => <button className={`baseline-row ${state.projectId === row.id ? "active" : ""}`} key={row.id} disabled={!state.connected} data-project-id={row.id} onClick={() => void state.selectProject(row.id)}><span>{displayText(row.name)}</span><span className="mono">{row.id}</span><span className="muted">Declared repositories: {row.repository_count}</span></button>)}
+      {state.projectPage?.items.length === 0 && <p>No projects were returned.</p>}
+      {state.projectPage?.has_more && <button disabled={state.busy || !state.connected} onClick={() => void state.refreshProjects(true)}>Next project page</button>}
+    </div>;
+}
+
 export function Conversation({ state }: { state: ReturnType<typeof useOwnerBrowser> }) {
   const draft = state.drafts[state.projectId];
   const project = state.project?.project_id === state.projectId ? state.project : undefined;
@@ -12,13 +22,7 @@ export function Conversation({ state }: { state: ReturnType<typeof useOwnerBrows
   const blocked = state.busy || state.pending || !state.connected || !project?.fresh;
   const bytes = (text: string) => new TextEncoder().encode(text).length;
   return <section className="baseline-browser conversation-browser" aria-busy={state.busy}>
-    <div className="baseline-list">
-      <div className="section-heading"><h2>Projects</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProjects()}>Refresh projects</button></div>
-      <p className="muted">{state.projectPage?.fresh ? "Projects from the engine" : "Project list is stale or unavailable"}</p>
-      {state.projectPage?.items.map((row) => <button className={`baseline-row ${state.projectId === row.id ? "active" : ""}`} key={row.id} disabled={!state.connected} data-project-id={row.id} onClick={() => void state.selectProject(row.id)}><span>{displayText(row.name)}</span><span className="mono">{row.id}</span></button>)}
-      {state.projectPage?.items.length === 0 && <p>No projects were returned.</p>}
-      {state.projectPage?.has_more && <button disabled={state.busy || !state.connected} onClick={() => void state.refreshProjects(true)}>Next project page</button>}
-    </div>
+    <ProjectList state={state} />
     <div className="inspection">
       {!state.projectId ? <><h2>Select a project</h2><p className="muted">Read its actual conversation and versioned brief.</p></> : <>
         <div className="section-heading"><h2>{state.projectId}</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProject()} data-testid="inspect-project">Inspect current brief</button></div>

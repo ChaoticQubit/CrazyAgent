@@ -10,6 +10,7 @@ use bridge::{
 };
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::ModelAccessCollection;
+use crazyagent::protocol::ProjectSpec;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -112,6 +113,17 @@ async fn desktop_projects(
 ) -> Result<ProjectPage, BridgeError> {
     main_window(&window)?;
     lock(&state)?.projects(next).await
+}
+
+#[tauri::command]
+async fn desktop_create_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.create_project(spec, generation).await
 }
 
 #[tauri::command]
@@ -237,6 +249,7 @@ pub fn run() {
             desktop_reconcile,
             desktop_retry,
             desktop_projects,
+            desktop_create_project,
             desktop_open_project,
             desktop_history,
             desktop_send_message,

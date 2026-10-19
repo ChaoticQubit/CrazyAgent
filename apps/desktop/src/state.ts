@@ -3,7 +3,7 @@ import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
   revokeBaseline, sendMessage, status,
-  modelAccessPage, inspectModelAccess, editModelAccess,
+  modelAccessPage, inspectModelAccess, editModelAccess, createProject,
 } from "./engine-client";
 import type {
   ActionReceipt, BaselineDetail, BaselinePage, HistoryPage, IntentReceipt,
@@ -12,6 +12,8 @@ import type {
 } from "./engine-client";
 import { editFromForm, newForm, formFromRecord, rebaseForm } from "./model-access";
 import type { ModelAccessForm } from "./model-access";
+import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens/projects";
+import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
 
 export interface Draft {
   text: string;
@@ -44,7 +46,11 @@ export function useOwnerBrowser() {
   const [historyPage, setHistoryPage] = useState<HistoryPage>();
   const [projectId, setProjectId] = useState("");
   const [drafts, setDrafts] = useState<Record<string, ProjectDrafts>>(() => Object.create(null));
-  const [view, setView] = useState<"approvals" | "conversation" | "settings">("approvals");
+  const [view, setView] = useState<"approvals" | "conversation" | "settings" | "projects">("approvals");
+  const [projectForm, setProjectForm] = useState<ProjectCreationDraft>({ name: "", repositories: "", generation: 0 });
+  const currentProjectForm = useRef(projectForm);
+  const creationSubmission = useRef<CreationSubmission | undefined>(undefined);
+  const [createdProject, setCreatedProject] = useState<string>();
   const [modelCollection, setModelCollection] = useState<ModelAccessCollection>("accounts");
   const [modelPage, setModelPage] = useState<ModelAccessPage>();
   const [modelDetail, setModelDetail] = useState<ModelAccessDetail>();
@@ -63,6 +69,7 @@ export function useOwnerBrowser() {
   const activeView = useRef(view);
   const currentDrafts = useRef(drafts);
   const generation = useRef(0);
+  const navigation = useRef(0);
 
   function nextGeneration() {
     if (generation.current >= Number.MAX_SAFE_INTEGER) throw { code: "draft_generation_limit" };
@@ -86,6 +93,19 @@ export function useOwnerBrowser() {
     setHistoryPage((old) => old ? { ...old, fresh: false } : old);
     setModelPage((old) => old ? { ...old, fresh: false } : old);
     setModelDetail((old) => old ? { ...old, fresh: false } : old);
+  }
+
+  function changeView(next: typeof view) {
+    navigation.current = nextGeneration();
+    stale();
+    activeView.current = next;
+    setView(next);
+  }
+
+  async function loadProjects(next = false) {
+    const current = navigation.current;
+    const page = await projects(next);
+    if (navigation.current === current && (activeView.current === "projects" || activeView.current === "conversation")) setProjectPage(page);
   }
 
   async function run(action: () => Promise<void>, clearNotice = false) {
@@ -127,9 +147,11 @@ export function useOwnerBrowser() {
 
   async function loadProject(id: string) {
     if (id !== activeProject.current || activeView.current !== "conversation") return;
+    const current = navigation.current;
     const selected = await openProject(id);
+    if (id !== activeProject.current || activeView.current !== "conversation" || current !== navigation.current) return;
     const entries = await history();
-    if (id !== activeProject.current || activeView.current !== "conversation") return;
+    if (id !== activeProject.current || activeView.current !== "conversation" || current !== navigation.current) return;
     setProject(selected);
     setHistoryPage(entries);
     setDetail((old) => old ? { ...old, fresh: false } : old);
@@ -153,7 +175,7 @@ export function useOwnerBrowser() {
     if (activeView.current === "approvals") setPage(await baselines());
     else if (activeView.current === "settings") await loadModels();
     else {
-      setProjectPage(await projects());
+      await loadProjects();
       if (activeProject.current) await loadProject(activeProject.current);
     }
   }
@@ -174,6 +196,30 @@ export function useOwnerBrowser() {
   }
 
   async function finishIntent(receipt: IntentReceipt) {
+    if (receipt.kind === "create_project") {
+      setPending(receipt.pending);
+      setNotice(`Project declaration: ${receiptMessage(receipt)}` + (receipt.rejection ? ` ${errorMessage({ code: receipt.rejection })}` : ""));
+      stale();
+      const submitted = creationSubmission.current;
+      if (receipt.outcome === "applied" && !receipt.pending && receipt.project_id) {
+        setCreatedProject(receipt.project_id);
+        if (receipt.generation === String(submitted?.generation) && creationMatches(currentProjectForm.current, submitted, navigation.current) && activeView.current === "projects") {
+          retainProjectDraft({ kind: "discard", generation: nextGeneration() });
+          changeView("conversation");
+          activeProject.current = receipt.project_id;
+          setProjectId(receipt.project_id);
+          setProject(undefined);
+          setHistoryPage(undefined);
+          await loadProjects();
+          await loadProject(receipt.project_id);
+        }
+      }
+      if (!receipt.pending) {
+        if (receipt.generation === String(submitted?.generation)) creationSubmission.current = undefined;
+        if (activeView.current === "projects") await loadProjects();
+      }
+      return;
+    }
     if (receipt.kind === "model_access") {
       setPending(receipt.pending);
       setNotice(`Model metadata: ${receiptMessage(receipt)}` + (receipt.rejection ? ` ${errorMessage({ code: receipt.rejection })}` : ""));
@@ -236,11 +282,35 @@ export function useOwnerBrowser() {
     setModelForm(retained);
   }
 
+  function retainProjectDraft(event: Parameters<typeof reduceProjectDraft>[1]) {
+    currentProjectForm.current = reduceProjectDraft(currentProjectForm.current, event);
+    setProjectForm(currentProjectForm.current);
+  }
+
+  function editProject(field: "name" | "repositories", value: string) {
+    try {
+      retainProjectDraft({ kind: "edit", field, value, generation: nextGeneration() });
+      setError("");
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : errorMessage(failure));
+    }
+  }
+
+  function discardProject() {
+    try {
+      retainProjectDraft({ kind: "discard", generation: nextGeneration() });
+      setError("");
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : errorMessage(failure));
+    }
+  }
+
   useEffect(() => { void run(reconnect); }, []);
 
   return {
     page, detail, connected, pending, intent, busy, error, notice, view,
     projectPage, project, historyPage, projectId, drafts,
+    projectForm, createdProject, editProject, discardProject,
     modelCollection, modelPage, modelDetail, modelForm,
     reconnect: () => run(reconnect),
     refresh: (next = false) => run(() => refresh(next)),
@@ -250,28 +320,22 @@ export function useOwnerBrowser() {
     reconcile: () => run(async () => finishIntent(await reconcileIntent()), true),
     retry: () => run(async () => finishIntent(await retryIntent()), true),
     showApprovals: () => {
-      stale();
-      activeView.current = "approvals";
-      setView("approvals");
+      changeView("approvals");
       setDetail(undefined);
       return read(() => activeView.current === "approvals" ? refresh() : Promise.resolve());
     },
     showConversation: () => {
-      stale();
-      activeView.current = "conversation";
-      setView("conversation");
+      changeView("conversation");
       setDetail((old) => old ? { ...old, fresh: false } : old);
       return read(async () => {
         if (activeView.current !== "conversation") return;
-        setProjectPage(await projects());
+        await loadProjects();
         if (activeProject.current) await loadProject(activeProject.current);
       });
     },
     showSettings: (collection: ModelAccessCollection = activeCollection.current) => {
-      stale();
-      activeView.current = "settings";
+      changeView("settings");
       activeCollection.current = collection;
-      setView("settings");
       setModelCollection(collection);
       setModelPage(undefined);
       setModelDetail(undefined);
@@ -330,8 +394,22 @@ export function useOwnerBrowser() {
       catch (failure) { setError(failure instanceof Error ? failure.message : "Invalid metadata form."); return; }
       await finishIntent(await editModelAccess(retained.value.ticket, edit, retained.generation));
     }, true),
-    refreshProjects: (next = false) => read(async () => setProjectPage(await projects(next))),
+    showProjects: () => {
+      changeView("projects");
+      return read(() => activeView.current === "projects" ? loadProjects() : Promise.resolve());
+    },
+    submitProject: () => run(async () => {
+      if (pending || !connected || !projectPage?.fresh || activeView.current !== "projects") return;
+      const draft = currentProjectForm.current;
+      let spec;
+      try { spec = parseProjectSpec(draft.name, draft.repositories); }
+      catch (failure) { setError(failure instanceof Error ? failure.message : "Invalid project declaration."); return; }
+      creationSubmission.current = { generation: draft.generation, navigation: navigation.current };
+      await finishIntent(await createProject(spec, draft.generation));
+    }, true),
+    refreshProjects: (next = false) => read(() => loadProjects(next)),
     selectProject: (id: string) => {
+      changeView("conversation");
       activeProject.current = id;
       setProjectId(id);
       setProject(undefined);

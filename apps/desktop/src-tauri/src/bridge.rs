@@ -8,9 +8,10 @@ use crazyagent::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor, OwnerRead,
     OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
-use crazyagent::protocol::{BaselineId, ProjectId};
+use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -119,6 +120,7 @@ struct BaselineSelection {
 pub struct ProjectRow {
     pub id: String,
     pub name: String,
+    pub repository_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +165,8 @@ pub struct PendingIntent {
     pub baseline_id: Option<String>,
     pub generation: String,
     pub model_access: Option<crazyagent::config::ModelAccessEdit>,
+    pub project_spec: Option<ProjectSpec>,
+    pub operation_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +421,9 @@ impl NativeBridge {
                 mutation: ConversationMutation::ReplaceBrief { project_id, .. },
             } => ("brief", Some(project_id.as_str().to_owned()), None),
             OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
+            OwnerMutation::CreateProject { project_id, .. } => {
+                ("create_project", Some(project_id.as_str().to_owned()), None)
+            }
             _ => return Err(failure("unexpected_pending_intent")),
         };
         bounded(Some(PendingIntent {
@@ -428,6 +435,11 @@ impl NativeBridge {
                 OwnerMutation::ModelAccess { edit, .. } => Some(edit.clone()),
                 _ => None,
             },
+            project_spec: match mutation {
+                OwnerMutation::CreateProject { spec, .. } => Some(spec.clone()),
+                _ => None,
+            },
+            operation_id: pending.request().request_id.as_str().to_owned(),
         }))
     }
 
@@ -447,6 +459,7 @@ impl NativeBridge {
         self.next = None;
         self.model_access = None;
         self.model_access_next = None;
+        self.projects_next = None;
         let response = if reconcile {
             self.controller()?.reconcile_pending().await
         } else {
@@ -512,10 +525,13 @@ impl NativeBridge {
             .into_iter()
             .map(|item| match item {
                 OwnerSummary::Project {
-                    project_id, name, ..
+                    project_id,
+                    name,
+                    repository_count,
                 } => Ok(ProjectRow {
                     id: project_id.as_str().into(),
                     name,
+                    repository_count,
                 }),
                 _ => Err(failure("unexpected_reply")),
             })
@@ -527,6 +543,53 @@ impl NativeBridge {
         })?;
         self.projects_next = next;
         Ok(page)
+    }
+
+    pub async fn create_project(
+        &mut self,
+        spec: ProjectSpec,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        if self.status().pending {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        spec.validate()
+            .map_err(|_| failure("project_spec_bounds"))?;
+        if spec.repositories.is_empty()
+            || spec
+                .repositories
+                .iter()
+                .any(|path| !std::path::Path::new(path).is_absolute())
+        {
+            return Err(failure("project_spec_bounds"));
+        }
+        let project_id = native_project_id()?;
+        let preview = PendingIntent {
+            kind: "create_project",
+            project_id: Some(project_id.as_str().to_owned()),
+            baseline_id: None,
+            generation: generation.to_string(),
+            model_access: None,
+            project_spec: Some(spec.clone()),
+            operation_id: "0".repeat(64),
+        };
+        let length = serde_json::to_vec(&preview)
+            .map_err(|_| failure("project_spec_bounds"))?
+            .len();
+        if length > PROJECTION_BYTES_MAX - 128 {
+            return Err(failure("project_spec_bounds"));
+        }
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::CreateProject { project_id, spec },
+                generation,
+            )
+            .map_err(|_| failure("owner_not_ready"))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
     }
 
     pub async fn open_project(&mut self, id: &str) -> Result<ProjectDetail, BridgeError> {
@@ -682,6 +745,20 @@ impl NativeBridge {
         assert!(self.status().pending);
         Ok(())
     }
+}
+
+fn native_project_id() -> Result<ProjectId, BridgeError> {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|_| failure("project_identity_unavailable"))?;
+    let mut id = String::with_capacity(72);
+    id.push_str("project-");
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut id, "{byte:02x}").map_err(|_| failure("project_identity_unavailable"))?;
+    }
+    ProjectId::new(id).map_err(|_| failure("project_identity_unavailable"))
 }
 
 fn conversation_row(entry: ConversationEntry) -> ConversationRow {

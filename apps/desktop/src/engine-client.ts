@@ -101,6 +101,8 @@ export function errorMessage(error: unknown): string {
     model_access_referenced: "This record is still referenced by a connection or pool. Update those records before removal.",
     model_access_edit_bounds: "The metadata edit exceeds the engine byte limit. Reduce the entered values.",
     invalid_project: "The selected project identity is invalid.",
+    project_spec_bounds: "Use a nonblank name within 256 UTF-8 bytes and 1 to 64 absolute local paths within 4096 bytes each. The complete declaration must fit the native engine frame. Previous values are retained.",
+    project_identity_unavailable: "A native project identity could not be generated. The draft is retained; reconnect before trying again.",
     draft_generation_limit: "This draft reached its safe generation limit. Preserve it before restarting.",
     conversation_text_bounds: "Text must be nonempty, contain no NUL, and fit within 8192 UTF-8 bytes. The draft was not submitted.",
     not_configured: "No engine connection was configured for this desktop session.",
@@ -126,7 +128,7 @@ export function errorMessage(error: unknown): string {
 }
 
 export interface ProjectPage {
-  items: { id: string; name: string }[];
+  items: { id: string; name: string; repository_count: number }[];
   has_more: boolean;
   fresh: boolean;
 }
@@ -157,11 +159,13 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
   model_access: ModelAccessEdit | null;
+  project_spec: ProjectSpec | null;
+  operation_id: string;
 }
 
 export interface IntentReceipt extends PendingIntent {
@@ -172,6 +176,15 @@ export interface IntentReceipt extends PendingIntent {
 
 export function projects(next = false): Promise<ProjectPage> {
   return invoke<ProjectPage>("desktop_projects", { next });
+}
+
+export interface ProjectSpec {
+  name: string;
+  repositories: string[];
+}
+
+export function createProject(spec: ProjectSpec, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_create_project", { spec, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
