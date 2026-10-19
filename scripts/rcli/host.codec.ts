@@ -171,7 +171,7 @@ export async function* readControls(source: AsyncIterable<Uint8Array>, sessionId
   let bodyUsed = 0;
   try {
     for await (const chunk of source) {
-      if (!(chunk instanceof Uint8Array)) reject();
+      if (!(chunk instanceof Uint8Array) || chunk.byteLength > FRAME_MAX + 4) reject();
       let offset = 0;
       while (offset < chunk.byteLength) {
         if (body === null) {

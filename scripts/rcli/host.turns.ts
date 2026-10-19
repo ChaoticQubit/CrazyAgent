@@ -34,6 +34,7 @@ private readonly requestIds = new Set<string>();
 private readonly turnIds = new Set<string>();
 private readonly sdkIds = new Set<string>();
 private readonly inputIds = new Set<string>();
+private readonly abortedInputs = new Set<string>();
 private awaitingStart: string | null = null;
 private nextInput = 1;
 private stopped = false;
@@ -42,6 +43,7 @@ private check(): void {
 assert(this.turns.size <= 2 && [...this.turns].every(([id, turn]) => turn !== null && typeof turn === "object" && id === turn.id && this.turnIds.has(id)), "host_turn_state_invariant");
 assert(this.awaitingStart === null || this.turns.has(this.awaitingStart), "host_turn_state_invariant");
 assert([this.requestIds, this.turnIds, this.sdkIds, this.inputIds].every((ids) => ids.size <= 4096) && Number.isSafeInteger(this.nextInput) && this.nextInput >= 1 && this.nextInput <= 4097, "host_turn_state_invariant");
+assert(this.abortedInputs.size <= this.inputIds.size && [...this.abortedInputs].every((id) => this.inputIds.has(id)), "host_turn_state_invariant");
 }
 get hasOutstanding(): boolean { this.check(); return this.turns.size !== 0; }
 admit(value: Control): HostAction {
@@ -57,7 +59,7 @@ identifier(body.turn_id);
 if (this.turnIds.size >= 4096 || this.turnIds.has(body.turn_id)) reject();
 if (body.kind === "prompt" ? this.turns.size !== 0 : this.turns.size !== 1 || [...this.turns.values()][0]!.cancelling) reject();
 if (body.kind === "steer") {
-for (const turn of this.turns.values()) { turn.cancelling = true; turn.input = null; }
+for (const turn of this.turns.values()) { turn.cancelling = true; this.cancelInput(turn); }
 }
 this.turnIds.add(body.turn_id);
 this.turns.set(body.turn_id, { id: body.turn_id, started: false, sdkId: null, ended: false, cancelling: false, messages: null, input: null });
@@ -66,7 +68,7 @@ break;
 }
 case "cancel": {
 if (!this.turns.has(body.turn_id)) reject();
-for (const turn of this.turns.values()) { turn.cancelling = true; turn.input = null; }
+for (const turn of this.turns.values()) { turn.cancelling = true; this.cancelInput(turn); }
 action = { kind: "cancel" };
 break;
 }
@@ -135,7 +137,7 @@ return [];
 case "turn:cancelled": {
 const turn = this.running(event.turnId);
 turn.cancelling = true;
-turn.input = null;
+this.cancelInput(turn);
 return [];
 }
 case "input:request": {
@@ -154,6 +156,11 @@ this.inputIds.add(id);
 return [this.inputFrame(turn, pending)];
 }
 case "input:response": {
+if (this.abortedInputs.has(event.response.id)) {
+if (!Array.isArray(event.response.answers) || event.response.answers.length !== 0) reject();
+this.abortedInputs.delete(event.response.id);
+return [];
+}
 const turn = this.running();
 const pending = turn.input;
 if (!pending || !pending.awaitingResponse || event.response.id !== pending.id || !Array.isArray(event.response.answers) || event.response.answers.length !== pending.answers.length || event.response.answers.some((answer, index) => answer !== pending.answers[index])) reject();
@@ -176,14 +183,19 @@ return [{ kind: "completed", turn_id: turnId, status: status === "completed" ? "
 stop(): void {
 this.check();
 this.stopped = true;
-for (const turn of this.turns.values()) { turn.cancelling = true; turn.input = null; }
+for (const turn of this.turns.values()) { turn.cancelling = true; this.cancelInput(turn); }
 }
 close(): void {
 this.stop();
 for (const turn of this.turns.values()) turn.messages?.close();
 this.turns.clear();
+this.abortedInputs.clear();
 this.awaitingStart = null;
 this.disposed = true;
+}
+private cancelInput(turn: TurnState): void {
+if (turn.input !== null) this.abortedInputs.add(turn.input.id);
+turn.input = null;
 }
 private running(sdkId?: string): TurnState {
 const matches = [...this.turns.values()].filter((turn) => turn.sdkId !== null && !turn.ended && (sdkId === undefined || turn.sdkId === sdkId));
