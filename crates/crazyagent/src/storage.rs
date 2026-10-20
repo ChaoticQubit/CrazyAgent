@@ -12,6 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 
 mod master_session;
 mod native_auth;
+#[cfg(test)]
+mod native_auth_host_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
