@@ -110,8 +110,8 @@ def owner_effects(database):
 
 
 @contextmanager
-def engine(binary, root):
-    child = tui_flow.engine(binary, root)
+def engine(binary, root, *, writable=False):
+    child = tui_flow.engine(binary, root, writable=writable)
     assert child.pid > 0
     assert child.poll() is None
     print("owned engine started pid=%d" % child.pid, flush=True)

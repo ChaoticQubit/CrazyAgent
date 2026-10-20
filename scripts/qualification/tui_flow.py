@@ -152,10 +152,13 @@ def screen_text(raw, width, height):
                      for r in range(1, min(height, 120) + 1))
 
 
-def engine(binary, root):
+def engine(binary, root, *, writable=False):
+    command = [binary, "engine", str(root), str(root / "global.toml"),
+               str(root / "project.toml"), "engine.sock"]
+    if writable:
+        command.append("--writable-settings")
     child = subprocess.Popen(
-        [binary, "engine", str(root), str(root / "global.toml"),
-         str(root / "project.toml"), "engine.sock"],
+        command,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if not select.select([child.stdout], [], [], 5)[0]:

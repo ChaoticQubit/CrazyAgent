@@ -210,7 +210,7 @@ def truthful(master):
 
 def seed(binary, root):
     database = root / "engine.db"
-    with creation.engine(binary, root):
+    with creation.engine(binary, root, writable=True):
         for index, name in enumerate(("p", "q")):
             reply = creation.request(root / "engine.sock", "create-master-686-" + name, {
                 "kind": "CreateProject", "project_id": name,
@@ -401,7 +401,7 @@ def run(binary, root):
         catalog.chmod(0o600)
         assert catalog.stat().st_mode & 0o777 == 0o600
         database = root / "engine.db"
-        with creation.engine(binary, root) as service:
+        with creation.engine(binary, root, writable=True) as service:
             before_effects = creation.effect_counts(database)
             assert before_effects[0] == 0 and before_effects[2:] == (0, 0, 0, 0)
             with terminal(binary, root / "engine.sock") as (child, master):
@@ -422,7 +422,7 @@ def run(binary, root):
                 service.send_signal(signal.SIGINT)
                 assert service.wait(timeout=5) == 0
                 tui_flow.expect(master, "Disconnected", child)
-                with creation.engine(binary, root):
+                with creation.engine(binary, root, writable=True):
                     os.write(master, b"\x12")
                     tui_flow.expect(master, "Owner: connected", child)
                     tui_flow.expect(master, "Master: Closed", child)
