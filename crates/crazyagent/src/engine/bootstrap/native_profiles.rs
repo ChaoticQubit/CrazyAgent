@@ -595,3 +595,6 @@ mod tests {
         remember_profile(&mut pins, "overflow".into(), "b".repeat(64));
     }
 }
+
+#[cfg(test)]
+mod use_tests;
