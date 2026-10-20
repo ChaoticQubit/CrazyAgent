@@ -1,6 +1,7 @@
 pub mod app;
 mod client;
 mod dispatch;
+mod master_session;
 mod model_access;
 pub mod views;
 
@@ -132,12 +133,15 @@ fn event_loop(
             break;
         }
         if let Some(event) = connection.poll_owner().map_err(TuiError)? {
+            let master_event = matches!(&event, client::OwnerEvent::Master(_));
             app.apply_owner(event).map_err(TuiError)?;
-            owner_refresh = if app.owner_continuation() {
-                Instant::now()
-            } else {
-                Instant::now() + Duration::from_secs(1)
-            };
+            if !master_event {
+                owner_refresh = if app.owner_continuation() {
+                    Instant::now()
+                } else {
+                    Instant::now() + Duration::from_secs(1)
+                };
+            }
             snapshot = true;
             refresh = Instant::now();
             dirty = true;
@@ -163,6 +167,7 @@ fn event_loop(
             if owner_reconnect {
                 owner_reconnect = false;
                 if !app.model_access.retry()
+                    && !app.master.retry()
                     && !app.retry_conversation()
                     && !app.retry_creation()
                     && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
@@ -185,6 +190,9 @@ fn event_loop(
                 dirty = true;
             } else if let Some(job) = app.take_conversation_job() {
                 connection.conversation(job).map_err(TuiError)?;
+                dirty = true;
+            } else if let Some(job) = app.master_request().map_err(TuiError)? {
+                connection.master(job).map_err(TuiError)?;
                 dirty = true;
             } else if Instant::now() >= refresh {
                 let command = if snapshot {
@@ -238,6 +246,7 @@ fn event_loop(
                     let result = if connection.uncertain() {
                         connection.retry()
                     } else if app.has_unresolved_conversation()
+                        || app.master.has_pending()
                         || app.model_access.has_pending()
                         || app.has_unresolved_creation()
                     {
@@ -337,6 +346,15 @@ fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
         return None;
     }
     Some(match key.code {
+        KeyCode::F(2) if app.focus() == Focus::Conversation && !app.is_creating_project() => {
+            UiEvent::ConfigureMaster
+        }
+        KeyCode::F(3) if app.focus() == Focus::Conversation && !app.is_creating_project() => {
+            UiEvent::CancelMaster
+        }
+        KeyCode::F(4) if app.focus() == Focus::Conversation && !app.is_creating_project() => {
+            UiEvent::CloseMaster
+        }
         KeyCode::Tab => UiEvent::FocusNext,
         KeyCode::BackTab => UiEvent::FocusPrevious,
         KeyCode::Up => UiEvent::SelectionPrevious,

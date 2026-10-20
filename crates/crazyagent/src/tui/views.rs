@@ -181,8 +181,12 @@ pub fn body(app: &App) -> String {
 }
 
 fn conversation_lines(app: &App) -> String {
+    if app.master.is_open() {
+        return format!("Project owner conversation\n{}", app.master.lines());
+    }
     let mut lines = vec![
         "Project owner conversation | Enter: message | Ctrl-B: explicit brief edit".to_owned(),
+        app.master.lines(),
     ];
     if !app.owner_ready {
         lines.push(
@@ -194,7 +198,7 @@ fn conversation_lines(app: &App) -> String {
         lines.push(safe_text(&app.conversation_notice, 512));
         lines.push("No protected history is inferred from a worker snapshot.".into());
         lines.push(
-            "Ctrl-U: separate unassigned draft. Messages do not rewrite a brief or start tasks."
+            "Ctrl-U: separate unassigned draft. Owner notes do not rewrite a brief. F2 explicitly configures master turns."
                 .into(),
         );
         lines.push("Leader consumption and replies are not integrated.".into());
@@ -242,7 +246,7 @@ fn conversation_lines(app: &App) -> String {
     }
     lines.push(safe_text(&app.conversation_notice, 512));
     lines.push("Ctrl-N: next history page | Ctrl-P: first | Ctrl-U: unassigned draft".into());
-    lines.push("Messages never approve or start tasks. Leader replies are not integrated.".into());
+    lines.push("Owner notes never approve tasks. Master turns require explicit Open; replies require actual provenance.".into());
     lines.join("\n")
 }
 

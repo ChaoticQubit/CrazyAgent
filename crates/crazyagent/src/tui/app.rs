@@ -3,7 +3,7 @@ use super::client::{
     ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
     MutationDelivery, OwnerEvent, OwnerProgress,
 };
-use super::{dispatch, model_access};
+use super::{dispatch, master_session, model_access};
 use crate::config::EffectiveConfig;
 use crate::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
@@ -60,6 +60,9 @@ pub enum UiEvent {
     ToggleUnassigned,
     HistoryNext,
     HistoryFirst,
+    ConfigureMaster,
+    CancelMaster,
+    CloseMaster,
 }
 
 struct ProjectDraft {
@@ -192,6 +195,7 @@ pub struct App {
     snapshot_revision: Option<Cursor>,
     pub(super) model_access: model_access::State,
     pub(super) dispatch: dispatch::State,
+    pub(super) master: master_session::State,
     focus: Focus,
     draft: String,
     project_draft: String,
@@ -230,6 +234,7 @@ pub struct App {
     conversation_pending: Option<ConversationPending>,
     conversation_job: Option<ConversationJob>,
     edit_requested: Option<(OwnerConnectionIdentity, ProjectId)>,
+    brief_completion: Option<(String, ProjectId)>,
 }
 
 impl Default for App {
@@ -248,6 +253,7 @@ impl App {
             snapshot_revision: None,
             model_access: model_access::State::default(),
             dispatch: dispatch::State::default(),
+            master: master_session::State::default(),
             focus: Focus::Conversation,
             draft: String::new(),
             project_draft: String::new(),
@@ -286,6 +292,7 @@ impl App {
             conversation_pending: None,
             conversation_job: None,
             edit_requested: None,
+            brief_completion: None,
         }
     }
 
@@ -300,6 +307,8 @@ impl App {
             } else {
                 &self.declaration.repositories[self.declaration.field - 1]
             }
+        } else if let Some(draft) = self.master.draft() {
+            draft
         } else if self.creating_project {
             &self.project_draft
         } else if let Some(index) = self.draft_index() {
@@ -343,9 +352,40 @@ impl App {
     }
 
     pub fn reduce(&mut self, event: UiEvent) -> Result<(), String> {
+        self.sync_master()?;
         if self.declaration.open && self.reduce_declaration(&event)? {
             self.assert_consistent();
             return Ok(());
+        }
+        if !self.is_creating_project() && self.focus == Focus::Conversation {
+            if matches!(event, UiEvent::ConfigureMaster) {
+                self.master.open()?;
+                self.scroll = 0;
+                return Ok(());
+            }
+            if matches!(event, UiEvent::Submit)
+                && self.master.is_open()
+                && (self.conversation_pending.is_some()
+                    || self.declaration_pending.is_some()
+                    || self.model_access.has_pending()
+                    || self.pending_creation.is_some()
+                    || self.command.is_some())
+            {
+                return Err(
+                    "An owner or project intent is unresolved; master setup retained".into(),
+                );
+            }
+            if self.master.reduce(&event)? {
+                self.assert_consistent();
+                return Ok(());
+            }
+        }
+        if matches!(
+            event,
+            UiEvent::Submit | UiEvent::CancelMaster | UiEvent::CloseMaster
+        ) && self.master.has_pending()
+        {
+            return Err("Master owner intent unresolved; fields and draft retained; Ctrl-R recovers its exact identity".into());
         }
         if matches!(event, UiEvent::Submit) && self.declaration_pending.is_some() {
             return Err("A creation owner intent is unresolved; input retained".into());
@@ -457,6 +497,26 @@ impl App {
                 self.notice("Declare repositories | Tab fields | Ctrl-N add | Ctrl-D remove | Enter create | Esc retain");
             }
             UiEvent::DeclarationAdd | UiEvent::DeclarationRemove => {}
+            UiEvent::ConfigureMaster => {
+                return Err("Select the project Conversation for F2 Configure master".into());
+            }
+            UiEvent::CancelMaster | UiEvent::CloseMaster => {
+                if self.focus != Focus::Conversation
+                    || self.is_creating_project()
+                    || self.unassigned
+                {
+                    return Err(
+                        "Select the project Conversation to control its actual master".into(),
+                    );
+                }
+                if self.conversation_pending.is_some()
+                    || self.declaration_pending.is_some()
+                    || self.model_access.has_pending()
+                {
+                    return Err("An owner intent is unresolved; master control retained".into());
+                }
+                self.master.control(matches!(event, UiEvent::CloseMaster))?;
+            }
             UiEvent::Cancel => {
                 if self.is_editing_brief() {
                     let index = self
@@ -464,6 +524,16 @@ impl App {
                         .expect("brief mode requires its project draft");
                     self.drafts[index].editing_brief = false;
                     self.notice("Brief edit closed; both drafts retained");
+                } else if self.draft_index().is_some_and(|index| {
+                    self.brief_completion
+                        .as_ref()
+                        .is_some_and(|(database, project)| {
+                            database == &self.drafts[index].database
+                                && project == &self.drafts[index].project
+                        })
+                }) {
+                    self.brief_completion = None;
+                    self.notice("Acknowledged brief edit closed; conversation draft retained");
                 } else {
                     self.ensure_draft()?;
                     self.advance_input_generation()?;
@@ -534,6 +604,7 @@ impl App {
             self.invalidate_evidence()?;
         }
         self.sync_dispatch()?;
+        self.sync_master()?;
         self.assert_consistent();
         Ok(())
     }
@@ -633,6 +704,7 @@ impl App {
             self.invalidate_evidence()?;
         }
         self.sync_dispatch()?;
+        self.sync_master()?;
         self.assert_consistent();
         Ok(())
     }
@@ -664,6 +736,8 @@ impl App {
         self.model_access.access(None, false);
         self.invalidate_evidence()?;
         self.owner_ready = false;
+        self.sync_master()?;
+        self.master.access();
         self.owner_problem = None;
         self.owner_notice = "Reconnecting to the original configured engine endpoint".into();
         self.sync_dispatch()?;
@@ -735,6 +809,18 @@ impl App {
 
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
+            OwnerEvent::Master(event) => {
+                if let Some(submission) = self.master.apply(*event)? {
+                    self.complete_master_draft(&submission)?;
+                    self.invalidate_evidence()?;
+                }
+                if self.master.disconnected() {
+                    self.owner_ready = false;
+                    self.owner_problem = Some("master_owner_connection_unavailable".into());
+                }
+                let notice = self.master.notice.clone();
+                self.notice(&notice);
+            }
             OwnerEvent::Dispatch(event) => {
                 self.sync_dispatch()?;
                 if let Some(problem) = self.dispatch.apply(*event) {
@@ -774,6 +860,8 @@ impl App {
                 }
                 self.invalidate_evidence()?;
                 self.owner_ready = ready;
+                self.sync_master()?;
+                self.master.access();
                 self.owner_problem = (!ready).then_some(problem);
                 if !ready {
                     self.owner_notice =
@@ -854,6 +942,57 @@ impl App {
             }
         }
         self.sync_dispatch()?;
+        self.sync_master()?;
+        Ok(())
+    }
+
+    fn sync_master(&mut self) -> Result<(), String> {
+        self.master.select(
+            self.owner_identity.clone(),
+            self.selected_project()
+                .map(|project| project.project_id.clone()),
+            self.owner_ready,
+        )
+    }
+
+    pub(super) fn master_request(&mut self) -> Result<Option<master_session::Job>, String> {
+        self.sync_master()?;
+        if self.conversation_pending.is_some()
+            || self.declaration_pending.is_some()
+            || self.model_access.has_pending()
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .master
+            .request(self.focus == Focus::Conversation && !self.is_creating_project()))
+    }
+
+    fn complete_master_draft(
+        &mut self,
+        submission: &master_session::Submission,
+    ) -> Result<(), String> {
+        let crate::master_session::MasterOwnerAction::Submit {
+            project_id, text, ..
+        } = &submission.action
+        else {
+            return Ok(());
+        };
+        let draft = self
+            .drafts
+            .iter_mut()
+            .find(|draft| {
+                draft.database == submission.identity.database_instance()
+                    && &draft.project == project_id
+            })
+            .ok_or("Submitted master draft disappeared")?;
+        if draft.message_generation == submission.generation && &draft.message == text {
+            draft.message.clear();
+            draft.message_generation = draft
+                .message_generation
+                .checked_add(1)
+                .ok_or("Master input generation exhausted")?;
+        }
         Ok(())
     }
 
@@ -929,6 +1068,9 @@ impl App {
                 )
             };
         }
+        if self.master.is_open() {
+            return "Master setup | Enter Open | Esc retains conversation draft".into();
+        }
         if self.creating_project {
             return "Project name".into();
         }
@@ -963,7 +1105,10 @@ impl App {
         if self.focus != Focus::Conversation || self.unassigned {
             return Err("Select the project Conversation to submit; draft retained".into());
         }
-        if self.conversation_pending.is_some() || self.conversation_job.is_some() {
+        if self.conversation_pending.is_some()
+            || self.conversation_job.is_some()
+            || self.master.has_pending()
+        {
             return Err("An owner mutation is pending; draft retained. Ctrl-R reconnects and reconciles its exact identity".into());
         }
         self.ensure_draft()?;
@@ -979,6 +1124,16 @@ impl App {
         if text.trim().is_empty() {
             return Err("Owner input must contain non-whitespace text".into());
         }
+        if !draft.editing_brief {
+            let text = draft.message.clone();
+            let generation = draft.message_generation;
+            if self.master.submit(&text, generation)? {
+                self.conversation_stale = true;
+                self.notice("Submitting actual master turn; newer text remains a separate draft");
+                return Ok(());
+            }
+        }
+        let draft = &self.drafts[index];
         let (generation, mutation) = if draft.editing_brief {
             (
                 draft.brief_generation,
@@ -1067,6 +1222,7 @@ impl App {
             None => (0, String::new()),
         };
         self.ensure_draft()?;
+        self.brief_completion = None;
         let index = self.draft_index().ok_or("Project draft unavailable")?;
         let draft = &mut self.drafts[index];
         let cannot_prefill = text.len() > DRAFT_BYTES_MAX || text.chars().any(char::is_control);
@@ -1165,6 +1321,7 @@ impl App {
     pub(super) fn model_access_request(&mut self) -> Result<Option<model_access::Job>, String> {
         if self.conversation_pending.is_some()
             || self.declaration_pending.is_some()
+            || self.master.has_pending()
             || self.declaration.open
         {
             return Ok(None);
@@ -1374,6 +1531,9 @@ impl App {
                 .checked_add(1)
                 .ok_or("Conversation draft generation exhausted")?;
             if brief {
+                if draft.editing_brief {
+                    self.brief_completion = Some((draft.database.clone(), draft.project.clone()));
+                }
                 draft.editing_brief = false;
                 draft.expected_version = None;
             }
@@ -1441,6 +1601,7 @@ impl App {
         }
         if self.declaration_pending.is_some()
             || self.conversation_pending.is_some()
+            || self.master.has_pending()
             || self.conversation_job.is_some()
             || self.model_access.has_pending()
             || self.pending_creation.is_some()

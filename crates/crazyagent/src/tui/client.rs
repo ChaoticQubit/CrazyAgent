@@ -1,4 +1,4 @@
-use super::{dispatch, model_access};
+use super::{dispatch, master_session, model_access};
 use crate::client_controller::OwnerController;
 use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
@@ -32,6 +32,7 @@ enum Job {
     Wire(Box<WireRequest>),
     Reconnect,
     Conversation(Box<ConversationJob>),
+    Master(Box<master_session::Job>),
     ModelAccess(Box<model_access::Job>),
     Dispatch(Box<dispatch::Query>),
     Evidence {
@@ -135,6 +136,7 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
+    Master(Box<master_session::Event>),
     Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
     Dispatch(Box<dispatch::Event>),
@@ -343,6 +345,30 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Master(job) => {
+                            let native = native
+                                .as_mut()
+                                .expect("master requires paired configuration");
+                            let event = runtime.block_on(native.master(*job));
+                            let failed = matches!(
+                                &event,
+                                master_session::Event::Read { result: Err(_), .. }
+                                    | master_session::Event::Mutation { result: Err(_), .. }
+                            );
+                            if failed {
+                                native.detach();
+                                client = native.ordinary();
+                            }
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Master(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Dispatch(query) => {
                             let native = native
                                 .as_mut()
@@ -540,6 +566,10 @@ impl Connection {
         self.owner_job(Job::Conversation(Box::new(job)))
     }
 
+    pub(super) fn master(&mut self, job: master_session::Job) -> Result<(), String> {
+        self.owner_job(Job::Master(Box::new(job)))
+    }
+
     pub(super) fn creation(&mut self, job: CreationJob) -> Result<(), String> {
         self.owner_job(Job::Creation(Box::new(job)))
     }
@@ -590,6 +620,8 @@ struct Scan {
 }
 
 struct NativeOwner {
+    master_pending: Option<master_session::Submission>,
+    master_operation: Option<(RequestId, String)>,
     creation_pending: Option<CreationSubmission>,
     creation_operation: Option<(RequestId, String)>,
     creation_retry_allowed: bool,
@@ -607,6 +639,8 @@ struct NativeOwner {
 impl NativeOwner {
     fn new(socket: PathBuf, timeout: Duration) -> Self {
         Self {
+            master_pending: None,
+            master_operation: None,
             creation_pending: None,
             creation_operation: None,
             creation_retry_allowed: false,
@@ -677,6 +711,151 @@ impl NativeOwner {
     async fn dispatch(&mut self, query: dispatch::Query) -> dispatch::Event {
         let result = self.read_dispatch(&query).await;
         dispatch::Event { query, result }
+    }
+
+    async fn master(&mut self, job: master_session::Job) -> master_session::Event {
+        match job {
+            master_session::Job::Catalog { context } => {
+                let result = match self.master_controller(&context.identity) {
+                    Ok(controller) => tokio::time::timeout(
+                        Duration::from_secs(4),
+                        master_session::read_catalog(controller),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("master_catalog_deadline; inspect Settings".into()))
+                    .map(Box::new),
+                    Err(problem) => Err(problem),
+                };
+                master_session::Event::Catalog { context, result }
+            }
+            master_session::Job::Read {
+                context,
+                confirmation,
+            } => {
+                let result = match self.master_controller(&context.identity) {
+                    Ok(controller) => tokio::time::timeout(
+                        Duration::from_secs(4),
+                        master_session::read_view(controller, &context, confirmation.as_ref()),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("master_read_deadline".into()))
+                    .map(Box::new),
+                    Err(problem) => Err(problem),
+                };
+                master_session::Event::Read { context, result }
+            }
+            master_session::Job::Mutation {
+                submission,
+                delivery,
+            } => {
+                let result = self
+                    .mutate_master(&submission, delivery)
+                    .await
+                    .map(Box::new);
+                let retained = self.master_pending.is_some()
+                    && self
+                        .controller
+                        .as_ref()
+                        .is_some_and(|controller| controller.pending().is_some());
+                let operation = self.master_operation.clone();
+                assert!(!retained || operation.is_some());
+                if !retained {
+                    self.master_pending = None;
+                    self.master_operation = None;
+                }
+                master_session::Event::Mutation {
+                    submission,
+                    operation,
+                    result,
+                    retained,
+                }
+            }
+        }
+    }
+
+    fn master_controller(
+        &mut self,
+        identity: &OwnerConnectionIdentity,
+    ) -> Result<&mut OwnerController, String> {
+        if !self.ready {
+            return Err("master_owner_unavailable".into());
+        }
+        let controller = self.controller.as_mut().ok_or("master_owner_unavailable")?;
+        if controller.identity() != identity {
+            return Err("master_owner_identity_changed".into());
+        }
+        Ok(controller)
+    }
+
+    async fn mutate_master(
+        &mut self,
+        submission: &master_session::Submission,
+        delivery: MutationDelivery,
+    ) -> Result<OwnerResponse, String> {
+        if !self.ready {
+            return Err("master_owner_unavailable".into());
+        }
+        let controller = self.controller.as_mut().ok_or("master_owner_unavailable")?;
+        match delivery {
+            MutationDelivery::Submit => {
+                if controller.identity() != &submission.identity
+                    || controller.pending().is_some()
+                    || self.creation_pending.is_some()
+                    || self.conversation_pending.is_some()
+                    || self.model_pending.is_some()
+                    || self.master_pending.is_some()
+                {
+                    return Err("master_pending_or_owner_changed".into());
+                }
+                let project = master_session::action_project(&submission.action);
+                let state = controller
+                    .read(OwnerRead::ProjectMaster {
+                        project_id: project.clone(),
+                    })
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))?;
+                if !matches!(state.data, OwnerData::ProjectMaster { .. }) {
+                    return Err("master_fresh_read_required".into());
+                }
+                if let crate::master_session::MasterOwnerAction::Open {
+                    expected_config_id, ..
+                } = &submission.action
+                    && &state.config_id != expected_config_id
+                {
+                    return Err("master_stale_catalog; inspect Settings".into());
+                }
+                let pending = controller
+                    .begin_mutation(
+                        OwnerMutation::ProjectMaster {
+                            action: submission.action.clone(),
+                        },
+                        submission.generation,
+                    )
+                    .map_err(|error| bounded_problem(&error.0))?;
+                self.master_operation = Some((
+                    pending.request().request_id.clone(),
+                    pending.hash().to_owned(),
+                ));
+                self.master_pending = Some(submission.clone());
+                controller
+                    .send_pending()
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
+            }
+            MutationDelivery::Reconcile | MutationDelivery::Retry => {
+                if self.master_pending.as_ref() != Some(submission)
+                    || controller.pending().is_none()
+                {
+                    return Err("master_original_pending_context_required".into());
+                }
+                match delivery {
+                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
+                    MutationDelivery::Retry => controller.retry_pending().await,
+                    MutationDelivery::Submit => unreachable!(),
+                }
+                .map_err(|error| bounded_problem(&error.0))
+            }
+        }
     }
 
     async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {
@@ -801,6 +980,7 @@ impl NativeOwner {
                     || self.creation_pending.is_some()
                     || self.model_pending.is_some()
                     || self.conversation_pending.is_some()
+                    || self.master_pending.is_some()
                 {
                     return Err("metadata_pending_or_owner_changed".into());
                 }
@@ -1002,6 +1182,7 @@ impl NativeOwner {
                     || self.creation_pending.is_some()
                     || self.model_pending.is_some()
                     || self.conversation_pending.is_some()
+                    || self.master_pending.is_some()
                     || controller.pending().is_some()
                 {
                     return Err("conversation_pending_or_connection_changed".into());
@@ -1092,6 +1273,7 @@ impl NativeOwner {
         if self.creation_pending.is_some()
             || self.conversation_pending.is_some()
             || self.model_pending.is_some()
+            || self.master_pending.is_some()
         {
             return Err("creation_cross_kind_pending".into());
         }
