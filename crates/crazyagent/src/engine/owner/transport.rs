@@ -25,6 +25,8 @@ pub(crate) mod native_auth_channel;
 use native_auth_channel::NativeAuthSlot;
 #[cfg(test)]
 mod native_auth_channel_tests;
+#[cfg(test)]
+mod native_auth_dispatch_lifetime_tests;
 
 const SOCKET: &str = "owner.sock";
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
