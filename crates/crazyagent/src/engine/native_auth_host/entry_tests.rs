@@ -6,7 +6,7 @@ use crate::engine::owner::{
     OwnerOperation, OwnerRead, OwnerRequest, OwnerResponse,
 };
 use crate::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, RequestId};
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::OFlags;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -45,26 +45,24 @@ fallback_allowed = false
 "#;
 
 struct BootstrapPipe {
-    _root: tempfile::TempDir,
     reader: OwnedFd,
     writer: Option<File>,
 }
 
 impl BootstrapPipe {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("ca-eb-")
-            .tempdir_in("/private/tmp")
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let directory = File::open(root.path()).unwrap();
-        rustix::fs::mkfifoat(&directory, "bootstrap", Mode::from_raw_mode(0o600)).unwrap();
-        let flags = OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-        let reader = rustix::fs::openat(&directory, "bootstrap", OFlags::RDONLY | flags,
-            Mode::empty()).unwrap();
-        let writer = rustix::fs::openat(&directory, "bootstrap", OFlags::WRONLY | flags,
-            Mode::empty()).unwrap();
-        Self { _root: root, reader, writer: Some(File::from(writer)) }
+        let (reader, writer) = std::io::pipe().unwrap();
+        let reader = OwnedFd::from(reader);
+        let writer = OwnedFd::from(writer);
+        for fd in [&reader, &writer] {
+            let flags = rustix::fs::fcntl_getfl(fd).unwrap();
+            rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK).unwrap();
+            rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC).unwrap();
+        }
+        Self {
+            reader,
+            writer: Some(File::from(writer)),
+        }
     }
 
     fn write(&mut self, bytes: &[u8]) {
