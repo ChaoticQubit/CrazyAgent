@@ -139,6 +139,7 @@ where
         .request(OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: request("source-for-channel-fixture"),
+            expected_revision: Cursor::new(0),
             operation: OwnerOperation::Read {
                 query: OwnerRead::ModelAccessRecord {
                     collection: ModelAccessCollection::Connections,
@@ -375,6 +376,7 @@ async fn capabilities(client: &OwnerClient, id: &str) {
         .request(OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: request(id),
+            expected_revision: Cursor::new(0),
             operation: OwnerOperation::Read {
                 query: OwnerRead::Capabilities,
             },
