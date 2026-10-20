@@ -1,4 +1,4 @@
-use super::{dispatch, master_session, model_access};
+use super::{dispatch, master_session, model_access, native_auth};
 use crate::client_controller::OwnerController;
 use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
@@ -890,6 +890,10 @@ impl NativeOwner {
 
     async fn model_access(&mut self, job: model_access::Job) -> model_access::Event {
         match job {
+            model_access::Job::NativeAuth(job) => {
+                let result = self.native_auth(&job).await;
+                model_access::Event::NativeAuth(Box::new(native_auth::Event { job: *job, result }))
+            }
             model_access::Job::Read {
                 identity,
                 generation,
@@ -931,6 +935,49 @@ impl NativeOwner {
                     result,
                     retained,
                 }
+            }
+        }
+    }
+
+    async fn native_auth(&mut self, job: &native_auth::Job) -> Result<native_auth::Output, String> {
+        if !self.ready {
+            return Err("native_auth_owner_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("native_auth_owner_unavailable")?;
+        if controller.identity() != &job.context.basis.identity {
+            return Err("native_auth_owner_identity_changed".into());
+        }
+        match &job.command {
+            native_auth::Command::Inspect => controller
+                .read(OwnerRead::ModelAccessRecord {
+                    collection: crate::engine::owner::ModelAccessCollection::Connections,
+                    id: job.context.connection.id.clone(),
+                })
+                .await
+                .map(|reply| native_auth::Output::Inspected(Box::new(reply)))
+                .map_err(|_| "native_auth_inspection_unavailable".into()),
+            command => {
+                let reply = match command {
+                    native_auth::Command::Start(request) => {
+                        controller.start_native_auth(request.clone()).await
+                    }
+                    native_auth::Command::Read(request) => {
+                        controller.read_native_auth(request.clone()).await
+                    }
+                    native_auth::Command::Cancel(request) => {
+                        controller.cancel_native_auth(request.clone()).await
+                    }
+                    native_auth::Command::Logout(request) => {
+                        controller.logout_native_auth(request.clone()).await
+                    }
+                    native_auth::Command::Inspect => unreachable!(),
+                };
+                reply
+                    .map(|reply| native_auth::Output::Auth(Box::new(reply)))
+                    .map_err(|error| native_auth::public_problem(&error.0).into())
             }
         }
     }

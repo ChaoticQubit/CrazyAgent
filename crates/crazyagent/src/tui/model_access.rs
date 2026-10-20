@@ -1,5 +1,6 @@
 use super::app::UiEvent;
 use super::client::MutationDelivery;
+use super::native_auth;
 use crate::config::{
     AccountPool, ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint,
     ModelReference, ProviderQuotaPolicy,
@@ -29,6 +30,7 @@ pub(super) struct Submission {
 
 #[derive(Clone)]
 pub(super) enum Job {
+    NativeAuth(Box<native_auth::Job>),
     Read {
         identity: OwnerConnectionIdentity,
         generation: u64,
@@ -41,6 +43,7 @@ pub(super) enum Job {
 }
 
 pub(super) enum Event {
+    NativeAuth(Box<native_auth::Event>),
     Read {
         identity: OwnerConnectionIdentity,
         generation: u64,
@@ -63,6 +66,7 @@ enum RecordAction {
 }
 
 pub(super) struct State {
+    native_auth: native_auth::State,
     identity: Option<OwnerConnectionIdentity>,
     ready: bool,
     pub pinned: bool,
@@ -91,6 +95,7 @@ pub(super) struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            native_auth: native_auth::State::default(),
             identity: None,
             ready: false,
             pinned: false,
@@ -120,6 +125,7 @@ impl Default for State {
 
 impl State {
     pub fn access(&mut self, identity: Option<OwnerConnectionIdentity>, ready: bool) {
+        self.native_auth.access(identity.clone(), ready);
         self.ready = ready;
         if let Some(identity) = identity {
             self.identity = Some(identity);
@@ -145,11 +151,11 @@ impl State {
     }
 
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.native_auth.has_pending()
     }
 
     pub fn loading(&self) -> bool {
-        self.flight.is_some() || self.job.is_some()
+        self.flight.is_some() || self.job.is_some() || self.native_auth.loading()
     }
 
     pub fn disconnected(&self) -> bool {
@@ -160,12 +166,15 @@ impl State {
         if !self.ready {
             return Ok(None);
         }
+        if let Some(job) = self.native_auth.request() {
+            return Ok(Some(Job::NativeAuth(Box::new(job))));
+        }
         if self.job.is_none()
             && active
             && !self.pinned
             && self.needs_page
             && !self.loading()
-            && self.pending.is_none()
+            && !self.has_pending()
         {
             self.read(OwnerRead::ModelAccessPage {
                 collection: self.collection,
@@ -233,6 +242,12 @@ impl State {
     }
 
     pub fn reduce(&mut self, event: &UiEvent) -> Result<bool, String> {
+        if self.native_auth.is_open() {
+            return self.native_auth.reduce(event);
+        }
+        if matches!(event, UiEvent::ConfigureMaster) {
+            return self.open_native_auth();
+        }
         if !self.pinned
             && matches!(
                 event,
@@ -274,6 +289,38 @@ impl State {
         }
         self.assert_consistent();
         result.map(|()| true)
+    }
+
+    fn open_native_auth(&mut self) -> Result<bool, String> {
+        if self.editing || self.confirmation.is_some() || self.pending.is_some() {
+            return Ok(true);
+        }
+        if !self.ready
+            || self.pinned
+            || self.collection != ModelAccessCollection::Connections
+            || self.loading()
+        {
+            self.notice =
+                "Select an idle writable managed native Connection for authentication".into();
+            return Ok(true);
+        }
+        let Some(ModelAccessRecord::Connection { connection }) = self.items.get(self.selected)
+        else {
+            self.notice = "Select an actual Connection record for authentication".into();
+            return Ok(true);
+        };
+        let basis = self
+            .basis
+            .clone()
+            .ok_or("A fresh owner connection read is required")?;
+        match self.native_auth.open(basis, connection.clone()) {
+            Ok(()) => self.notice = "Inspecting the selected native connection".into(),
+            Err(_) => {
+                self.notice =
+                    "Authentication requires a managed Codex or Claude native connection".into()
+            }
+        }
+        Ok(true)
     }
 
     fn reduce_idle(&mut self, event: &UiEvent) -> Result<(), String> {
@@ -470,6 +517,10 @@ impl State {
 
     pub fn apply(&mut self, event: Event) -> Result<(), String> {
         match event {
+            Event::NativeAuth(event) => {
+                self.native_auth.apply(*event)?;
+                self.notice = "Native authentication observation updated; metadata retained".into();
+            }
             Event::Read {
                 identity,
                 generation,
@@ -689,6 +740,9 @@ impl State {
     }
 
     pub fn render(&self, compact: bool) -> String {
+        if self.native_auth.is_open() {
+            return self.native_auth.render(compact);
+        }
         let authority = if self.ready && self.basis.as_ref().is_some_and(|basis| basis.writable) {
             "Writable: host-granted metadata sources"
         } else {

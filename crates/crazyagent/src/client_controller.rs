@@ -1,5 +1,6 @@
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
+    NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply, NativeAuthStart,
     OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor,
     OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerView,
 };
@@ -63,6 +64,50 @@ impl PendingMutation {
 }
 
 impl OwnerController {
+    pub async fn start_native_auth(
+        &mut self,
+        request: NativeAuthStart,
+    ) -> Result<NativeAuthReply, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .start_native_auth(request)
+            .await
+    }
+
+    pub async fn read_native_auth(
+        &mut self,
+        request: NativeAuthQuery,
+    ) -> Result<NativeAuthReply, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .read_native_auth(request)
+            .await
+    }
+
+    pub async fn cancel_native_auth(
+        &mut self,
+        request: NativeAuthCancel,
+    ) -> Result<NativeAuthReply, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .cancel_native_auth(request)
+            .await
+    }
+
+    pub async fn logout_native_auth(
+        &mut self,
+        request: NativeAuthLogout,
+    ) -> Result<NativeAuthReply, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .logout_native_auth(request)
+            .await
+    }
+
     /// Admits the configured ordinary endpoint with its actual owner connection.
     /// Consumes a native client and fixes its kind and configured timeout.
     /// Returns the bound ordinary client and controller without rediscovery.
