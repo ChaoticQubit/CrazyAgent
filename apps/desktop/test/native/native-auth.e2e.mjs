@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, isAbsolute, join } from "node:path";
-import { lstatSync, writeFileSync } from "node:fs";
+import { ftruncateSync, lstatSync, openSync, writeFileSync, writeSync } from "node:fs";
 
 const execute = promisify(execFile);
 const panel = '[data-testid="native-auth-panel"]';
@@ -10,6 +10,35 @@ const first = "native-auth-connection-a";
 const second = "native-auth-connection-b";
 const account = "native-auth-account";
 const stages = new Set();
+let progressDescriptor;
+let progressStage = "case.prepare";
+
+function progress(label) {
+  const allowed = ["case.prepare", "case.initial", "case.start", "case.navigate", "case.cancel",
+    "case.logout", "case.complete", "idle.wait", "click.find", "click.enabled", "click.action",
+    "click.idle", "input.find", "input.enabled", "input.set", "input.value", "save.click",
+    "save.wait", "connection.create", "connection.fields", "connection.endpoint", "connection.auth",
+    "connection.profile", "connection.save", "prepare.idle", "prepare.settings",
+    "prepare.authority", "prepare.account.create", "prepare.account.input", "prepare.account.save",
+    "prepare.connections", "prepare.first", "prepare.second", "fields.execute", "observe.exec",
+    "open.select", "open.panel", "open.display", "open.context", "read.click", "read.observe",
+    "read.fields", "initial.open", "initial.control", "initial.logout", "initial.confirm",
+    "initial.back", "initial.operation", "initial.confirm-again", "initial.escape",
+    "initial.closed", "initial.reopen", "initial.proof", "start.click", "navigate.escape",
+    "cancel.click", "logout.open"];
+  if (!allowed.includes(label)) throw new Error("closed auth progress label required");
+  if (label.startsWith("case.") || label.startsWith("prepare.")) progressStage = label;
+  const bytes = Buffer.from(JSON.stringify({ stage: progressStage, step: label }));
+  if (bytes.length > 256) throw new Error("auth progress byte bound");
+  if (progressDescriptor === undefined) {
+    progressDescriptor = openSync(join(privateRun().evidence, "native-auth-progress.json"),
+      "wx", 0o600);
+  }
+  if (writeSync(progressDescriptor, bytes, 0, bytes.length, 0) !== bytes.length) {
+    throw new Error("auth progress write incomplete");
+  }
+  ftruncateSync(progressDescriptor, bytes.length);
+}
 
 function privateRun() {
   const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
@@ -38,58 +67,85 @@ function proof(stage, observation) {
 }
 
 async function idle() {
+  progress("idle.wait");
   await browser.waitUntil(async () => await $('[data-testid="connect-owner"]').isEnabled(),
     { timeout: 15000, timeoutMsg: "actual owner action did not settle" });
 }
 
 async function click(selector, root) {
+  progress("click.find");
   const element = root ? await $(root).$(selector) : await $(selector);
+  progress("click.enabled");
   await element.waitForEnabled({ timeout: 10000 });
+  progress("click.action");
   await element.click();
+  progress("click.idle");
   await idle();
 }
 
 async function input(field, value) {
+  progress("input.find");
   const element = await $(`[data-testid="model-field-${field}"]`);
+  progress("input.enabled");
   await element.waitForEnabled({ timeout: 10000 });
+  progress("input.set");
   await element.setValue(value);
+  progress("input.value");
   assert(await element.getValue() === value, "real metadata input did not retain its value");
 }
 
 async function save() {
+  progress("save.click");
   await click('[data-testid="save-model-access"]');
+  progress("save.wait");
   await browser.waitUntil(async () =>
     !await $('[data-testid="model-access-form"]').isExisting(),
   { timeout: 10000, timeoutMsg: "actual owner metadata mutation did not settle" });
 }
 
 async function createConnection(id, suffix) {
+  progress("connection.create");
   await click('[data-testid="create-model-access"]');
   const fields = { id, provider: "native-auth-provider", harness: "codex", protocol: "native",
     account, model: "native-auth-model", author: "native-auth-author" };
+  progress("connection.fields");
   for (const [field, value] of Object.entries(fields)) await input(field, value);
+  progress("connection.endpoint");
   await $('[data-testid="model-field-endpoint"]').selectByAttribute("value", "native");
+  progress("connection.auth");
   await $('[data-testid="model-field-auth"]').selectByAttribute("value", "native_managed");
+  progress("connection.profile");
   await input("credential", `auth-${privateRun().run}-${suffix}`);
+  progress("connection.save");
   await save();
 }
 
 async function prepare() {
   privateRun();
+  progress("prepare.idle");
   await idle();
+  progress("prepare.settings");
   await click("button=Settings");
+  progress("prepare.authority");
   await browser.waitUntil(async () =>
     (await $('[data-testid="model-access-authority"]').getText()).startsWith("Writable:"),
   { timeout: 10000, timeoutMsg: "actual writable metadata owner required" });
+  progress("prepare.account.create");
   await click('[data-testid="create-model-access"]');
+  progress("prepare.account.input");
   await input("id", account);
+  progress("prepare.account.save");
   await save();
+  progress("prepare.connections");
   await click('[data-testid="model-tab-connections"]');
+  progress("prepare.first");
   await createConnection(first, "a");
+  progress("prepare.second");
   await createConnection(second, "b");
 }
 
 async function fields() {
+  progress("fields.execute");
   return browser.execute(() => {
     const root = document.querySelector('[data-testid="native-auth-panel"]');
     if (!root) return null;
@@ -123,6 +179,7 @@ async function observe(connection, operation) {
   }
   let result;
   try {
+    progress("observe.exec");
     result = await execute(privateRun().fixture, args,
       { timeout: 10000, killSignal: "SIGKILL", maxBuffer: 4096 });
   } catch {
@@ -171,40 +228,59 @@ function factMatches(ui, actual, original, action) {
 }
 
 async function open(connection = first) {
+  progress("open.select");
   await click(`[data-model-id="${connection}"]`);
+  progress("open.panel");
   await click('[data-testid="native-auth-open"]');
+  progress("open.display");
   await $(panel).waitForDisplayed({ timeout: 10000 });
+  progress("open.context");
   contextMatches(await fields(), await observe(connection));
 }
 
 async function readOriginal(original, action = "sign_in") {
+  progress("read.click");
   await click('[data-testid="native-auth-read"]');
+  progress("read.observe");
   const actual = await observe(first, original);
+  progress("read.fields");
   factMatches(await fields(), actual, original, action);
   return actual;
 }
 
 async function initialControls() {
+  progress("initial.open");
   await open();
   for (const name of ["read", "cancel"]) {
+    progress("initial.control");
     assert(!await $(`[data-testid="native-auth-${name}"]`).isEnabled(),
       "Read and Cancel require an actual retained operation");
   }
+  progress("initial.logout");
   await click("button=Logout…", panel);
+  progress("initial.confirm");
   assert(await $(panel).$("button=Confirm logout").isEnabled(),
     "logout requires visible explicit confirmation");
+  progress("initial.back");
   await click("button=Back", panel);
+  progress("initial.operation");
   assert((await fields())["Original operation"] === null,
     "Back must not invent or submit an operation");
+  progress("initial.confirm-again");
   await click("button=Logout…", panel);
+  progress("initial.escape");
   await browser.keys("Escape");
+  progress("initial.closed");
   assert(!await $(panel).isExisting(),
     "Escape from the focused confirmation must hide the panel");
+  progress("initial.reopen");
   await open();
+  progress("initial.proof");
   proof("initial", { selected: await observe(first), ui: await fields() });
 }
 
 async function startOriginal() {
+  progress("start.click");
   await click("button=Start browser sign-in", panel);
   await browser.waitUntil(async () => {
     const ui = await fields();
@@ -224,6 +300,7 @@ async function startOriginal() {
 }
 
 async function navigate(original) {
+  progress("navigate.escape");
   await browser.keys("Escape");
   assert(!await $(panel).isExisting(), "focused Read Escape must hide the panel");
   await click("button=Approvals");
@@ -247,6 +324,7 @@ async function navigate(original) {
 }
 
 async function cancelOriginal(original) {
+  progress("cancel.click");
   await click('[data-testid="native-auth-cancel"]');
   const ui = await fields();
   assert(ui?.reason === "native_auth_not_active" && ui["Original operation"] === original,
@@ -261,6 +339,7 @@ async function cancelOriginal(original) {
 }
 
 async function logoutAndReconnect(original) {
+  progress("logout.open");
   await click("button=Logout…", panel);
   await click("button=Back", panel);
   factMatches(await fields(), await observe(first, original), original, "sign_in");
@@ -286,11 +365,18 @@ async function logoutAndReconnect(original) {
 
 describe("actual native desktop authentication controls", () => {
   it("joins real owner operations through Settings without claiming native sign-in", async () => {
+    progress("case.prepare");
     await prepare();
+    progress("case.initial");
     await initialControls();
+    progress("case.start");
     const original = await startOriginal();
+    progress("case.navigate");
     await navigate(original);
+    progress("case.cancel");
     await cancelOriginal(original);
+    progress("case.logout");
     await logoutAndReconnect(original);
+    progress("case.complete");
   });
 });
