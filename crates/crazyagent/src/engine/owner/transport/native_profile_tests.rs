@@ -232,11 +232,7 @@ impl ProfileCase {
     async fn prepare_at(&self, basis: &Basis) -> Result<PreparedNativeProfile, EngineError> {
         self.host()
             .await
-            .prepare_native_profile(
-                &basis.connection.id,
-                &basis.config_id,
-                &basis.source_hash,
-            )
+            .prepare_native_profile(&basis.connection.id, &basis.config_id, &basis.source_hash)
             .await
     }
 
@@ -270,7 +266,10 @@ impl ProfileCase {
             panic!("actual owner metadata edit required");
         };
         assert_eq!(operation.result, OwnerResult::Applied);
-        assert_eq!(operation.current_revision.value(), basis.revision.value() + 1);
+        assert_eq!(
+            operation.current_revision.value(),
+            basis.revision.value() + 1
+        );
     }
 
     fn custody(&self) -> PathBuf {
@@ -302,7 +301,8 @@ where
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let context = Arc::new(ProfileCase::start(root.path(), explicit_sources).await);
     let mut task = tokio::spawn(body(context.clone()));
-    let (outcome, timed_out) = match tokio::time::timeout(Duration::from_secs(45), &mut task).await {
+    let (outcome, timed_out) = match tokio::time::timeout(Duration::from_secs(45), &mut task).await
+    {
         Ok(outcome) => (outcome, false),
         Err(_) => {
             task.abort();
@@ -312,7 +312,10 @@ where
     let cleanup = tokio::time::timeout(Duration::from_secs(5), context.close()).await;
     let closed = matches!(&cleanup, Ok(Ok(())));
     if timed_out || outcome.is_err() || !closed {
-        eprintln!("native profile fixture retained at {}", root.keep().display());
+        eprintln!(
+            "native profile fixture retained at {}",
+            root.keep().display()
+        );
     }
     assert!(closed, "actual EngineService cleanup failed: {cleanup:?}");
     assert!(!timed_out, "native profile case exceeded 45 seconds");
@@ -378,10 +381,12 @@ fn assert_receipt(prepared: &PreparedNativeProfile, basis: &Basis) {
     assert_eq!(binding.database_instance, basis.database_instance);
     assert_eq!(binding.engine_epoch, basis.engine_epoch);
     assert_eq!(binding.custody_id.len(), 64);
-    assert!(binding
-        .custody_id
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert!(
+        binding
+            .custody_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
 }
 
 fn assert_rejected(result: Result<PreparedNativeProfile, EngineError>, state: &Path) {
@@ -420,8 +425,13 @@ fn durable_snapshot(path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     assert!(names.len() <= 128);
     let mut snapshot = BTreeMap::new();
     for name in names {
-        assert!(name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
-        let mut statement = transaction.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+        let mut statement = transaction
+            .prepare(&format!("SELECT * FROM \"{name}\""))
+            .unwrap();
         let columns = statement.column_count();
         let mut rows = statement.query([]).unwrap();
         let mut values = Vec::new();
@@ -481,7 +491,10 @@ async fn repeated_preparation_preserves_physical_custody_and_manifests() {
         assert_eq!(stamp(&context.profile_z()), profile);
         assert_eq!(stamp(&context.manifest_z()), identity);
         assert_eq!(std::fs::read(context.manifest_z()).unwrap(), bytes);
-        assert_eq!(std::fs::read(context.custody().join("identity.json")).unwrap(), root_bytes);
+        assert_eq!(
+            std::fs::read(context.custody().join("identity.json")).unwrap(),
+            root_bytes
+        );
         assert_eq!(slot_count(&context), 1);
     })
     .await;
@@ -492,7 +505,10 @@ async fn populated_engine_home_reuses_unread_native_state_after_repeat_and_resta
     run_case(true, |context| async move {
         let first = context.prepare("connection-z").await;
         let sentinel = context.home_z().join("native-owned-unread");
-        private_file(&sentinel, b"synthetic native state that preparation must never read\n");
+        private_file(
+            &sentinel,
+            b"synthetic native state that preparation must never read\n",
+        );
         std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o000)).unwrap();
         let unread = stamp(&sentinel);
         let home = stamp(&context.home_z());
@@ -509,14 +525,26 @@ async fn populated_engine_home_reuses_unread_native_state_after_repeat_and_resta
         let reopened = context.prepare_at(&basis).await.unwrap();
         assert_receipt(&reopened, &basis);
         assert_eq!(reopened.binding().custody_id, first.binding().custody_id);
-        assert_eq!(reopened.binding().database_instance, first.binding().database_instance);
-        assert_ne!(reopened.binding().engine_epoch, first.binding().engine_epoch);
+        assert_eq!(
+            reopened.binding().database_instance,
+            first.binding().database_instance
+        );
+        assert_ne!(
+            reopened.binding().engine_epoch,
+            first.binding().engine_epoch
+        );
         assert_eq!(stamp(&sentinel), unread);
         assert_eq!(stamp(&context.home_z()), home);
         let after = std::fs::symlink_metadata(&sentinel).unwrap();
         assert_eq!((after.atime(), after.atime_nsec()), accessed);
-        assert_eq!(std::fs::read(context.manifest_z()).unwrap(), profile_identity);
-        assert_eq!(std::fs::read(context.custody().join("identity.json")).unwrap(), root_identity);
+        assert_eq!(
+            std::fs::read(context.manifest_z()).unwrap(),
+            profile_identity
+        );
+        assert_eq!(
+            std::fs::read(context.custody().join("identity.json")).unwrap(),
+            root_identity
+        );
         assert_eq!(slot_count(&context), 1);
     })
     .await;
@@ -581,21 +609,28 @@ async fn unavailable_custody_does_not_broaden_ordinary_engine_startup_rejection(
     let global = root.path().join("global.toml");
     private_file(&global, CATALOG.as_bytes());
     let config = resolve_config(&global, &root.path().join("project.toml")).unwrap();
-    let engine = Arc::new(Engine::open(&state.join("engine.db"), config.clone()).await.unwrap());
-    let (server, host) = OwnerServer::bind(&owners, engine.clone(), &config).await.unwrap();
+    let engine = Arc::new(
+        Engine::open(&state.join("engine.db"), config.clone())
+            .await
+            .unwrap(),
+    );
+    let (server, host) = OwnerServer::bind(&owners, engine.clone(), &config)
+        .await
+        .unwrap();
     let (stop, stopped) = oneshot::channel();
     let serving = tokio::spawn(server.run(stopped));
     let mut prepare = tokio::spawn(async move {
         host.prepare_native_profile(&reference("connection-z"), &config.id, config.id.as_str())
             .await
     });
-    let (result, timed_out) = match tokio::time::timeout(Duration::from_secs(45), &mut prepare).await {
-        Ok(result) => (result, false),
-        Err(_) => {
-            prepare.abort();
-            (prepare.await, true)
-        }
-    };
+    let (result, timed_out) =
+        match tokio::time::timeout(Duration::from_secs(45), &mut prepare).await {
+            Ok(result) => (result, false),
+            Err(_) => {
+                prepare.abort();
+                (prepare.await, true)
+            }
+        };
     let _ = stop.send(());
     let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
         let served = serving.await;
@@ -606,10 +641,16 @@ async fn unavailable_custody_does_not_broaden_ordinary_engine_startup_rejection(
     .await;
     let closed = matches!(&cleanup, Ok(Ok(())));
     if timed_out || result.is_err() || !closed {
-        eprintln!("ordinary engine profile fixture retained at {}", root.keep().display());
+        eprintln!(
+            "ordinary engine profile fixture retained at {}",
+            root.keep().display()
+        );
     }
     assert!(closed, "ordinary Engine cleanup failed: {cleanup:?}");
-    assert!(!timed_out, "ordinary Engine preparation exceeded 45 seconds");
+    assert!(
+        !timed_out,
+        "ordinary Engine preparation exceeded 45 seconds"
+    );
     let result = match result {
         Ok(result) => result,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
@@ -849,12 +890,18 @@ async fn symlinked_home_cannot_escape_to_an_outside_directory() {
         context.prepare("connection-z").await;
         let outside = context.state.parent().unwrap().join("outside");
         private_directory(&outside);
-        private_file(&outside.join("sentinel"), b"outside fixture remains unchanged");
+        private_file(
+            &outside.join("sentinel"),
+            b"outside fixture remains unchanged",
+        );
         std::fs::rename(context.home_z(), context.profile_z().join("original-home")).unwrap();
         symlink(&outside, context.home_z()).unwrap();
         let basis = context.basis("connection-z").await;
         assert_rejected(context.prepare_at(&basis).await, &context.state);
-        assert_eq!(std::fs::read(outside.join("sentinel")).unwrap(), b"outside fixture remains unchanged");
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"outside fixture remains unchanged"
+        );
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
     })
     .await;
@@ -909,7 +956,10 @@ async fn a_new_database_inode_cannot_reuse_old_custody() {
         context.reopen_main().await;
         let basis = context.basis("connection-z").await;
         assert_rejected(context.prepare_at(&basis).await, &context.state);
-        assert_eq!(std::fs::read(context.custody().join("identity.json")).unwrap(), identity);
+        assert_eq!(
+            std::fs::read(context.custody().join("identity.json")).unwrap(),
+            identity
+        );
     })
     .await;
 }
@@ -970,7 +1020,10 @@ async fn unknown_identity_fields_are_rejected() {
         context.prepare("connection-z").await;
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(context.manifest_z()).unwrap()).unwrap();
-        value.as_object_mut().unwrap().insert("unrecognized".into(), true.into());
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unrecognized".into(), true.into());
         let bytes = serde_json::to_vec(&value).unwrap();
         private_file(&context.manifest_z(), &bytes);
         let basis = context.basis("connection-z").await;
@@ -987,7 +1040,8 @@ async fn duplicate_declared_identity_fields_are_rejected() {
         let original = std::fs::read(context.manifest_z()).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
         let (key, first) = value.as_object().unwrap().iter().next().unwrap();
-        let mut bytes = format!("{{{}:{},", serde_json::to_string(key).unwrap(), first).into_bytes();
+        let mut bytes =
+            format!("{{{}:{},", serde_json::to_string(key).unwrap(), first).into_bytes();
         let normalized = serde_json::to_vec(&value).unwrap();
         bytes.extend_from_slice(normalized.strip_prefix(b"{").unwrap());
         private_file(&context.manifest_z(), &bytes);
@@ -1141,7 +1195,10 @@ async fn incomplete_retained_slots_are_not_evicted_to_admit_another_profile() {
     run_case(true, |context| async move {
         context.prepare("connection-a").await;
         for index in 0..63 {
-            let key = format!("{:x}", Sha256::digest(format!("incomplete-{index}").as_bytes()));
+            let key = format!(
+                "{:x}",
+                Sha256::digest(format!("incomplete-{index}").as_bytes())
+            );
             private_directory(&context.custody().join(key));
         }
         assert_eq!(slot_count(&context), 64);
@@ -1160,7 +1217,10 @@ async fn profile_preparation_changes_no_durable_engine_or_admission_state() {
         let before = durable_snapshot(&context.state.join("engine.db"));
         let source = std::fs::read(&context.global).unwrap();
         let host = context.host().await;
-        let state = host.model_connection_state(&basis.connection.id).await.unwrap();
+        let state = host
+            .model_connection_state(&basis.connection.id)
+            .await
+            .unwrap();
         assert_eq!(state.health, Health::Unknown);
         assert_eq!(state.quota, Quota::Unknown);
         let prepared = context.prepare_at(&basis).await.unwrap();
@@ -1170,7 +1230,10 @@ async fn profile_preparation_changes_no_durable_engine_or_admission_state() {
         assert_eq!(current.config_id, basis.config_id);
         assert_eq!(current.source_hash, basis.source_hash);
         assert_eq!(std::fs::read(&context.global).unwrap(), source);
-        let state = host.model_connection_state(&basis.connection.id).await.unwrap();
+        let state = host
+            .model_connection_state(&basis.connection.id)
+            .await
+            .unwrap();
         assert_eq!(state.health, Health::Unknown);
         assert_eq!(state.quota, Quota::Unknown);
         assert!(state.capabilities.is_empty());
