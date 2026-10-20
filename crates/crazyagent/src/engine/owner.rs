@@ -82,6 +82,9 @@ pub(crate) struct Registration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerMutation {
+    ProjectMaster {
+        action: crate::master_session::MasterOwnerAction,
+    },
     PrepareWorkerDispatch {
         attempt: crate::worker_dispatch::AttemptRef,
         repository_slot: u8,
@@ -139,6 +142,9 @@ pub enum OwnerMutation {
 impl OwnerMutation {
     pub(crate) fn command(&self) -> Result<Command, EngineError> {
         Ok(match self {
+            Self::ProjectMaster { .. } => {
+                return Err(failure("owner_master_requires_actor"));
+            }
             Self::PrepareWorkerDispatch {
                 attempt,
                 repository_slot,
@@ -261,6 +267,15 @@ pub struct OwnerPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerRead {
+    ProjectMaster {
+        project_id: ProjectId,
+    },
+    ProjectMasterTurns {
+        project_id: ProjectId,
+        session_id: SessionId,
+        cursor: Option<crate::master_session::MasterCursor>,
+        limit: u8,
+    },
     WorkerDispatch {
         dispatch_id: RequestId,
     },
@@ -329,6 +344,8 @@ impl OwnerRead {
     pub(crate) fn command(&self) -> Result<Option<Command>, EngineError> {
         Ok(Some(match self {
             Self::WorkerDispatch { .. }
+            | Self::ProjectMaster { .. }
+            | Self::ProjectMasterTurns { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
             | Self::ModelAccessRecord { .. }
@@ -427,6 +444,9 @@ impl OwnerRequest {
         encode_frame(self).map_err(|_| failure("owner_request_bounds"))?;
         match &self.operation {
             OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            } => crate::master_session::validate_action(action)?,
+            OwnerOperation::Apply {
                 mutation:
                     OwnerMutation::PrepareWorkerDispatch {
                         attempt,
@@ -458,6 +478,9 @@ impl OwnerRequest {
             }
             OwnerOperation::Read { query } => {
                 query.command()?;
+                if let OwnerRead::ProjectMasterTurns { cursor, limit, .. } = query {
+                    crate::master_session::validate_page(cursor.as_ref(), *limit)?;
+                }
                 if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
                     if !(1..=16).contains(limit) {
                         return Err(failure("model_access_page_limit"));
@@ -581,6 +604,12 @@ pub enum OwnerSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
+    ProjectMaster {
+        session: Option<crate::master_session::MasterSessionView>,
+    },
+    ProjectMasterTurns {
+        page: crate::master_session::MasterTurnPage,
+    },
     WorkerDispatch {
         dispatch: Option<Box<crate::worker_dispatch::DispatchView>>,
     },

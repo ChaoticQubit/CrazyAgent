@@ -9,6 +9,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
+mod master_session;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -221,6 +222,21 @@ impl Storage {
                                 let _ = reply.send(Err(e));
                                 continue;
                             }
+                            if matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::ProjectMaster { .. }
+                                }
+                            ) {
+                                let _ = reply.send(master_session::apply(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &admission,
+                                    &request,
+                                ));
+                                continue;
+                            }
                             let _ = reply.send(owner_apply(
                                 &mut connection,
                                 &config,
@@ -230,6 +246,20 @@ impl Storage {
                             ));
                         }
                         Job::OwnerRead(admission, query, reply) => {
+                            if matches!(
+                                &query,
+                                OwnerRead::ProjectMaster { .. }
+                                    | OwnerRead::ProjectMasterTurns { .. }
+                            ) {
+                                let _ = reply.send(master_session::read(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &admission,
+                                    &query,
+                                ));
+                                continue;
+                            }
                             if matches!(
                                 query,
                                 OwnerRead::ModelAccessPage { .. }
@@ -410,7 +440,8 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
     worker_dispatch::initialize(connection)?;
-    model_gateway::initialize(connection)
+    model_gateway::initialize(connection)?;
+    master_session::initialize(connection)
 }
 
 fn prepare_native_profile(

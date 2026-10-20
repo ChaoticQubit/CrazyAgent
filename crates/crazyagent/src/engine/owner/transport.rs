@@ -1579,6 +1579,7 @@ async fn write_owner_reply(
                 | "owner_runtime_stale"
                 | "owner_queue_not_submitted"
                 | "operation_identity_conflict"
+                | "master_transaction_rolled_back"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {

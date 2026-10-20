@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod coordination;
 pub mod engine;
 pub mod isolation;
+pub mod master_session;
 pub mod memory;
 pub mod model_gateway;
 pub mod protocol;
