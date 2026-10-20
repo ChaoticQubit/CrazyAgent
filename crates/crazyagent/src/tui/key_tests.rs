@@ -438,6 +438,21 @@ fn assert_conversation_routes(app: &App) {
     }
 }
 
+fn assert_control_alt_rejected(app: &App, characters: &[char]) {
+    for modifiers in [
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ] {
+        for &character in characters {
+            assert_one(
+                app,
+                KeyEvent::new(KeyCode::Char(character), modifiers),
+                None,
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
     with_brief(|app| {
@@ -445,8 +460,6 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
         for modifiers in [
             KeyModifiers::CONTROL,
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
         ] {
             for (character, expected) in [
                 ('b', UiEvent::ToggleBrief),
@@ -461,6 +474,7 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
                 );
             }
         }
+        assert_control_alt_rejected(app, &['b', 'u', 'n', 'p']);
         for character in ['q', 'c', 'r'] {
             assert_one(
                 app,
@@ -469,6 +483,7 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
             );
         }
         focus(app, Focus::Settings);
+        assert_control_alt_rejected(app, &['n', 'p']);
         for (character, expected) in [('n', UiEvent::HistoryNext), ('p', UiEvent::HistoryFirst)] {
             assert_one(
                 app,
@@ -489,6 +504,7 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
             );
         }
         app.reduce(UiEvent::BeginDeclaration).unwrap();
+        assert_control_alt_rejected(app, &['n', 'd']);
         for (character, expected) in [
             ('n', UiEvent::DeclarationAdd),
             ('d', UiEvent::DeclarationRemove),
@@ -503,4 +519,3 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
     })
     .await;
 }
-
