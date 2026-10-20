@@ -20,6 +20,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+mod native_auth;
+
 const SOCKET: &str = "owner.sock";
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
 
@@ -1481,6 +1483,12 @@ async fn serve_owner(
         }
         let a = authority.authenticate(&auth)?;
         let frame = read_frame(&mut stream).await?;
+        let selector: serde_json::Value =
+            serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
+        if selector.get("native_auth").is_some() {
+            return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+                .await;
+        }
         let request: OwnerRequest =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;

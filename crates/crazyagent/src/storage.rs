@@ -1,4 +1,5 @@
 use crate::config::EffectiveConfig;
+use crate::engine::owner::native_auth as owner_auth;
 use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
@@ -10,10 +11,16 @@ use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 
 mod master_session;
+mod native_auth;
 mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    NativeAuth(
+        Admission,
+        owner_auth::Command,
+        oneshot::Sender<Result<NativeAuthReply, EngineError>>,
+    ),
     PrepareNativeProfile(
         HostStamp,
         CredentialRef,
@@ -132,6 +139,21 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::NativeAuth(admission, command, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::execute(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    custody.as_mut().unwrap(),
+                                    &admission,
+                                    command,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::PrepareNativeProfile(host, id, config_id, source_hash, reply) => {
                             let result = if readonly {
                                 Err(error("native_profile_readonly"))
@@ -441,7 +463,8 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     crate::worktrees::reconcile(connection)?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
-    master_session::initialize(connection)
+    master_session::initialize(connection)?;
+    native_auth::initialize(connection)
 }
 
 fn prepare_native_profile(

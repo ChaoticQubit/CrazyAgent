@@ -1,4 +1,11 @@
+pub(crate) mod native_auth;
 mod transport;
+
+pub use native_auth::{
+    NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
+    NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
+    NativeAuthScope, NativeAuthStart,
+};
 
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
