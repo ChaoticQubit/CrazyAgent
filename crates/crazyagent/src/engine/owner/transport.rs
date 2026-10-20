@@ -2766,3 +2766,6 @@ fallback_allowed = false
         );
     }
 }
+
+#[cfg(test)]
+mod native_profile_tests;
