@@ -36,6 +36,132 @@ pub enum ProtocolError {
     Unsupported,
 }
 
+const AUTH_STATUS_STRING_BYTES_MAX: usize = 4096;
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AuthStatus {
+    pub logged_in: bool,
+    pub auth_method: AuthMethod,
+    pub api_provider: AuthStatusText,
+    pub config_directory: AuthStatusText,
+    pub email: AuthStatusField,
+    pub org_id: AuthStatusField,
+    pub org_name: AuthStatusField,
+    pub subscription_type: AuthStatusField,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum AuthMethod {
+    None,
+    ClaudeAi,
+    ApiKey,
+    OauthToken,
+    ApiKeyHelper,
+    ThirdParty,
+    Unknown(AuthStatusText),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum AuthStatusField {
+    Missing,
+    Null,
+    Value(AuthStatusText),
+}
+
+#[derive(Eq, PartialEq)]
+pub struct AuthStatusText(String);
+
+impl AuthStatusText {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for AuthStatusText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthStatusText([REDACTED])")
+    }
+}
+
+/// Decodes one bounded JSON stdout document from Claude auth status.
+/// Input contains observed CLI facts without trusted process or profile identity.
+/// Output preserves unknown facts and redacts sensitive text from Debug.
+pub fn decode_auth_status(stdout: &[u8]) -> Result<AuthStatus, ProtocolError> {
+    if stdout.len() > FRAME_BYTES_MAX {
+        return Err(ProtocolError::FrameTooLarge);
+    }
+    let StrictValue(value) =
+        serde_json::from_slice(stdout).map_err(|_| ProtocolError::InvalidMessage)?;
+    let mut nodes = 0;
+    validate_shape(&value, 0, &mut nodes)?;
+    auth_status_string_bounds(&value)?;
+    let logged_in = field(&value, "loggedIn")?
+        .as_bool()
+        .ok_or(ProtocolError::InvalidMessage)?;
+    let method = auth_status_required_text(&value, "authMethod")?;
+    let auth_method = match method.as_str() {
+        "none" => AuthMethod::None,
+        "claude.ai" => AuthMethod::ClaudeAi,
+        "api_key" => AuthMethod::ApiKey,
+        "oauth_token" => AuthMethod::OauthToken,
+        "api_key_helper" => AuthMethod::ApiKeyHelper,
+        "third_party" => AuthMethod::ThirdParty,
+        _ => AuthMethod::Unknown(method),
+    };
+    Ok(AuthStatus {
+        logged_in,
+        auth_method,
+        api_provider: auth_status_required_text(&value, "apiProvider")?,
+        config_directory: auth_status_required_text(&value, "configDirectory")?,
+        email: auth_status_optional_text(&value, "email")?,
+        org_id: auth_status_optional_text(&value, "orgId")?,
+        org_name: auth_status_optional_text(&value, "orgName")?,
+        subscription_type: auth_status_optional_text(&value, "subscriptionType")?,
+    })
+}
+
+fn auth_status_required_text(value: &Value, name: &str) -> Result<AuthStatusText, ProtocolError> {
+    let text = field(value, name)?
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .ok_or(ProtocolError::InvalidMessage)?;
+    Ok(AuthStatusText(text.to_owned()))
+}
+
+fn auth_status_optional_text(value: &Value, name: &str) -> Result<AuthStatusField, ProtocolError> {
+    match value.get(name) {
+        None => Ok(AuthStatusField::Missing),
+        Some(Value::Null) => Ok(AuthStatusField::Null),
+        Some(Value::String(text)) => Ok(AuthStatusField::Value(AuthStatusText(text.clone()))),
+        Some(_) => Err(ProtocolError::InvalidMessage),
+    }
+}
+
+fn auth_status_string_bounds(value: &Value) -> Result<(), ProtocolError> {
+    match value {
+        Value::String(text) => {
+            if text.len() > AUTH_STATUS_STRING_BYTES_MAX {
+                return Err(ProtocolError::Capacity);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                auth_status_string_bounds(item)?;
+            }
+        }
+        Value::Object(items) => {
+            for (key, item) in items {
+                if key.len() > AUTH_STATUS_STRING_BYTES_MAX {
+                    return Err(ProtocolError::Capacity);
+                }
+                auth_status_string_bounds(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Projects bounded Claude structured stream messages into shared observations.
 /// Inputs bind a launch action and account reference without executing either.
 /// Outputs preserve observed identity and never qualify native admission.
