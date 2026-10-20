@@ -6,3 +6,5 @@ mod custody_tests;
 mod entry;
 #[cfg(test)]
 mod entry_tests;
+#[cfg(test)]
+mod executable_tests;
