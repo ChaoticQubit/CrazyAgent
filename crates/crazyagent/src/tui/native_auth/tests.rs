@@ -783,12 +783,12 @@ async fn real_changed_source_is_rejected_before_start_and_does_not_rebase_scope(
         let mut state = State::default();
         state.open(basis.clone(), connection).unwrap();
         let job = state.request().unwrap();
+        let mut ui = Ui::new(&case).await;
         std::fs::write(
             &case.global,
             CATALOG.replace("model-codex", "model-changed"),
         )
         .unwrap();
-        let mut ui = Ui::new(&case).await;
         let event = ui.exchange(job).await;
         let _ = state.apply(event);
         let _ = state.reduce(&UiEvent::Submit);
