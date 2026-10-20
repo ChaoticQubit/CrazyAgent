@@ -2,15 +2,15 @@ use super::app::UiEvent;
 use super::client::MutationDelivery;
 use crate::client_controller::OwnerController;
 use crate::config::{AccountPool, ModelAccess, ModelConnection, ModelEndpoint};
-use crate::conversation::{ConversationContent, ConversationEntry};
+use crate::conversation::{ConversationContent, ConversationCursor, ConversationEntry};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
-    ModelAccessCollection, ModelAccessRecord, OwnerData, OwnerProvenance, OwnerRead,
-    OwnerReadReply, OwnerResponse, OwnerResult,
+    ModelAccessCollection, ModelAccessCursor, ModelAccessRecord, OwnerApplied, OwnerData,
+    OwnerProvenance, OwnerRead, OwnerReadReply, OwnerResponse, OwnerResult,
 };
 use crate::master_session::{
-    MasterBackend, MasterOwnerAction, MasterSelection, MasterSessionPhase, MasterSessionView,
-    MasterTurnPhase, MasterTurnView,
+    MasterBackend, MasterCursor, MasterOwnerAction, MasterSelection, MasterSessionPhase,
+    MasterSessionView, MasterTurnPhase, MasterTurnView,
 };
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::routing::{ResourceBudget, RouteRequest};
@@ -293,100 +293,16 @@ impl State {
             }
             UiEvent::SelectionNext | UiEvent::SelectionPrevious => {
                 let forward = matches!(event, UiEvent::SelectionNext);
-                let form = &mut self.forms[index];
-                match form.field {
-                    0 => {
-                        let backends = [
-                            MasterBackend::Rcli,
-                            MasterBackend::Codex,
-                            MasterBackend::Claude,
-                        ];
-                        let current = backends
-                            .iter()
-                            .position(|backend| backend == &form.backend)
-                            .unwrap();
-                        form.backend = backends[(current + if forward { 1 } else { 2 }) % 3];
-                        form.account = None;
-                        if self.catalog.as_ref().is_some_and(|catalog| {
-                            !catalog
-                                .pools(form)
-                                .iter()
-                                .any(|pool| Some(&pool.id) == form.pool.as_ref())
-                        }) {
-                            form.pool = None;
-                        }
-                    }
-                    1 => {
-                        if let Some(catalog) = &self.catalog {
-                            let choices: Vec<_> = catalog
-                                .pools(form)
-                                .iter()
-                                .map(|pool| pool.id.clone())
-                                .collect();
-                            let selected = cycle(&choices, form.pool.as_ref(), forward);
-                            if form.pool != selected {
-                                form.account = None;
-                            }
-                            form.pool = selected;
-                        }
-                    }
-                    2 => {
-                        if let Some(catalog) = &self.catalog {
-                            form.account =
-                                cycle(&catalog.accounts(form), form.account.as_ref(), forward);
-                        }
-                    }
-                    3 => {
-                        if let Some(catalog) = &self.catalog {
-                            form.target = cycle(&catalog.targets, form.target.as_ref(), forward);
-                        }
-                    }
-                    _ => return Ok(true),
+                if !self.forms[index].select(self.catalog.as_ref(), forward)? {
+                    return Ok(true);
                 }
-                form.generation = form
-                    .generation
-                    .checked_add(1)
-                    .ok_or("Master form generation exhausted")?;
                 self.defaults();
             }
             UiEvent::Character(character) => {
-                let form = &mut self.forms[index];
-                if form.field >= 4 {
-                    let value = &mut form.values[form.field - 4];
-                    if !character.is_ascii_digit() || value.len() >= 13 {
-                        return Err(
-                            "Allowance uses at most 13 decimal digits; literal value retained"
-                                .into(),
-                        );
-                    }
-                    value.push(*character);
-                    form.generation = form
-                        .generation
-                        .checked_add(1)
-                        .ok_or("Master form generation exhausted")?;
-                }
+                self.forms[index].edit_allowance(Some(*character))?;
             }
-            UiEvent::Backspace => {
-                let form = &mut self.forms[index];
-                if form.field >= 4 && form.values[form.field - 4].pop().is_some() {
-                    form.generation = form
-                        .generation
-                        .checked_add(1)
-                        .ok_or("Master form generation exhausted")?;
-                }
-            }
-            UiEvent::Submit => {
-                let selection = self.selection()?;
-                let catalog = self.catalog.as_ref().unwrap();
-                let action = MasterOwnerAction::Open {
-                    project_id: self.project.clone().unwrap(),
-                    expected_config_id: catalog.config_id.clone(),
-                    expected_source_hash: catalog.source_hash.clone(),
-                    selection,
-                };
-                self.enqueue(action, self.forms[index].generation)?;
-                self.forms[index].explicit = true;
-            }
+            UiEvent::Backspace => self.forms[index].edit_allowance(None)?,
+            UiEvent::Submit => self.open_selection(index)?,
             UiEvent::Cancel => self.forms[index].open = false,
             UiEvent::ToggleBrief
             | UiEvent::ToggleUnassigned
@@ -401,9 +317,27 @@ impl State {
         Ok(true)
     }
 
+    fn open_selection(&mut self, index: usize) -> Result<(), String> {
+        let selection = self.selection()?;
+        let catalog = self.catalog.as_ref().unwrap();
+        let action = MasterOwnerAction::Open {
+            project_id: self.project.clone().unwrap(),
+            expected_config_id: catalog.config_id.clone(),
+            expected_source_hash: catalog.source_hash.clone(),
+            selection,
+        };
+        self.enqueue(action, self.forms[index].generation)?;
+        self.forms[index].explicit = true;
+        Ok(())
+    }
+
     fn selection(&self) -> Result<MasterSelection, String> {
         if !self.ready {
-            return Err("Open disabled: authenticated owner unavailable; inspect Settings; Ctrl-R reconnects".into());
+            return Err(concat!(
+                "Open disabled: authenticated owner unavailable; ",
+                "inspect Settings; Ctrl-R reconnects"
+            )
+            .into());
         }
         let catalog = self
             .catalog
@@ -429,31 +363,17 @@ impl State {
             .as_ref()
             .filter(|target| catalog.targets.contains(target))
             .ok_or("Open disabled: no allowed execution sandbox; inspect Settings")?;
-        let mut values = [0; 7];
-        for (index, value) in form.values.iter().enumerate() {
-            values[index] = value.parse().map_err(|_| {
-                format!(
-                    "Open disabled: {} requires a decimal allowance; value retained",
-                    DIMENSIONS[index]
-                )
-            })?;
-        }
-        let resources = ResourceBudget {
-            slots: values[0],
-            cpu_millis: values[1],
-            memory_mib: values[2],
-            processes: values[3],
-            output_bytes: values[4],
-            wall_time_ms: values[5],
-            spend_microunits: values[6],
-        };
-        resources.validate()?;
+        let resources = form.resources()?;
         if catalog
             .capacities
             .iter()
             .any(|capacity| !resources.fits(capacity))
         {
-            return Err("Open disabled: allowance exceeds current owner policy; all seven values retained; inspect Settings".into());
+            return Err(concat!(
+                "Open disabled: allowance exceeds current owner policy; ",
+                "all seven values retained; inspect Settings"
+            )
+            .into());
         }
         Ok(MasterSelection {
             backend: form.backend,
@@ -472,7 +392,11 @@ impl State {
 
     fn enqueue(&mut self, action: MasterOwnerAction, generation: u64) -> Result<(), String> {
         if !self.ready || self.pending.is_some() || self.job.is_some() {
-            return Err("Master owner intent pending or unavailable; draft and exact identity retained; Ctrl-R recovers".into());
+            return Err(concat!(
+                "Master owner intent pending or unavailable; ",
+                "draft and exact identity retained; Ctrl-R recovers"
+            )
+            .into());
         }
         let submission = Submission {
             identity: self
@@ -639,181 +563,252 @@ impl State {
     pub fn apply(&mut self, event: Event) -> Result<Option<Submission>, String> {
         match event {
             Event::Catalog { context, result } => {
-                if self.flight.as_ref() != Some(&context) {
-                    return Ok(None);
-                }
-                self.flight = None;
-                if !self.matches(&context) {
-                    return Ok(None);
-                }
-                match result {
-                    Ok(catalog) => {
-                        self.catalog = Some(*catalog);
-                        self.defaults();
-                        self.notice = "Actual owner catalog and policy loaded; native delivery/authentication remain unsupported".into();
-                    }
-                    Err(problem) => {
-                        self.catalog = None;
-                        self.notice = format!(
-                            "Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes"
-                        );
-                    }
-                }
+                self.apply_catalog(context, result);
+                Ok(None)
             }
-            Event::Read { context, result } => {
-                if self.flight.as_ref() == Some(&context) {
-                    self.flight = None;
-                }
-                let current = self.matches(&context);
-                if self.identity.as_ref() != Some(&context.identity) {
-                    return Ok(None);
-                }
-                self.next_read = Instant::now() + Duration::from_secs(1);
-                match result {
-                    Ok(view) => {
-                        let completed = match self.confirm(&context, &view) {
-                            Ok(completed) => completed,
-                            Err(problem) => {
-                                self.notice = format!(
-                                    "{problem}; receipt and drafts retained; Ctrl-R refreshes"
-                                );
-                                if current {
-                                    self.view = None;
-                                }
-                                return Ok(None);
-                            }
-                        };
-                        if current {
-                            self.view = Some(*view);
-                        }
-                        if let Some(submission) = completed {
-                            self.pending = None;
-                            if let MasterOwnerAction::Open { .. } = submission.action
-                                && let Some(form) = self.forms.iter_mut().find(|form| {
-                                    form.database.as_deref()
-                                        == Some(submission.identity.database_instance())
-                                        && &form.project == action_project(&submission.action)
-                                })
-                                && form.generation == submission.generation
-                            {
-                                form.open = false;
-                            }
-                            self.notice = "Actual master receipt and read agree; native delivery/authentication remain unsupported".into();
-                            return Ok(Some(submission));
-                        }
-                    }
-                    Err(problem) => {
-                        if current {
-                            self.view = None;
-                        }
-                        self.ready = false;
-                        self.notice = format!(
-                            "Master read unavailable: {problem}; drafts retained; Ctrl-R reconnects"
-                        );
-                    }
-                }
-            }
+            Event::Read { context, result } => self.apply_read(context, result),
             Event::Mutation {
                 submission,
                 operation,
                 result,
                 retained,
             } => {
-                let pending = self
-                    .pending
-                    .as_mut()
-                    .ok_or("Master completion has no retained submission")?;
-                assert_eq!(pending.submission, submission);
-                if pending
-                    .operation
-                    .as_ref()
-                    .is_some_and(|original| Some(original) != operation.as_ref())
-                {
-                    return Err(
-                        "Master owner operation identity changed; original intent retained".into(),
-                    );
-                }
-                pending.operation = operation.clone();
-                pending.retry_allowed = false;
-                match result {
-                    Ok(response) => match *response {
-                        OwnerResponse::Applied { operation: applied }
-                        | OwnerResponse::Committed { operation: applied } => {
-                            if retained
-                                || operation.as_ref()
-                                    != Some(&(
-                                        applied.provenance.operation_id.clone(),
-                                        applied.provenance.request_hash.clone(),
-                                    ))
-                            {
-                                return Err(
-                                    "Master receipt provenance mismatch; intent retained".into()
-                                );
-                            }
-                            match applied.result {
-                                OwnerResult::Applied => {
-                                    pending.receipt = Some(applied.provenance);
-                                    self.next_read = Instant::now();
-                                    self.notice = "Owner applied master intent; waiting for matching actual session/input/turn read".into();
-                                }
-                                OwnerResult::Rejected { code } => {
-                                    self.pending = None;
-                                    self.notice = format!(
-                                        "Owner rejected master intent: {code}; fields and draft retained"
-                                    );
-                                }
-                                _ => return Err("Unexpected master owner result".into()),
-                            }
-                        }
-                        OwnerResponse::NotRecordedAtBarrier { .. } => {
-                            if !retained {
-                                return Err("Master barrier lost original intent".into());
-                            }
-                            pending.retry_allowed = true;
-                            self.notice = "Original owner operation not recorded at actual barrier; Ctrl-R explicitly retries that exact request".into();
-                        }
-                        OwnerResponse::OutcomeUnknown { operation_id } => {
-                            if !retained
-                                || !operation
-                                    .as_ref()
-                                    .is_some_and(|operation| operation.0 == operation_id)
-                            {
-                                return Err("Master unknown outcome lost original identity".into());
-                            }
-                            self.notice = "Owner outcome unknown; original identity and drafts retained; Ctrl-R reconnects and reconciles".into();
-                        }
-                        OwnerResponse::Rejected { code } => {
-                            if !retained {
-                                self.pending = None;
-                            }
-                            self.notice = format!(
-                                "Owner admission rejected: {code}; draft and any original intent retained"
-                            );
-                        }
-                        OwnerResponse::Read { .. } => {
-                            return Err("Unexpected read for master mutation".into());
-                        }
-                    },
+                self.apply_mutation(submission, operation, result, retained)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn apply_catalog(&mut self, context: Context, result: Result<Box<Catalog>, String>) {
+        if self.flight.as_ref() != Some(&context) {
+            return;
+        }
+        self.flight = None;
+        if !self.matches(&context) {
+            return;
+        }
+        match result {
+            Ok(catalog) => {
+                self.catalog = Some(*catalog);
+                self.defaults();
+                self.notice = concat!(
+                    "Actual owner catalog and policy loaded; ",
+                    "native delivery/authentication remain unsupported"
+                )
+                .into();
+            }
+            Err(problem) => {
+                self.catalog = None;
+                self.notice =
+                    format!("Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes");
+            }
+        }
+        self.assert_consistent();
+    }
+
+    fn apply_read(
+        &mut self,
+        context: Context,
+        result: Result<Box<View>, String>,
+    ) -> Result<Option<Submission>, String> {
+        if self.flight.as_ref() == Some(&context) {
+            self.flight = None;
+        }
+        let current = self.matches(&context);
+        if self.identity.as_ref() != Some(&context.identity) {
+            return Ok(None);
+        }
+        self.next_read = Instant::now() + Duration::from_secs(1);
+        match result {
+            Ok(view) => {
+                let completed = match self.confirm(&context, &view) {
+                    Ok(completed) => completed,
                     Err(problem) => {
-                        if !retained {
-                            self.pending = None;
+                        self.notice =
+                            format!("{problem}; receipt and drafts retained; Ctrl-R refreshes");
+                        if current {
+                            self.view = None;
                         }
-                        self.ready = false;
-                        self.notice = if retained {
-                            format!(
-                                "Owner outcome unknown: {problem}; original identity and drafts retained; Ctrl-R reconnects and reconciles"
-                            )
-                        } else {
-                            format!(
-                                "Master intent unavailable: {problem}; fields and draft retained; Ctrl-R reconnects"
-                            )
-                        };
+                        return Ok(None);
                     }
+                };
+                if current {
+                    self.view = Some(*view);
                 }
+                if let Some(submission) = completed {
+                    self.finish_read(&submission);
+                    return Ok(Some(submission));
+                }
+            }
+            Err(problem) => {
+                if current {
+                    self.view = None;
+                }
+                self.ready = false;
+                self.notice = format!(
+                    "Master read unavailable: {problem}; drafts retained; Ctrl-R reconnects"
+                );
             }
         }
         self.assert_consistent();
         Ok(None)
+    }
+
+    fn finish_read(&mut self, submission: &Submission) {
+        self.pending = None;
+        if let MasterOwnerAction::Open { .. } = submission.action
+            && let Some(form) = self.forms.iter_mut().find(|form| {
+                form.database.as_deref() == Some(submission.identity.database_instance())
+                    && &form.project == action_project(&submission.action)
+            })
+            && form.generation == submission.generation
+        {
+            form.open = false;
+        }
+        self.notice = concat!(
+            "Actual master receipt and read agree; ",
+            "native delivery/authentication remain unsupported"
+        )
+        .into();
+    }
+
+    fn apply_mutation(
+        &mut self,
+        submission: Submission,
+        operation: Option<(RequestId, String)>,
+        result: Result<Box<OwnerResponse>, String>,
+        retained: bool,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or("Master completion has no retained submission")?;
+        assert_eq!(pending.submission, submission);
+        if pending
+            .operation
+            .as_ref()
+            .is_some_and(|original| Some(original) != operation.as_ref())
+        {
+            return Err("Master owner operation identity changed; original intent retained".into());
+        }
+        pending.operation = operation.clone();
+        pending.retry_allowed = false;
+        match result {
+            Ok(response) => self.apply_response(*response, operation.as_ref(), retained)?,
+            Err(problem) => self.mutation_unavailable(problem, retained),
+        }
+        self.assert_consistent();
+        Ok(())
+    }
+
+    fn apply_response(
+        &mut self,
+        response: OwnerResponse,
+        operation: Option<&(RequestId, String)>,
+        retained: bool,
+    ) -> Result<(), String> {
+        match response {
+            OwnerResponse::Applied { operation: applied }
+            | OwnerResponse::Committed { operation: applied } => {
+                self.apply_receipt(applied, operation, retained)?;
+            }
+            OwnerResponse::NotRecordedAtBarrier { .. } => {
+                if !retained {
+                    return Err("Master barrier lost original intent".into());
+                }
+                self.pending.as_mut().unwrap().retry_allowed = true;
+                self.notice = concat!(
+                    "Original owner operation not recorded at actual barrier; ",
+                    "Ctrl-R explicitly retries that exact request"
+                )
+                .into();
+            }
+            OwnerResponse::OutcomeUnknown { operation_id } => {
+                if !retained || !operation.is_some_and(|operation| operation.0 == operation_id) {
+                    return Err("Master unknown outcome lost original identity".into());
+                }
+                self.notice = concat!(
+                    "Owner outcome unknown; original identity and drafts retained; ",
+                    "Ctrl-R reconnects and reconciles"
+                )
+                .into();
+            }
+            OwnerResponse::Rejected { code } => {
+                if !retained {
+                    self.pending = None;
+                }
+                self.notice = format!(
+                    concat!(
+                        "Owner admission rejected: {code}; ",
+                        "draft and any original intent retained"
+                    ),
+                    code = code
+                );
+            }
+            OwnerResponse::Read { .. } => {
+                return Err("Unexpected read for master mutation".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_receipt(
+        &mut self,
+        applied: OwnerApplied,
+        operation: Option<&(RequestId, String)>,
+        retained: bool,
+    ) -> Result<(), String> {
+        if retained
+            || operation
+                != Some(&(
+                    applied.provenance.operation_id.clone(),
+                    applied.provenance.request_hash.clone(),
+                ))
+        {
+            return Err("Master receipt provenance mismatch; intent retained".into());
+        }
+        match applied.result {
+            OwnerResult::Applied => {
+                self.pending.as_mut().unwrap().receipt = Some(applied.provenance);
+                self.next_read = Instant::now();
+                self.notice = concat!(
+                    "Owner applied master intent; ",
+                    "waiting for matching actual session/input/turn read"
+                )
+                .into();
+            }
+            OwnerResult::Rejected { code } => {
+                self.pending = None;
+                self.notice =
+                    format!("Owner rejected master intent: {code}; fields and draft retained");
+            }
+            _ => return Err("Unexpected master owner result".into()),
+        }
+        Ok(())
+    }
+
+    fn mutation_unavailable(&mut self, problem: String, retained: bool) {
+        if !retained {
+            self.pending = None;
+        }
+        self.ready = false;
+        self.notice = if retained {
+            format!(
+                concat!(
+                    "Owner outcome unknown: {problem}; ",
+                    "original identity and drafts retained; Ctrl-R reconnects and reconciles"
+                ),
+                problem = problem
+            )
+        } else {
+            format!(
+                concat!(
+                    "Master intent unavailable: {problem}; ",
+                    "fields and draft retained; Ctrl-R reconnects"
+                ),
+                problem = problem
+            )
+        };
     }
 
     fn matches(&self, context: &Context) -> bool {
@@ -837,58 +832,7 @@ impl State {
         {
             return Ok(None);
         }
-        let session = view
-            .session
-            .as_ref()
-            .ok_or("Applied master session missing from actual read")?;
-        let matches = match &pending.submission.action {
-            MasterOwnerAction::Open {
-                selection,
-                expected_config_id,
-                expected_source_hash,
-                ..
-            } => {
-                session.selection == *selection
-                    && session.config_id == *expected_config_id
-                    && session.source_hash == *expected_source_hash
-                    && session.phase == MasterSessionPhase::Configured
-                    && session.owner == *receipt
-            }
-            MasterOwnerAction::Submit {
-                session_id, text, ..
-            } => {
-                session.session_id == *session_id
-                    && view.turns.iter().any(|turn| {
-                        turn.id == receipt.operation_id
-                            && turn.session_id == *session_id
-                            && receipt.event_cursor.as_ref() == Some(&turn.input_cursor)
-                    })
-                    && view.input.as_ref().is_some_and(|input| {
-                        input.text == *text
-                            && input.content == ConversationContent::Message
-                            && input.provenance == *receipt
-                            && receipt.event_cursor.as_ref() == Some(&input.event_cursor)
-                    })
-            }
-            MasterOwnerAction::Cancel {
-                session_id,
-                turn_id,
-                ..
-            } => {
-                session.session_id == *session_id
-                    && session.current_turn.is_none()
-                    && view
-                        .turns
-                        .iter()
-                        .any(|turn| turn.id == *turn_id && turn.phase == MasterTurnPhase::Cancelled)
-            }
-            MasterOwnerAction::Close { session_id, .. } => {
-                session.session_id == *session_id
-                    && session.phase == MasterSessionPhase::Closed
-                    && session.current_turn.is_none()
-            }
-        };
-        if !matches {
+        if !view.confirms(&pending.submission.action, receipt)? {
             return Err(
                 "Master receipt and actual read do not agree; draft and receipt retained".into(),
             );
@@ -906,90 +850,14 @@ impl State {
             lines.push("Select a project before Configure master".into());
         }
         if self.is_open() {
-            let form = &self.forms[self.form_index().unwrap()];
-            let choices = [
-                backend_label(form.backend).to_owned(),
-                form.pool
-                    .as_ref()
-                    .map_or("Unavailable", CredentialRef::as_str)
-                    .to_owned(),
-                form.account
-                    .as_ref()
-                    .map_or("Unavailable", CredentialRef::as_str)
-                    .to_owned(),
-                form.target
-                    .as_ref()
-                    .map_or("Unavailable", CredentialRef::as_str)
-                    .to_owned(),
-            ];
-            for (index, label) in ["Backend", "Pool", "Account", "Execution sandbox"]
-                .iter()
-                .enumerate()
-            {
-                lines.push(format!(
-                    "{} {label}: {}",
-                    if form.field == index { ">" } else { " " },
-                    choices[index]
-                ));
-            }
-            for (index, name) in DIMENSIONS.iter().enumerate() {
-                lines.push(format!(
-                    "{} {name}: {}",
-                    if form.field == index + 4 { ">" } else { " " },
-                    form.values[index]
-                ));
-            }
-            if let Some(catalog) = &self.catalog {
-                lines.push(format!(
-                    "Owner catalog revision {} | config {} | source {}",
-                    catalog.revision.value(),
-                    catalog.config_id.as_str(),
-                    catalog.source_hash
-                ));
-            }
-            lines.push(match self.selection() { Ok(_) if !self.has_pending() => "Enter Open | Tab/Shift-Tab fields | arrows choices | Esc retains setup and conversation draft".into(), Ok(_) => "Open disabled: owner intent unresolved; fields retained".into(), Err(reason) => reason });
-            lines.push(
-                "Settings: Esc, Tab twice | execution sandbox is separate from credential profile"
-                    .into(),
-            );
+            self.setup_lines(&mut lines);
         } else if let Some(view) = &self.view {
-            if let Some(session) = &view.session {
-                lines.push(format!(
-                    "Master: {:?} | {} | {} | pool {}",
-                    session.phase,
-                    session.session_id.as_str(),
-                    backend_label(session.selection.backend),
-                    session.selection.pool_ref.as_str()
-                ));
-                for turn in &view.turns {
-                    lines.push(format!(
-                        "Turn: {:?} | {} | input {} | reason {:?}",
-                        turn.phase,
-                        turn.id.as_str(),
-                        turn.input_cursor.value(),
-                        turn.reason
-                    ));
-                    if let Some(reply) = &turn.reply {
-                        lines.push(format!(
-                            "Actual reply | attempt {} | runtime {} | capture {} sequence {}\n{}",
-                            reply.provenance.attempt_id.as_str(),
-                            reply.provenance.runtime_ref.as_str(),
-                            reply.provenance.capture_ref.as_str(),
-                            reply.provenance.capture_sequence,
-                            super::views::safe_text(&reply.text, 8192)
-                        ));
-                    }
-                }
-            } else {
-                lines.push(
-                    "No master configured; Enter stores an owner note until explicit Open".into(),
-                );
-            }
+            view.lines(&mut lines);
         } else {
             lines.push("Waiting for actual master state; stored notes remain notes".into());
         }
         if let Some(pending) = &self.pending {
-            lines.push(match &pending.operation { Some((id, _)) => format!("Owner operation {} unresolved; Ctrl-R reconciles or retries after an actual barrier", id.as_str()), None => "Master owner intent queued; fields and newer text retained".into() });
+            lines.push(pending.line());
         }
         if self.is_open() || self.pending.is_some() || self.view.is_none() {
             lines.push(self.notice.clone());
@@ -1000,9 +868,40 @@ impl State {
                 .as_ref()
                 .is_some_and(|view| view.session.is_some())
         {
-            lines.push("Configured/Queued are durable bootstrap states; native delivery/authentication remain unsupported".into());
+            lines.push(
+                concat!(
+                    "Configured/Queued are durable bootstrap states; ",
+                    "native delivery/authentication remain unsupported"
+                )
+                .into(),
+            );
         }
         lines.join("\n")
+    }
+
+    fn setup_lines(&self, lines: &mut Vec<String>) {
+        self.forms[self.form_index().unwrap()].lines(lines);
+        if let Some(catalog) = &self.catalog {
+            lines.push(format!(
+                "Owner catalog revision {} | config {} | source {}",
+                catalog.revision.value(),
+                catalog.config_id.as_str(),
+                catalog.source_hash
+            ));
+        }
+        lines.push(match self.selection() {
+            Ok(_) if !self.has_pending() => concat!(
+                "Enter Open | Tab/Shift-Tab fields | arrows choices | ",
+                "Esc retains setup and conversation draft"
+            )
+            .into(),
+            Ok(_) => "Open disabled: owner intent unresolved; fields retained".into(),
+            Err(reason) => reason,
+        });
+        lines.push(
+            "Settings: Esc, Tab twice | execution sandbox is separate from credential profile"
+                .into(),
+        );
     }
 
     fn assert_consistent(&self) {
@@ -1021,6 +920,241 @@ impl State {
             assert!(pending.submission.generation > 0);
             assert!(pending.receipt.is_none() || pending.operation.is_some());
         }
+    }
+}
+
+impl View {
+    fn lines(&self, lines: &mut Vec<String>) {
+        if let Some(session) = &self.session {
+            lines.push(format!(
+                "Master: {:?} | {} | {} | pool {}",
+                session.phase,
+                session.session_id.as_str(),
+                backend_label(session.selection.backend),
+                session.selection.pool_ref.as_str()
+            ));
+            for turn in &self.turns {
+                turn_lines(turn, lines);
+            }
+        } else {
+            lines.push(
+                "No master configured; Enter stores an owner note until explicit Open".into(),
+            );
+        }
+    }
+
+    fn confirms(
+        &self,
+        action: &MasterOwnerAction,
+        receipt: &OwnerProvenance,
+    ) -> Result<bool, String> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or("Applied master session missing from actual read")?;
+        Ok(match action {
+            MasterOwnerAction::Open {
+                selection,
+                expected_config_id,
+                expected_source_hash,
+                ..
+            } => {
+                session.selection == *selection
+                    && session.config_id == *expected_config_id
+                    && session.source_hash == *expected_source_hash
+                    && session.phase == MasterSessionPhase::Configured
+                    && session.owner == *receipt
+            }
+            MasterOwnerAction::Submit {
+                session_id, text, ..
+            } => {
+                session.session_id == *session_id
+                    && self.turns.iter().any(|turn| {
+                        turn.id == receipt.operation_id
+                            && turn.session_id == *session_id
+                            && receipt.event_cursor.as_ref() == Some(&turn.input_cursor)
+                    })
+                    && self.input.as_ref().is_some_and(|input| {
+                        input.text == *text
+                            && input.content == ConversationContent::Message
+                            && input.provenance == *receipt
+                            && receipt.event_cursor.as_ref() == Some(&input.event_cursor)
+                    })
+            }
+            MasterOwnerAction::Cancel {
+                session_id,
+                turn_id,
+                ..
+            } => {
+                session.session_id == *session_id
+                    && session.current_turn.is_none()
+                    && self
+                        .turns
+                        .iter()
+                        .any(|turn| turn.id == *turn_id && turn.phase == MasterTurnPhase::Cancelled)
+            }
+            MasterOwnerAction::Close { session_id, .. } => {
+                session.session_id == *session_id
+                    && session.phase == MasterSessionPhase::Closed
+                    && session.current_turn.is_none()
+            }
+        })
+    }
+}
+
+impl Pending {
+    fn line(&self) -> String {
+        match &self.operation {
+            Some((id, _)) => format!(
+                concat!(
+                    "Owner operation {} unresolved; ",
+                    "Ctrl-R reconciles or retries after an actual barrier"
+                ),
+                id.as_str()
+            ),
+            None => "Master owner intent queued; fields and newer text retained".into(),
+        }
+    }
+}
+
+impl Form {
+    fn lines(&self, lines: &mut Vec<String>) {
+        let choices = [
+            backend_label(self.backend).to_owned(),
+            self.pool
+                .as_ref()
+                .map_or("Unavailable", CredentialRef::as_str)
+                .to_owned(),
+            self.account
+                .as_ref()
+                .map_or("Unavailable", CredentialRef::as_str)
+                .to_owned(),
+            self.target
+                .as_ref()
+                .map_or("Unavailable", CredentialRef::as_str)
+                .to_owned(),
+        ];
+        for (index, label) in ["Backend", "Pool", "Account", "Execution sandbox"]
+            .iter()
+            .enumerate()
+        {
+            lines.push(format!(
+                "{} {label}: {}",
+                if self.field == index { ">" } else { " " },
+                choices[index]
+            ));
+        }
+        for (index, name) in DIMENSIONS.iter().enumerate() {
+            lines.push(format!(
+                "{} {name}: {}",
+                if self.field == index + 4 { ">" } else { " " },
+                self.values[index]
+            ));
+        }
+    }
+
+    fn select(&mut self, catalog: Option<&Catalog>, forward: bool) -> Result<bool, String> {
+        match self.field {
+            0 => self.cycle_backend(catalog, forward),
+            1 => {
+                if let Some(catalog) = catalog {
+                    let choices: Vec<_> = catalog
+                        .pools(self)
+                        .iter()
+                        .map(|pool| pool.id.clone())
+                        .collect();
+                    let selected = cycle(&choices, self.pool.as_ref(), forward);
+                    if self.pool != selected {
+                        self.account = None;
+                    }
+                    self.pool = selected;
+                }
+            }
+            2 => {
+                if let Some(catalog) = catalog {
+                    self.account = cycle(&catalog.accounts(self), self.account.as_ref(), forward);
+                }
+            }
+            3 => {
+                if let Some(catalog) = catalog {
+                    self.target = cycle(&catalog.targets, self.target.as_ref(), forward);
+                }
+            }
+            _ => return Ok(false),
+        }
+        self.advance_generation()?;
+        Ok(true)
+    }
+
+    fn cycle_backend(&mut self, catalog: Option<&Catalog>, forward: bool) {
+        let backends = [
+            MasterBackend::Rcli,
+            MasterBackend::Codex,
+            MasterBackend::Claude,
+        ];
+        let current = backends
+            .iter()
+            .position(|backend| backend == &self.backend)
+            .unwrap();
+        self.backend = backends[(current + if forward { 1 } else { 2 }) % 3];
+        self.account = None;
+        if catalog.is_some_and(|catalog| {
+            !catalog
+                .pools(self)
+                .iter()
+                .any(|pool| Some(&pool.id) == self.pool.as_ref())
+        }) {
+            self.pool = None;
+        }
+    }
+
+    fn edit_allowance(&mut self, character: Option<char>) -> Result<(), String> {
+        if self.field < 4 {
+            return Ok(());
+        }
+        let value = &mut self.values[self.field - 4];
+        if let Some(character) = character {
+            if !character.is_ascii_digit() || value.len() >= 13 {
+                return Err(
+                    "Allowance uses at most 13 decimal digits; literal value retained".into(),
+                );
+            }
+            value.push(character);
+        } else if value.pop().is_none() {
+            return Ok(());
+        }
+        self.advance_generation()
+    }
+
+    fn advance_generation(&mut self) -> Result<(), String> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or("Master form generation exhausted")?;
+        Ok(())
+    }
+
+    fn resources(&self) -> Result<ResourceBudget, String> {
+        let mut values = [0; 7];
+        for (index, value) in self.values.iter().enumerate() {
+            values[index] = value.parse().map_err(|_| {
+                format!(
+                    "Open disabled: {} requires a decimal allowance; value retained",
+                    DIMENSIONS[index]
+                )
+            })?;
+        }
+        let resources = ResourceBudget {
+            slots: values[0],
+            cpu_millis: values[1],
+            memory_mib: values[2],
+            processes: values[3],
+            output_bytes: values[4],
+            wall_time_ms: values[5],
+            spend_microunits: values[6],
+        };
+        resources.validate()?;
+        Ok(resources)
     }
 }
 
@@ -1068,6 +1202,26 @@ impl Catalog {
             }
         }
         accounts
+    }
+}
+
+fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "Turn: {:?} | {} | input {} | reason {:?}",
+        turn.phase,
+        turn.id.as_str(),
+        turn.input_cursor.value(),
+        turn.reason
+    ));
+    if let Some(reply) = &turn.reply {
+        lines.push(format!(
+            "Actual reply | attempt {} | runtime {} | capture {} sequence {}\n{}",
+            reply.provenance.attempt_id.as_str(),
+            reply.provenance.runtime_ref.as_str(),
+            reply.provenance.capture_ref.as_str(),
+            reply.provenance.capture_sequence,
+            super::views::safe_text(&reply.text, 8192)
+        ));
     }
 }
 
@@ -1154,91 +1308,129 @@ pub(super) async fn read_catalog(controller: &mut OwnerController) -> Result<Cat
         ModelAccessCollection::Connections,
         ModelAccessCollection::Pools,
     ] {
-        let mut cursor = None;
-        let mut complete = false;
-        for _ in 0..64 {
-            let state = controller
-                .read(OwnerRead::ModelAccessPage {
-                    collection,
-                    cursor: cursor.clone(),
-                    limit: 16,
-                })
-                .await
-                .map_err(|error| error.to_string())?;
-            if let Some((revision, config, _)) = &basis {
-                same_basis(&state, revision, config)?;
-            }
-            let OwnerData::ModelAccessPage {
-                collection: actual,
-                source_hash,
-                items,
-                next,
-                ..
-            } = state.data
-            else {
-                return Err("master_catalog_page_required".into());
-            };
-            if actual != collection || items.len() > 16 {
-                return Err("master_catalog_page_context".into());
-            }
-            if let Some((_, _, hash)) = &basis {
-                if hash != &source_hash {
-                    return Err("master_catalog_source_changed".into());
-                }
-            } else {
-                basis = Some((state.revision, state.config_id, source_hash.clone()));
-            }
-            for item in items {
-                match (collection, item) {
-                    (
-                        ModelAccessCollection::Accounts,
-                        ModelAccessRecord::Account { account_ref },
-                    ) => models.accounts.push(account_ref),
-                    (
-                        ModelAccessCollection::Connections,
-                        ModelAccessRecord::Connection { connection },
-                    ) => models.connections.push(connection),
-                    (ModelAccessCollection::Pools, ModelAccessRecord::Pool { pool }) => {
-                        models.pools.push(pool)
-                    }
-                    _ => return Err("master_catalog_record_kind".into()),
-                }
-            }
-            if models.accounts.len() > 64
-                || models.connections.len() > 64
-                || models.pools.len() > 64
-            {
-                return Err("master_catalog_capacity".into());
-            }
-            if let Some(next) = &next {
-                let (revision, config, _) = basis.as_ref().unwrap();
-                if next.db_instance != controller.identity().database_instance()
-                    || next.engine_epoch != controller.identity().engine_epoch()
-                    || next.collection != collection
-                    || next.at_revision != *revision
-                    || next.config_id != *config
-                    || next.source_hash != source_hash
-                    || cursor.as_ref().is_some_and(
-                        |previous: &crate::engine::owner::ModelAccessCursor| {
-                            next.after_id.as_str() <= previous.after_id.as_str()
-                        },
-                    )
-                {
-                    return Err("master_catalog_cursor_context".into());
-                }
-            } else {
-                complete = true;
-            }
-            cursor = next;
-            if complete {
-                break;
-            }
-        }
-        if !complete {
-            return Err("master_catalog_incomplete; inspect Settings".into());
-        }
+        read_collection(controller, collection, &mut models, &mut basis).await?;
     }
     let (revision, config_id, source_hash) = basis.ok_or("master_catalog_basis_missing")?;
+    let values = read_policy(controller, &revision, &config_id).await?;
+    catalog_from_policy(models, revision, config_id, source_hash, values)
+}
+
+async fn read_collection(
+    controller: &mut OwnerController,
+    collection: ModelAccessCollection,
+    models: &mut ModelAccess,
+    basis: &mut Option<(Cursor, ConfigId, String)>,
+) -> Result<(), String> {
+    let mut cursor = None;
+    for _ in 0..64 {
+        let state = controller
+            .read(OwnerRead::ModelAccessPage {
+                collection,
+                cursor: cursor.clone(),
+                limit: 16,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let next = catalog_page(state, collection, models, basis)?;
+        if let Some(next) = &next {
+            catalog_cursor(
+                controller.identity(),
+                collection,
+                basis.as_ref().unwrap(),
+                cursor.as_ref(),
+                next,
+            )?;
+        } else {
+            return Ok(());
+        }
+        cursor = next;
+    }
+    Err("master_catalog_incomplete; inspect Settings".into())
+}
+
+fn catalog_page(
+    state: OwnerReadReply,
+    collection: ModelAccessCollection,
+    models: &mut ModelAccess,
+    basis: &mut Option<(Cursor, ConfigId, String)>,
+) -> Result<Option<ModelAccessCursor>, String> {
+    if let Some((revision, config, _)) = basis.as_ref() {
+        same_basis(&state, revision, config)?;
+    }
+    let OwnerData::ModelAccessPage {
+        collection: actual,
+        source_hash,
+        items,
+        next,
+        ..
+    } = state.data
+    else {
+        return Err("master_catalog_page_required".into());
+    };
+    if actual != collection || items.len() > 16 {
+        return Err("master_catalog_page_context".into());
+    }
+    if let Some((_, _, hash)) = basis.as_ref() {
+        if hash != &source_hash {
+            return Err("master_catalog_source_changed".into());
+        }
+    } else {
+        *basis = Some((state.revision, state.config_id, source_hash));
+    }
+    catalog_records(models, collection, items)?;
+    Ok(next)
+}
+
+fn catalog_records(
+    models: &mut ModelAccess,
+    collection: ModelAccessCollection,
+    items: Vec<ModelAccessRecord>,
+) -> Result<(), String> {
+    for item in items {
+        match (collection, item) {
+            (ModelAccessCollection::Accounts, ModelAccessRecord::Account { account_ref }) => {
+                models.accounts.push(account_ref);
+            }
+            (ModelAccessCollection::Connections, ModelAccessRecord::Connection { connection }) => {
+                models.connections.push(connection);
+            }
+            (ModelAccessCollection::Pools, ModelAccessRecord::Pool { pool }) => {
+                models.pools.push(pool);
+            }
+            _ => return Err("master_catalog_record_kind".into()),
+        }
+    }
+    if models.accounts.len() > 64 || models.connections.len() > 64 || models.pools.len() > 64 {
+        return Err("master_catalog_capacity".into());
+    }
+    Ok(())
+}
+
+fn catalog_cursor(
+    identity: &OwnerConnectionIdentity,
+    collection: ModelAccessCollection,
+    basis: &(Cursor, ConfigId, String),
+    previous: Option<&ModelAccessCursor>,
+    next: &ModelAccessCursor,
+) -> Result<(), String> {
+    if next.db_instance != identity.database_instance()
+        || next.engine_epoch != identity.engine_epoch()
+        || next.collection != collection
+        || next.at_revision != basis.0
+        || next.config_id != basis.1
+        || next.source_hash != basis.2
+        || previous.is_some_and(|previous| next.after_id.as_str() <= previous.after_id.as_str())
+    {
+        return Err("master_catalog_cursor_context".into());
+    }
+    Ok(())
+}
+
+async fn read_policy(
+    controller: &mut OwnerController,
+    revision: &Cursor,
+    config: &ConfigId,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut values = Vec::new();
     for name in [
         "allowed_destinations",
@@ -1254,7 +1446,7 @@ pub(super) async fn read_catalog(controller: &mut OwnerController) -> Result<Cat
             })
             .await
             .map_err(|error| error.to_string())?;
-        same_basis(&reply, &revision, &config_id)?;
+        same_basis(&reply, revision, config)?;
         let OwnerData::Setting { descriptor } = reply.data else {
             return Err("master_policy_descriptor_required".into());
         };
@@ -1263,6 +1455,16 @@ pub(super) async fn read_catalog(controller: &mut OwnerController) -> Result<Cat
         }
         values.push(descriptor.value);
     }
+    Ok(values)
+}
+
+fn catalog_from_policy(
+    models: ModelAccess,
+    revision: Cursor,
+    config_id: ConfigId,
+    source_hash: String,
+    values: Vec<serde_json::Value>,
+) -> Result<Catalog, String> {
     let allowed: Vec<CredentialRef> =
         serde_json::from_value(values[0].clone()).map_err(|_| "master_allowed_targets_shape")?;
     let revoked: Vec<CredentialRef> =
@@ -1321,114 +1523,177 @@ pub(super) async fn read_view(
         {
             return Err("master_session_read_context".into());
         }
-        let mut cursor = None;
-        let mut complete = false;
-        for _ in 0..1024 {
-            let reply = controller
-                .read(OwnerRead::ProjectMasterTurns {
-                    project_id: context.project.clone(),
-                    session_id: session.session_id.clone(),
-                    cursor: cursor.clone(),
-                    limit: 32,
-                })
-                .await
-                .map_err(|error| error.to_string())?;
-            same_basis(&reply, &view.revision, &state.config_id)?;
-            let OwnerData::ProjectMasterTurns { page } = reply.data else {
-                return Err("master_turn_page_required".into());
-            };
-            if page.project_id != context.project
-                || page.session_id != session.session_id
-                || page.turns.len() > 32
-            {
-                return Err("master_turn_page_context".into());
-            }
-            let mut after = cursor
-                .as_ref()
-                .map_or(0, |cursor: &crate::master_session::MasterCursor| {
-                    cursor.after_ordinal
-                });
-            for turn in page.turns {
-                if turn.session_id != session.session_id
-                    || turn.ordinal <= after
-                    || turn.input_cursor.value() > view.revision.value()
-                {
-                    return Err("master_turn_context".into());
-                }
-                after = turn.ordinal;
-                view.turns.push(turn);
-                if view.turns.len() > 32 {
-                    view.turns.remove(0);
-                }
-            }
-            if let Some(next) = &page.next {
-                if next.project_id != context.project
-                    || next.session_id != session.session_id
-                    || next.version != view.revision
-                    || next.config_id != state.config_id
-                    || next.db_instance != context.identity.database_instance()
-                    || next.engine_epoch != context.identity.engine_epoch()
-                    || next.after_ordinal != after
-                    || cursor
-                        .as_ref()
-                        .is_some_and(|previous| next.after_ordinal <= previous.after_ordinal)
-                {
-                    return Err("master_turn_cursor_context".into());
-                }
-            } else {
-                complete = true;
-            }
-            cursor = page.next;
-            if complete {
-                break;
-            }
-        }
-        if !complete {
-            return Err("master_turn_pages_incomplete".into());
-        }
+        view.turns = read_turns(
+            controller,
+            context,
+            session,
+            &view.revision,
+            &state.config_id,
+        )
+        .await?;
     }
     if let Some(confirmation) = confirmation
         && let MasterOwnerAction::Submit { .. } = confirmation.submission.action
     {
-        let receipt = &confirmation.receipt;
-        let mut cursor = None;
-        for _ in 0..crate::conversation::ENTRIES_MAX {
-            let reply = controller
-                .read(OwnerRead::ConversationHistory {
-                    project_id: context.project.clone(),
-                    cursor: cursor.clone(),
-                    limit: 32,
-                })
-                .await
-                .map_err(|error| error.to_string())?;
-            same_basis(&reply, &view.revision, &state.config_id)?;
-            let OwnerData::ConversationHistory { page } = reply.data else {
-                return Err("master_owner_input_read_required".into());
-            };
-            if page.project_id != context.project || page.entries.len() > 32 {
-                return Err("master_owner_input_page_context".into());
-            }
-            view.input = page
-                .entries
-                .into_iter()
-                .find(|entry| receipt.event_cursor.as_ref() == Some(&entry.event_cursor));
-            if view.input.is_some() || page.next.is_none() {
-                break;
-            }
-            if page.next.as_ref().is_some_and(|next| {
-                next.project_id != context.project
-                    || next.db_instance != context.identity.database_instance()
-                    || next.engine_epoch != context.identity.engine_epoch()
-                    || cursor.as_ref().is_some_and(
-                        |previous: &crate::conversation::ConversationCursor| {
-                            next.after.value() <= previous.after.value()
-                        },
-                    )
-            }) {
-                return Err("master_owner_input_cursor_context".into());
-            }
-            cursor = page.next;
-        }
+        view.input = read_input(
+            controller,
+            context,
+            &view.revision,
+            &state.config_id,
+            &confirmation.receipt,
+        )
+        .await?;
     }
     Ok(view)
+}
+
+async fn read_turns(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &MasterSessionView,
+    revision: &Cursor,
+    config: &ConfigId,
+) -> Result<Vec<MasterTurnView>, String> {
+    let mut turns = Vec::new();
+    let mut cursor = None;
+    for _ in 0..1024 {
+        let reply = controller
+            .read(OwnerRead::ProjectMasterTurns {
+                project_id: context.project.clone(),
+                session_id: session.session_id.clone(),
+                cursor: cursor.clone(),
+                limit: 32,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        same_basis(&reply, revision, config)?;
+        let OwnerData::ProjectMasterTurns { page } = reply.data else {
+            return Err("master_turn_page_required".into());
+        };
+        if page.project_id != context.project
+            || page.session_id != session.session_id
+            || page.turns.len() > 32
+        {
+            return Err("master_turn_page_context".into());
+        }
+        let after = cursor
+            .as_ref()
+            .map_or(0, |cursor: &MasterCursor| cursor.after_ordinal);
+        let after = append_turns(&mut turns, page.turns, session, revision, after)?;
+        if let Some(next) = &page.next {
+            turn_cursor(
+                context,
+                session,
+                revision,
+                config,
+                cursor.as_ref(),
+                after,
+                next,
+            )?;
+        } else {
+            return Ok(turns);
+        }
+        cursor = page.next;
+    }
+    Err("master_turn_pages_incomplete".into())
+}
+
+fn append_turns(
+    turns: &mut Vec<MasterTurnView>,
+    items: Vec<MasterTurnView>,
+    session: &MasterSessionView,
+    revision: &Cursor,
+    mut after: u64,
+) -> Result<u64, String> {
+    for turn in items {
+        if turn.session_id != session.session_id
+            || turn.ordinal <= after
+            || turn.input_cursor.value() > revision.value()
+        {
+            return Err("master_turn_context".into());
+        }
+        after = turn.ordinal;
+        turns.push(turn);
+        if turns.len() > 32 {
+            turns.remove(0);
+        }
+    }
+    Ok(after)
+}
+
+fn turn_cursor(
+    context: &Context,
+    session: &MasterSessionView,
+    revision: &Cursor,
+    config: &ConfigId,
+    previous: Option<&MasterCursor>,
+    after: u64,
+    next: &MasterCursor,
+) -> Result<(), String> {
+    if next.project_id != context.project
+        || next.session_id != session.session_id
+        || next.version != *revision
+        || next.config_id != *config
+        || next.db_instance != context.identity.database_instance()
+        || next.engine_epoch != context.identity.engine_epoch()
+        || next.after_ordinal != after
+        || previous.is_some_and(|previous| next.after_ordinal <= previous.after_ordinal)
+    {
+        return Err("master_turn_cursor_context".into());
+    }
+    Ok(())
+}
+
+async fn read_input(
+    controller: &mut OwnerController,
+    context: &Context,
+    revision: &Cursor,
+    config: &ConfigId,
+    receipt: &OwnerProvenance,
+) -> Result<Option<ConversationEntry>, String> {
+    let mut cursor = None;
+    for _ in 0..crate::conversation::ENTRIES_MAX {
+        let reply = controller
+            .read(OwnerRead::ConversationHistory {
+                project_id: context.project.clone(),
+                cursor: cursor.clone(),
+                limit: 32,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        same_basis(&reply, revision, config)?;
+        let OwnerData::ConversationHistory { page } = reply.data else {
+            return Err("master_owner_input_read_required".into());
+        };
+        if page.project_id != context.project || page.entries.len() > 32 {
+            return Err("master_owner_input_page_context".into());
+        }
+        let input = page
+            .entries
+            .into_iter()
+            .find(|entry| receipt.event_cursor.as_ref() == Some(&entry.event_cursor));
+        if input.is_some() || page.next.is_none() {
+            return Ok(input);
+        }
+        if let Some(next) = &page.next {
+            input_cursor(context, cursor.as_ref(), next)?;
+        }
+        cursor = page.next;
+    }
+    Ok(None)
+}
+
+fn input_cursor(
+    context: &Context,
+    previous: Option<&ConversationCursor>,
+    next: &ConversationCursor,
+) -> Result<(), String> {
+    if next.project_id != context.project
+        || next.db_instance != context.identity.database_instance()
+        || next.engine_epoch != context.identity.engine_epoch()
+        || previous.is_some_and(|previous| next.after.value() <= previous.after.value())
+    {
+        return Err("master_owner_input_cursor_context".into());
+    }
+    Ok(())
 }
