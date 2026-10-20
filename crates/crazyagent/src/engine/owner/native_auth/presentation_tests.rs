@@ -25,7 +25,7 @@ fn fixture() -> (Value, Command) {
             "engine_epoch": "b".repeat(64),
             "config_id": scope.expected_config_id,
             "source_hash": scope.expected_source_hash,
-            "at_revision": 0,
+            "at_revision": Cursor::new(0),
             "connection": {
                 "id": "connection", "provider": "provider", "harness": "codex",
                 "protocol": "native", "account_ref": "account",
@@ -37,6 +37,7 @@ fn fixture() -> (Value, Command) {
         },
         "generation": 1, "phase": "unavailable", "code": "native_auth_host_unavailable"
     });
+    let fact: NativeAuthFact = serde_json::from_value(fact).unwrap();
     let value = json!({
         "status": "fact", "request_id": "wire-operation",
         "database_instance": "a".repeat(64), "engine_epoch": "b".repeat(64),
