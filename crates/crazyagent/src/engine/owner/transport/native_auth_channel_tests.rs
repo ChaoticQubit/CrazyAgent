@@ -411,12 +411,22 @@ fn read_barrier(path: &Path) -> Connection {
     db
 }
 
-fn pending<F: Future>(future: Pin<&mut F>) {
+fn pending<F: Future>(future: Pin<&mut F>)
+where
+    F::Output: std::fmt::Debug,
+{
     let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(future.poll(&mut context), Poll::Pending));
+    let observed = future.poll(&mut context);
+    assert!(
+        matches!(&observed, Poll::Pending),
+        "expected Poll::Pending; observed {observed:?}"
+    );
 }
 
-async fn retirement_write_started<F: Future>(case: &ChannelCase, future: &mut Pin<Box<F>>) {
+async fn retirement_write_started<F: Future>(case: &ChannelCase, future: &mut Pin<Box<F>>)
+where
+    F::Output: std::fmt::Debug,
+{
     let journal = case.root.join("engine.db-journal");
     assert!(!journal.exists());
     tokio::time::timeout(Duration::from_secs(2), async {
