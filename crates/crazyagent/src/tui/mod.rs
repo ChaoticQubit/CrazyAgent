@@ -3,6 +3,7 @@ mod client;
 mod dispatch;
 mod master_session;
 mod model_access;
+mod native_auth;
 pub mod views;
 
 #[cfg(test)]
