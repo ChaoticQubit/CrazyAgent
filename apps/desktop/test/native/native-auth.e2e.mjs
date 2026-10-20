@@ -127,12 +127,11 @@ async function createConnection(id, suffix) {
 
 async function prepare() {
   privateRun();
-  const labels = await browser.tauri.listWindows();
-  assert(labels.length === 1 && labels[0] === "main", "single main label required");
   const handles = await browser.getWindowHandles();
   assert(handles.length === 1 && typeof handles[0] === "string" && handles[0].length > 0,
     "single live handle required");
-  await browser.tauri.switchWindow(labels[0]);
+  assert(handles[0] === "main", "single main label required");
+  await browser.switchToWindow(handles[0]);
   assert(await browser.getWindowHandle() === handles[0], "selected main handle required");
   progress("prepare.idle");
   await idle();
