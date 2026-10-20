@@ -286,6 +286,8 @@ fn record(
     command: &Command,
     generation: u64,
 ) -> Result<NativeAuthFact, EngineError> {
+    let sql_generation =
+        i64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?;
     let fact = NativeAuthFact {
         operation_id: command.operation_id().clone(),
         action: command
@@ -307,7 +309,7 @@ fn record(
             params![
                 fact.operation_id.as_str(),
                 key,
-                generation,
+                sql_generation,
                 request,
                 bytes,
                 fact.phase.name()
