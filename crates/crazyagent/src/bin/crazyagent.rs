@@ -62,6 +62,14 @@ fn main() -> ExitCode {
             }
         };
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "native-auth-custodian")
+        && args.len() != 2
+    {
+        eprintln!("usage: crazyagent native-auth-custodian RUNTIME_DIR");
+        return ExitCode::FAILURE;
+    }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
             Ok(()) => ExitCode::SUCCESS,
