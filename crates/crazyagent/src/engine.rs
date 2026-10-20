@@ -484,7 +484,7 @@ impl Engine {
         tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| EngineError("database close timeout".into()))?
-            .map_err(|_| EngineError("database worker stopped".into()))
+            .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
     pub fn set_controller_epoch(

@@ -57,7 +57,7 @@ pub(crate) enum Job {
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
-    Close(oneshot::Sender<()>),
+    Close(oneshot::Sender<Result<(), EngineError>>),
 }
 
 pub(crate) struct Storage {
@@ -274,15 +274,15 @@ impl Storage {
                                 let _ = owner_stop(&mut connection, stamp);
                             }
                             drop(connection);
-                            drop(lock);
+                            let released = release_database_lock(lock);
                             drop(sources.take());
-                            let _ = reply.send(());
+                            let _ = reply.send(released);
                             break;
                         }
                     }
                 }
             })
-            .map_err(error)?;
+            .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
         let config = ready_receive.await.map_err(error)??;
         Ok((Self { sender }, config))
     }
@@ -430,10 +430,15 @@ fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
         return Err(error("invalid_engine_lock_file"));
     }
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(error)?;
+        .map_err(|e| error(format!("database_lock_acquire_failed: {e}")))?;
     assert_eq!(lock.metadata().map_err(error)?.ino(), lock_metadata.ino());
     assert_eq!(lock.metadata().map_err(error)?.dev(), lock_metadata.dev());
     Ok(lock)
+}
+
+fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
+        .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
@@ -1827,7 +1832,7 @@ mod owner_actor_tests {
             .sender
             .try_send(Job::Close(tx))
             .unwrap_or_else(|_| panic!("queue"));
-        rx.await.unwrap();
+        rx.await.unwrap().unwrap();
     }
 
     fn mutation(id: &str) -> OwnerRequest {
@@ -1987,7 +1992,7 @@ mod owner_actor_tests {
             .sender
             .try_send(Job::Close(tx))
             .unwrap_or_else(|_| panic!("queue"));
-        rx.await.unwrap();
+        rx.await.unwrap().unwrap();
         let storage = Storage::open(&path, cfg, false).await.unwrap();
         let restarted = start(&storage).await;
         assert_eq!(restarted.owners[0].admission.owner_id, owner.owner_id);
@@ -2021,7 +2026,7 @@ mod owner_actor_tests {
             .sender
             .try_send(Job::Close(tx))
             .unwrap_or_else(|_| panic!("queue"));
-        rx.await.unwrap();
+        rx.await.unwrap().unwrap();
         let db = Connection::open(&path).unwrap();
         assert_eq!(
             db.query_row(
