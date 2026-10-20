@@ -12,6 +12,7 @@ const account = "native-auth-account";
 const stages = new Set();
 let progressDescriptor;
 let progressStage = "case.prepare";
+let progressStarted;
 
 function progress(label) {
   const allowed = ["case.prepare", "case.initial", "case.start", "case.navigate", "case.cancel",
@@ -28,7 +29,11 @@ function progress(label) {
     "cancel.click", "logout.open"];
   if (!allowed.includes(label)) throw new Error("closed auth progress label required");
   if (label.startsWith("case.") || label.startsWith("prepare.")) progressStage = label;
-  const bytes = Buffer.from(JSON.stringify({ stage: progressStage, step: label }));
+  progressStarted ??= performance.now();
+  const elapsedMs = Math.floor(performance.now() - progressStarted);
+  const bytes = Buffer.from(JSON.stringify({
+    stage: progressStage, step: label, elapsed_ms: elapsedMs,
+  }));
   if (bytes.length > 256) throw new Error("auth progress byte bound");
   if (progressDescriptor === undefined) {
     progressDescriptor = openSync(join(privateRun().evidence, "native-auth-progress.json"),
