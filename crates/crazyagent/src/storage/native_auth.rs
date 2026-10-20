@@ -307,6 +307,14 @@ pub(crate) fn finish_native_auth_without_effect(
         )?;
     apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
     store_fact(&tx, &fact)?;
+    guard.revalidate(
+        &host,
+        &fact.binding,
+        &fact.operation_id,
+        fact.generation,
+        purpose,
+    )?;
+    validate_continuation(&tx, config, sources, &host, work.fact())?;
     let deleted = tx
         .execute(
             "DELETE FROM native_auth_fences WHERE operation_id=?1 AND generation=?2",
@@ -318,14 +326,6 @@ pub(crate) fn finish_native_auth_without_effect(
         )
         .map_err(error)?;
     assert_eq!(deleted, 1);
-    guard.revalidate(
-        &host,
-        &fact.binding,
-        &fact.operation_id,
-        fact.generation,
-        purpose,
-    )?;
-    validate_continuation(&tx, config, sources, &host, work.fact())?;
     tx.commit().map_err(error)?;
     drop(guard);
     assert!(db.is_autocommit());
