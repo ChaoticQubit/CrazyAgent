@@ -56,11 +56,21 @@ try {
   assert.throws(() => compilerArgv(paths, { os: "linux", arch: "arm64", bun_target: "bun" }), /build_target_rejected/);
   assert.throws(() => compilerArgv({ ...paths, entry: "../entry.ts" }, { os: "darwin", arch: "arm64", bun_target: "bun" }), /build_argv_path_rejected/);
   const before = await readdir(stage);
-  await assert.rejects(planBuild({ staging: stage }), /build_entry_unavailable/);
+  await assert.rejects(planBuild({ staging: stage }), /build_closure_unavailable/);
   assert.deepEqual(await readdir(stage), before);
   assert.deepEqual(await readFile(source), content);
   const lock = JSON.parse(await readFile(new URL("./source-lock.json", import.meta.url)));
-  assert.equal(lock.entry, null);
+  assert.deepEqual(lock.entry, {
+    path: "scripts/rcli/entry.ts",
+    sha256: "93f81817b0eae962d767a1bc8a26958d7f12dc6b7660e41ac1d12b113e588156",
+    bytes: 489,
+    executable: true,
+    contract: {
+      path: "scripts/rcli/host.entry.test.mjs",
+      sha256: "3b7ea0b7230dc5f1430ff35b2b70b92cfbe118e748192eb3d982051f7855b48d",
+      bytes: 10195,
+    },
+  });
   assert.equal(lock.closure.complete, false);
   assert.equal(lock.compiler_arguments_qualified, false);
   assert.equal(lock.host_files.find(row => row.path.endsWith("host.ts")).sha256, "65d5d6d4f6185cfa9e0ea1638f6d8885f3720443185bfdc4914af6726f72a67e");
@@ -68,7 +78,7 @@ try {
   console.log("PASS actual source replacement and mutation detected through owned open descriptors");
   console.log("PASS private staging and unchanged files/output on admission rejection");
   console.log("PASS exact declared argv, wrong-target/path rejection; compiler syntax UNQUALIFIED");
-  console.log("PASS real lock blocks missing executable entry and records incomplete closure; no compiler invoked");
+  console.log("PASS real lock pins executable source entry and blocks incomplete closure; no compiler invoked");
 } finally {
   await rm(root, { recursive: true });
 }

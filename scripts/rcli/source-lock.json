@@ -426,7 +426,17 @@
     "format": "Mach-O64",
     "bun_target": "bun"
   },
-  "entry": null,
+  "entry": {
+    "path": "scripts/rcli/entry.ts",
+    "sha256": "93f81817b0eae962d767a1bc8a26958d7f12dc6b7660e41ac1d12b113e588156",
+    "bytes": 489,
+    "executable": true,
+    "contract": {
+      "path": "scripts/rcli/host.entry.test.mjs",
+      "sha256": "3b7ea0b7230dc5f1430ff35b2b70b92cfbe118e748192eb3d982051f7855b48d",
+      "bytes": 10195
+    }
+  },
   "closure": {
     "complete": false,
     "missing": [
