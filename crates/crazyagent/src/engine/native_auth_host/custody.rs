@@ -445,3 +445,147 @@ fn sleep_until(deadline: Instant) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     thread::sleep(POLL_INTERVAL.min(remaining));
 }
+
+pub(super) fn retain_direct_child(
+    retained: &mut Option<Child>,
+    incoming: Child,
+) -> Result<(), Child> {
+    if retained.is_some() {
+        return Err(incoming);
+    }
+    let direct = incoming.id();
+    *retained = Some(incoming);
+    assert!(retained.is_some());
+    assert_eq!(retained.as_ref().map(Child::id), Some(direct));
+    Ok(())
+}
+
+pub(super) fn cleanup_direct_child(
+    child: &mut Child,
+    deadline: Instant,
+) -> io::Result<Option<ExitStatus>> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(Some(status));
+    }
+    let started = Instant::now();
+    if started >= deadline {
+        return Ok(None);
+    }
+    let deadline = deadline.min(started + DROP_TIME);
+    assert!(deadline > started);
+    assert!(deadline.duration_since(started) <= DROP_TIME);
+    if let Err(error) = child.kill() {
+        return match child.try_wait()? {
+            Some(status) => Ok(Some(status)),
+            None => Err(error),
+        };
+    }
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        sleep_until(deadline);
+    }
+}
+
+use crate::engine::EngineError;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::{HostStamp, NativeProfileBinding};
+use crate::protocol::RequestId;
+
+pub(in crate::engine) struct CustodySession {
+    child: Option<Child>,
+    child_attempted: bool,
+    guard: Option<NativeProfileUse>,
+}
+
+pub(in crate::engine) struct Retirement {
+    guard: NativeProfileUse,
+}
+
+impl CustodySession {
+    pub(in crate::engine) fn new(guard: NativeProfileUse) -> Self {
+        let session = Self {
+            child: None,
+            child_attempted: false,
+            guard: Some(guard),
+        };
+        assert!(session.child.is_none());
+        assert!(!session.child_attempted);
+        session
+    }
+
+    pub(in crate::engine) fn retain_child(
+        &mut self,
+        child: Child,
+    ) -> Result<(), (EngineError, Child)> {
+        let previously_attempted = self.child_attempted;
+        self.child_attempted = true;
+        if previously_attempted {
+            return Err((
+                EngineError("native_auth_child_already_attempted".into()),
+                child,
+            ));
+        }
+        match retain_direct_child(&mut self.child, child) {
+            Ok(()) => {
+                assert!(self.child_attempted);
+                assert!(self.child.is_some());
+                Ok(())
+            }
+            Err(child) => Err((
+                EngineError("native_auth_child_already_retained".into()),
+                child,
+            )),
+        }
+    }
+
+    pub(in crate::engine) fn seal_without_effect(mut self) -> Result<Retirement, EngineError> {
+        if self.child_attempted || self.child.is_some() {
+            return Err(EngineError(
+                "native_auth_child_effect_requires_retirement".into(),
+            ));
+        }
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        guard.revalidate_retained()?;
+        let guard = self
+            .guard
+            .take()
+            .expect("validated physical guard remains retained");
+        assert!(self.child.is_none());
+        assert!(!self.child_attempted);
+        Ok(Retirement { guard })
+    }
+}
+
+impl Drop for CustodySession {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            match cleanup_direct_child(child, Instant::now() + DROP_TIME) {
+                Ok(Some(_)) => {}
+                Ok(None) => eprintln!("native_auth_direct_child_cleanup_deadline_uncertain"),
+                Err(_) => eprintln!("native_auth_direct_child_cleanup_error_uncertain"),
+            }
+        }
+    }
+}
+
+impl Retirement {
+    pub(in crate::engine) fn revalidate(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+    ) -> Result<(), EngineError> {
+        self.guard
+            .revalidate(host, binding, operation_id, generation, purpose)
+    }
+}
