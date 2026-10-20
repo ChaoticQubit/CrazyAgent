@@ -11,6 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
+mod native_auth_host;
 pub mod owner;
 
 pub(crate) use bootstrap::NativeProfileCustody;
