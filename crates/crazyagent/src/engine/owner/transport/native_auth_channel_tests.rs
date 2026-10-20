@@ -5,7 +5,7 @@ use super::*;
 use crate::engine::bootstrap::{EngineService, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::native_auth_host::custody::CustodySession;
 use crate::engine::owner::native_auth::Command;
-use crate::storage::{NativeAuthBegin, NativeAuthWork};
+use crate::storage::{NativeAuthBegin, NativeAuthRetirementCheckpoint, NativeAuthWork};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -395,20 +395,12 @@ async fn capabilities(client: &OwnerClient, id: &str) {
     ));
 }
 
-fn read_barrier(path: &Path) -> Connection {
-    let db = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .unwrap();
-    db.execute_batch("BEGIN").unwrap();
-    let count: i64 = db
-        .query_row("SELECT count(*) FROM native_auth_fences", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(count, 1);
-    db
+fn retirement_checkpoint(
+    case: &ChannelCase,
+    fact: &NativeAuthFact,
+) -> NativeAuthRetirementCheckpoint {
+    assert_eq!(case.snapshot().fences.len(), 1);
+    NativeAuthRetirementCheckpoint::arm(fact, Duration::from_secs(2)).unwrap()
 }
 
 fn pending<F: Future>(future: Pin<&mut F>)
@@ -423,20 +415,21 @@ where
     );
 }
 
-async fn retirement_write_started<F: Future>(case: &ChannelCase, future: &mut Pin<Box<F>>)
+async fn retirement_write_started<F: Future>(
+    future: &mut Pin<Box<F>>,
+    checkpoint: &mut NativeAuthRetirementCheckpoint,
+)
 where
     F::Output: std::fmt::Debug,
 {
-    let journal = case.root.join("engine.db-journal");
-    assert!(!journal.exists());
     tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            pending(future.as_mut());
-            if journal.exists() {
-                break;
+        tokio::select! {
+            observed = future.as_mut() => {
+                panic!("retirement completed before its storage checkpoint: {observed:?}")
             }
-            tokio::task::yield_now().await;
+            reached = checkpoint.reached() => reached.unwrap(),
         }
+        pending(future.as_mut());
     })
     .await
     .unwrap();
@@ -1018,10 +1011,10 @@ async fn native_auth_channel_dropped_retirement_before_commit_preserves_fence() 
         let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
         assert!(channel.revalidate(&guard).await.is_ok());
         let before = case.snapshot();
-        let barrier = read_barrier(&case.root.join("engine.db"));
+        let mut checkpoint = retirement_checkpoint(&case, &fact);
         let retirement = CustodySession::new(guard).seal_without_effect().unwrap();
         let mut future = Box::pin(channel.retire(retirement));
-        retirement_write_started(&case, &mut future).await;
+        retirement_write_started(&mut future, &mut checkpoint).await;
         drop(future);
         drop(channel);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1039,7 +1032,7 @@ async fn native_auth_channel_dropped_retirement_before_commit_preserves_fence() 
         })
         .await
         .unwrap();
-        barrier.execute_batch("ROLLBACK").unwrap();
+        checkpoint.release().unwrap();
         let _ = case
             .client(OwnerClientKind::Tui)
             .read_native_auth(case.query(&fact, "retirement-loss-barrier"))
@@ -1060,11 +1053,11 @@ async fn native_auth_channel_lost_committed_retirement_ack_reconciles_without_se
         let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
         assert!(channel.revalidate(&guard).await.is_ok());
         let probe = case.probe();
-        let barrier = read_barrier(&case.root.join("engine.db"));
+        let mut checkpoint = retirement_checkpoint(&case, &fact);
         let retirement = CustodySession::new(guard).seal_without_effect().unwrap();
         let mut future = Box::pin(channel.retire(retirement));
-        retirement_write_started(&case, &mut future).await;
-        barrier.execute_batch("ROLLBACK").unwrap();
+        retirement_write_started(&mut future, &mut checkpoint).await;
+        checkpoint.release().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let observed = case.snapshot();

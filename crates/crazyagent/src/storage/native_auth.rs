@@ -323,6 +323,8 @@ fn commit_native_auth_custody(
         )
         .map_err(error)?;
     assert_eq!(deleted, 1);
+    #[cfg(test)]
+    retirement_checkpoint::before_commit(retirement)?;
     retirement.validate_session()?;
     tx.commit().map_err(error)?;
     assert!(db.is_autocommit());
@@ -984,5 +986,143 @@ fn reply(admission: &Admission, command: &Command, fact: NativeAuthFact) -> Nati
         fact,
         challenge: None,
         account: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) use retirement_checkpoint::NativeAuthRetirementCheckpoint;
+
+#[cfg(test)]
+mod retirement_checkpoint {
+    use super::{EngineError, NativeAuthCustodyRetirement, NativeAuthFact, error};
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex, mpsc};
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    type Scope = (String, String, String, u64);
+
+    struct Waiter {
+        reached: oneshot::Sender<()>,
+        released: mpsc::Receiver<()>,
+        bound: Duration,
+    }
+
+    struct Entry {
+        registration: Arc<()>,
+        waiter: Option<Waiter>,
+    }
+
+    static CHECKPOINTS: LazyLock<Mutex<HashMap<Scope, Entry>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct NativeAuthRetirementCheckpoint {
+        scope: Scope,
+        registration: Arc<()>,
+        reached: Option<oneshot::Receiver<()>>,
+        release: Option<mpsc::SyncSender<()>>,
+    }
+
+    impl NativeAuthRetirementCheckpoint {
+        pub(crate) fn arm(
+            fact: &NativeAuthFact,
+            wait_bound: Duration,
+        ) -> Result<Self, EngineError> {
+            if wait_bound.is_zero() || wait_bound > Duration::from_secs(2) {
+                return Err(error("native_auth_test_checkpoint_bound"));
+            }
+            let scope = scope(fact);
+            let registration = Arc::new(());
+            let (entered, reached) = oneshot::channel();
+            let (release, released) = mpsc::sync_channel(1);
+            let mut checkpoints = CHECKPOINTS
+                .lock()
+                .map_err(|_| error("native_auth_test_checkpoint_poisoned"))?;
+            if checkpoints.contains_key(&scope) {
+                return Err(error("native_auth_test_checkpoint_duplicate"));
+            }
+            if checkpoints.len() >= 16 {
+                return Err(error("native_auth_test_checkpoint_capacity"));
+            }
+            checkpoints.insert(
+                scope.clone(),
+                Entry {
+                    registration: registration.clone(),
+                    waiter: Some(Waiter {
+                        reached: entered,
+                        released,
+                        bound: wait_bound,
+                    }),
+                },
+            );
+            Ok(Self {
+                scope,
+                registration,
+                reached: Some(reached),
+                release: Some(release),
+            })
+        }
+
+        pub(crate) async fn reached(&mut self) -> Result<(), EngineError> {
+            self.reached
+                .take()
+                .ok_or_else(|| error("native_auth_test_checkpoint_consumed"))?
+                .await
+                .map_err(|_| error("native_auth_test_checkpoint_closed"))
+        }
+
+        pub(crate) fn release(&mut self) -> Result<(), EngineError> {
+            self.release
+                .take()
+                .ok_or_else(|| error("native_auth_test_checkpoint_consumed"))?
+                .send(())
+                .map_err(|_| error("native_auth_test_checkpoint_closed"))
+        }
+    }
+
+    impl Drop for NativeAuthRetirementCheckpoint {
+        fn drop(&mut self) {
+            drop(self.release.take());
+            let mut checkpoints = CHECKPOINTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if checkpoints
+                .get(&self.scope)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.registration, &self.registration))
+            {
+                checkpoints.remove(&self.scope);
+            }
+        }
+    }
+
+    pub(super) fn before_commit(
+        retirement: &NativeAuthCustodyRetirement,
+    ) -> Result<(), EngineError> {
+        let waiter = {
+            let mut checkpoints = CHECKPOINTS
+                .lock()
+                .map_err(|_| error("native_auth_test_checkpoint_poisoned"))?;
+            let Some(entry) = checkpoints.get_mut(&scope(retirement.dispatch().fact())) else {
+                return Ok(());
+            };
+            entry
+                .waiter
+                .take()
+                .ok_or_else(|| error("native_auth_test_checkpoint_consumed"))?
+        };
+        waiter
+            .reached
+            .send(())
+            .map_err(|_| error("native_auth_test_checkpoint_closed"))?;
+        waiter.released.recv_timeout(waiter.bound).map_err(error)
+    }
+
+    fn scope(fact: &NativeAuthFact) -> Scope {
+        (
+            fact.binding.database_instance.as_str().to_owned(),
+            fact.binding.engine_epoch.as_str().to_owned(),
+            fact.operation_id.as_str().to_owned(),
+            fact.generation,
+        )
     }
 }

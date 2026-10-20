@@ -15,6 +15,8 @@ mod master_session;
 mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
+#[cfg(test)]
+pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(test)]
 mod native_auth_host_tests;
