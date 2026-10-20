@@ -13,6 +13,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub mod owner;
 
+pub(crate) use bootstrap::NativeProfileCustody;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputLease {

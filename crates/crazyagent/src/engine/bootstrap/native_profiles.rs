@@ -1,0 +1,597 @@
+use super::{Anchor, Identity, hex, safe_directory, safe_file};
+use crate::config::{ModelAuthentication, ModelConnection};
+use crate::engine::EngineError;
+use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
+use crate::protocol::CredentialRef;
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, Metadata};
+use std::io::{Read, Write};
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::Path;
+
+const ROOT: &str = "native-profiles";
+const MANIFEST: &str = "identity.json";
+const MAX_MANIFEST: usize = 4096;
+const MAX_PROFILES: usize = 64;
+
+fn failure(code: &str) -> EngineError {
+    EngineError(code.to_owned())
+}
+
+fn unsafe_custody(_: impl std::fmt::Display) -> EngineError {
+    failure("native_profile_custody_unsafe")
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StableBinding {
+    profile_ref: CredentialRef,
+    account_ref: CredentialRef,
+    provider: CredentialRef,
+    harness: CredentialRef,
+    protocol: CredentialRef,
+}
+
+impl StableBinding {
+    fn of(connection: &ModelConnection) -> Result<Self, EngineError> {
+        let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+            return Err(failure("native_profile_not_managed"));
+        };
+        Ok(Self {
+            profile_ref: profile_ref.clone(),
+            account_ref: connection.account_ref.clone(),
+            provider: connection.provider.clone(),
+            harness: connection.harness.clone(),
+            protocol: connection.protocol.clone(),
+        })
+    }
+
+    fn key(&self) -> String {
+        digest(self.profile_ref.as_str().as_bytes())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootIdentity {
+    version: u8,
+    database_instance: String,
+    state: Identity,
+    database: Identity,
+    directory: Identity,
+    manifest: Identity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileIdentity {
+    version: u8,
+    root: RootIdentity,
+    binding: StableBinding,
+    directory: Identity,
+    home: Identity,
+    manifest: Identity,
+}
+
+struct Directory {
+    file: File,
+    identity: Identity,
+}
+
+impl Directory {
+    fn open(parent: &File, name: &OsStr) -> Result<Self, EngineError> {
+        let file = File::from(
+            rustix::fs::openat(
+                parent,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                if error == rustix::io::Errno::NOENT {
+                    failure("native_profile_incomplete")
+                } else {
+                    unsafe_custody(error)
+                }
+            })?,
+        );
+        let identity = Identity::of(&file.metadata().map_err(unsafe_custody)?);
+        verify_named(parent, name, &file, identity, true)?;
+        Ok(Self { file, identity })
+    }
+
+    fn create(parent: &File, name: &OsStr) -> Result<Self, EngineError> {
+        rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(unsafe_custody)?;
+        parent.sync_all().map_err(unsafe_custody)?;
+        Self::open(parent, name)
+    }
+
+    fn verify(&self, parent: &File, name: &OsStr) -> Result<(), EngineError> {
+        verify_named(parent, name, &self.file, self.identity, true)
+    }
+}
+
+fn verify_named(
+    parent: &File,
+    name: &OsStr,
+    file: &File,
+    identity: Identity,
+    directory: bool,
+) -> Result<(), EngineError> {
+    let metadata = file.metadata().map_err(unsafe_custody)?;
+    let named =
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(unsafe_custody)?;
+    let safe = if directory {
+        safe_directory(&metadata)
+    } else {
+        safe_file(&metadata)
+    };
+    if !safe
+        || identity.inode == 0
+        || Identity::of(&metadata) != identity
+        || named.st_ino != metadata.ino()
+        || named.st_dev as u64 != metadata.dev()
+        || named.st_uid != metadata.uid()
+        || named.st_mode as u32 != metadata.mode()
+        || (!directory && named.st_nlink as u64 != metadata.nlink())
+    {
+        return Err(failure("native_profile_custody_unsafe"));
+    }
+    Ok(())
+}
+
+struct Manifest {
+    file: File,
+    identity: Identity,
+    bytes: Vec<u8>,
+}
+
+impl Manifest {
+    fn open(parent: &File, create: bool) -> Result<Self, EngineError> {
+        let access = if create {
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL
+        } else {
+            OFlags::RDONLY
+        };
+        let file = File::from(
+            rustix::fs::openat(
+                parent,
+                MANIFEST,
+                access | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(|error| {
+                if error == rustix::io::Errno::NOENT {
+                    failure("native_profile_incomplete")
+                } else {
+                    unsafe_custody(error)
+                }
+            })?,
+        );
+        let metadata = file.metadata().map_err(unsafe_custody)?;
+        let identity = Identity::of(&metadata);
+        verify_named(parent, OsStr::new(MANIFEST), &file, identity, false)?;
+        let mut bytes = Vec::new();
+        if !create {
+            if metadata.len() == 0 || metadata.len() > MAX_MANIFEST as u64 {
+                return Err(failure("native_profile_identity_bounds"));
+            }
+            (&file)
+                .take((MAX_MANIFEST + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(unsafe_custody)?;
+            if bytes.len() > MAX_MANIFEST {
+                return Err(failure("native_profile_identity_bounds"));
+            }
+        }
+        let manifest = Self {
+            file,
+            identity,
+            bytes,
+        };
+        manifest.verify(parent)?;
+        Ok(manifest)
+    }
+
+    fn write(&mut self, parent: &File, bytes: Vec<u8>) -> Result<(), EngineError> {
+        if bytes.is_empty() || bytes.len() > MAX_MANIFEST {
+            return Err(failure("native_profile_identity_bounds"));
+        }
+        self.file.write_all(&bytes).map_err(unsafe_custody)?;
+        self.file.sync_all().map_err(unsafe_custody)?;
+        parent.sync_all().map_err(unsafe_custody)?;
+        self.bytes = bytes;
+        self.verify(parent)
+    }
+
+    fn verify(&self, parent: &File) -> Result<(), EngineError> {
+        verify_named(
+            parent,
+            OsStr::new(MANIFEST),
+            &self.file,
+            self.identity,
+            false,
+        )?;
+        if self.file.metadata().map_err(unsafe_custody)?.len() != self.bytes.len() as u64 {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        let mut bytes = vec![0; self.bytes.len()];
+        self.file
+            .read_exact_at(&mut bytes, 0)
+            .map_err(unsafe_custody)?;
+        if bytes != self.bytes {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        verify_named(
+            parent,
+            OsStr::new(MANIFEST),
+            &self.file,
+            self.identity,
+            false,
+        )
+    }
+}
+
+pub(crate) struct NativeProfileCustody {
+    anchor: Anchor,
+    database: File,
+    database_name: OsString,
+    database_identity: Identity,
+    root_hash: Option<String>,
+    profiles: BTreeMap<String, String>,
+}
+
+impl NativeProfileCustody {
+    pub(crate) fn capture(path: &Path, opened: &Metadata) -> Result<Self, EngineError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| failure("native_profile_custody_unsafe"))?;
+        let anchor = Anchor::open(parent).map_err(unsafe_custody)?;
+        let database_name = path
+            .file_name()
+            .ok_or_else(|| failure("native_profile_custody_unsafe"))?
+            .to_owned();
+        let database = File::from(
+            rustix::fs::openat(
+                &anchor.directory,
+                &database_name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(unsafe_custody)?,
+        );
+        let custody = Self {
+            anchor,
+            database,
+            database_name,
+            database_identity: Identity::of(opened),
+            root_hash: None,
+            profiles: BTreeMap::new(),
+        };
+        custody.verify()?;
+        Ok(custody)
+    }
+
+    fn verify(&self) -> Result<(), EngineError> {
+        self.anchor.verify().map_err(unsafe_custody)?;
+        verify_named(
+            &self.anchor.directory,
+            &self.database_name,
+            &self.database,
+            self.database_identity,
+            false,
+        )
+    }
+
+    fn root(
+        &mut self,
+        host: &HostStamp,
+    ) -> Result<(Directory, Manifest, RootIdentity), EngineError> {
+        let exists =
+            match rustix::fs::statat(&self.anchor.directory, ROOT, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => true,
+                Err(rustix::io::Errno::NOENT) => false,
+                Err(error) => return Err(unsafe_custody(error)),
+            };
+        if !exists && self.root_hash.is_some() {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        let directory = if exists {
+            Directory::open(&self.anchor.directory, OsStr::new(ROOT))?
+        } else {
+            Directory::create(&self.anchor.directory, OsStr::new(ROOT))?
+        };
+        let mut manifest = Manifest::open(&directory.file, !exists)?;
+        let expected = RootIdentity {
+            version: 1,
+            database_instance: host.db_instance.clone(),
+            state: self.anchor.identity,
+            database: self.database_identity,
+            directory: directory.identity,
+            manifest: manifest.identity,
+        };
+        if exists {
+            let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
+                .map_err(|_| failure("native_profile_identity_invalid"))?;
+            if actual != expected {
+                return Err(failure("native_profile_binding_conflict"));
+            }
+        } else {
+            manifest.write(
+                &directory.file,
+                serde_json::to_vec(&expected)
+                    .map_err(|_| failure("native_profile_identity_invalid"))?,
+            )?;
+            directory.file.sync_all().map_err(unsafe_custody)?;
+            self.anchor.directory.sync_all().map_err(unsafe_custody)?;
+        }
+        let hash = digest(&manifest.bytes);
+        if self
+            .root_hash
+            .as_ref()
+            .is_some_and(|pinned| pinned != &hash)
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        self.root_hash = Some(hash);
+        Ok((directory, manifest, expected))
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+    ) -> Result<(String, String), EngineError> {
+        let binding = StableBinding::of(connection)?;
+        self.verify()?;
+        let (root, root_manifest, root_identity) = self.root(host)?;
+        let slots = scan_slots(&root.file)?;
+        if self.profiles.keys().any(|key| !slots.contains_key(key)) {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        let key = binding.key();
+        let exists = slots.contains_key(&key);
+        if !exists && slots.len() >= MAX_PROFILES {
+            return Err(failure("native_profile_capacity"));
+        }
+        let profile = if exists {
+            Directory::open(&root.file, OsStr::new(&key))?
+        } else {
+            Directory::create(&root.file, OsStr::new(&key))?
+        };
+        let (home, manifest) = prepare_profile(&profile, &root_identity, binding, !exists)?;
+        let hash = digest(&manifest.bytes);
+        if self
+            .profiles
+            .get(&key)
+            .is_some_and(|pinned| pinned != &hash)
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        manifest.verify(&profile.file)?;
+        home.verify(&profile.file, OsStr::new("home"))?;
+        profile.verify(&root.file, OsStr::new(&key))?;
+        root_manifest.verify(&root.file)?;
+        root.verify(&self.anchor.directory, OsStr::new(ROOT))?;
+        let current_slots = scan_slots(&root.file)?;
+        if current_slots.get(&key) != Some(&profile.identity)
+            || slots
+                .iter()
+                .any(|(key, id)| current_slots.get(key) != Some(id))
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        self.verify()?;
+        remember_profile(&mut self.profiles, key.clone(), hash.clone());
+        Ok((hash, key))
+    }
+
+    pub(crate) fn receipt(
+        binding: NativeProfileBinding,
+        requested: &CredentialRef,
+        profile: &CredentialRef,
+        key: &str,
+    ) -> PreparedNativeProfile {
+        assert_eq!(&binding.connection.id, requested);
+        assert_eq!(digest(profile.as_str().as_bytes()), key);
+        PreparedNativeProfile::from_binding(binding)
+    }
+}
+
+fn prepare_profile(
+    profile: &Directory,
+    root: &RootIdentity,
+    binding: StableBinding,
+    create: bool,
+) -> Result<(Directory, Manifest), EngineError> {
+    let home = if create {
+        Directory::create(&profile.file, OsStr::new("home"))?
+    } else {
+        Directory::open(&profile.file, OsStr::new("home"))?
+    };
+    if create {
+        require_empty_home(&home.file)?;
+    }
+    let mut manifest = Manifest::open(&profile.file, create)?;
+    let expected = ProfileIdentity {
+        version: 1,
+        root: root.clone(),
+        binding,
+        directory: profile.identity,
+        home: home.identity,
+        manifest: manifest.identity,
+    };
+    if create {
+        manifest.write(
+            &profile.file,
+            serde_json::to_vec(&expected)
+                .map_err(|_| failure("native_profile_identity_invalid"))?,
+        )?;
+        home.file.sync_all().map_err(unsafe_custody)?;
+        profile.file.sync_all().map_err(unsafe_custody)?;
+    } else {
+        let actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
+            .map_err(|_| failure("native_profile_identity_invalid"))?;
+        if actual != expected {
+            return Err(failure("native_profile_binding_conflict"));
+        }
+    }
+    require_profile_entries(&profile.file)?;
+    Ok((home, manifest))
+}
+
+fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
+    let mut slots = BTreeMap::new();
+    let entries = Dir::read_from(root).map_err(unsafe_custody)?;
+    let mut visited = 0;
+    for entry in entries {
+        visited += 1;
+        if visited > MAX_PROFILES + 3 {
+            return Err(failure("native_profile_capacity"));
+        }
+        let entry = entry.map_err(unsafe_custody)?;
+        let name = entry.file_name();
+        let bytes = name.to_bytes();
+        if matches!(bytes, b"." | b".." | b"identity.json") {
+            continue;
+        }
+        let key = std::str::from_utf8(bytes).map_err(unsafe_custody)?;
+        if !hex(key, 64) {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        if slots.len() == MAX_PROFILES {
+            return Err(failure("native_profile_capacity"));
+        }
+        let metadata =
+            rustix::fs::statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(unsafe_custody)?;
+        if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
+            || metadata.st_uid != rustix::process::getuid().as_raw()
+            || metadata.st_mode & 0o7777 != 0o700
+            || metadata.st_ino == 0
+        {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        let identity = Identity {
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino,
+        };
+        if slots.insert(key.to_owned(), identity).is_some() {
+            return Err(failure("native_profile_identity_changed"));
+        }
+    }
+    Ok(slots)
+}
+
+fn require_empty_home(home: &File) -> Result<(), EngineError> {
+    let entries = Dir::read_from(home).map_err(unsafe_custody)?;
+    for (index, entry) in entries.enumerate() {
+        let entry = entry.map_err(unsafe_custody)?;
+        if index > 2 || !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Err(failure("native_profile_new_home_not_empty"));
+        }
+    }
+    Ok(())
+}
+
+fn require_profile_entries(profile: &File) -> Result<(), EngineError> {
+    let entries = Dir::read_from(profile).map_err(unsafe_custody)?;
+    let mut identity = false;
+    let mut home = false;
+    for (index, entry) in entries.enumerate() {
+        let entry = entry.map_err(unsafe_custody)?;
+        if index > 3 {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        match entry.file_name().to_bytes() {
+            b"." | b".." => {}
+            b"identity.json" if !identity => identity = true,
+            b"home" if !home => home = true,
+            _ => return Err(failure("native_profile_custody_unsafe")),
+        }
+    }
+    if !identity || !home {
+        return Err(failure("native_profile_incomplete"));
+    }
+    Ok(())
+}
+
+fn remember_profile(pins: &mut BTreeMap<String, String>, key: String, hash: String) {
+    pins.insert(key, hash);
+    assert!(pins.len() <= MAX_PROFILES);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ModelEndpoint, ModelReference};
+    use crate::protocol::{ConfigId, Cursor};
+
+    fn reference(value: &str) -> CredentialRef {
+        CredentialRef::new(value).unwrap()
+    }
+
+    fn binding() -> NativeProfileBinding {
+        NativeProfileBinding {
+            database_instance: "a".repeat(64),
+            engine_epoch: "b".repeat(64),
+            config_id: ConfigId::new("c".repeat(64)).unwrap(),
+            source_hash: "d".repeat(64),
+            at_revision: Cursor::new(0),
+            connection: ModelConnection {
+                id: reference("connection"),
+                provider: reference("provider"),
+                harness: reference("codex"),
+                protocol: reference("native"),
+                account_ref: reference("account"),
+                endpoint: ModelEndpoint::Native {},
+                model: ModelReference {
+                    id: "model".into(),
+                    author: reference("author"),
+                },
+                auth: ModelAuthentication::NativeManaged {
+                    profile_ref: reference("profile"),
+                },
+            },
+            custody_id: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn assembled_receipt_cannot_change_the_selected_connection() {
+        NativeProfileCustody::receipt(
+            binding(),
+            &reference("another"),
+            &reference("profile"),
+            &digest(b"profile"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn assembled_receipt_cannot_change_the_profile_key() {
+        NativeProfileCustody::receipt(
+            binding(),
+            &reference("connection"),
+            &reference("profile"),
+            &digest(b"another"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: pins.len() <= MAX_PROFILES")]
+    fn retained_pin_assembly_cannot_exceed_the_validated_capacity() {
+        let mut pins = (0..MAX_PROFILES)
+            .map(|index| (format!("{index:064x}"), "a".repeat(64)))
+            .collect();
+        remember_profile(&mut pins, "overflow".into(), "b".repeat(64));
+    }
+}

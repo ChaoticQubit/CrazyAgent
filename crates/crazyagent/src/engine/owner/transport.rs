@@ -713,6 +713,35 @@ pub struct OwnerRuntimeHandle {
 }
 
 impl OwnerRuntimeHandle {
+    pub async fn prepare_native_profile(
+        &self,
+        connection_id: &CredentialRef,
+        expected_config_id: &ConfigId,
+        expected_source_hash: &str,
+    ) -> Result<PreparedNativeProfile, EngineError> {
+        if expected_source_hash.len() != 64
+            || !expected_source_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(failure("native_profile_source_invalid"));
+        }
+        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
+            .await
+            .map_err(|_| failure("native_profile_not_submitted"))?;
+        self.engine
+            .owner_job(|reply| {
+                Job::PrepareNativeProfile(
+                    self.identity(),
+                    connection_id.clone(),
+                    expected_config_id.clone(),
+                    expected_source_hash.to_owned(),
+                    reply,
+                )
+            })
+            .await
+    }
+
     /// Persists a bounded observation under this trusted host incarnation.
     /// Takes exact source identity, connection, sequence and freshness evidence.
     /// Returns after commit; an uncertain result requires retrying identical bytes.

@@ -1,6 +1,6 @@
 use crate::config::EffectiveConfig;
-use crate::engine::EngineError;
 use crate::engine::owner::*;
+use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
@@ -13,6 +13,13 @@ mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    PrepareNativeProfile(
+        HostStamp,
+        CredentialRef,
+        ConfigId,
+        String,
+        oneshot::Sender<Result<PreparedNativeProfile, EngineError>>,
+    ),
     GatewayObserve(
         HostStamp,
         Box<Observation>,
@@ -95,7 +102,11 @@ impl Storage {
         std::thread::Builder::new()
             .name("crazyagent-sqlite".into())
             .spawn(move || {
-                let (mut connection, lock) = match open_database(&path, readonly) {
+                let OpenedDatabase {
+                    mut connection,
+                    lock,
+                    custody,
+                } = match open_actor_database(&path, readonly) {
                     Ok(database) => database,
                     Err(e) => {
                         drop(sources.take());
@@ -103,12 +114,14 @@ impl Storage {
                         return;
                     }
                 };
+                let mut custody = Some(custody);
                 let mut config = config;
                 if !readonly
                     && let Err(e) =
                         settings::recover(&mut connection, &mut config, sources.as_ref())
                 {
                     drop(connection);
+                    drop(custody.take());
                     drop(lock);
                     drop(sources.take());
                     let _ = ready_send.send(Err(e));
@@ -118,6 +131,21 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::PrepareNativeProfile(host, id, config_id, source_hash, reply) => {
+                            let result = if readonly {
+                                Err(error("native_profile_readonly"))
+                            } else {
+                                prepare_native_profile(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    custody.as_mut().unwrap(),
+                                    &host,
+                                    (&id, &config_id, &source_hash),
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::GatewayObserve(host, observation, reply) => {
                             let result = if readonly {
                                 Err(error("gateway_readonly"))
@@ -274,6 +302,7 @@ impl Storage {
                                 let _ = owner_stop(&mut connection, stamp);
                             }
                             drop(connection);
+                            drop(custody.take());
                             let released = release_database_lock(lock);
                             drop(sources.take());
                             let _ = reply.send(released);
@@ -295,7 +324,19 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Opens private engine storage and initializes additive authority schemas.
 /// Takes a database path and read-only mode and returns connection ownership.
 /// Rejects unsafe filesystem metadata and competing engine ownership.
+#[cfg(test)]
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
+    let opened = open_actor_database(path, readonly)?;
+    Ok((opened.connection, opened.lock))
+}
+
+struct OpenedDatabase {
+    connection: Connection,
+    lock: std::fs::File,
+    custody: Result<NativeProfileCustody, EngineError>,
+}
+
+fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| error("database parent missing"))?;
@@ -345,22 +386,116 @@ fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::Fi
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(error)?;
     if !readonly {
-        initialize_schema(&connection)?;
-        crate::coordination::initialize(&connection)?;
-        crate::memory::initialize(&connection)?;
-        crate::assets::initialize(&connection)?;
-        crate::verification::initialize(&connection)?;
-        crate::worktrees::initialize(&connection)?;
-        crate::worktrees::reconcile(&connection)?;
-        worker_dispatch::initialize(&connection)?;
-        model_gateway::initialize(&connection)?;
+        initialize_authority_schemas(&connection)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
         std::fs::symlink_metadata(path).map_err(error)?.ino(),
         metadata.ino()
     );
-    Ok((connection, lock))
+    let custody = NativeProfileCustody::capture(path, &metadata);
+    Ok(OpenedDatabase {
+        connection,
+        lock,
+        custody,
+    })
+}
+
+fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
+    initialize_schema(connection)?;
+    crate::coordination::initialize(connection)?;
+    crate::memory::initialize(connection)?;
+    crate::assets::initialize(connection)?;
+    crate::verification::initialize(connection)?;
+    crate::worktrees::initialize(connection)?;
+    crate::worktrees::reconcile(connection)?;
+    worker_dispatch::initialize(connection)?;
+    model_gateway::initialize(connection)
+}
+
+fn prepare_native_profile(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    expected: (&CredentialRef, &ConfigId, &str),
+) -> Result<PreparedNativeProfile, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db.transaction().map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let source_hash = settings::verified_source_hash(config, sources)
+        .map_err(|_| error("native_profile_source_conflict"))?;
+    if &config.id != expected.1 || source_hash != expected.2 {
+        return Err(error("native_profile_source_conflict"));
+    }
+    let connection = native_profile_connection(config, expected.0)?;
+    let (custody_id, key) = custody
+        .as_mut()
+        .map_err(|error| error.clone())?
+        .prepare(host, connection)?;
+    if settings::verified_source_hash(config, sources)
+        .map_err(|_| error("native_profile_source_conflict"))?
+        != source_hash
+    {
+        return Err(error("native_profile_source_conflict"));
+    }
+    let binding = NativeProfileBinding {
+        database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(),
+        config_id: config.id.clone(),
+        source_hash,
+        at_revision: Cursor::new(owner_revision(&tx)?),
+        connection: connection.clone(),
+        custody_id,
+    };
+    tx.commit().map_err(error)?;
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(error("native_profile_not_managed"));
+    };
+    Ok(NativeProfileCustody::receipt(
+        binding,
+        expected.0,
+        profile_ref,
+        &key,
+    ))
+}
+
+fn native_profile_connection<'a>(
+    config: &'a EffectiveConfig,
+    id: &CredentialRef,
+) -> Result<&'a crate::config::ModelConnection, EngineError> {
+    use crate::config::{ModelAuthentication, ModelEndpoint};
+    let catalog = config
+        .settings
+        .model_access
+        .as_ref()
+        .ok_or_else(|| error("native_profile_connection_missing"))?;
+    let connection = catalog
+        .connections
+        .iter()
+        .find(|item| &item.id == id)
+        .ok_or_else(|| error("native_profile_connection_missing"))?;
+    let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(error("native_profile_not_managed"));
+    };
+    if !matches!(connection.endpoint, ModelEndpoint::Native {})
+        || connection.protocol.as_str() != "native"
+        || !catalog.accounts.contains(&connection.account_ref)
+    {
+        return Err(error("native_profile_not_managed"));
+    }
+    for alias in &catalog.connections {
+        if matches!(&alias.auth, ModelAuthentication::NativeManaged { profile_ref: other } if other == profile_ref)
+            && (alias.account_ref != connection.account_ref
+                || alias.provider != connection.provider
+                || alias.harness != connection.harness
+                || alias.protocol != connection.protocol)
+        {
+            return Err(error("native_profile_binding_conflict"));
+        }
+    }
+    Ok(connection)
 }
 
 fn gateway_observe(

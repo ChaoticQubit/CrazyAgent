@@ -11,6 +11,32 @@ use crate::protocol::*;
 use crate::verification::{BaselineDraft, OwnerVerification, Risk};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeProfileBinding {
+    pub database_instance: String,
+    pub engine_epoch: String,
+    pub config_id: ConfigId,
+    pub source_hash: String,
+    pub at_revision: Cursor,
+    pub connection: crate::config::ModelConnection,
+    pub custody_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedNativeProfile {
+    binding: NativeProfileBinding,
+}
+
+impl PreparedNativeProfile {
+    pub fn binding(&self) -> &NativeProfileBinding {
+        &self.binding
+    }
+
+    pub(crate) fn from_binding(binding: NativeProfileBinding) -> Self {
+        Self { binding }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnerClientKind {

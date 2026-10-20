@@ -616,6 +616,22 @@ fn reject(
     })
 }
 
+pub(super) fn verified_source_hash(
+    config: &EffectiveConfig,
+    sources: Option<&SettingsSources>,
+) -> Result<String, EngineError> {
+    match sources {
+        Some(sources) => {
+            let snapshot = sources.snapshot()?;
+            if snapshot.config()?.id != config.id {
+                return Err(error("settings_source_conflict"));
+            }
+            snapshot.hash()
+        }
+        None => Ok(config.id.as_str().to_owned()),
+    }
+}
+
 pub(super) fn read(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -629,16 +645,7 @@ pub(super) fn read(
         return Err(error("settings_publication_pending"));
     }
     let revision = owner_revision(&tx)?;
-    let source_hash = match sources {
-        Some(sources) => {
-            let snapshot = sources.snapshot()?;
-            if snapshot.config()?.id != config.id {
-                return Err(error("settings_source_conflict"));
-            }
-            snapshot.hash()?
-        }
-        None => config.id.as_str().to_owned(),
-    };
+    let source_hash = verified_source_hash(config, sources)?;
     let writable = sources.is_some();
     let (collection, record_id, cursor, limit) = match query {
         OwnerRead::ModelAccessPage {
