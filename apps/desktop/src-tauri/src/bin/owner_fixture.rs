@@ -1,10 +1,11 @@
 use crazyagent::client_controller::OwnerController;
-use crazyagent::config::resolve_config;
+use crazyagent::config::{ModelConnection, resolve_config};
 use crazyagent::engine::Client;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
-    ModelAccessCollection, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse,
-    OwnerResult, OwnerView,
+    ModelAccessCollection, ModelAccessRecord, NativeAuthQuery, NativeAuthReply, NativeAuthScope,
+    OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerRead,
+    OwnerRequest, OwnerResponse, OwnerResult, OwnerView,
 };
 use crazyagent::protocol::*;
 use crazyagent::verification::*;
@@ -194,13 +195,145 @@ async fn observe_model_access() -> FixtureResult<()> {
     emit(json!({ "collections": records }))
 }
 
+async fn auth_connection(
+    owner: &OwnerClient,
+    id: CredentialRef,
+) -> FixtureResult<(ConfigId, String, bool, String, ModelConnection)> {
+    let request = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("native-auth-observer-record")?,
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Read {
+            query: OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Connections,
+                id: id.clone(),
+            },
+        },
+    };
+    let OwnerResponse::Read { state } = owner.request(request).await?.response else {
+        return Err("Desktop observer connection read was not admitted".into());
+    };
+    let OwnerData::ModelAccessRecord {
+        source_hash,
+        writable,
+        record: ModelAccessRecord::Connection { connection },
+    } = state.data
+    else {
+        return Err("actual native connection record required".into());
+    };
+    if connection.id != id {
+        return Err("observer connection identity mismatch".into());
+    }
+    Ok((
+        state.config_id,
+        source_hash,
+        writable,
+        state.revision.value().to_string(),
+        connection,
+    ))
+}
+
+fn auth_observation(
+    reply: NativeAuthReply,
+    scope: &NativeAuthScope,
+    connection: &ModelConnection,
+    operation_id: &RequestId,
+    engine_epoch: &str,
+) -> FixtureResult<serde_json::Value> {
+    let binding = &reply.fact.binding;
+    if &reply.fact.operation_id != operation_id
+        || reply.request_id.as_str() != "native-auth-observer-read"
+        || reply.database_instance != scope.expected_database_instance
+        || reply.engine_epoch != engine_epoch
+        || binding.database_instance != reply.database_instance
+        || binding.engine_epoch != engine_epoch
+        || binding.config_id != scope.expected_config_id
+        || binding.source_hash != scope.expected_source_hash
+        || &binding.connection != connection
+    {
+        return Err("actual owner auth fact did not join the inspected connection".into());
+    }
+    Ok(json!({
+        "request_id": reply.request_id.as_str(),
+        "operation_id": reply.fact.operation_id.as_str(),
+        "database_instance": reply.database_instance,
+        "engine_epoch": reply.engine_epoch,
+        "config_id": binding.config_id.as_str(),
+        "source_hash": binding.source_hash,
+        "connection": binding.connection.id.as_str(),
+        "connection_match": true,
+        "generation": reply.fact.generation.to_string(),
+        "action": reply.fact.action,
+        "phase": reply.fact.phase,
+        "code": reply.fact.code,
+        "challenge_present": reply.challenge.is_some(),
+        "account_present": reply.account.is_some()
+    }))
+}
+
+async fn observe_native_auth(id: &str, operation: Option<&str>) -> FixtureResult<()> {
+    let id = CredentialRef::new(id)?;
+    let operation = operation.map(RequestId::new).transpose()?;
+    let socket =
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").ok_or("native fixture socket is required")?;
+    let client = Client::new(socket.into(), Duration::from_secs(3))?;
+    let (_, owner, identity) = client.with_owner(OwnerClientKind::Desktop).await?;
+    let (config_id, source_hash, writable, revision, connection) =
+        auth_connection(&owner, id.clone()).await?;
+    let scope = NativeAuthScope {
+        expected_database_instance: identity.database_instance().into(),
+        connection: id,
+        expected_config_id: config_id,
+        expected_source_hash: source_hash,
+    };
+    let observation = if let Some(operation_id) = operation {
+        let reply = owner
+            .read_native_auth(NativeAuthQuery {
+                request_id: RequestId::new("native-auth-observer-read")?,
+                scope: scope.clone(),
+                operation_id: operation_id.clone(),
+            })
+            .await?;
+        Some(auth_observation(
+            reply,
+            &scope,
+            &connection,
+            &operation_id,
+            identity.engine_epoch(),
+        )?)
+    } else {
+        None
+    };
+    emit(json!({
+        "observer_kind": "desktop",
+        "connection": connection.id.as_str(),
+        "config_id": scope.expected_config_id.as_str(),
+        "source_hash": scope.expected_source_hash,
+        "database_instance": identity.database_instance(),
+        "engine_epoch": identity.engine_epoch(),
+        "revision": revision,
+        "writable": writable,
+        "operation": observation
+    }))
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).take(3).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
     let result = match args.as_slice() {
         [mode, root] if mode == "serve" => serve(Path::new(root), false).await,
         [mode, root] if mode == "serve-model-access" => serve(Path::new(root), true).await,
         [mode] if mode == "observe-model-access" => observe_model_access().await,
+        [mode, id] if mode == "observe-native-auth" => match id.to_str() {
+            Some(id) => observe_native_auth(id, None).await,
+            None => Err("invalid connection id".into()),
+        },
+        [mode, id, operation] if mode == "observe-native-auth" => {
+            match (id.to_str(), operation.to_str()) {
+                (Some(id), Some(operation)) => observe_native_auth(id, Some(operation)).await,
+                _ => Err("invalid connection or operation id".into()),
+            }
+        }
         [mode, id] if mode == "observe" => match id.to_str() {
             Some(id) => observe(id).await,
             None => Err("invalid baseline id".into()),
