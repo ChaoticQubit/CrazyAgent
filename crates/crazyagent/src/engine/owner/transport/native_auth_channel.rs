@@ -328,7 +328,7 @@ enum AttachKind {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Attach {
-    protocol_version: u32,
+    protocol_version: u16,
     kind: AttachKind,
 }
 
@@ -341,7 +341,7 @@ enum GrantKind {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Grant {
-    protocol_version: u32,
+    protocol_version: u16,
     kind: GrantKind,
     fact: NativeAuthFact,
 }
@@ -356,7 +356,7 @@ enum RequestKind {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
-    protocol_version: u32,
+    protocol_version: u16,
     operation_id: RequestId,
     generation: u64,
     seq: u64,
@@ -374,7 +374,7 @@ enum ReplyKind {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {
-    protocol_version: u32,
+    protocol_version: u16,
     seq: u64,
     kind: ReplyKind,
     fact: NativeAuthFact,

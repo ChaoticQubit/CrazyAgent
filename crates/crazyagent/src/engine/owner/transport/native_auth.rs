@@ -1,4 +1,4 @@
-use super::{Authority, OwnerClient, SOCKET};
+use super::{Authority, OwnerClient, OwnerRuntimeHandle, SOCKET};
 use crate::engine::owner::native_auth::{self as auth, Command, Envelope};
 use crate::engine::owner::{
     Admission, NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply,
@@ -6,6 +6,7 @@ use crate::engine::owner::{
 };
 use crate::engine::{Engine, EngineError, io_error, read_frame, verify_peer};
 use crate::protocol::encode_frame;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
