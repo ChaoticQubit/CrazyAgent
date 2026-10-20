@@ -21,6 +21,8 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 mod native_auth;
+#[cfg(test)]
+mod native_auth_channel_tests;
 
 const SOCKET: &str = "owner.sock";
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
