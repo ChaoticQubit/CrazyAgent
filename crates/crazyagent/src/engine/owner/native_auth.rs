@@ -4,6 +4,9 @@ use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[cfg(test)]
+mod presentation_tests;
+
 pub(crate) const REQUEST_BYTES_MAX: usize = 8192;
 pub(crate) const FACT_BYTES_MAX: usize = 16384;
 pub(crate) const OPERATIONS_MAX: i64 = 1024;
