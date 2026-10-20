@@ -91,3 +91,12 @@ fn native_auth_registered_executable_rejects_empty_and_oversize_files() {
     file.set_len(256 * 1024 * 1024 + 1).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&path).is_err());
 }
+
+#[test]
+#[should_panic(expected = "assertion failed")]
+fn native_auth_registered_executable_internal_hash_length_is_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "host");
+    let file = File::open(path).unwrap();
+    let _ = RegisteredNativeAuthHost::hash(&file, 0);
+}
