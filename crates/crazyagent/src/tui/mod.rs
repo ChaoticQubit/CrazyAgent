@@ -23,9 +23,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use std::fs::{File, OpenOptions, Permissions};
 use std::io::{IsTerminal, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -121,76 +119,6 @@ fn bounded_area(width: u16, height: u16) -> Rect {
     Rect::new(0, 0, width.min(300), height.min(120))
 }
 
-const KEY_OBSERVATION_RECORDS: usize = 256;
-const KEY_OBSERVATION_LINE_BYTES: usize = 256;
-const KEY_OBSERVATION_BYTES: usize = 65536;
-
-struct KeyObservation {
-    file: File,
-    records: usize,
-    bytes: usize,
-}
-
-impl KeyObservation {
-    fn open() -> Option<Self> {
-        let path = std::path::PathBuf::from(std::env::var_os("CRAZYAGENT_TUI_KEY_OBSERVATION")?);
-        if !path.is_absolute() {
-            return None;
-        }
-        let parent = std::fs::symlink_metadata(path.parent()?).ok()?;
-        if !parent.is_dir() || parent.permissions().mode() & 0o077 != 0 {
-            return None;
-        }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .ok()?;
-        file.set_permissions(Permissions::from_mode(0o600)).ok()?;
-        Some(Self {
-            file,
-            records: 0,
-            bytes: 0,
-        })
-    }
-
-    fn record(&mut self, event: &Event, app: &App) -> bool {
-        let Event::Key(key) = event else {
-            return true;
-        };
-        if self.records >= KEY_OBSERVATION_RECORDS {
-            return false;
-        }
-        let line = format!(
-            concat!(
-                "kind={:?} modifiers={} expected_m={} focus={:?} ",
-                "brief={} creating={} declaration={} master={} draft_bytes={}\n"
-            ),
-            key.kind,
-            key.modifiers.bits(),
-            key.code == KeyCode::Char('m'),
-            app.focus(),
-            app.is_editing_brief(),
-            app.is_creating_project(),
-            app.declaration.open,
-            app.master.is_open(),
-            app.draft().len(),
-        );
-        if line.len() > KEY_OBSERVATION_LINE_BYTES
-            || self.bytes > KEY_OBSERVATION_BYTES - line.len()
-        {
-            return false;
-        }
-        self.records += 1;
-        self.bytes += line.len();
-        assert!(self.records <= KEY_OBSERVATION_RECORDS && self.bytes <= KEY_OBSERVATION_BYTES);
-        self.file.write_all(line.as_bytes()).is_ok()
-            && self.records < KEY_OBSERVATION_RECORDS
-            && self.bytes < KEY_OBSERVATION_BYTES
-    }
-}
-
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
@@ -203,7 +131,6 @@ fn event_loop(
     let mut owner_refresh = Instant::now();
     let mut dispatch_refresh = Instant::now();
     let mut owner_reconnect = false;
-    let mut key_observation = KeyObservation::open();
     loop {
         if stopped.load(Ordering::Relaxed) {
             break;
@@ -312,11 +239,6 @@ fn event_loop(
             continue;
         }
         let event = event::read().map_err(|e| TuiError(e.to_string()))?;
-        if let Some(observer) = key_observation.as_mut()
-            && !observer.record(&event, app)
-        {
-            key_observation = None;
-        }
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -343,27 +265,30 @@ fn event_loop(
                     if let Err(error) = result {
                         app.notice(&error);
                     }
-                } else if let Some(event) = key_event(key, app) {
-                    let previous_focus = app.focus();
-                    if matches!(event, UiEvent::Submit)
-                        && app.is_creating_project()
-                        && (connection.mutation_pending() || app.has_command())
-                    {
-                        app.notice(
-                            "Request pending; wait, or Ctrl-R retry if creation outcome is unknown",
-                        );
-                    } else if let Err(error) = app.reduce(event) {
-                        app.notice(&error);
+                } else {
+                    for event in key_events(app, key).into_iter().flatten() {
+                        let previous_focus = app.focus();
+                        if matches!(event, UiEvent::Submit)
+                            && app.is_creating_project()
+                            && (connection.mutation_pending() || app.has_command())
+                        {
+                            app.notice(concat!(
+                                "Request pending; wait, or Ctrl-R retry if ",
+                                "creation outcome is unknown",
+                            ));
+                        } else if let Err(error) = app.reduce(event) {
+                            app.notice(&error);
+                        }
+                        if previous_focus != app.focus()
+                            && matches!(
+                                app.focus(),
+                                Focus::Evidence | Focus::Conversation | Focus::Settings
+                            )
+                        {
+                            owner_refresh = Instant::now();
+                        }
+                        refresh = Instant::now();
                     }
-                    if previous_focus != app.focus()
-                        && matches!(
-                            app.focus(),
-                            Focus::Evidence | Focus::Conversation | Focus::Settings
-                        )
-                    {
-                        owner_refresh = Instant::now();
-                    }
-                    refresh = Instant::now();
                 }
                 dirty = true;
             }
@@ -379,6 +304,25 @@ fn event_loop(
         }
     }
     Ok(())
+}
+
+fn key_events(app: &App, mut key: KeyEvent) -> [Option<UiEvent>; 2] {
+    if key.kind == KeyEventKind::Release {
+        return [None, None];
+    }
+    if app.focus() == Focus::Conversation
+        && app.is_editing_brief()
+        && !app.is_creating_project()
+        && !app.declaration.open
+        && !app.master.is_open()
+        && (key.modifiers == KeyModifiers::ALT
+            || key.modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT))
+        && matches!(key.code, KeyCode::Char(character) if !character.is_control())
+    {
+        key.modifiers.remove(KeyModifiers::ALT);
+        return [Some(UiEvent::Cancel), key_event(key, app)];
+    }
+    [key_event(key, app), None]
 }
 
 fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
