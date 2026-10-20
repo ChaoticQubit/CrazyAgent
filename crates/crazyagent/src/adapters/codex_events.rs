@@ -69,6 +69,7 @@ impl CodexEventBridge {
         self.assert_consistent();
         let mut observed = self.observation(request_id, EventKind::ProtocolInitialized);
         observed.kind = match event {
+            Event::AuthControl(_) => return Err(BridgeError::Unsupported),
             Event::Initialized => EventKind::ProtocolInitialized,
             Event::AccountRateLimitsRead {
                 id,
@@ -130,6 +131,9 @@ impl CodexEventBridge {
                 code,
                 message,
             } => {
+                if auth_control_method(method) {
+                    return Err(BridgeError::Unsupported);
+                }
                 if method == "account/rateLimits/read" {
                     observed.native_thread_id = None;
                 }
@@ -177,14 +181,24 @@ impl CodexEventBridge {
                     params,
                 }
             }
-            Event::UnsupportedRequest { id, method } => EventKind::UnsupportedRequest {
-                id: native_request_id(id),
-                method,
-            },
-            Event::UnsupportedNotification { method } => EventKind::Unsupported {
-                message_type: "notification".into(),
-                subtype: Some(method),
-            },
+            Event::UnsupportedRequest { id, method } => {
+                if auth_control_method(&method) {
+                    return Err(BridgeError::Unsupported);
+                }
+                EventKind::UnsupportedRequest {
+                    id: native_request_id(id),
+                    method,
+                }
+            }
+            Event::UnsupportedNotification { method } => {
+                if auth_control_method(&method) {
+                    return Err(BridgeError::Unsupported);
+                }
+                EventKind::Unsupported {
+                    message_type: "notification".into(),
+                    subtype: Some(method),
+                }
+            }
         };
         serde_json::to_writer(
             &mut OutputLimit {
@@ -236,6 +250,17 @@ impl CodexEventBridge {
                 .is_none_or(|id| !id.is_empty() && id.len() <= FRAME_BYTES_MAX)
         );
     }
+}
+
+fn auth_control_method(method: &str) -> bool {
+    matches!(
+        method,
+        "account/login/start"
+            | "account/login/completed"
+            | "account/read"
+            | "account/login/cancel"
+            | "account/logout"
+    )
 }
 
 fn native_request_id(id: WireId) -> NativeRequestId {

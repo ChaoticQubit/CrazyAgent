@@ -9,6 +9,10 @@ const APPROVALS_MAX: usize = 16;
 const SERVER_IDS_MAX: usize = 1024;
 const TURNS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
+const LOGINS_MAX: usize = 16;
+const AUTH_URL_BYTES_MAX: usize = 2048;
+const AUTH_ERROR_BYTES_MAX: usize = 4096;
+const ACCOUNT_EMAIL_BYTES_MAX: usize = 320;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
@@ -57,9 +61,88 @@ pub enum ApprovalKind {
     Permissions,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct SensitiveAuthText(String);
+
+impl SensitiveAuthText {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SensitiveAuthText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SensitiveAuthText([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoginChallenge {
+    Browser {
+        login_id: String,
+        auth_url: SensitiveAuthText,
+    },
+    DeviceCode {
+        login_id: String,
+        user_code: SensitiveAuthText,
+        verification_url: SensitiveAuthText,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthAccount {
+    ApiKey,
+    Chatgpt {
+        email: Option<SensitiveAuthText>,
+        plan_type: String,
+    },
+    AmazonBedrock {
+        uses_codex_managed_credentials: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoginCancelStatus {
+    Canceled,
+    NotFound,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthControl {
+    LoginStarted {
+        id: i64,
+        challenge: LoginChallenge,
+    },
+    LoginCompleted {
+        login_id: Option<String>,
+        success: bool,
+        error: Option<SensitiveAuthText>,
+        onboarding_entrypoint: Option<String>,
+    },
+    AccountRead {
+        id: i64,
+        account: Option<AuthAccount>,
+        requires_openai_auth: bool,
+    },
+    LoginCanceled {
+        id: i64,
+        status: LoginCancelStatus,
+    },
+    LoggedOut {
+        id: i64,
+    },
+    RequestFailed {
+        id: i64,
+        method: &'static str,
+        code: i64,
+        message: SensitiveAuthText,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Initialized,
+    AuthControl(AuthControl),
     AccountRateLimitsRead {
         id: i64,
         account_id: Option<String>,
@@ -112,9 +195,22 @@ pub enum Event {
 enum Operation {
     Initialize,
     AccountRateLimitsRead,
-    ThreadStart { cwd: String },
+    LoginStart {
+        device_code: bool,
+        completed_login_id: Option<String>,
+    },
+    AccountRead,
+    LoginCancel {
+        login_id: String,
+    },
+    AccountLogout,
+    ThreadStart {
+        cwd: String,
+    },
     TurnStart,
-    Interrupt { turn_id: String },
+    Interrupt {
+        turn_id: String,
+    },
 }
 
 impl Operation {
@@ -122,6 +218,10 @@ impl Operation {
         match self {
             Self::Initialize => "initialize",
             Self::AccountRateLimitsRead => "account/rateLimits/read",
+            Self::LoginStart { .. } => "account/login/start",
+            Self::AccountRead => "account/read",
+            Self::LoginCancel { .. } => "account/login/cancel",
+            Self::AccountLogout => "account/logout",
             Self::ThreadStart { .. } => "thread/start",
             Self::TurnStart => "turn/start",
             Self::Interrupt { .. } => "turn/interrupt",
@@ -157,6 +257,13 @@ struct Turn {
     items: Vec<Value>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoginState {
+    Pending,
+    Canceled,
+    Completed,
+}
+
 /// Tracks a bounded projection of the pinned stable Codex wire protocol.
 /// Byte inputs and returned frames describe protocol facts only.
 /// This object grants no execution, authentication or recovery authority.
@@ -170,6 +277,7 @@ pub struct CodexProtocol {
     seen_turns: BTreeSet<String>,
     seen_server_ids: BTreeSet<WireId>,
     server_requests: BTreeMap<WireId, Option<ApprovalKind>>,
+    login_ids: BTreeMap<String, LoginState>,
 }
 
 impl Default for CodexProtocol {
@@ -190,6 +298,7 @@ impl CodexProtocol {
             seen_turns: BTreeSet::new(),
             seen_server_ids: BTreeSet::new(),
             server_requests: BTreeMap::new(),
+            login_ids: BTreeMap::new(),
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
@@ -225,8 +334,62 @@ impl CodexProtocol {
         Ok(bytes)
     }
 
+    pub fn start_chatgpt_login(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.start_login(false)
+    }
+
+    pub fn start_device_code_login(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.start_login(true)
+    }
+
+    pub fn read_account(&mut self, refresh_token: bool) -> Result<Vec<u8>, ProtocolError> {
+        if refresh_token {
+            self.require_auth_idle()?;
+        } else {
+            self.assert_consistent();
+            if !matches!(self.phase, State::Ready | State::Idle | State::Active) {
+                return Err(ProtocolError::InvalidState);
+            }
+            self.require(self.phase)?;
+        }
+        let phase = self.phase;
+        let bytes = self.request(
+            Operation::AccountRead,
+            json!({"refreshToken":refresh_token}),
+        )?;
+        assert_eq!(self.phase, phase);
+        Ok(bytes)
+    }
+
+    pub fn cancel_login(&mut self, login_id: &str) -> Result<Vec<u8>, ProtocolError> {
+        self.require(State::Ready)?;
+        if self.thread_id.is_some() {
+            return Err(ProtocolError::InvalidState);
+        }
+        if login_id.len() > ID_BYTES_MAX
+            || login_id.trim().is_empty()
+            || login_id.chars().any(char::is_control)
+        {
+            return Err(ProtocolError::InvalidInput);
+        }
+        self.request(
+            Operation::LoginCancel {
+                login_id: login_id.into(),
+            },
+            json!({"loginId":login_id}),
+        )
+    }
+
+    pub fn logout_account(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.require_auth_idle()?;
+        self.request(Operation::AccountLogout, Value::Null)
+    }
+
     pub fn start_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Ready)?;
+        if self.has_pending_login() {
+            return Err(ProtocolError::InvalidState);
+        }
         let cwd = valid_path(cwd).ok_or(ProtocolError::InvalidInput)?;
         let bytes = self.request(
             Operation::ThreadStart { cwd: cwd.into() },
@@ -354,6 +517,31 @@ impl CodexProtocol {
         assert!(self.seen_turns.len() <= TURNS_MAX);
         assert!(self.seen_server_ids.len() <= SERVER_IDS_MAX);
         assert!(self.server_requests.len() <= APPROVALS_MAX);
+        assert!(self.login_ids.len() <= LOGINS_MAX);
+        assert!(self.login_ids.keys().all(|id| {
+            !id.trim().is_empty() && id.len() <= ID_BYTES_MAX && !id.chars().any(char::is_control)
+        }));
+        assert!(
+            self.login_ids
+                .values()
+                .filter(|state| **state == LoginState::Pending)
+                .count()
+                <= 1
+        );
+        if self.has_pending_login() {
+            assert!(self.thread_id.is_none());
+            assert!(matches!(self.phase, State::Ready | State::Failed));
+        }
+        if let Some((
+            _,
+            Operation::LoginStart {
+                completed_login_id: Some(id),
+                ..
+            },
+        )) = &self.pending
+        {
+            assert_eq!(self.login_ids.get(id), Some(&LoginState::Completed));
+        }
         assert!(
             self.server_requests
                 .keys()
@@ -384,6 +572,35 @@ impl CodexProtocol {
                     .is_none_or(|turn| turn.status != TurnStatus::InProgress)
             );
         }
+    }
+
+    fn has_pending_login(&self) -> bool {
+        self.login_ids
+            .values()
+            .any(|state| *state == LoginState::Pending)
+    }
+
+    fn require_auth_idle(&self) -> Result<(), ProtocolError> {
+        self.require(State::Ready)?;
+        if self.thread_id.is_some() || self.has_pending_login() {
+            return Err(ProtocolError::InvalidState);
+        }
+        assert!(self.thread_id.is_none());
+        Ok(())
+    }
+
+    fn start_login(&mut self, device_code: bool) -> Result<Vec<u8>, ProtocolError> {
+        self.require_auth_idle()?;
+        if self.login_ids.len() == LOGINS_MAX {
+            return Err(ProtocolError::Capacity);
+        }
+        self.request(
+            Operation::LoginStart {
+                device_code,
+                completed_login_id: None,
+            },
+            json!({"type":if device_code { "chatgptDeviceCode" } else { "chatgpt" }}),
+        )
     }
 
     fn require(&self, phase: State) -> Result<(), ProtocolError> {
@@ -501,6 +718,23 @@ impl CodexProtocol {
             .get("code")
             .and_then(Value::as_i64)
             .ok_or(ProtocolError::InvalidMessage)?;
+        if matches!(
+            operation,
+            Operation::LoginStart { .. }
+                | Operation::AccountRead
+                | Operation::LoginCancel { .. }
+                | Operation::AccountLogout
+        ) {
+            let message = sensitive_auth_text(&error["message"], AUTH_ERROR_BYTES_MAX)?;
+            assert!(self.pending.is_some());
+            self.assert_consistent();
+            return Ok(Some(Event::AuthControl(AuthControl::RequestFailed {
+                id,
+                method: operation.method(),
+                code,
+                message,
+            })));
+        }
         let message = message_text(&error["message"])?;
         self.phase = match operation {
             Operation::Initialize => State::New,
@@ -530,6 +764,24 @@ impl CodexProtocol {
         }
         match operation {
             Operation::AccountRateLimitsRead => account_rate_limits(id, &result).map(Some),
+            Operation::LoginStart {
+                device_code,
+                completed_login_id,
+            } => self
+                .login_started(id, *device_code, completed_login_id.as_deref(), &result)
+                .map(|control| Some(Event::AuthControl(control))),
+            Operation::AccountRead => {
+                account_read(id, &result).map(|control| Some(Event::AuthControl(control)))
+            }
+            Operation::LoginCancel { login_id } => self
+                .login_canceled(id, login_id, &result)
+                .map(|control| Some(Event::AuthControl(control))),
+            Operation::AccountLogout => {
+                if !result.as_object().is_some_and(|object| object.is_empty()) {
+                    return Err(ProtocolError::InvalidMessage);
+                }
+                Ok(Some(Event::AuthControl(AuthControl::LoggedOut { id })))
+            }
             Operation::Initialize => {
                 for key in ["userAgent", "platformFamily", "platformOs"] {
                     identifier(&result[key])?;
@@ -651,12 +903,139 @@ impl CodexProtocol {
         Ok(Some(event))
     }
 
+    fn login_started(
+        &mut self,
+        id: i64,
+        device_code: bool,
+        completed_login_id: Option<&str>,
+        result: &Value,
+    ) -> Result<AuthControl, ProtocolError> {
+        let expected_type = if device_code {
+            "chatgptDeviceCode"
+        } else {
+            "chatgpt"
+        };
+        if result["type"] != expected_type {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        let login_id = identifier(&result["loginId"])?;
+        let challenge = if device_code {
+            let user_code = identifier(&result["userCode"])?;
+            LoginChallenge::DeviceCode {
+                login_id: login_id.clone(),
+                user_code: SensitiveAuthText(user_code),
+                verification_url: auth_url(&result["verificationUrl"])?,
+            }
+        } else {
+            LoginChallenge::Browser {
+                login_id: login_id.clone(),
+                auth_url: auth_url(&result["authUrl"])?,
+            }
+        };
+        if let Some(completed) = completed_login_id {
+            if completed != login_id
+                || self.login_ids.get(&login_id) != Some(&LoginState::Completed)
+            {
+                return Err(ProtocolError::StaleMessage);
+            }
+        } else {
+            if self.login_ids.contains_key(&login_id) {
+                return Err(ProtocolError::StaleMessage);
+            }
+            if self.login_ids.len() == LOGINS_MAX {
+                return Err(ProtocolError::Capacity);
+            }
+            let previous = self.login_ids.insert(login_id, LoginState::Pending);
+            assert!(previous.is_none());
+        }
+        assert!(self.login_ids.len() <= LOGINS_MAX);
+        Ok(AuthControl::LoginStarted { id, challenge })
+    }
+
+    fn login_completed(&mut self, params: &Value) -> Result<AuthControl, ProtocolError> {
+        let success = params["success"]
+            .as_bool()
+            .ok_or(ProtocolError::InvalidMessage)?;
+        let login_id = match params.get("loginId") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(identifier(value)?),
+        };
+        let error = match params.get("error") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(sensitive_auth_text(value, AUTH_ERROR_BYTES_MAX)?),
+        };
+        let onboarding_entrypoint = match params.get("onboardingEntrypoint") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if value == "life_sciences" => Some(value.clone()),
+            _ => return Err(ProtocolError::InvalidMessage),
+        };
+        if let Some(login_id) = &login_id {
+            if let Some(state) = self.login_ids.get_mut(login_id) {
+                if *state == LoginState::Completed {
+                    return Err(ProtocolError::StaleMessage);
+                }
+                *state = LoginState::Completed;
+            } else {
+                let Some((
+                    _,
+                    Operation::LoginStart {
+                        completed_login_id, ..
+                    },
+                )) = &mut self.pending
+                else {
+                    return Err(ProtocolError::StaleMessage);
+                };
+                if completed_login_id.is_some() {
+                    return Err(ProtocolError::StaleMessage);
+                }
+                if self.login_ids.len() == LOGINS_MAX {
+                    return Err(ProtocolError::Capacity);
+                }
+                *completed_login_id = Some(login_id.clone());
+                let previous = self
+                    .login_ids
+                    .insert(login_id.clone(), LoginState::Completed);
+                assert!(previous.is_none());
+            }
+        }
+        assert!(self.login_ids.len() <= LOGINS_MAX);
+        Ok(AuthControl::LoginCompleted {
+            login_id,
+            success,
+            error,
+            onboarding_entrypoint,
+        })
+    }
+
+    fn login_canceled(
+        &mut self,
+        id: i64,
+        login_id: &str,
+        result: &Value,
+    ) -> Result<AuthControl, ProtocolError> {
+        let status = match result["status"].as_str() {
+            Some("canceled") => LoginCancelStatus::Canceled,
+            Some("notFound") => LoginCancelStatus::NotFound,
+            _ => return Err(ProtocolError::InvalidMessage),
+        };
+        if status == LoginCancelStatus::Canceled
+            && let Some(state) = self.login_ids.get_mut(login_id)
+            && *state == LoginState::Pending
+        {
+            *state = LoginState::Canceled;
+        }
+        Ok(AuthControl::LoginCanceled { id, status })
+    }
+
     fn notification(
         &mut self,
         method: String,
         params: Value,
     ) -> Result<Option<Event>, ProtocolError> {
         match method.as_str() {
+            "account/login/completed" => self
+                .login_completed(&params)
+                .map(|control| Some(Event::AuthControl(control))),
             "thread/started" => {
                 let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() else {
                     return Err(ProtocolError::StaleMessage);
@@ -804,6 +1183,105 @@ fn account_rate_limits(id: i64, result: &Value) -> Result<Event, ProtocolError> 
         account_id,
         ordinary_usage_allowed,
     })
+}
+
+fn account_read(id: i64, result: &Value) -> Result<AuthControl, ProtocolError> {
+    let requires_openai_auth = result["requiresOpenaiAuth"]
+        .as_bool()
+        .ok_or(ProtocolError::InvalidMessage)?;
+    let account = match result.get("account") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(auth_account(value)?),
+    };
+    Ok(AuthControl::AccountRead {
+        id,
+        account,
+        requires_openai_auth,
+    })
+}
+
+fn auth_account(value: &Value) -> Result<AuthAccount, ProtocolError> {
+    match value["type"].as_str() {
+        Some("apiKey") => Ok(AuthAccount::ApiKey),
+        Some("chatgpt") => {
+            let email = match value.get("email") {
+                Some(Value::Null) => None,
+                Some(email) => Some(sensitive_auth_text(email, ACCOUNT_EMAIL_BYTES_MAX)?),
+                None => return Err(ProtocolError::InvalidMessage),
+            };
+            let plan = value["planType"]
+                .as_str()
+                .ok_or(ProtocolError::InvalidMessage)?;
+            if !matches!(
+                plan,
+                "free"
+                    | "go"
+                    | "plus"
+                    | "pro"
+                    | "prolite"
+                    | "promax"
+                    | "team"
+                    | "self_serve_business_prolite"
+                    | "self_serve_business_usage_based"
+                    | "business"
+                    | "ent26"
+                    | "enterprise_cbp_automation"
+                    | "enterprise_cbp_usage_based"
+                    | "enterprise"
+                    | "edu"
+                    | "edu_plus"
+                    | "edu_pro"
+                    | "unknown"
+            ) {
+                return Err(ProtocolError::InvalidMessage);
+            }
+            Ok(AuthAccount::Chatgpt {
+                email,
+                plan_type: plan.into(),
+            })
+        }
+        Some("amazonBedrock") => {
+            let uses_codex_managed_credentials = match value.get("usesCodexManagedCredentials") {
+                None => false,
+                Some(value) => value.as_bool().ok_or(ProtocolError::InvalidMessage)?,
+            };
+            Ok(AuthAccount::AmazonBedrock {
+                uses_codex_managed_credentials,
+            })
+        }
+        _ => Err(ProtocolError::InvalidMessage),
+    }
+}
+
+fn sensitive_auth_text(value: &Value, maximum: usize) -> Result<SensitiveAuthText, ProtocolError> {
+    let text = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
+    if text.len() > maximum || text.contains('\0') {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    Ok(SensitiveAuthText(text.into()))
+}
+
+fn auth_url(value: &Value) -> Result<SensitiveAuthText, ProtocolError> {
+    let text = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
+    if text.len() > AUTH_URL_BYTES_MAX
+        || text
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    let address = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))
+        .ok_or(ProtocolError::InvalidMessage)?;
+    if address
+        .split(['/', '?', '#'])
+        .next()
+        .is_none_or(str::is_empty)
+    {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    Ok(SensitiveAuthText(text.into()))
 }
 
 fn identifier(value: &Value) -> Result<String, ProtocolError> {
