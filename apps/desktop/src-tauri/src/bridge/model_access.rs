@@ -69,7 +69,7 @@ impl NativeBridge {
             return Err(failure("stale_model_access"));
         };
         if connection.protocol.as_str() != "native"
-            || !matches!(connection.endpoint, ModelEndpoint::Native)
+            || !matches!(connection.endpoint, ModelEndpoint::Native {})
             || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
             || !matches!(connection.harness.as_str(), "codex" | "claude")
         {
