@@ -1200,7 +1200,7 @@ fn account_read(id: i64, result: &Value) -> Result<AuthControl, ProtocolError> {
     })
 }
 
-fn auth_account(value: &Value) -> Result<AuthAccount, ProtocolError> {
+pub(crate) fn auth_account(value: &Value) -> Result<AuthAccount, ProtocolError> {
     match value["type"].as_str() {
         Some("apiKey") => Ok(AuthAccount::ApiKey),
         Some("chatgpt") => {
@@ -1251,6 +1251,26 @@ fn auth_account(value: &Value) -> Result<AuthAccount, ProtocolError> {
         }
         _ => Err(ProtocolError::InvalidMessage),
     }
+}
+
+pub(crate) fn owner_login_challenge(
+    login_id: &str,
+    url: &str,
+    user_code: Option<&str>,
+) -> Result<LoginChallenge, ProtocolError> {
+    let login_id = identifier(&Value::String(login_id.into()))?;
+    let url = auth_url(&Value::String(url.into()))?;
+    Ok(match user_code {
+        None => LoginChallenge::Browser {
+            login_id,
+            auth_url: url,
+        },
+        Some(code) => LoginChallenge::DeviceCode {
+            login_id,
+            user_code: SensitiveAuthText(identifier(&Value::String(code.into()))?),
+            verification_url: url,
+        },
+    })
 }
 
 fn sensitive_auth_text(value: &Value, maximum: usize) -> Result<SensitiveAuthText, ProtocolError> {

@@ -72,6 +72,13 @@ pub enum AuthStatusField {
 pub struct AuthStatusText(String);
 
 impl AuthStatusText {
+    pub(crate) fn from_owner_wire(value: String) -> Result<Self, ProtocolError> {
+        if value.len() > AUTH_STATUS_STRING_BYTES_MAX {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        Ok(Self(value))
+    }
+
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }

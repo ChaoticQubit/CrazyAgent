@@ -4,6 +4,8 @@ use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod presentation;
+
 #[cfg(test)]
 mod presentation_tests;
 
@@ -279,6 +281,8 @@ enum WireReply {
         database_instance: String,
         engine_epoch: String,
         fact: Box<NativeAuthFact>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<presentation::WirePresentation>,
     },
     Rejected {
         request_id: RequestId,
@@ -295,16 +299,15 @@ pub(crate) fn encode_reply(
 ) -> Result<Vec<u8>, EngineError> {
     let reply = match result {
         Ok(reply) => {
-            if reply.challenge.is_some() || reply.account.is_some() {
-                return Err(failure("native_auth_presentation_unavailable"));
-            }
             encode_fact(&reply.fact)?;
             assert_eq!(reply.request_id, request_id);
+            let presentation = presentation::encode(&reply)?;
             WireReply::Fact {
                 request_id,
                 database_instance: reply.database_instance,
                 engine_epoch: reply.engine_epoch,
                 fact: Box::new(reply.fact),
+                presentation,
             }
         }
         Err(error) if public_error(&error.0) => WireReply::Rejected {
@@ -320,6 +323,9 @@ pub(crate) fn decode_reply(
     bytes: &[u8],
     command: &Command,
 ) -> Result<NativeAuthReply, EngineError> {
+    if bytes.len() > crate::protocol::FRAME_BYTES_MAX {
+        return Err(outcome_unknown());
+    }
     let reply: WireReply = serde_json::from_slice(bytes).map_err(|_| outcome_unknown())?;
     match reply {
         WireReply::Fact {
@@ -327,6 +333,7 @@ pub(crate) fn decode_reply(
             database_instance,
             engine_epoch,
             fact,
+            presentation,
         } => {
             encode_fact(&fact).map_err(|_| outcome_unknown())?;
             let scope = command.scope();
@@ -342,14 +349,16 @@ pub(crate) fn decode_reply(
             {
                 return Err(outcome_unknown());
             }
-            Ok(NativeAuthReply {
+            let mut reply = NativeAuthReply {
                 request_id,
                 database_instance,
                 engine_epoch,
                 fact: *fact,
                 challenge: None,
                 account: None,
-            })
+            };
+            presentation::apply(presentation, &mut reply).map_err(|_| outcome_unknown())?;
+            Ok(reply)
         }
         WireReply::Rejected { request_id, code }
             if &request_id == command.request_id() && public_error(&code) =>
