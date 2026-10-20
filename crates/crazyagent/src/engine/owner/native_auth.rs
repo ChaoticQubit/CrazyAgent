@@ -398,6 +398,8 @@ fn public_error(code: &str) -> bool {
             | "native_profile_identity_invalid"
             | "native_profile_capacity"
             | "native_profile_new_home_not_empty"
+            | "native_profile_in_use"
+            | "native_profile_lock_unavailable"
             | "owner_grant_stale_or_revoked"
             | "owner_queue_not_submitted"
     )

@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
     Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
 };
@@ -48,22 +49,11 @@ pub(crate) fn execute(
     ensure_capacity(&tx)?;
     ensure_idle(&tx, &key)?;
     tx.commit().map_err(error)?;
-    let scope = command.scope();
-    let prepared = prepare_native_profile(
-        db,
-        config,
-        sources,
-        custody,
-        &HostStamp {
-            db_instance: admission.db_instance.clone(),
-            engine_epoch: admission.engine_epoch.clone(),
-        },
-        (
-            &scope.connection,
-            &scope.expected_config_id,
-            &scope.expected_source_hash,
-        ),
-    )?;
+    let host = HostStamp {
+        db_instance: admission.db_instance.clone(),
+        engine_epoch: admission.engine_epoch.clone(),
+    };
+    let prepared = prepare_requested_profile(db, config, sources, custody, &host, &command)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -73,9 +63,56 @@ pub(crate) fn execute(
     }
     ensure_capacity(&tx)?;
     ensure_idle(&tx, &key)?;
-    let fact = record(&tx, &key, prepared, &command)?;
+    let generation = next_generation(&tx, &key)?;
+    let purpose = if matches!(command, Command::Logout(_)) {
+        NativeProfileUsePurpose::Logout
+    } else {
+        NativeProfileUsePurpose::Authentication
+    };
+    let guard = custody
+        .as_mut()
+        .map_err(|error| error.clone())?
+        .acquire_use(
+            &host,
+            prepared.binding(),
+            command.operation_id(),
+            generation,
+            purpose,
+        )?;
+    let fact = record(&tx, &key, prepared, &command, generation)?;
+    guard.revalidate(
+        &host,
+        &fact.binding,
+        &fact.operation_id,
+        fact.generation,
+        purpose,
+    )?;
     tx.commit().map_err(error)?;
+    drop(guard);
     Ok(reply(admission, &command, fact))
+}
+
+fn prepare_requested_profile(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    command: &Command,
+) -> Result<PreparedNativeProfile, EngineError> {
+    let scope = command.scope();
+    prepare_native_profile(
+        db,
+        config,
+        sources,
+        custody,
+        host,
+        (
+            &scope.connection,
+            &scope.expected_config_id,
+            &scope.expected_source_hash,
+        ),
+    )
 }
 
 fn validate_scope<'a>(
@@ -227,12 +264,7 @@ fn ensure_idle(tx: &Transaction<'_>, key: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn record(
-    tx: &Transaction<'_>,
-    key: &str,
-    prepared: PreparedNativeProfile,
-    command: &Command,
-) -> Result<NativeAuthFact, EngineError> {
+fn next_generation(tx: &Transaction<'_>, key: &str) -> Result<u64, EngineError> {
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(generation),0) FROM native_auth_operations WHERE profile_key=?1",
@@ -242,21 +274,32 @@ fn record(
         .map_err(error)?;
     let generation = previous
         .checked_add(1)
+        .filter(|generation| *generation > 0)
         .ok_or_else(|| error("native_auth_generation_bounds"))?;
+    u64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))
+}
+
+fn record(
+    tx: &Transaction<'_>,
+    key: &str,
+    prepared: PreparedNativeProfile,
+    command: &Command,
+    generation: u64,
+) -> Result<NativeAuthFact, EngineError> {
     let fact = NativeAuthFact {
         operation_id: command.operation_id().clone(),
         action: command
             .action()
             .ok_or_else(|| error("native_auth_operation_missing"))?,
         binding: prepared.binding().clone(),
-        generation: u64::try_from(generation).map_err(error)?,
+        generation,
         phase: NativeAuthPhase::Unavailable,
         code: Some("native_auth_host_unavailable".into()),
     };
     let request = command.request_bytes()?;
     let bytes = encode_fact(&fact)?;
     assert!(request.len() <= REQUEST_BYTES_MAX && bytes.len() <= FACT_BYTES_MAX);
-    assert!(generation > previous && fact.generation > 0);
+    assert!(generation > 0);
     let inserted = tx
         .execute(
             "INSERT INTO native_auth_operations(id,profile_key,generation,request,fact,phase)

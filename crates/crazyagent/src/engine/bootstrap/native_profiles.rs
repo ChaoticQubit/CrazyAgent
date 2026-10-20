@@ -2,8 +2,8 @@ use super::{Anchor, Identity, hex, safe_directory, safe_file};
 use crate::config::{ModelAuthentication, ModelConnection};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
-use crate::protocol::CredentialRef;
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use crate::protocol::{CredentialRef, RequestId};
+use rustix::fs::{AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -249,6 +249,83 @@ pub(crate) struct NativeProfileCustody {
     profiles: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeProfileUsePurpose {
+    Authentication,
+    #[allow(
+        dead_code,
+        reason = "Refresh requires the separately qualified native host"
+    )]
+    Refresh,
+    Logout,
+    #[allow(
+        dead_code,
+        reason = "Execution requires the separately qualified native host"
+    )]
+    Execution,
+}
+
+pub(crate) struct NativeProfileUse {
+    custody: NativeProfileCustody,
+    root: Directory,
+    root_manifest: Manifest,
+    profile: Directory,
+    home: Directory,
+    manifest: Manifest,
+    key: String,
+    host: HostStamp,
+    binding: NativeProfileBinding,
+    operation_id: RequestId,
+    generation: u64,
+    purpose: NativeProfileUsePurpose,
+}
+
+impl NativeProfileUse {
+    pub(crate) fn revalidate(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+    ) -> Result<(), EngineError> {
+        if host.db_instance != self.host.db_instance
+            || host.engine_epoch != self.host.engine_epoch
+            || binding != &self.binding
+            || operation_id != &self.operation_id
+            || generation != self.generation
+            || purpose != self.purpose
+        {
+            return Err(failure("native_profile_binding_conflict"));
+        }
+        self.custody.verify()?;
+        self.root
+            .verify(&self.custody.anchor.directory, OsStr::new(ROOT))?;
+        self.root_manifest.verify(&self.root.file)?;
+        self.profile
+            .verify(&self.root.file, OsStr::new(&self.key))?;
+        self.home.verify(&self.profile.file, OsStr::new("home"))?;
+        self.manifest.verify(&self.profile.file)?;
+        require_profile_entries(&self.profile.file)?;
+        let slots = scan_slots(&self.root.file)?;
+        if slots.get(&self.key) != Some(&self.profile.identity)
+            || self
+                .custody
+                .profiles
+                .keys()
+                .any(|key| !slots.contains_key(key))
+            || digest(&self.manifest.bytes) != binding.custody_id
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        self.profile
+            .verify(&self.root.file, OsStr::new(&self.key))?;
+        self.root
+            .verify(&self.custody.anchor.directory, OsStr::new(ROOT))?;
+        self.custody.verify()
+    }
+}
+
 impl NativeProfileCustody {
     pub(crate) fn capture(path: &Path, opened: &Metadata) -> Result<Self, EngineError> {
         let parent = path
@@ -289,6 +366,114 @@ impl NativeProfileCustody {
             self.database_identity,
             false,
         )
+    }
+
+    fn retain(&self) -> Result<Self, EngineError> {
+        self.verify()?;
+        let retained = Self {
+            anchor: Anchor {
+                supplied: self.anchor.supplied.clone(),
+                path: self.anchor.path.clone(),
+                directory: self.anchor.directory.try_clone().map_err(unsafe_custody)?,
+                identity: self.anchor.identity,
+            },
+            database: self.database.try_clone().map_err(unsafe_custody)?,
+            database_name: self.database_name.clone(),
+            database_identity: self.database_identity,
+            root_hash: self.root_hash.clone(),
+            profiles: self.profiles.clone(),
+        };
+        retained.verify()?;
+        Ok(retained)
+    }
+
+    fn retained_root(
+        &self,
+        host: &HostStamp,
+    ) -> Result<(Directory, Manifest, RootIdentity), EngineError> {
+        let root = Directory::open(&self.anchor.directory, OsStr::new(ROOT))?;
+        let manifest = Manifest::open(&root.file, false)?;
+        let expected = RootIdentity {
+            version: 1,
+            database_instance: host.db_instance.clone(),
+            state: self.anchor.identity,
+            database: self.database_identity,
+            directory: root.identity,
+            manifest: manifest.identity,
+        };
+        let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
+            .map_err(|_| failure("native_profile_identity_invalid"))?;
+        if actual != expected {
+            return Err(failure("native_profile_binding_conflict"));
+        }
+        if self
+            .root_hash
+            .as_ref()
+            .is_some_and(|pinned| pinned != &digest(&manifest.bytes))
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        Ok((root, manifest, expected))
+    }
+
+    pub(crate) fn acquire_use(
+        &mut self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+    ) -> Result<NativeProfileUse, EngineError> {
+        assert!(generation > 0);
+        assert_eq!(host.db_instance, binding.database_instance);
+        assert_eq!(host.engine_epoch, binding.engine_epoch);
+        let custody = self.retain()?;
+        let (root, root_manifest, root_identity) = self.retained_root(host)?;
+        let stable = StableBinding::of(&binding.connection)?;
+        let key = stable.key();
+        let profile = Directory::open(&root.file, OsStr::new(&key))?;
+        let (home, manifest) = prepare_profile(&profile, &root_identity, stable, false)?;
+        let hash = digest(&manifest.bytes);
+        if binding.custody_id != hash
+            || self
+                .profiles
+                .get(&key)
+                .is_some_and(|pinned| pinned != &hash)
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        let guard = NativeProfileUse {
+            custody,
+            root,
+            root_manifest,
+            profile,
+            home,
+            manifest,
+            key: key.clone(),
+            host: host.clone(),
+            binding: binding.clone(),
+            operation_id: operation_id.clone(),
+            generation,
+            purpose,
+        };
+        guard.revalidate(host, binding, operation_id, generation, purpose)?;
+        flock(
+            &guard.manifest.file,
+            FlockOperation::NonBlockingLockExclusive,
+        )
+        .map_err(|error| {
+            failure(
+                if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
+                    "native_profile_in_use"
+                } else {
+                    "native_profile_lock_unavailable"
+                },
+            )
+        })?;
+        guard.revalidate(host, binding, operation_id, generation, purpose)?;
+        self.root_hash = Some(digest(&guard.root_manifest.bytes));
+        remember_profile(&mut self.profiles, key, hash);
+        Ok(guard)
     }
 
     fn root(

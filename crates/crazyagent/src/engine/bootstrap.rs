@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
 mod native_profiles;
-pub(crate) use native_profiles::NativeProfileCustody;
+pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUsePurpose};
 
 const LOCATOR: &str = "owner-current";
 const LOCATOR_MAX: usize = 2048;
