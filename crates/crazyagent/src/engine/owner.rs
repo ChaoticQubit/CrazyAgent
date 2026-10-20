@@ -1,5 +1,5 @@
 pub(crate) mod native_auth;
-mod transport;
+pub(crate) mod transport;
 
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
