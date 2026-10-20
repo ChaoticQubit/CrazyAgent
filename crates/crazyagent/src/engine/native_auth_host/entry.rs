@@ -1,6 +1,11 @@
+use super::custody::CustodySession;
+use crate::engine::bootstrap::{NativeProfileUsePurpose, runner_binding};
+use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
+use crate::engine::owner::{HostStamp, NativeAuthAction, NativeAuthFact};
 use crate::engine::{EngineError, io_error};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::os::fd::{AsFd, OwnedFd};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
@@ -59,4 +64,42 @@ pub(super) async fn read_bootstrap(
             Err(_would_block) => continue,
         }
     }
+}
+
+pub(in crate::engine) async fn run(
+    runtime_dir: &Path,
+    input: OwnedFd,
+) -> Result<NativeAuthFact, EngineError> {
+    let token = read_bootstrap(&input, Instant::now() + BOOTSTRAP_TIME_MAX).await?;
+    drop(input);
+    let mut channel = NativeAuthCustodyChannel::connect(runtime_dir, token).await?;
+    let fact = channel.fact().clone();
+    let (_, identity, binding) = runner_binding(runtime_dir)?;
+    if identity.database_instance() != fact.binding.database_instance.as_str()
+        || identity.engine_epoch() != fact.binding.engine_epoch.as_str()
+    {
+        return Err(EngineError("native_profile_binding_conflict".into()));
+    }
+    let host = HostStamp {
+        db_instance: identity.database_instance().to_owned(),
+        engine_epoch: identity.engine_epoch().to_owned(),
+    };
+    let purpose = match fact.action {
+        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
+        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
+    };
+    let mut custody = binding.capture_native_profile_custody()?;
+    let guard = custody.acquire_use(
+        &host,
+        &fact.binding,
+        &fact.operation_id,
+        fact.generation,
+        purpose,
+    )?;
+    let session = CustodySession::new(guard);
+    session.check(&mut channel).await?;
+    let retired = channel.retire(session.seal_without_effect()?).await?;
+    assert_eq!(retired.operation_id, fact.operation_id);
+    assert_eq!(retired.generation, fact.generation);
+    Ok(retired)
 }

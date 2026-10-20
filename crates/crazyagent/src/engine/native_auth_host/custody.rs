@@ -493,6 +493,9 @@ pub(super) fn cleanup_direct_child(
 
 use crate::engine::EngineError;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::transport::native_auth_channel::{
+    NativeAuthCustodyChannel, NativeAuthCustodyControl,
+};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::RequestId;
 
@@ -516,6 +519,17 @@ impl CustodySession {
         assert!(session.child.is_none());
         assert!(!session.child_attempted);
         session
+    }
+
+    pub(in crate::engine) async fn check(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        channel.revalidate(guard).await
     }
 
     pub(in crate::engine) fn retain_child(

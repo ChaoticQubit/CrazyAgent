@@ -14,6 +14,8 @@ pub mod bootstrap;
 mod native_auth_host;
 pub mod owner;
 
+pub use native_auth_host::run_native_auth_custodian;
+
 pub(crate) use bootstrap::NativeProfileCustody;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

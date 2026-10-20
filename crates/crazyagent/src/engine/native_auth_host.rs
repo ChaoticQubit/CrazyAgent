@@ -2,10 +2,18 @@ use crate::engine::{EngineError, io_error};
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 use std::fs::{File, Metadata};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 const EXECUTABLE_BYTES_MAX: u64 = 256 * 1024 * 1024;
+
+pub async fn run_native_auth_custodian(
+    runtime_dir: &Path,
+    input: OwnedFd,
+) -> Result<(), EngineError> {
+    entry::run(runtime_dir, input).await.map(|_| ())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ExecutableIdentity {

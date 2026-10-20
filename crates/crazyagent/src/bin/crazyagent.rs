@@ -6,6 +6,7 @@ use crazyagent::qualification::{
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -65,10 +66,14 @@ fn main() -> ExitCode {
     if args
         .first()
         .is_some_and(|arg| arg == "native-auth-custodian")
-        && args.len() != 2
     {
-        eprintln!("usage: crazyagent native-auth-custodian RUNTIME_DIR");
-        return ExitCode::FAILURE;
+        return match run_native_auth_custodian(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
@@ -86,6 +91,33 @@ fn main() -> ExitCode {
             ExitCode::from(code)
         }
     }
+}
+
+fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
+    if args.len() != 2 {
+        return Err("usage: crazyagent native-auth-custodian RUNTIME_DIR".into());
+    }
+    let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
+        .map(std::fs::File::from)
+        .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
+    if !input
+        .metadata()
+        .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?
+        .file_type()
+        .is_fifo()
+    {
+        return Err("native_auth_bootstrap_input_not_pipe".into());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .block_on(crazyagent::engine::run_native_auth_custodian(
+            Path::new(&args[1]),
+            input.into(),
+        ))
+        .map_err(|error| error.to_string())
 }
 
 fn run_engine(args: &[OsString]) -> Result<(), String> {
