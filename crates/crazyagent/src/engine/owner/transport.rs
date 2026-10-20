@@ -21,6 +21,8 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 mod native_auth;
+pub(crate) mod native_auth_channel;
+use native_auth_channel::NativeAuthSlot;
 #[cfg(test)]
 mod native_auth_channel_tests;
 
@@ -321,6 +323,7 @@ struct Authority {
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
+    native_auth: Mutex<Option<NativeAuthSlot>>,
     usable: std::sync::atomic::AtomicBool,
 }
 
@@ -999,6 +1002,7 @@ impl OwnerServer {
                 host: host.clone(),
                 slots: Mutex::new(slots),
                 runners: Mutex::new(Vec::new()),
+                native_auth: Mutex::new(None),
                 usable: std::sync::atomic::AtomicBool::new(true),
             });
             Ok::<_, EngineError>((listener, authority))
@@ -1036,30 +1040,97 @@ impl OwnerServer {
         Ok((server, handle))
     }
 
+    fn accept_owner_handshake(
+        &self,
+        stream: UnixStream,
+        auth: [u8; 37],
+        deadline: Instant,
+        clients: &mut tokio::task::JoinSet<()>,
+        custody: &mut tokio::task::JoinSet<()>,
+    ) -> Result<(), EngineError> {
+        if &auth[..4] == b"CAN1" {
+            while let Some(result) = custody.try_join_next() {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    return Err(io_error(error));
+                }
+            }
+            if !custody.is_empty() || self.authority.can_start_native_auth(&auth).is_err() {
+                return Ok(());
+            }
+            let engine = self.engine.clone();
+            let authority = Arc::downgrade(&self.authority);
+            let timeout = self.timeout;
+            let task = custody.spawn(async move {
+                native_auth_channel::serve(stream, auth, engine, authority, timeout, deadline)
+                    .await;
+            });
+            self.authority.track_native_auth(&auth, task);
+        } else {
+            while let Some(result) = clients.try_join_next() {
+                result.map_err(io_error)?;
+            }
+            if clients.len() >= 2 {
+                return Ok(());
+            }
+            let engine = self.engine.clone();
+            let authority = self.authority.clone();
+            clients.spawn(async move {
+                serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
+            });
+        }
+        Ok(())
+    }
+
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut clients = tokio::task::JoinSet::new();
-        let result = 'accept: loop {
+        let mut handshakes = tokio::task::JoinSet::new();
+        let mut custody = tokio::task::JoinSet::new();
+        let result = loop {
+            let expiry = self.authority.native_auth_deadline();
             tokio::select! {
                 _ = &mut stop => break Ok(()),
+                _ = async { match expiry { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => {
+                    self.authority.expire_native_auth(&self.engine).await;
+                }
                 result=clients.join_next(), if !clients.is_empty() => {
                     if let Some(Err(e))=result {break Err(io_error(e));}
                 }
+                result=custody.join_next(), if !custody.is_empty() => {
+                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                }
+                result=handshakes.join_next(), if !handshakes.is_empty() => {
+                    match result {
+                        Some(Ok(Some((stream, auth, deadline)))) => {
+                            if let Err(error) = self.accept_owner_handshake(stream, auth, deadline, &mut clients, &mut custody) {
+                                break Err(error);
+                            }
+                        }
+                        Some(Err(error)) => break Err(io_error(error)),
+                        _ => {}
+                    }
+                }
                 accepted=self.listener.accept() => {
                     let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
-                    while let Some(completed) = clients.try_join_next() {
-                        if let Err(error) = completed { break 'accept Err(io_error(error)); }
-                    }
-                    if clients.len()>=2 {drop(stream);continue;}
-                    let engine=self.engine.clone();let authority=self.authority.clone();let timeout=self.timeout;
-                    clients.spawn(async move { serve_owner(stream,engine,authority,timeout).await; });
+                    if handshakes.len()>=3 {drop(stream);continue;}
+                    let timeout=self.timeout;
+                    handshakes.spawn(read_owner_handshake(stream,timeout));
                 }
             }
             assert!(clients.len() <= 2);
+            assert!(handshakes.len() <= 3);
+            assert!(custody.len() <= 1);
         };
         self.authority
             .usable
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.authority.stop_native_auth();
+        handshakes.abort_all();
+        custody.abort_all();
         clients.abort_all();
+        while handshakes.join_next().await.is_some() {}
+        while custody.join_next().await.is_some() {}
         while clients.join_next().await.is_some() {}
         let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
             .await
@@ -1461,17 +1532,44 @@ impl Engine {
     }
 }
 
-async fn serve_owner(
+async fn read_owner_handshake(
     mut stream: UnixStream,
-    engine: Arc<Engine>,
-    authority: Arc<Authority>,
     timeout: Duration,
-) {
+) -> Option<(UnixStream, [u8; 37], Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
         verify_peer(&stream)?;
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
+        Ok::<_, EngineError>(auth)
+    };
+    match tokio::time::timeout_at(deadline, exchange).await {
+        Ok(Ok(auth)) => Some((stream, auth, deadline)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+async fn serve_owner(
+    stream: UnixStream,
+    engine: Arc<Engine>,
+    authority: Arc<Authority>,
+    timeout: Duration,
+) {
+    if let Some((stream, auth, deadline)) = read_owner_handshake(stream, timeout).await {
+        serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
+    }
+}
+
+async fn serve_authenticated_owner(
+    mut stream: UnixStream,
+    auth: [u8; 37],
+    engine: Arc<Engine>,
+    authority: Arc<Authority>,
+    deadline: Instant,
+) {
+    let exchange = async {
+        verify_peer(&stream)?;
         if &auth[..4] == b"CAR1" {
             authority.authenticate_runner(&auth)?;
             let frame = read_frame(&mut stream).await?;

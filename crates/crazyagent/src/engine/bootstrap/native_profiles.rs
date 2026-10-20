@@ -281,6 +281,16 @@ pub(crate) struct NativeProfileUse {
 }
 
 impl NativeProfileUse {
+    pub(in crate::engine) fn revalidate_retained(&self) -> Result<(), EngineError> {
+        self.revalidate(
+            &self.host,
+            &self.binding,
+            &self.operation_id,
+            self.generation,
+            self.purpose,
+        )
+    }
+
     pub(crate) fn revalidate(
         &self,
         host: &HostStamp,

@@ -3,6 +3,18 @@ use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
     Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
 };
+use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyRetirement;
+
+impl Clone for Command {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Start(value) => Self::Start(value.clone()),
+            Self::Read(value) => Self::Read(value.clone()),
+            Self::Cancel(value) => Self::Cancel(value.clone()),
+            Self::Logout(value) => Self::Logout(value.clone()),
+        }
+    }
+}
 
 pub(crate) struct NativeAuthBegin {
     pub(crate) reply: NativeAuthReply,
@@ -13,12 +25,308 @@ pub(crate) struct NativeAuthWork {
     fact: NativeAuthFact,
     admission: Admission,
     command: Command,
+    physical: NativeAuthPhysical,
+}
+
+struct NativeAuthPhysical {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    device: u64,
+    inode: u64,
+    bytes: u64,
+}
+
+impl NativeAuthPhysical {
+    fn capture(db: &Connection, fact: &NativeAuthFact) -> Result<Self, EngineError> {
+        let database = Path::new(
+            db.path()
+                .ok_or_else(|| error("native_profile_custody_unsafe"))?,
+        );
+        let path = database
+            .parent()
+            .ok_or_else(|| error("native_profile_custody_unsafe"))?
+            .join("native-profiles")
+            .join(profile_key(&fact.binding.connection)?)
+            .join("identity.json");
+        let file = std::fs::File::from(
+            rustix::fs::open(
+                &path,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NONBLOCK,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(error)?,
+        );
+        let metadata = file.metadata().map_err(error)?;
+        let physical = Self {
+            file,
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            bytes: metadata.len(),
+        };
+        physical.verify()?;
+        Ok(physical)
+    }
+
+    fn verify(&self) -> Result<(), EngineError> {
+        let metadata = self.file.metadata().map_err(error)?;
+        let named = std::fs::symlink_metadata(&self.path).map_err(error)?;
+        if !metadata.is_file()
+            || !named.is_file()
+            || self.inode == 0
+            || metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || named.dev() != self.device
+            || named.ino() != self.inode
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.nlink() != 1
+            || named.uid() != metadata.uid()
+            || named.mode() != metadata.mode()
+            || named.nlink() != 1
+            || metadata.len() != self.bytes
+            || self.bytes == 0
+        {
+            return Err(error("native_profile_identity_changed"));
+        }
+        Ok(())
+    }
 }
 
 impl NativeAuthWork {
     pub(crate) fn fact(&self) -> &NativeAuthFact {
         &self.fact
     }
+}
+
+pub(crate) struct NativeAuthDispatch {
+    work: NativeAuthWork,
+}
+
+impl NativeAuthDispatch {
+    pub(crate) fn fact(&self) -> &NativeAuthFact {
+        self.work.fact()
+    }
+
+    pub(crate) fn admission(&self) -> &Admission {
+        &self.work.admission
+    }
+}
+
+pub(crate) fn dispatch_native_auth(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    work: NativeAuthWork,
+) -> Result<NativeAuthDispatch, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let dispatch = NativeAuthDispatch { work };
+    let fact = validate_dispatch(&tx, config, sources, &dispatch)?;
+    if !matches!(
+        fact.phase,
+        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+    ) {
+        return Err(error("native_auth_recovery_required"));
+    }
+    let host = dispatch_host(&dispatch);
+    let purpose = custody_purpose(&fact);
+    let guard = custody
+        .as_mut()
+        .map_err(|error| error.clone())?
+        .acquire_use(
+            &host,
+            &fact.binding,
+            &fact.operation_id,
+            fact.generation,
+            purpose,
+        )?;
+    guard.revalidate(
+        &host,
+        &fact.binding,
+        &fact.operation_id,
+        fact.generation,
+        purpose,
+    )?;
+    validate_dispatch(&tx, config, sources, &dispatch)?;
+    tx.commit().map_err(error)?;
+    drop(guard);
+    assert!(db.is_autocommit());
+    Ok(dispatch)
+}
+
+pub(crate) fn check_native_auth_custody(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    dispatch: &NativeAuthDispatch,
+) -> Result<NativeAuthFact, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let fact = validate_dispatch(&tx, config, sources, dispatch)?;
+    if !matches!(
+        fact.phase,
+        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+    ) {
+        return Err(error("native_auth_recovery_required"));
+    }
+    tx.commit().map_err(error)?;
+    Ok(fact)
+}
+
+fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
+    HostStamp {
+        db_instance: dispatch.admission().db_instance.clone(),
+        engine_epoch: dispatch.admission().engine_epoch.clone(),
+    }
+}
+
+fn custody_purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
+    match fact.action {
+        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
+        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
+    }
+}
+
+fn validate_dispatch(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    dispatch: &NativeAuthDispatch,
+) -> Result<NativeAuthFact, EngineError> {
+    dispatch.work.physical.verify()?;
+    let admission = dispatch.admission();
+    validate_scope(tx, config, sources, admission, &dispatch.work.command)?;
+    let fact = validate_continuation(
+        tx,
+        config,
+        sources,
+        &dispatch_host(dispatch),
+        dispatch.fact(),
+    )?;
+    let (owner_id, owner_epoch, request): (String, i64, Vec<u8>) = tx
+        .query_row(
+            "SELECT f.owner_id,f.owner_epoch,o.request FROM native_auth_fences f
+             JOIN native_auth_operations o ON o.id=f.operation_id WHERE f.operation_id=?1",
+            [fact.operation_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(error)?;
+    if owner_id != admission.owner_id || owner_epoch != admission.owner_epoch {
+        return Err(error("owner_grant_stale_or_revoked"));
+    }
+    if request != dispatch.work.command.request_bytes()? {
+        return Err(error("native_auth_operation_scope_conflict"));
+    }
+    Ok(fact)
+}
+
+pub(crate) fn lose_native_auth_custody(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    dispatch: &NativeAuthDispatch,
+) -> Result<NativeAuthFact, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let mut fact = validate_dispatch(&tx, config, sources, dispatch)?;
+    apply_update(&mut fact, NativeAuthHostUpdate::CustodyUncertain)?;
+    store_fact(&tx, &fact)?;
+    tx.commit().map_err(error)?;
+    Ok(fact)
+}
+
+thread_local! {
+    static RETIREMENT_WAIT: std::cell::RefCell<Option<(Arc<NativeAuthCustodyRetirement>, std::time::Instant)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn wait_for_custody_commit(_: i32) -> bool {
+    let live = RETIREMENT_WAIT.with_borrow(|state| {
+        state.as_ref().is_some_and(|(retirement, started)| {
+            retirement.session_is_live()
+                && started.elapsed() < std::time::Duration::from_millis(250)
+        })
+    });
+    if live {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    live && RETIREMENT_WAIT.with_borrow(|state| {
+        state
+            .as_ref()
+            .is_some_and(|(retirement, _)| retirement.session_is_live())
+    })
+}
+
+pub(crate) fn finish_native_auth_custody(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    retirement: NativeAuthCustodyRetirement,
+) -> Result<NativeAuthFact, EngineError> {
+    let retirement = Arc::new(retirement);
+    db.busy_handler(Some(wait_for_custody_commit))
+        .map_err(error)?;
+    RETIREMENT_WAIT.with_borrow_mut(|state| {
+        assert!(state.is_none());
+        *state = Some((retirement.clone(), std::time::Instant::now()));
+    });
+    let result = commit_native_auth_custody(db, config, sources, &retirement);
+    RETIREMENT_WAIT.with_borrow_mut(|state| {
+        state.take();
+    });
+    db.busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(error)?;
+    result
+}
+
+fn commit_native_auth_custody(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    retirement: &NativeAuthCustodyRetirement,
+) -> Result<NativeAuthFact, EngineError> {
+    settings::ensure_clear(db)?;
+    retirement.validate_session()?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let dispatch = retirement.dispatch();
+    let mut fact = validate_dispatch(&tx, config, sources, dispatch)?;
+    if !matches!(
+        fact.phase,
+        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+    ) {
+        return Err(error("native_auth_recovery_required"));
+    }
+    apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+    store_fact(&tx, &fact)?;
+    validate_dispatch(&tx, config, sources, dispatch)?;
+    retirement.validate_session()?;
+    let deleted = tx
+        .execute(
+            "DELETE FROM native_auth_fences WHERE operation_id=?1 AND generation=?2",
+            params![
+                fact.operation_id.as_str(),
+                i64::try_from(fact.generation)
+                    .map_err(|_| error("native_auth_generation_bounds"))?
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(deleted, 1);
+    retirement.validate_session()?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
+    Ok(fact)
 }
 
 pub(crate) enum NativeAuthHostUpdate {
@@ -164,6 +472,7 @@ pub(crate) fn begin_native_auth(
         ],
     ).map_err(error)?;
     assert_eq!(inserted, 1);
+    let physical = NativeAuthPhysical::capture(&tx, &fact)?;
     guard.revalidate(
         &host,
         &fact.binding,
@@ -182,6 +491,7 @@ pub(crate) fn begin_native_auth(
             fact,
             admission: admission.clone(),
             command,
+            physical,
         }),
     })
 }

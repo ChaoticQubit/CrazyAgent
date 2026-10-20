@@ -8,19 +8,36 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 mod master_session;
 mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
-pub(crate) use native_auth::{NativeAuthBegin, NativeAuthWork};
+pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(test)]
 mod native_auth_host_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    NativeAuthDispatch(
+        Box<NativeAuthWork>,
+        oneshot::Sender<Result<NativeAuthDispatch, EngineError>>,
+    ),
+    NativeAuthCustodyCheck(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<NativeAuthFact, EngineError>>,
+    ),
+    NativeAuthCustodyRetire(
+        crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyRetirement,
+        oneshot::Sender<Result<NativeAuthFact, EngineError>>,
+    ),
+    NativeAuthCustodyLost(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<NativeAuthFact, EngineError>>,
+    ),
     NativeAuth(
         Admission,
         owner_auth::Command,
@@ -149,6 +166,54 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::NativeAuthDispatch(work, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::dispatch_native_auth(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    custody.as_mut().unwrap(),
+                                    *work,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::NativeAuthCustodyCheck(dispatch, reply) => {
+                            let _ = reply.send(native_auth::check_native_auth_custody(
+                                &mut connection,
+                                &config,
+                                sources.as_ref(),
+                                &dispatch,
+                            ));
+                        }
+                        Job::NativeAuthCustodyRetire(retirement, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::finish_native_auth_custody(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    retirement,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::NativeAuthCustodyLost(dispatch, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::lose_native_auth_custody(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &dispatch,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::NativeAuth(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))

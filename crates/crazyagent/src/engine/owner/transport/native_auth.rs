@@ -97,8 +97,8 @@ impl OwnerClient {
 
 pub(super) async fn serve(
     stream: &mut UnixStream,
-    engine: &Engine,
-    authority: &Authority,
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
@@ -116,7 +116,11 @@ pub(super) async fn serve(
             return Err(failure("owner_grant_stale_or_revoked"));
         }
     }
-    let result = match engine.native_auth_command(admission.clone(), command).await {
+    let host = OwnerRuntimeHandle {
+        engine: engine.clone(),
+        authority: authority.clone(),
+    };
+    let result = match host.native_auth_command(admission.clone(), command).await {
         Err(error) if error.0 == "native_auth_host_busy" => {
             Err(failure("native_auth_recovery_required"))
         }

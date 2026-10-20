@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
 mod native_profiles;
-pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUsePurpose};
+pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
 
 const LOCATOR: &str = "owner-current";
 const LOCATOR_MAX: usize = 2048;
@@ -307,6 +307,20 @@ pub(super) struct NativeBinding {
 }
 
 impl NativeBinding {
+    pub(in crate::engine) fn capture_native_profile_custody(
+        &self,
+    ) -> Result<NativeProfileCustody, EngineError> {
+        self.verify()?;
+        let metadata = self.anchor.metadata("engine.db")?;
+        if Identity::of(&metadata) != self.pinned.value.database {
+            return Err(fail("engine_database_replaced"));
+        }
+        let custody =
+            NativeProfileCustody::capture(&self.anchor.path.join("engine.db"), &metadata)?;
+        self.verify()?;
+        Ok(custody)
+    }
+
     pub(super) fn socket(&self) -> PathBuf {
         self.anchor.path.join(&self.pinned.value.ordinary_name)
     }

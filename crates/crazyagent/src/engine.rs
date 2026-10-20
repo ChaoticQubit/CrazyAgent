@@ -338,7 +338,9 @@ fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
     Ok(())
 }
 
-async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, EngineError> {
+async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<Vec<u8>, EngineError> {
     let length = stream.read_u32().await.map_err(io_error)? as usize;
     if length == 0 || length > FRAME_BYTES_MAX {
         return Err(EngineError("invalid_frame_length".into()));
@@ -392,30 +394,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub(crate) async fn native_auth_command(
-        &self,
-        admission: owner::Admission,
-        command: owner::native_auth::Command,
-    ) -> Result<owner::NativeAuthReply, EngineError> {
-        command.validate()?;
-        let begun = self
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
-            .await?;
-        match begun.work {
-            Some(work) => self
-                .native_auth_job(|reply| Job::NativeAuthFinish(admission, Box::new(work), reply))
-                .await
-                .map_err(|error| {
-                    if error.0 == "owner_queue_not_submitted" {
-                        owner::native_auth::outcome_unknown()
-                    } else {
-                        error
-                    }
-                }),
-            None => Ok(begun.reply),
-        }
-    }
-
     async fn native_auth_job<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
