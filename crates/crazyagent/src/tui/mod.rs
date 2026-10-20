@@ -373,7 +373,10 @@ fn key_event(key: KeyEvent, app: &App) -> Option<UiEvent> {
         return None;
     }
     Some(match key.code {
-        KeyCode::F(2) if app.focus() == Focus::Conversation && !app.is_creating_project() => {
+        KeyCode::F(2)
+            if matches!(app.focus(), Focus::Conversation | Focus::Settings)
+                && !app.is_creating_project() =>
+        {
             UiEvent::ConfigureMaster
         }
         KeyCode::F(3) if app.focus() == Focus::Conversation && !app.is_creating_project() => {
