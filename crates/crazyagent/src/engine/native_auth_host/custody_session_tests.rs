@@ -100,9 +100,15 @@ impl Drop for InertChild {
         if let Some(child) = self.child.as_mut() {
             if let Err(error) = fallback_cleanup(child) {
                 if thread::panicking() {
-                    eprintln!("fixture fallback failed for direct child {}: {error}", child.id());
+                    eprintln!(
+                        "fixture fallback failed for direct child {}: {error}",
+                        child.id()
+                    );
                 } else {
-                    panic!("fixture fallback failed for direct child {}: {error}", child.id());
+                    panic!(
+                        "fixture fallback failed for direct child {}: {error}",
+                        child.id()
+                    );
                 }
             }
         }
@@ -147,9 +153,11 @@ fn native_auth_custody_session_rejected_live_child_keeps_ownership_and_sentinel(
     rejected.assert_live();
     sentinel.assert_live();
     let expired = Instant::now().checked_sub(POLL_INTERVAL).unwrap();
-    assert!(cleanup_direct_child(rejected.child(), expired)
-        .unwrap()
-        .is_none());
+    assert!(
+        cleanup_direct_child(rejected.child(), expired)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(rejected.child().id(), rejected_id);
     rejected.assert_live();
     retained.assert_live();
