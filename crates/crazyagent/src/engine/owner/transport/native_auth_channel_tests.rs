@@ -2,6 +2,13 @@ use super::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl, NativeAuthCustodyLaunch,
 };
 use super::*;
+
+mod entry_run_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/engine/native_auth_host/entry_run_tests.rs"
+    ));
+}
 use crate::engine::bootstrap::{EngineService, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::native_auth_host::custody::CustodySession;
 use crate::engine::owner::native_auth::Command;

@@ -121,7 +121,7 @@ pub(super) mod custody;
 mod custody_session_tests;
 #[cfg(test)]
 mod custody_tests;
-mod entry;
+pub(in crate::engine) mod entry;
 #[cfg(test)]
 mod entry_tests;
 #[cfg(test)]

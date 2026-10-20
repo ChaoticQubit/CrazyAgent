@@ -167,3 +167,52 @@ fn native_auth_custodian_cli_live_bootstrap_without_eof_times_out() {
         "native_auth_bootstrap_timeout",
     );
 }
+
+#[test]
+fn native_auth_custodian_cli_rejects_regular_stdin_without_changing_its_flags() {
+    let root = private_root();
+    let path = root.path().join("input");
+    std::fs::write(&path, [0xff; 32]).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let input = std::fs::File::open(path).unwrap();
+    let original_flags = rustix::fs::fcntl_getfl(&input).unwrap();
+    let mut child = OwnedChild(
+        std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(arguments(root.path()))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let stderr = child.0.stderr.take().unwrap();
+    let stdout = std::thread::spawn(move || bounded_stream(stdout));
+    let stderr = std::thread::spawn(move || bounded_stream(stderr));
+    let deadline = Instant::now() + CHILD_BOUND;
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "custodian CLI exceeded child deadline"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
+    assert!(stdout.len() <= OUTPUT_BOUND);
+    assert!(stderr.len() <= OUTPUT_BOUND);
+    assert_eq!(status.code(), Some(1));
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap().trim(),
+        "native_auth_bootstrap_input_not_pipe"
+    );
+    assert_eq!(rustix::fs::fcntl_getfl(&input).unwrap(), original_flags);
+}
