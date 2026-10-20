@@ -6,6 +6,9 @@ mod model_access;
 pub mod views;
 
 #[cfg(test)]
+mod key_tests;
+
+#[cfg(test)]
 mod project_creation_tests;
 
 use crate::engine::Client;
