@@ -4,6 +4,28 @@ use crate::engine::owner::native_auth::{
     Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
 };
 
+pub(crate) struct NativeAuthBegin {
+    pub(crate) reply: NativeAuthReply,
+    pub(crate) work: Option<NativeAuthWork>,
+}
+
+pub(crate) struct NativeAuthWork {
+    fact: NativeAuthFact,
+    admission: Admission,
+    command: Command,
+}
+
+impl NativeAuthWork {
+    pub(crate) fn fact(&self) -> &NativeAuthFact {
+        &self.fact
+    }
+}
+
+pub(crate) enum NativeAuthHostUpdate {
+    CustodyUncertain,
+    Unavailable,
+}
+
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS native_auth_operations (
@@ -21,7 +43,19 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
         CREATE TRIGGER IF NOT EXISTS native_auth_operations_capacity
         BEFORE INSERT ON native_auth_operations
         WHEN (SELECT COUNT(*) FROM native_auth_operations)>=1024
-        BEGIN SELECT RAISE(ABORT,'native_auth_operation_capacity'); END;",
+        BEGIN SELECT RAISE(ABORT,'native_auth_operation_capacity'); END;
+        CREATE TABLE IF NOT EXISTS native_auth_fences (
+            profile_key TEXT PRIMARY KEY NOT NULL CHECK(length(profile_key)=64),
+            operation_id TEXT UNIQUE NOT NULL REFERENCES native_auth_operations(id)
+                CHECK(length(operation_id) BETWEEN 1 AND 128),
+            generation INTEGER NOT NULL CHECK(generation>0),
+            db_instance TEXT NOT NULL CHECK(length(db_instance)=64),
+            engine_epoch TEXT NOT NULL CHECK(length(engine_epoch)=64),
+            custody_id TEXT NOT NULL CHECK(length(custody_id)=64),
+            owner_id TEXT NOT NULL CHECK(length(owner_id)=64),
+            owner_epoch INTEGER NOT NULL CHECK(owner_epoch>0)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS native_auth_one_flow ON native_auth_fences((1));",
     )
     .map_err(error)
 }
@@ -33,7 +67,38 @@ pub(crate) fn execute(
     custody: &mut Result<NativeProfileCustody, EngineError>,
     admission: &Admission,
     command: Command,
-) -> Result<NativeAuthReply, EngineError> {
+) -> Result<NativeAuthBegin, EngineError> {
+    let reply = match command {
+        Command::Read(request) => read_native_auth(db, config, sources, admission, &request)?,
+        Command::Cancel(request) => {
+            let observed = read_native_auth(
+                db,
+                config,
+                sources,
+                admission,
+                &NativeAuthQuery {
+                    request_id: request.request_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    scope: request.scope.clone(),
+                },
+            )?;
+            cancel_native_auth(db, config, sources, admission, &request, &observed.fact)?
+        }
+        command @ (Command::Start(_) | Command::Logout(_)) => {
+            return begin_native_auth(db, config, sources, custody, admission, command);
+        }
+    };
+    Ok(NativeAuthBegin { reply, work: None })
+}
+
+pub(crate) fn begin_native_auth(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    admission: &Admission,
+    command: Command,
+) -> Result<NativeAuthBegin, EngineError> {
     command.validate()?;
     settings::ensure_clear(db)?;
     let tx = db
@@ -42,7 +107,10 @@ pub(crate) fn execute(
     let connection = validate_scope(&tx, config, sources, admission, &command)?;
     if let Some(fact) = existing(&tx, connection, admission, &command)? {
         tx.commit().map_err(error)?;
-        return Ok(reply(admission, &command, fact));
+        return Ok(NativeAuthBegin {
+            reply: reply(admission, &command, fact),
+            work: None,
+        });
     }
     validate_method(connection, &command)?;
     let key = profile_key(connection)?;
@@ -80,6 +148,22 @@ pub(crate) fn execute(
             purpose,
         )?;
     let fact = record(&tx, &key, prepared, &command, generation)?;
+    let inserted = tx.execute(
+        "INSERT INTO native_auth_fences
+         (profile_key,operation_id,generation,db_instance,engine_epoch,custody_id,owner_id,owner_epoch)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            key,
+            fact.operation_id.as_str(),
+            i64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?,
+            admission.db_instance,
+            admission.engine_epoch,
+            fact.binding.custody_id,
+            admission.owner_id,
+            admission.owner_epoch
+        ],
+    ).map_err(error)?;
+    assert_eq!(inserted, 1);
     guard.revalidate(
         &host,
         &fact.binding,
@@ -87,9 +171,271 @@ pub(crate) fn execute(
         fact.generation,
         purpose,
     )?;
+    validate_scope(&tx, config, sources, admission, &command)?;
     tx.commit().map_err(error)?;
     drop(guard);
+    assert!(db.is_autocommit());
+    let reply = reply(admission, &command, fact.clone());
+    Ok(NativeAuthBegin {
+        reply,
+        work: Some(NativeAuthWork {
+            fact,
+            admission: admission.clone(),
+            command,
+        }),
+    })
+}
+
+pub(crate) fn read_native_auth(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    request: &NativeAuthQuery,
+) -> Result<NativeAuthReply, EngineError> {
+    let command = Command::Read(request.clone());
+    command.validate()?;
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let fact = existing(&tx, connection, admission, &command)?
+        .ok_or_else(|| error("native_auth_operation_missing"))?;
+    tx.commit().map_err(error)?;
     Ok(reply(admission, &command, fact))
+}
+
+pub(crate) fn cancel_native_auth(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    request: &NativeAuthCancel,
+    expected: &NativeAuthFact,
+) -> Result<NativeAuthReply, EngineError> {
+    let command = Command::Cancel(request.clone());
+    command.validate()?;
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    if command.operation_id() != &expected.operation_id
+        || connection != &expected.binding.connection
+    {
+        return Err(error("native_auth_operation_scope_conflict"));
+    }
+    let mut fact = load_fact(&tx, &expected.operation_id)?;
+    if !unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain {
+        return Err(error("native_auth_not_active"));
+    }
+    let host = HostStamp {
+        db_instance: admission.db_instance.clone(),
+        engine_epoch: admission.engine_epoch.clone(),
+    };
+    validate_continuation(&tx, config, sources, &host, expected)?;
+    if fact.phase == NativeAuthPhase::Uncertain {
+        return Err(error("native_auth_recovery_required"));
+    }
+    fact.phase = NativeAuthPhase::Cancelling;
+    fact.code = None;
+    store_fact(&tx, &fact)?;
+    tx.commit().map_err(error)?;
+    Ok(reply(admission, &command, fact))
+}
+
+pub(crate) fn publish_native_auth(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    expected: &NativeAuthFact,
+    update: NativeAuthHostUpdate,
+) -> Result<NativeAuthFact, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let mut fact = validate_continuation(&tx, config, sources, host, expected)?;
+    apply_update(&mut fact, update)?;
+    store_fact(&tx, &fact)?;
+    tx.commit().map_err(error)?;
+    Ok(fact)
+}
+
+pub(crate) fn finish_native_auth_without_effect(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    admission: &Admission,
+    work: NativeAuthWork,
+) -> Result<NativeAuthReply, EngineError> {
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_admission(&tx, admission)?;
+    if admission != &work.admission {
+        return Err(error("owner_grant_stale_or_revoked"));
+    }
+    let host = HostStamp {
+        db_instance: admission.db_instance.clone(),
+        engine_epoch: admission.engine_epoch.clone(),
+    };
+    let mut fact = validate_continuation(&tx, config, sources, &host, work.fact())?;
+    if !matches!(
+        fact.phase,
+        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling | NativeAuthPhase::Unavailable
+    ) {
+        return Err(error("native_auth_recovery_required"));
+    }
+    let purpose = match fact.action {
+        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
+        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
+    };
+    let guard = custody
+        .as_mut()
+        .map_err(|error| error.clone())?
+        .acquire_use(
+            &host,
+            &fact.binding,
+            &fact.operation_id,
+            fact.generation,
+            purpose,
+        )?;
+    apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+    store_fact(&tx, &fact)?;
+    let deleted = tx
+        .execute(
+            "DELETE FROM native_auth_fences WHERE operation_id=?1 AND generation=?2",
+            params![
+                fact.operation_id.as_str(),
+                i64::try_from(fact.generation)
+                    .map_err(|_| error("native_auth_generation_bounds"))?
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(deleted, 1);
+    guard.revalidate(
+        &host,
+        &fact.binding,
+        &fact.operation_id,
+        fact.generation,
+        purpose,
+    )?;
+    validate_continuation(&tx, config, sources, &host, work.fact())?;
+    tx.commit().map_err(error)?;
+    drop(guard);
+    assert!(db.is_autocommit());
+    Ok(reply(admission, &work.command, fact))
+}
+
+fn load_fact(tx: &Transaction<'_>, id: &RequestId) -> Result<NativeAuthFact, EngineError> {
+    let row: Option<(Vec<u8>, String, String, i64)> = tx
+        .query_row(
+            "SELECT fact,phase,profile_key,generation FROM native_auth_operations WHERE id=?1",
+            [id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let (bytes, phase, key, generation) =
+        row.ok_or_else(|| error("native_auth_operation_missing"))?;
+    let fact = decode_fact(&bytes)?;
+    if &fact.operation_id != id
+        || phase != fact.phase.name()
+        || key != profile_key(&fact.binding.connection)?
+        || i64::try_from(fact.generation).ok() != Some(generation)
+    {
+        return Err(error("native_auth_fact_invalid"));
+    }
+    Ok(fact)
+}
+
+fn validate_continuation(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    expected: &NativeAuthFact,
+) -> Result<NativeAuthFact, EngineError> {
+    check_owner_host(tx, host)?;
+    let fact = load_fact(tx, &expected.operation_id)?;
+    if fact.binding != expected.binding
+        || fact.generation != expected.generation
+        || fact.action != expected.action
+        || fact.binding.database_instance != host.db_instance
+        || fact.binding.engine_epoch != host.engine_epoch
+    {
+        return Err(error("native_auth_operation_scope_conflict"));
+    }
+    let source_hash = settings::verified_source_hash(config, sources)
+        .map_err(|_| error("native_profile_source_conflict"))?;
+    if fact.binding.config_id != config.id
+        || fact.binding.source_hash != source_hash
+        || native_profile_connection(config, &fact.binding.connection.id)?
+            != &fact.binding.connection
+    {
+        return Err(error("native_profile_source_conflict"));
+    }
+    let origin: Option<(String, i64)> = tx.query_row(
+        "SELECT owner_id,owner_epoch FROM native_auth_fences WHERE profile_key=?1 AND operation_id=?2
+         AND generation=?3 AND db_instance=?4 AND engine_epoch=?5 AND custody_id=?6",
+        params![profile_key(&fact.binding.connection)?, fact.operation_id.as_str(),
+            i64::try_from(fact.generation).map_err(|_| error("native_auth_generation_bounds"))?,
+            host.db_instance, host.engine_epoch, fact.binding.custody_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(error)?;
+    let (owner_id, owner_epoch) = origin.ok_or_else(|| error("native_auth_recovery_required"))?;
+    check_owner_admission(
+        tx,
+        &Admission {
+            db_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            owner_id,
+            owner_epoch,
+        },
+    )?;
+    Ok(fact)
+}
+
+fn apply_update(
+    fact: &mut NativeAuthFact,
+    update: NativeAuthHostUpdate,
+) -> Result<(), EngineError> {
+    match update {
+        NativeAuthHostUpdate::CustodyUncertain => {
+            fact.phase = NativeAuthPhase::Uncertain;
+            fact.code = Some("native_auth_recovery_required".into());
+        }
+        NativeAuthHostUpdate::Unavailable => {
+            if fact.phase == NativeAuthPhase::Uncertain {
+                return Err(error("native_auth_recovery_required"));
+            }
+            fact.phase = NativeAuthPhase::Unavailable;
+            fact.code = Some("native_auth_host_unavailable".into());
+        }
+    }
+    Ok(())
+}
+
+fn store_fact(tx: &Transaction<'_>, fact: &NativeAuthFact) -> Result<(), EngineError> {
+    let updated = tx
+        .execute(
+            "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
+            params![
+                encode_fact(fact)?,
+                fact.phase.name(),
+                fact.operation_id.as_str(),
+                i64::try_from(fact.generation)
+                    .map_err(|_| error("native_auth_generation_bounds"))?
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(updated, 1);
+    Ok(())
 }
 
 fn prepare_requested_profile(
@@ -161,15 +507,15 @@ fn existing(
     admission: &Admission,
     command: &Command,
 ) -> Result<Option<NativeAuthFact>, EngineError> {
-    let row: Option<(Vec<u8>, Vec<u8>, String)> = tx
+    let row: Option<Vec<u8>> = tx
         .query_row(
-            "SELECT request,fact,phase FROM native_auth_operations WHERE id=?1",
+            "SELECT request FROM native_auth_operations WHERE id=?1",
             [command.operation_id().as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| row.get(0),
         )
         .optional()
         .map_err(error)?;
-    let Some((request, bytes, phase)) = row else {
+    let Some(request) = row else {
         return match command {
             Command::Read(_) | Command::Cancel(_) => Err(error("native_auth_operation_missing")),
             Command::Start(_) | Command::Logout(_) => Ok(None),
@@ -178,10 +524,7 @@ fn existing(
     if command.action().is_some() && request != command.request_bytes()? {
         return Err(error("native_auth_operation_conflict"));
     }
-    let mut fact = decode_fact(&bytes)?;
-    if phase != fact.phase.name() {
-        return Err(error("native_auth_fact_invalid"));
-    }
+    let mut fact = load_fact(tx, command.operation_id())?;
     let scope = command.scope();
     if &fact.operation_id != command.operation_id()
         || fact.binding.database_instance != admission.db_instance
@@ -191,27 +534,17 @@ fn existing(
     {
         return Err(error("native_auth_operation_scope_conflict"));
     }
-    if unfinished(fact.phase) && fact.binding.engine_epoch != admission.engine_epoch {
-        fact.phase = NativeAuthPhase::Uncertain;
-        fact.code = Some("native_auth_recovery_required".into());
-        tx.execute(
-            "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3",
-            params![
-                encode_fact(&fact)?,
-                fact.phase.name(),
-                fact.operation_id.as_str()
-            ],
+    let fenced: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE operation_id=?1)",
+            [fact.operation_id.as_str()],
+            |row| row.get(0),
         )
         .map_err(error)?;
-    }
-    if matches!(command, Command::Cancel(_)) {
-        return Err(error(
-            if unfinished(fact.phase) || fact.phase == NativeAuthPhase::Uncertain {
-                "native_auth_recovery_required"
-            } else {
-                "native_auth_not_active"
-            },
-        ));
+    if (unfinished(fact.phase) || fenced) && fact.binding.engine_epoch != admission.engine_epoch {
+        fact.phase = NativeAuthPhase::Uncertain;
+        fact.code = Some("native_auth_recovery_required".into());
+        store_fact(tx, &fact)?;
     }
     Ok(Some(fact))
 }
@@ -252,14 +585,27 @@ fn ensure_capacity(tx: &Transaction<'_>) -> Result<(), EngineError> {
 fn ensure_idle(tx: &Transaction<'_>, key: &str) -> Result<(), EngineError> {
     let pending: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM native_auth_operations WHERE profile_key=?1
-         AND phase IN ('starting','awaiting_owner','checking_account','cancelling','uncertain'))",
+            "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)
+             OR EXISTS(SELECT 1 FROM native_auth_operations WHERE profile_key=?1
+             AND phase IN ('starting','awaiting_owner','checking_account','cancelling','uncertain'))",
             [key],
             |row| row.get(0),
         )
         .map_err(error)?;
     if pending {
         return Err(error("native_auth_recovery_required"));
+    }
+    let busy: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_auth_fences)
+         OR EXISTS(SELECT 1 FROM native_auth_operations
+         WHERE phase IN ('starting','awaiting_owner','checking_account','cancelling','uncertain'))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if busy {
+        return Err(error("native_auth_host_busy"));
     }
     Ok(())
 }
@@ -295,8 +641,8 @@ fn record(
             .ok_or_else(|| error("native_auth_operation_missing"))?,
         binding: prepared.binding().clone(),
         generation,
-        phase: NativeAuthPhase::Unavailable,
-        code: Some("native_auth_host_unavailable".into()),
+        phase: NativeAuthPhase::Starting,
+        code: None,
     };
     let request = command.request_bytes()?;
     let bytes = encode_fact(&fact)?;

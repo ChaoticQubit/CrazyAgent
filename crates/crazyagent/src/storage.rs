@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod master_session;
 mod native_auth;
+pub(crate) use native_auth::{NativeAuthBegin, NativeAuthWork};
 #[cfg(test)]
 mod native_auth_host_tests;
 mod settings;
@@ -21,6 +22,11 @@ pub(crate) enum Job {
     NativeAuth(
         Admission,
         owner_auth::Command,
+        oneshot::Sender<Result<NativeAuthBegin, EngineError>>,
+    ),
+    NativeAuthFinish(
+        Admission,
+        Box<NativeAuthWork>,
         oneshot::Sender<Result<NativeAuthReply, EngineError>>,
     ),
     PrepareNativeProfile(
@@ -152,6 +158,32 @@ impl Storage {
                                     custody.as_mut().unwrap(),
                                     &admission,
                                     command,
+                                )
+                            };
+                            if let Err(Ok(begun)) = reply.send(result)
+                                && let Some(work) = begun.work
+                            {
+                                let _ = finish_native_auth_without_host(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    custody.as_mut().unwrap(),
+                                    &admission,
+                                    work,
+                                );
+                            }
+                        }
+                        Job::NativeAuthFinish(admission, work, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                finish_native_auth_without_host(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    custody.as_mut().unwrap(),
+                                    &admission,
+                                    *work,
                                 )
                             };
                             let _ = reply.send(result);
@@ -467,6 +499,35 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
     native_auth::initialize(connection)
+}
+
+fn finish_native_auth_without_host(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    admission: &Admission,
+    work: NativeAuthWork,
+) -> Result<NativeAuthReply, EngineError> {
+    let expected = work.fact().clone();
+    let result = native_auth::finish_native_auth_without_effect(
+        db, config, sources, custody, admission, work,
+    );
+    if result.is_err() {
+        let host = HostStamp {
+            db_instance: admission.db_instance.clone(),
+            engine_epoch: admission.engine_epoch.clone(),
+        };
+        let _ = native_auth::publish_native_auth(
+            db,
+            config,
+            sources,
+            &host,
+            &expected,
+            native_auth::NativeAuthHostUpdate::CustodyUncertain,
+        );
+    }
+    result
 }
 
 fn prepare_native_profile(

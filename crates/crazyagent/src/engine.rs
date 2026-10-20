@@ -391,6 +391,45 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub(crate) async fn native_auth_command(
+        &self,
+        admission: owner::Admission,
+        command: owner::native_auth::Command,
+    ) -> Result<owner::NativeAuthReply, EngineError> {
+        command.validate()?;
+        let begun = self
+            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .await?;
+        match begun.work {
+            Some(work) => self
+                .native_auth_job(|reply| Job::NativeAuthFinish(admission, Box::new(work), reply))
+                .await
+                .map_err(|error| {
+                    if error.0 == "owner_queue_not_submitted" {
+                        owner::native_auth::outcome_unknown()
+                    } else {
+                        error
+                    }
+                }),
+            None => Ok(begun.reply),
+        }
+    }
+
+    async fn native_auth_job<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+    ) -> Result<T, EngineError> {
+        let (send, receive) = oneshot::channel();
+        self.storage
+            .sender
+            .try_send(build(send))
+            .map_err(|_| EngineError("owner_queue_not_submitted".into()))?;
+        tokio::time::timeout(self.timeout, receive)
+            .await
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+    }
+
     pub async fn open_with_settings_sources(
         path: &Path,
         global: &Path,

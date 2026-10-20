@@ -6,7 +6,6 @@ use crate::engine::owner::{
 };
 use crate::engine::{Engine, EngineError, io_error, read_frame, verify_peer};
 use crate::protocol::encode_frame;
-use crate::storage::Job;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
@@ -111,18 +110,19 @@ pub(super) async fn serve(
         serde_json::from_slice(bytes).map_err(|_| failure("native_auth_request_invalid"))?;
     let command = envelope.native_auth;
     let request_id = command.request_id().clone();
-    let _barrier = engine.owner_egress.write().await;
-    if &authority.authenticate(packet)? != admission {
-        return Err(failure("owner_grant_stale_or_revoked"));
-    }
-    let result = match command.validate() {
-        Ok(()) => {
-            engine
-                .owner_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
-                .await
+    {
+        let _barrier = engine.owner_egress.write().await;
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
         }
-        Err(error) => Err(error),
+    }
+    let result = match engine.native_auth_command(admission.clone(), command).await {
+        Err(error) if error.0 == "native_auth_host_busy" => {
+            Err(failure("native_auth_recovery_required"))
+        }
+        result => result,
     };
+    let _barrier = engine.owner_egress.write().await;
     if &authority.authenticate(packet)? != admission {
         return Err(failure("owner_grant_stale_or_revoked"));
     }
