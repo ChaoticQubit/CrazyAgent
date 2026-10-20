@@ -3,3 +3,5 @@ pub(super) mod custody;
 mod custody_session_tests;
 #[cfg(test)]
 mod custody_tests;
+#[cfg(test)]
+mod entry_tests;
