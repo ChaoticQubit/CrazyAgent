@@ -101,3 +101,84 @@ test("current host pins verify actual project files without admitting execution"
     "scripts/rcli/host.construction.test.ts",
   ].sort());
 });
+
+test("actual executable source entry and contract pins remain incomplete and nonexecuting", async () => {
+  const root = await realpath(new URL("../../", import.meta.url));
+  const lock = JSON.parse(await readFile(new URL("./source-lock.json", import.meta.url), "utf8"));
+  assert.notEqual(lock.entry, null, "actual source-entry descriptor is required");
+  assert.deepEqual(lock.entry, {
+    path: "scripts/rcli/entry.ts",
+    sha256: "93f81817b0eae962d767a1bc8a26958d7f12dc6b7660e41ac1d12b113e588156",
+    bytes: 489,
+    executable: true,
+    contract: {
+      path: "scripts/rcli/host.entry.test.mjs",
+      sha256: "3b7ea0b7230dc5f1430ff35b2b70b92cfbe118e748192eb3d982051f7855b48d",
+      bytes: 10195,
+    },
+  });
+  assert.equal(lock.closure.complete, false);
+  assert.equal(lock.output.qualified, false);
+  assert.equal(lock.compiler_arguments_qualified, false);
+  const result = await inspectClosure(root, {
+    complete: false,
+    files: [lock.entry, lock.entry.contract],
+    assets: [],
+    licenses: [],
+    missing: lock.closure.missing,
+  });
+  assert.deepEqual(result, {
+    status: "STATIC_INPUTS_INCOMPLETE",
+    complete: false,
+    execution_allowed: false,
+    counts: { files: 2, assets: 0, licenses: 0 },
+    bytes: 10684,
+    missing: [
+      "complete Bun compiler import/asset resolution proof",
+      "complete version-bound Bun linked/embedded component notices and LGPL redistribution/relinking materials",
+      "current native-entry admission contracts and host-file pins",
+    ],
+  });
+});
+
+test("actual source entry and contract each reject a corrupted descriptor digest", async () => {
+  const root = await realpath(new URL("../../", import.meta.url));
+  const lock = JSON.parse(await readFile(new URL("./source-lock.json", import.meta.url), "utf8"));
+  assert.notEqual(lock.entry, null, "actual source-entry descriptor is required");
+  const pins = [lock.entry, lock.entry.contract];
+  for (const index of [0, 1]) {
+    const files = pins.map((pin, position) => position === index
+      ? { ...pin, sha256: "0".repeat(64) }
+      : pin);
+    await assert.rejects(inspectClosure(root, {
+      complete: false,
+      files,
+      assets: [],
+      licenses: [],
+      missing: lock.closure.missing,
+    }), /build_hash_mismatch/);
+  }
+});
+
+test("real source entry leaves the planner closed and private empty staging unchanged", async () => {
+  const { planBuild } = await import("./build-native.mjs");
+  const { lstat, readdir } = await import("node:fs/promises");
+  const staging = await realpath(await mkdtemp(join(tmpdir(), "rcli-source-entry-")));
+  await chmod(staging, 0o700);
+  const before = await lstat(staging);
+  const entries = await readdir(staging);
+  const fields = ["dev", "ino", "mode", "nlink", "uid", "gid", "size", "mtimeMs", "ctimeMs"];
+  try {
+    assert.equal(before.mode & 0o777, 0o700);
+    assert.deepEqual(entries, []);
+    await assert.rejects(planBuild({ staging }), { message: "build_closure_unavailable" });
+  } finally {
+    try {
+      const after = await lstat(staging);
+      assert.deepEqual(await readdir(staging), entries);
+      assert.deepEqual(fields.map(field => after[field]), fields.map(field => before[field]));
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+});
