@@ -2439,3 +2439,26 @@ mod knowledge_storage_tests {
         assert!(db.is_autocommit());
     }
 }
+
+#[cfg(test)]
+mod database_lock_tests {
+    use super::*;
+
+    #[test]
+    fn release_does_not_depend_on_a_stale_file_description_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let lock = lock_database(&path).unwrap();
+        let stale_alias = lock.try_clone().unwrap();
+        assert!(lock_database(&path).is_err());
+
+        release_database_lock(lock).unwrap();
+        let new_owner = lock_database(&path).unwrap();
+        drop(stale_alias);
+        assert!(lock_database(&path).is_err());
+
+        release_database_lock(new_owner).unwrap();
+        let final_owner = lock_database(&path).unwrap();
+        release_database_lock(final_owner).unwrap();
+    }
+}
