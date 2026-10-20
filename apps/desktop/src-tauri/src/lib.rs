@@ -5,11 +5,11 @@ mod native_refresh_observation;
 
 use bridge::{
     ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, HistoryPage,
-    IntentReceipt, ModelAccessDetail, ModelAccessPage, NativeBridge, PendingIntent, ProjectDetail,
-    ProjectPage,
+    IntentReceipt, ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent,
+    ProjectDetail, ProjectPage,
 };
 use crazyagent::config::ModelAccessEdit;
-use crazyagent::engine::owner::ModelAccessCollection;
+use crazyagent::engine::owner::{ModelAccessCollection, NativeAuthMethod};
 use crazyagent::protocol::ProjectSpec;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
@@ -235,6 +235,47 @@ async fn desktop_edit_model_access(
         .await
 }
 
+#[tauri::command]
+async fn desktop_start_native_auth(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    method: NativeAuthMethod,
+) -> Result<NativeAuthView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.start_native_auth(&ticket, method).await
+}
+
+#[tauri::command]
+async fn desktop_read_native_auth(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<NativeAuthView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.read_native_auth(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_cancel_native_auth(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<NativeAuthView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.cancel_native_auth(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_logout_native_auth(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<NativeAuthView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.logout_native_auth(&ticket).await
+}
+
 pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
@@ -260,6 +301,10 @@ pub fn run() {
             desktop_model_access_page,
             desktop_inspect_model_access,
             desktop_edit_model_access,
+            desktop_start_native_auth,
+            desktop_read_native_auth,
+            desktop_cancel_native_auth,
+            desktop_logout_native_auth,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

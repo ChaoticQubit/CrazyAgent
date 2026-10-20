@@ -1,6 +1,7 @@
 import type { useOwnerBrowser } from "../state";
 import type { ModelAccessForm } from "../model-access";
 import { recordId } from "../model-access";
+import { NativeAuthPanel } from "./native-auth";
 
 type State = ReturnType<typeof useOwnerBrowser>;
 
@@ -48,7 +49,9 @@ export function ModelAccess({ state }: { state: State }) {
   return <section className="metadata-settings" aria-busy={state.busy}>
     <div className="section-heading"><h2>Model access</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshModels()} data-testid="refresh-model-access">Refresh metadata</button></div>
     <p>Configure account references, model connections and account pools through the engine.</p>
-    <p className="notice" data-testid="model-auth-unavailable">Actual sign-in and authentication are unavailable. Stored references are metadata, not qualified accounts. This editor makes no provider calls.</p>
+    <p className="notice" data-testid="model-auth-unavailable">Stored references are metadata.
+      Native authentication uses explicit owner actions on an inspected connection.
+      Account observation does not qualify native delivery or execution.</p>
     <nav className="metadata-tabs" aria-label="Model metadata collections">
       {(["accounts", "connections", "pools"] as const).map((collection) => <button key={collection} aria-current={state.modelCollection === collection ? "page" : undefined} onClick={() => void state.showSettings(collection)} data-testid={`model-tab-${collection}`}>{collection[0].toUpperCase() + collection.slice(1)}</button>)}
     </nav>
@@ -66,11 +69,18 @@ export function ModelAccess({ state }: { state: State }) {
           <h3>Inspected metadata: {recordId(state.modelDetail.record)}</h3>
           <pre data-testid="model-access-record">{JSON.stringify(state.modelDetail.record, null, 2)}</pre>
           <div className="button-row">
+            {state.modelDetail.record.kind === "connection" && <button
+              disabled={blocked || !state.modelDetail.fresh || Boolean(state.modelForm)}
+              onClick={() => void state.openNativeAuth()}
+              data-testid="native-auth-open">Native authentication…</button>}
             {state.modelDetail.record.kind !== "account" && <button disabled={blocked || !state.modelDetail.fresh || !state.modelDetail.writable || Boolean(state.modelForm)} onClick={() => state.editModel()} data-testid="replace-model-access">Replace metadata</button>}
             <button disabled={blocked || !state.modelDetail.fresh || !state.modelDetail.writable || Boolean(state.modelForm)} onClick={() => state.editModel(true)} data-testid="remove-model-access">Remove metadata…</button>
           </div>
         </section>}
         <MetadataForm state={state} />
+        <NativeAuthPanel state={state.nativeAuth} blocked={blocked || Boolean(state.modelForm)}
+          onAction={(action) => void state.nativeAuthAction(action)}
+          onClose={state.closeNativeAuth} />
         {!state.modelDetail && !state.modelForm && <p className="empty">Select a record to inspect its complete metadata or create a new reference.</p>}
       </div>
     </div>

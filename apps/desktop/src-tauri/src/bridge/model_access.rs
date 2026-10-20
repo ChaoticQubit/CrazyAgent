@@ -1,6 +1,6 @@
 use super::*;
-use crazyagent::config::ModelAccessEdit;
-use crazyagent::engine::owner::{ModelAccessCollection, ModelAccessRecord};
+use crazyagent::config::{ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint};
+use crazyagent::engine::owner::{ModelAccessCollection, ModelAccessRecord, NativeAuthScope};
 use crazyagent::engine::owner::{ModelAccessCursor, OwnerReadReply};
 use crazyagent::protocol::CredentialRef;
 
@@ -35,6 +35,57 @@ pub struct ModelAccessDetail {
 }
 
 impl NativeBridge {
+    pub(super) fn native_auth_selection(
+        &self,
+        ticket: &str,
+    ) -> Result<(NativeAuthScope, ModelConnection), BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        if self.status().pending {
+            return Err(failure("pending_intent"));
+        }
+        let selected = self
+            .model_access
+            .as_ref()
+            .filter(|value| ticket.len() <= 20 && ticket == value.generation.to_string())
+            .ok_or_else(|| failure("stale_model_access"))?;
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?;
+        if !controller
+            .view()
+            .is_some_and(|value| value.fresh && value.state == selected.state)
+        {
+            return Err(failure("stale_model_access"));
+        }
+        let OwnerData::ModelAccessRecord {
+            source_hash,
+            record: ModelAccessRecord::Connection { connection },
+            ..
+        } = &selected.state.data
+        else {
+            return Err(failure("stale_model_access"));
+        };
+        if connection.protocol.as_str() != "native"
+            || !matches!(connection.endpoint, ModelEndpoint::Native)
+            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+            || !matches!(connection.harness.as_str(), "codex" | "claude")
+        {
+            return Err(failure("native_profile_not_managed"));
+        }
+        Ok((
+            NativeAuthScope {
+                expected_database_instance: controller.identity().database_instance().into(),
+                connection: connection.id.clone(),
+                expected_config_id: selected.state.config_id.clone(),
+                expected_source_hash: source_hash.clone(),
+            },
+            connection.clone(),
+        ))
+    }
+
     pub async fn model_access_page(
         &mut self,
         collection: ModelAccessCollection,
@@ -171,6 +222,7 @@ impl NativeBridge {
         edit: ModelAccessEdit,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth()?;
         if self.status().pending {
             return Err(failure("pending_intent"));
         }

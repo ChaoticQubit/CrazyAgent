@@ -1,4 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
+
+export function startNativeAuth(ticket: string, method: NativeAuthMethod): Promise<NativeAuthView> {
+  return invoke<NativeAuthView>("desktop_start_native_auth", { ticket, method });
+}
+
+export function readNativeAuth(ticket: string): Promise<NativeAuthView> {
+  return invoke<NativeAuthView>("desktop_read_native_auth", { ticket });
+}
+
+export function cancelNativeAuth(ticket: string): Promise<NativeAuthView> {
+  return invoke<NativeAuthView>("desktop_cancel_native_auth", { ticket });
+}
+
+export function logoutNativeAuth(ticket: string): Promise<NativeAuthView> {
+  return invoke<NativeAuthView>("desktop_logout_native_auth", { ticket });
+}
 
 export interface ConnectionStatus {
   connected: boolean;

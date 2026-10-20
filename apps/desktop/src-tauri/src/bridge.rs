@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod model_access;
+mod native_auth;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
+pub use native_auth::NativeAuthView;
 
 const PAGE_SIZE: u8 = 16;
 const PROJECTION_BYTES_MAX: usize = 65_536;
@@ -196,6 +198,7 @@ pub struct NativeBridge {
     project: Option<ProjectSelection>,
     model_access: Option<model_access::Selection>,
     model_access_next: Option<crazyagent::engine::owner::ModelAccessCursor>,
+    native_auth: Option<native_auth::Operation>,
 }
 
 impl NativeBridge {
@@ -211,6 +214,7 @@ impl NativeBridge {
             project: None,
             model_access: None,
             model_access_next: None,
+            native_auth: None,
         }
     }
 
@@ -343,6 +347,7 @@ impl NativeBridge {
     }
 
     fn prepare(&mut self, ticket: &str, revoke: bool) -> Result<(), BridgeError> {
+        self.allow_new_auth()?;
         if self.status().pending {
             return Err(failure("pending_intent"));
         }
@@ -553,6 +558,7 @@ impl NativeBridge {
         spec: ProjectSpec,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth()?;
         if self.status().pending {
             return Err(failure("pending_intent"));
         }
@@ -715,6 +721,7 @@ impl NativeBridge {
         generation: u64,
         brief: bool,
     ) -> Result<(), BridgeError> {
+        self.allow_new_auth()?;
         if self.status().pending {
             return Err(failure("pending_intent"));
         }
@@ -751,17 +758,22 @@ impl NativeBridge {
 }
 
 fn native_project_id() -> Result<ProjectId, BridgeError> {
+    ProjectId::new(format!("project-{}", native_random_id()?))
+        .map_err(|_| failure("project_identity_unavailable"))
+}
+
+fn native_random_id() -> Result<String, BridgeError> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|_| failure("project_identity_unavailable"))?;
-    let mut id = String::with_capacity(72);
-    id.push_str("project-");
+    let mut id = String::with_capacity(64);
     for byte in bytes {
         use std::fmt::Write;
         write!(&mut id, "{byte:02x}").map_err(|_| failure("project_identity_unavailable"))?;
     }
-    ProjectId::new(id).map_err(|_| failure("project_identity_unavailable"))
+    assert_eq!(id.len(), 64);
+    Ok(id)
 }
 
 fn conversation_row(entry: ConversationEntry) -> ConversationRow {

@@ -4,6 +4,7 @@ import {
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
   revokeBaseline, sendMessage, status,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
+  startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth,
 } from "./engine-client";
 import type {
   ActionReceipt, BaselineDetail, BaselinePage, HistoryPage, IntentReceipt,
@@ -14,6 +15,9 @@ import { editFromForm, newForm, formFromRecord, rebaseForm } from "./model-acces
 import type { ModelAccessForm } from "./model-access";
 import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens/projects";
 import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
+import { nativeAuthFailureCode, reduceNativeAuth } from "./native-auth";
+import type { NativeAuthCommand, NativeAuthState } from "./native-auth";
+import type { PanelAction } from "./screens/native-auth";
 
 export interface Draft {
   text: string;
@@ -57,6 +61,10 @@ export function useOwnerBrowser() {
   const [modelForm, setModelForm] = useState<{ value: ModelAccessForm; generation: number }>();
   const activeCollection = useRef<ModelAccessCollection>("accounts");
   const currentModelForm = useRef(modelForm);
+  const selectedModel = useRef("");
+  const [nativeAuth, setNativeAuth] = useState<NativeAuthState>();
+  const currentNativeAuth = useRef(nativeAuth);
+  const authOpening = useRef<number | undefined>(undefined);
   const [connected, setConnected] = useState(false);
   const [pending, setPending] = useState(false);
   const [intent, setIntent] = useState<PendingIntent | null>(null);
@@ -70,6 +78,16 @@ export function useOwnerBrowser() {
   const currentDrafts = useRef(drafts);
   const generation = useRef(0);
   const navigation = useRef(0);
+
+  function updateNativeAuth(event: Parameters<typeof reduceNativeAuth>[1]) {
+    currentNativeAuth.current = reduceNativeAuth(currentNativeAuth.current, event);
+    setNativeAuth(currentNativeAuth.current);
+  }
+
+  function closeNativeAuth() {
+    authOpening.current = undefined;
+    updateNativeAuth({ kind: "close" });
+  }
 
   function nextGeneration() {
     if (generation.current >= Number.MAX_SAFE_INTEGER) throw { code: "draft_generation_limit" };
@@ -86,6 +104,7 @@ export function useOwnerBrowser() {
   }
 
   function stale() {
+    updateNativeAuth({ kind: "invalidate" });
     setPage((old) => old ? { ...old, fresh: false } : old);
     setDetail((old) => old ? { ...old, fresh: false } : old);
     setProjectPage((old) => old ? { ...old, fresh: false } : old);
@@ -96,6 +115,7 @@ export function useOwnerBrowser() {
   }
 
   function changeView(next: typeof view) {
+    closeNativeAuth();
     navigation.current = nextGeneration();
     stale();
     activeView.current = next;
@@ -124,6 +144,7 @@ export function useOwnerBrowser() {
         const native = await status();
         setPending(native.pending);
         setConnected(native.connected);
+        if (!native.connected) stale();
         setIntent(await pendingIntent());
       } catch {
         setConnected(false);
@@ -164,6 +185,7 @@ export function useOwnerBrowser() {
   }
 
   async function reconnect() {
+    const current = navigation.current;
     setConnected(false);
     stale();
     setDetail(undefined);
@@ -173,7 +195,10 @@ export function useOwnerBrowser() {
     setConnected(result.connected);
     setPending(result.pending);
     if (activeView.current === "approvals") setPage(await baselines());
-    else if (activeView.current === "settings") await loadModels();
+    else if (activeView.current === "settings") {
+      await loadModels();
+      await recoverNativeAuth(current);
+    }
     else {
       await loadProjects();
       if (activeProject.current) await loadProject(activeProject.current);
@@ -271,9 +296,89 @@ export function useOwnerBrowser() {
   async function loadModels(next = false) {
     const collection = activeCollection.current;
     if (activeView.current !== "settings") return;
+    updateNativeAuth({ kind: "invalidate" });
+    selectedModel.current = "";
     setModelDetail(undefined);
     const page = await modelAccessPage(collection, next);
     if (activeView.current === "settings" && collection === activeCollection.current) setModelPage(page);
+  }
+
+  async function deliverNativeAuth(action: NativeAuthCommand, current: number, request: number) {
+    const selected = currentNativeAuth.current;
+    if (!selected?.in_flight || selected.in_flight.request !== request) return;
+    try {
+      const ticket = selected.context.ticket;
+      const reply = action === "read" ? await readNativeAuth(ticket) :
+        action === "cancel" ? await cancelNativeAuth(ticket) :
+        action === "logout" ? await logoutNativeAuth(ticket) :
+        await startNativeAuth(ticket, action);
+      updateNativeAuth({ kind: "reply", navigation: current, request, reply });
+    } catch (failure) {
+      updateNativeAuth({ kind: "failure", navigation: current, request,
+        code: nativeAuthFailureCode(failure) });
+    }
+  }
+
+  async function recoverNativeAuth(current: number) {
+    const retained = currentNativeAuth.current;
+    if (!retained || !(retained.operation || retained.recover) ||
+      current !== navigation.current || activeView.current !== "settings" ||
+      activeCollection.current !== "connections") return;
+    const basis = retained.context;
+    const detail = await inspectModelAccess("connections", basis.connection);
+    if (current !== navigation.current || activeView.current !== "settings" ||
+      activeCollection.current !== "connections") return;
+    const same = detail.config_id === basis.config_id && detail.source_hash === basis.source_hash &&
+      detail.record.kind === "connection" && detail.record.connection.id === basis.connection;
+    selectedModel.current = basis.connection;
+    setModelDetail(detail);
+    const visible = Boolean(currentNativeAuth.current?.open);
+    updateNativeAuth({ kind: "open", detail: { ...detail, fresh: detail.fresh && same },
+      navigation: current });
+    const request = nextGeneration();
+    updateNativeAuth({ kind: "begin", action: "read", request });
+    if (!visible) closeNativeAuth();
+    await deliverNativeAuth("read", current, request);
+  }
+
+  async function openNativeAuth() {
+    if (running.current || !connected || pending || currentModelForm.current ||
+      activeView.current !== "settings" || activeCollection.current !== "connections" ||
+      modelDetail?.record.kind !== "connection" || !modelDetail.fresh) return;
+    const basis = modelDetail;
+    const id = basis.record.kind === "connection" ? basis.record.connection.id : "";
+    if (selectedModel.current !== id) return;
+    const current = navigation.current;
+    const opening = nextGeneration();
+    authOpening.current = opening;
+    updateNativeAuth({ kind: "invalidate" });
+    await run(async () => {
+      const detail = await inspectModelAccess("connections", id);
+      if (current !== navigation.current || activeView.current !== "settings" ||
+        activeCollection.current !== "connections" || selectedModel.current !== id ||
+        authOpening.current !== opening) return;
+      authOpening.current = undefined;
+      const same = detail.config_id === basis.config_id && detail.source_hash === basis.source_hash;
+      setModelDetail(detail);
+      updateNativeAuth({ kind: "open", detail: { ...detail, fresh: detail.fresh && same },
+        navigation: current });
+    });
+  }
+
+  async function nativeAuthAction(action: PanelAction) {
+    if (action === "refresh") return openNativeAuth();
+    if (running.current || !connected || pending || currentModelForm.current ||
+      activeView.current !== "settings" || activeCollection.current !== "connections") return;
+    if (action === "back" || action === "confirm_logout") {
+      updateNativeAuth({ kind: action });
+      return;
+    }
+    const current = navigation.current;
+    if (currentNativeAuth.current?.context.navigation !== current) return;
+    const request = nextGeneration();
+    updateNativeAuth({ kind: "begin", action, request });
+    if (currentNativeAuth.current?.in_flight?.request !== request) return;
+    await run(() => deliverNativeAuth(action, current, request));
   }
 
   function retainModelForm(value: ModelAccessForm) {
@@ -312,6 +417,7 @@ export function useOwnerBrowser() {
     projectPage, project, historyPage, projectId, drafts,
     projectForm, createdProject, editProject, discardProject,
     modelCollection, modelPage, modelDetail, modelForm,
+    nativeAuth, openNativeAuth, nativeAuthAction, closeNativeAuth,
     reconnect: () => run(reconnect),
     refresh: (next = false) => run(() => refresh(next)),
     select: (id: string) => run(async () => setDetail(await inspectBaseline(id))),
@@ -341,14 +447,28 @@ export function useOwnerBrowser() {
       setModelDetail(undefined);
       return read(() => loadModels());
     },
-    refreshModels: (next = false) => read(() => loadModels(next)),
-    selectModel: (id: string) => read(async () => {
+    refreshModels: (next = false) => {
+      closeNativeAuth();
+      updateNativeAuth({ kind: "invalidate" });
+      return read(() => loadModels(next));
+    },
+    selectModel: (id: string) => {
+      closeNativeAuth();
+      updateNativeAuth({ kind: "invalidate" });
+      navigation.current = nextGeneration();
+      selectedModel.current = id;
+      const current = navigation.current;
       const collection = activeCollection.current;
-      const detail = await inspectModelAccess(collection, id);
-      if (activeView.current === "settings" && collection === activeCollection.current) setModelDetail(detail);
-    }),
+      return read(async () => {
+        const detail = await inspectModelAccess(collection, id);
+        if (activeView.current === "settings" && collection === activeCollection.current &&
+          current === navigation.current && selectedModel.current === id) setModelDetail(detail);
+      });
+    },
     createModel: () => run(async () => {
       if (currentModelForm.current || pending || activeView.current !== "settings") return;
+      closeNativeAuth();
+      updateNativeAuth({ kind: "invalidate" });
       const collection = activeCollection.current;
       const page = await modelAccessPage(collection);
       if (activeView.current !== "settings" || collection !== activeCollection.current) return;
@@ -358,6 +478,8 @@ export function useOwnerBrowser() {
     }),
     editModel: (remove = false) => {
       if (!modelDetail?.fresh || !modelDetail.writable || currentModelForm.current || pending) return;
+      closeNativeAuth();
+      updateNativeAuth({ kind: "invalidate" });
       try { retainModelForm(formFromRecord(modelDetail.record, modelDetail.ticket, remove)); }
       catch { setError("The metadata form could not be retained. Preserve its values before restarting."); }
     },
@@ -375,6 +497,8 @@ export function useOwnerBrowser() {
     reviewModelForm: () => run(async () => {
       const retained = currentModelForm.current;
       if (!retained || pending) return;
+      closeNativeAuth();
+      updateNativeAuth({ kind: "invalidate" });
       const form = retained.value;
       activeCollection.current = form.collection;
       setModelCollection(form.collection);
