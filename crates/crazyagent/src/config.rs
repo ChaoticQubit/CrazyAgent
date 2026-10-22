@@ -528,10 +528,64 @@ pub(crate) fn edit_model_access(
     let catalog_document = toml_edit::ser::to_document(&catalog)
         .map_err(|_| ConfigError("model_access_encoding".into()))?;
     document["model_access"] = toml_edit::Item::Table(catalog_document.into_table());
+    approve_assigned_accounts(&mut document, &catalog)?;
     let bytes = document.to_string();
     let config = resolve_config_bytes(&bytes, project)?;
     assert_eq!(config.settings.model_access, Some(catalog));
     Ok((bytes, config))
+}
+
+const LOCAL_DESTINATION: &str = "local";
+
+/// Treats an explicit pool-to-project assignment as owner approval of the pool's accounts.
+/// Input: the edited global document and the validated catalog it now holds.
+/// Output: `routing.approved_accounts` gains every account of an assigned pool and an empty
+/// `allowed_destinations` gains the local execution target; nothing is ever removed.
+fn approve_assigned_accounts(
+    document: &mut toml_edit::DocumentMut,
+    catalog: &ModelAccess,
+) -> Result<(), ConfigError> {
+    let assigned: Vec<&CredentialRef> = catalog
+        .pools
+        .iter()
+        .filter(|pool| !pool.projects.is_empty())
+        .flat_map(|pool| {
+            catalog
+                .connections
+                .iter()
+                .filter(|connection| pool.members.contains(&connection.id))
+                .map(|connection| &connection.account_ref)
+        })
+        .collect();
+    if assigned.is_empty() {
+        return Ok(());
+    }
+    let shape = || ConfigError("routing_approval_shape".into());
+    let routing = document
+        .entry("routing")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or_else(shape)?;
+    let approved = routing
+        .entry("approved_accounts")
+        .or_insert_with(|| toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+        .ok_or_else(shape)?;
+    for account in assigned {
+        if !approved.iter().any(|value| value.as_str() == Some(account.as_str())) {
+            approved.push(account.as_str());
+        }
+    }
+    let destinations = document
+        .entry("allowed_destinations")
+        .or_insert_with(|| toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+        .ok_or_else(shape)?;
+    if destinations.is_empty() {
+        destinations.push(LOCAL_DESTINATION);
+    }
+    assert!(!destinations.is_empty());
+    Ok(())
 }
 
 fn apply_file(
@@ -693,6 +747,51 @@ impl ConfigState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ASSIGNMENT_GLOBAL: &str = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } }]
+pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
+"#;
+
+    fn assigned_pool(projects: &[&str]) -> ModelAccessEdit {
+        ModelAccessEdit::ReplacePool {
+            pool: AccountPool {
+                id: CredentialRef::new("local-pool").unwrap(),
+                members: vec![CredentialRef::new("local-connection").unwrap()],
+                projects: projects.iter().map(|p| CredentialRef::new(*p).unwrap()).collect(),
+                roles: vec![CredentialRef::new("project_leader").unwrap()],
+                fallback_allowed: false,
+                provider_quota_policy: ProviderQuotaPolicy::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn assigning_a_pool_to_a_project_approves_its_accounts_and_a_local_destination() {
+        let (bytes, config) =
+            edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&["demo"])).unwrap();
+        let account = CredentialRef::new("local-account").unwrap();
+        assert_eq!(config.settings.routing.approved_accounts, vec![account]);
+        assert_eq!(
+            config.settings.allowed_destinations,
+            vec![CredentialRef::new("local").unwrap()]
+        );
+        let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"])).unwrap();
+        assert_eq!(again.settings.routing.approved_accounts.len(), 1);
+        assert_eq!(again.settings.allowed_destinations.len(), 1);
+    }
+
+    #[test]
+    fn unassigned_pools_approve_nothing() {
+        let (_, config) = edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&[])).unwrap();
+        assert!(config.settings.routing.approved_accounts.is_empty());
+        assert!(config.settings.allowed_destinations.is_empty());
+    }
 
     #[test]
     fn legacy_configuration_keeps_its_identity_and_default_routing() {

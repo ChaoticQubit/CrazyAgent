@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
-crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH]\n\
+crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
@@ -182,17 +182,21 @@ fn engine_options(args: &[OsString]) -> Result<(bool, Option<&Path>), String> {
     Ok((writable, codex))
 }
 
-fn engine_options_with_claude(args: &[OsString]) -> Result<(bool, Option<std::path::PathBuf>, Option<std::path::PathBuf>), String> {
-    if !(5..=10).contains(&args.len()) { return Err(USAGE.into()); }
+type EngineOptions = (bool, Option<std::path::PathBuf>, Option<std::path::PathBuf>, Option<std::path::PathBuf>);
+
+fn engine_options_with_claude(args: &[OsString]) -> Result<EngineOptions, String> {
+    if !(5..=12).contains(&args.len()) { return Err(USAGE.into()); }
     let mut filtered = Vec::with_capacity(args.len());
     let mut claude = None;
+    let mut rcli = None;
     let mut index = 0;
     while index < args.len() {
-        if index >= 5 && args[index] == "--claude-executable" {
-            if claude.is_some() { return Err(USAGE.into()); }
+        if index >= 5 && (args[index] == "--claude-executable" || args[index] == "--rcli-executable") {
+            let slot = if args[index] == "--claude-executable" { &mut claude } else { &mut rcli };
+            if slot.is_some() { return Err(USAGE.into()); }
             let path = Path::new(args.get(index + 1).ok_or(USAGE)?);
             if !path.is_absolute() { return Err("native_auth_host_executable_unsafe".into()); }
-            claude = Some(path.to_path_buf());
+            *slot = Some(path.to_path_buf());
             index += 2;
         } else {
             filtered.push(args[index].clone());
@@ -201,15 +205,15 @@ fn engine_options_with_claude(args: &[OsString]) -> Result<(bool, Option<std::pa
         assert!(index <= args.len());
     }
     let (writable, codex) = engine_options(&filtered)?;
-    Ok((writable, codex.map(Path::to_path_buf), claude))
+    Ok((writable, codex.map(Path::to_path_buf), claude, rcli))
 }
 
 fn run_engine(args: &[OsString]) -> Result<(), String> {
-    let (writable, codex, claude) = engine_options_with_claude(args)?;
+    let (writable, codex, claude, rcli) = engine_options_with_claude(args)?;
     let runtime_dir = Path::new(&args[1]);
     let socket_name = args[4].to_str().ok_or("invalid socket name")?;
     crazyagent::protocol::SessionId::new(socket_name).map_err(|e| e.to_string())?;
-    assert!((5..=10).contains(&args.len()));
+    assert!((5..=12).contains(&args.len()));
     assert!(!socket_name.contains('/'));
     let config = if writable {
         None
@@ -275,6 +279,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     }
                     if let Some(executable) = claude.as_deref() {
                         service.register_claude_executable(executable).map_err(|e| e.to_string())?;
+                    }
+                    if let Some(executable) = rcli.as_deref() {
+                        service.register_rcli_executable(executable).map_err(|e| e.to_string())?;
                     }
                     Ok(())
                 })

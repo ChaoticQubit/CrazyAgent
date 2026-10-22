@@ -419,6 +419,30 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
+    pub(crate) fn register_rcli_private_key_executable(
+        &self,
+        host: RegisteredNativeAuthHost,
+    ) -> Result<(), EngineError> {
+        if !self.authority.usable.load(Ordering::SeqCst) {
+            return Err(failure("owner_runtime_stale"));
+        }
+        self.native_auth_owner_runtime_dir()?;
+        host.verified_path()?;
+        let mut registration = self
+            .authority
+            .native_auth_host
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        if registration.frozen
+            || registration.disabled
+            || registration.rcli_private_key_executable.is_some()
+        {
+            return Err(failure("native_auth_host_registration_frozen"));
+        }
+        registration.rcli_private_key_executable = Some(Arc::new(host));
+        Ok(())
+    }
+
     pub(crate) fn registered_codex_executable(
         &self,
     ) -> Result<Arc<RegisteredNativeAuthHost>, EngineError> {

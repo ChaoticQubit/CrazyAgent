@@ -481,6 +481,24 @@ impl EngineService {
             .register_claude_executable(host)
     }
 
+    /// Registers the native RCLI host for master turns and API-key writes.
+    /// Input: absolute path to the bundled `crazyagent-rcli` executable.
+    /// Output: Ok once both identities are captured before the runtime freezes.
+    pub fn register_rcli_executable(&mut self, executable: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        let master = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let writer = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        runtime.register_rcli_master_executable(master)?;
+        runtime.register_rcli_private_key_executable(writer)
+    }
+
     pub async fn prepare_runner(
         &mut self,
         attempt: &crate::worker_dispatch::AttemptRef,
