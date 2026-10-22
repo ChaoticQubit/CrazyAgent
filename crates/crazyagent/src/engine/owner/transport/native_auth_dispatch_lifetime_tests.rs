@@ -210,7 +210,7 @@ where
     let cleanup = tokio::time::timeout(Duration::from_secs(8), async {
         context.host.invalidate_native_auth_dispatch()?;
         context.host.drain_native_auth_dispatch().await?;
-        if let Some(service) = context.service.lock().await.take() {
+        if let Some(mut service) = context.service.lock().await.take() {
             service.shutdown().await?;
         }
         Ok::<(), EngineError>(())
@@ -396,10 +396,10 @@ impl LifetimeCase {
 }
 
 fn assert_reaped(pid: rustix::process::Pid) {
-    assert_eq!(
-        rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
-        Err(rustix::io::Errno::CHILD),
-        "retained direct child was not already reaped by its actual owner"
+    let observed = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+    assert!(
+        matches!(&observed, Err(rustix::io::Errno::CHILD)),
+        "retained direct child was not already reaped by its actual owner: {observed:?}"
     );
 }
 
@@ -429,8 +429,8 @@ async fn native_auth_dispatch_lifetime_runtime_dir_joins_actual_generation_and_e
         assert_ne!(root, case.host.authority.root.path);
         let (generation, identity, binding) = runner_binding(&root).unwrap();
         assert_eq!(generation, case.host.authority.root.path);
-        assert_eq!(identity.database_instance, case.host.identity().db_instance);
-        assert_eq!(identity.engine_epoch, case.host.identity().engine_epoch);
+        assert_eq!(identity.database_instance(), case.host.identity().db_instance);
+        assert_eq!(identity.engine_epoch(), case.host.identity().engine_epoch);
         binding.verify().unwrap();
     })
     .await;
@@ -586,8 +586,8 @@ async fn native_auth_dispatch_lifetime_service_shutdown_reaps_child_and_preserve
         let (_, mut checkpoint) = case.held("shutdown-before-commit").await;
         let before = case.snapshot();
         let pid = case.retained_pid();
-        let service = case.service.lock().await.take().unwrap();
-        let shutdown = tokio::spawn(service.shutdown());
+        let mut service = case.service.lock().await.take().unwrap();
+        let shutdown = tokio::spawn(async move { service.shutdown().await });
         case.wait_invalidated().await;
         checkpoint.release().unwrap();
         tokio::time::timeout(Duration::from_secs(8), shutdown)

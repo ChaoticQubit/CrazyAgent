@@ -166,8 +166,8 @@ impl ModelAccess {
             })
             || self.pools.iter().any(|pool| {
                 !bounded_unique_refs(&pool.members, true)
-                    || !bounded_unique_refs(&pool.projects, true)
-                    || !bounded_unique_refs(&pool.roles, true)
+                    || !bounded_unique_refs(&pool.projects, false)
+                    || !bounded_unique_refs(&pool.roles, false)
                     || pool.members.iter().any(|id| !connections.contains(id))
             })
         {

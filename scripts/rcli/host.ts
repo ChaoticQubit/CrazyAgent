@@ -1,4 +1,5 @@
 export * from "./host.codec.ts";
+export { type PrivateKeyWriteBinding, runPrivateProviderKeyAction, writePrivateProviderKey } from "./host.keys.ts";
 import { identifier } from "./host.codec.ts";
 import {
   AgentController,

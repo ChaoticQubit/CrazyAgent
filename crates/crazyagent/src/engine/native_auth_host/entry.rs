@@ -1,3 +1,4 @@
+use super::RegisteredNativeAuthHost;
 use super::custody::CustodySession;
 use crate::engine::bootstrap::{NativeProfileUsePurpose, runner_binding};
 use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
@@ -70,6 +71,33 @@ pub(in crate::engine) async fn run(
     runtime_dir: &Path,
     input: OwnedFd,
 ) -> Result<NativeAuthFact, EngineError> {
+    run_inner(runtime_dir, input, None, None).await
+}
+
+pub(in crate::engine) async fn run_with_codex(
+    runtime_dir: &Path,
+    input: OwnedFd,
+    executable: &Path,
+    expected_sha256: &str,
+) -> Result<NativeAuthFact, EngineError> {
+    run_inner(runtime_dir, input, Some((executable, expected_sha256)), None).await
+}
+
+pub(in crate::engine) async fn run_with_claude(
+    runtime_dir: &Path,
+    input: OwnedFd,
+    executable: &Path,
+    expected_sha256: &str,
+) -> Result<NativeAuthFact, EngineError> {
+    run_inner(runtime_dir, input, None, Some((executable, expected_sha256))).await
+}
+
+async fn run_inner(
+    runtime_dir: &Path,
+    input: OwnedFd,
+    codex: Option<(&Path, &str)>,
+    claude: Option<(&Path, &str)>,
+) -> Result<NativeAuthFact, EngineError> {
     let token = read_bootstrap(&input, Instant::now() + BOOTSTRAP_TIME_MAX).await?;
     drop(input);
     let mut channel = NativeAuthCustodyChannel::connect(runtime_dir, token).await?;
@@ -98,7 +126,30 @@ pub(in crate::engine) async fn run(
     )?;
     let session = CustodySession::new(guard);
     session.check(&mut channel).await?;
-    let retired = channel.retire(session.seal_without_effect()?).await?;
+    let retired = if let Some((executable, expected_sha256)) = claude {
+        if codex.is_some() || fact.binding.connection.harness.as_str() != "claude" {
+            return Err(EngineError("native_auth_method_mismatch".into()));
+        }
+        let executable = RegisteredNativeAuthHost::capture(executable)?;
+        if executable.verified_sha256()? != expected_sha256 {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
+        let retirement = super::claude_auth::run(session, &mut channel, &executable).await?;
+        channel.retire_after_child_reaped(retirement).await?
+    } else if let Some((executable, expected_sha256)) = codex {
+        if fact.binding.connection.harness.as_str() != "codex" {
+            return Err(EngineError("native_auth_method_mismatch".into()));
+        }
+        let executable = RegisteredNativeAuthHost::capture(executable)?;
+        if executable.verified_sha256()? != expected_sha256 {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
+        let retirement =
+            super::codex_auth::run(session, &mut channel, executable.verified_path()?).await?;
+        channel.retire_after_child_reaped(retirement).await?
+    } else {
+        channel.retire(session.seal_without_effect()?).await?
+    };
     assert_eq!(retired.operation_id, fact.operation_id);
     assert_eq!(retired.generation, fact.generation);
     Ok(retired)

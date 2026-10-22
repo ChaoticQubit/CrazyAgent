@@ -1253,3 +1253,6 @@ async fn profile_preparation_changes_no_durable_engine_or_admission_state() {
     })
     .await;
 }
+
+#[path = "account_profile_transport_tests.rs"]
+mod account_profile_transport_tests;

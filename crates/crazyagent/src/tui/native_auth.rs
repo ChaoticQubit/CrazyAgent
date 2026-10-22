@@ -10,6 +10,8 @@ use crate::engine::owner::{
 };
 use crate::protocol::RequestId;
 
+pub(super) mod claude_code;
+
 const DISPLAY_BYTES_MAX: usize = 65536;
 const FIELD_BYTES_MAX: usize = 4096;
 
@@ -52,6 +54,7 @@ struct Retained {
 }
 
 pub(super) struct State {
+    claude_code: claude_code::Input,
     context: Option<Context>,
     retained: Option<Retained>,
     flight: Option<Job>,
@@ -70,6 +73,7 @@ pub(super) struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            claude_code: claude_code::Input::default(),
             context: None,
             retained: None,
             flight: None,
@@ -130,7 +134,7 @@ impl Command {
 }
 
 impl Context {
-    fn scope(&self) -> NativeAuthScope {
+    pub(super) fn scope(&self) -> NativeAuthScope {
         NativeAuthScope {
             expected_database_instance: self.basis.identity.database_instance().into(),
             connection: self.connection.id.clone(),
@@ -202,6 +206,7 @@ impl State {
 
     pub(super) fn hide(&mut self) -> Result<(), String> {
         self.open = false;
+        self.claude_code.clear();
         self.presentation = None;
         self.confirmation = None;
         self.generation = self
@@ -238,7 +243,7 @@ impl State {
     }
 
     pub(super) fn loading(&self) -> bool {
-        self.flight.is_some() || self.job.is_some()
+        self.flight.is_some() || self.job.is_some() || self.claude_code.loading()
     }
 
     pub(super) fn request(&mut self) -> Option<Job> {
@@ -262,6 +267,17 @@ impl State {
     pub(super) fn reduce(&mut self, event: &UiEvent) -> Result<bool, String> {
         if !self.open {
             return Ok(false);
+        }
+        if self.selected == 0
+            && self.confirmation.is_none()
+            && matches!(event, UiEvent::Character(_) | UiEvent::Backspace | UiEvent::Submit)
+            && self.connected
+            && self.inspected
+            && self.flight.is_none()
+            && self.job.is_none()
+            && self.claude_code.reduce(event)?
+        {
+            return Ok(true);
         }
         match event {
             UiEvent::Cancel | UiEvent::FocusNext | UiEvent::FocusPrevious => {
@@ -302,6 +318,15 @@ impl State {
             .as_ref()
             .is_some_and(|c| c.connection.harness.as_str() == "claude")
         {
+            if self.claude_code.accepts_code() {
+                return &[
+                    "Submit Claude fallback code",
+                    "Read original operation",
+                    "Cancel original operation",
+                    "Logout",
+                    "Back",
+                ];
+            }
             &[
                 "Claude official sign-in",
                 "Read original operation",
@@ -422,7 +447,11 @@ impl State {
             return Err("Select the original connection and source to read or cancel".into());
         }
         let command = self.query(cancel)?;
-        self.queue(Job { context, command })
+        self.queue(Job { context, command })?;
+        if cancel {
+            self.claude_code.clear();
+        }
+        Ok(())
     }
 
     pub(super) fn apply(&mut self, event: Event) -> Result<(), String> {
@@ -446,6 +475,7 @@ impl State {
             }
             Err(problem) => {
                 self.presentation = None;
+                self.claude_code.clear();
                 self.notice = public_problem(&problem);
                 if problem != "native_auth_not_active"
                     && let Some(retained) = &mut self.retained
@@ -458,6 +488,7 @@ impl State {
             }
             _ => {
                 self.presentation = None;
+                self.claude_code.clear();
                 self.inspected = false;
                 self.notice = "Owner response context changed; close and inspect again";
             }
@@ -527,15 +558,80 @@ impl State {
         } else {
             "Historical operation observed; current account presentation unavailable"
         };
-        self.presentation = if self.open
+        let present = self.open
             && self.connected
             && self.context.as_ref() == Some(&job.context)
-            && reply.fact.binding.engine_epoch == reply.engine_epoch
-        {
+            && reply.fact.binding.engine_epoch == reply.engine_epoch;
+        if present {
+            self.observe_claude(&reply);
+        } else {
+            self.claude_code.clear();
+        }
+        self.presentation = if present {
             Some(reply)
         } else {
             None
         };
+    }
+
+    pub(super) fn last_authentication(&self, basis: Option<&Basis>) -> Vec<String> {
+        let (Some(retained), Some(operation)) = (&self.retained, self.operation_id()) else {
+            return Vec::new();
+        };
+        let original = &retained.original.context;
+        let generation = retained
+            .fact
+            .as_ref()
+            .map(|fact| fact.generation.to_string())
+            .unwrap_or_else(|| "not observed".into());
+        let phase = retained
+            .fact
+            .as_ref()
+            .map(|fact| format!("{:?}", fact.phase))
+            .unwrap_or_else(|| "not observed".into());
+        let action = retained
+            .original
+            .command
+            .action()
+            .map(|action| format!("{action:?}"))
+            .unwrap_or_default();
+        let current = self.connected
+            && basis.is_some_and(|basis| {
+                basis.identity.database_instance() == original.basis.identity.database_instance()
+                    && basis.identity.engine_epoch() == original.basis.identity.engine_epoch()
+                    && basis.config_id == original.basis.config_id
+                    && basis.source_hash == original.basis.source_hash
+            });
+        let mut lines = vec![
+            format!(
+                "Last authentication | {} | account reference: {}",
+                display_text(original.connection.id.as_str(), FIELD_BYTES_MAX),
+                display_text(original.connection.account_ref.as_str(), FIELD_BYTES_MAX)
+            ),
+            format!(
+                "Original operation: {} | generation: {generation}",
+                display_text(operation.as_str(), 256)
+            ),
+            format!("Original action: {action} | Last owner phase: {phase}"),
+            format!(
+                "Original owner: {} | epoch: {}",
+                display_text(original.basis.identity.database_instance(), 256),
+                display_text(original.basis.identity.engine_epoch(), 256)
+            ),
+            format!(
+                "Original config: {} | source: {}",
+                display_text(original.basis.config_id.as_str(), 256),
+                display_text(&original.basis.source_hash, 128)
+            ),
+        ];
+        if !current {
+            lines.push("Historical owner/source; read the exact original operation".into());
+        }
+        if retained.uncertain {
+            lines.push("Current outcome unresolved; read or cancel the original operation".into());
+        }
+        lines.push("Last owner observation only; model delivery and quota remain separate".into());
+        lines
     }
 
     pub(super) fn render(&self, compact: bool) -> String {
@@ -556,14 +652,18 @@ impl State {
                 }
             ),
             self.notice.into(),
+            format!(
+                "Selected account reference: {}",
+                display_text(context.connection.account_ref.as_str(), FIELD_BYTES_MAX)
+            ),
         ];
-        if let Some(operation) = self.operation_id() {
-            lines.push(format!(
-                "Original operation: {}",
-                display_text(operation.as_str(), 256)
-            ));
-        }
+        let history = self.last_authentication(Some(&context.basis));
+        lines.extend(history.iter().take(3).cloned());
         lines.extend(self.action_lines());
+        let claude = self.claude_code.render();
+        if !claude.is_empty() {
+            lines.push(claude);
+        }
         if let Some(reply) = &self.presentation {
             if let Some(code) = &reply.fact.code {
                 lines.push(format!("Owner result: {}", public_problem(code)));
@@ -575,6 +675,7 @@ impl State {
                 lines.push(render_account(account));
             }
         }
+        lines.extend(history.into_iter().skip(3));
         if !compact {
             lines.push("Account observations do not qualify model delivery or quota".into());
         }
@@ -632,7 +733,7 @@ impl State {
     }
 }
 
-fn supported(connection: &ModelConnection) -> bool {
+pub(super) fn supported(connection: &ModelConnection) -> bool {
     connection.protocol.as_str() == "native"
         && matches!(connection.harness.as_str(), "codex" | "claude")
         && matches!(connection.endpoint, ModelEndpoint::Native {})
@@ -675,6 +776,8 @@ fn phase_text(phase: NativeAuthPhase) -> &'static str {
         NativeAuthPhase::AuthenticatedObserved => "Authenticated account observed",
         NativeAuthPhase::UnauthenticatedObserved => "Signed-out account observed",
         NativeAuthPhase::Cancelling => "Cancellation requested; outcome pending",
+        NativeAuthPhase::Failed => "Native authentication failed",
+        NativeAuthPhase::Cancelled => "Native authentication cancelled",
         NativeAuthPhase::Unavailable => "Native authentication unavailable",
         NativeAuthPhase::Uncertain => "Outcome uncertain; read the original operation",
     }

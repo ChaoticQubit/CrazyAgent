@@ -209,6 +209,28 @@ async fn start_service(root: &Path) -> EngineService {
     ).await.unwrap()
 }
 
+#[tokio::test]
+async fn native_auth_engine_service_registers_distinct_codex_before_ready() {
+    let root = tempfile::Builder::new().prefix("ca-ep-")
+        .tempdir_in("/private/tmp").unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut service = start_service(root.path()).await;
+    let executable = root.path().join("crazyagent-pin-only");
+    let codex = root.path().join("codex-pin-only");
+    for path in [&executable, &codex] {
+        std::fs::write(path, path.file_name().unwrap().as_encoded_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    service.register_native_auth_host(&executable).unwrap();
+    service.register_codex_executable(&codex).unwrap();
+    let registered = service.owner_runtime().unwrap().registered_codex_executable().unwrap();
+    assert_eq!(registered.verified_path().unwrap(), codex);
+    assert_eq!(registered.verified_sha256().unwrap(), format!("{:x}", Sha256::digest(std::fs::read(&codex).unwrap())));
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    service.ensure_ready(&stopped).unwrap();
+    service.shutdown().await.unwrap();
+}
+
 async fn prepare_profile(root: &Path, service: &EngineService) -> NativeProfileBinding {
     let config = crate::config::resolve_config(&root.join("g.toml"), &root.join("p.toml"))
         .unwrap();

@@ -27,6 +27,15 @@ export function Conversation({ state }: { state: ReturnType<typeof useOwnerBrows
       {!state.projectId ? <><h2>Select a project</h2><p className="muted">Read its actual conversation and versioned brief.</p></> : <>
         <div className="section-heading"><h2>{state.projectId}</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProject()} data-testid="inspect-project">Inspect current brief</button></div>
         <p className="muted" data-testid="conversation-freshness">{project?.fresh ? `Brief read at revision ${project.revision}` : "Brief data is stale or unavailable. Inspect again before submitting."}</p>
+        <section aria-label="Project master">
+          <h3>Master conversation</h3>
+          <p role="status" id="master-availability" data-testid="master-availability">
+            This desktop connection does not expose master selection or model turns yet.
+            No live response stream is available here. Owner messages below are recorded
+            in the project history; they are not prompts sent to a model.</p>
+          <button type="button" disabled aria-describedby="master-availability"
+            data-testid="select-project-master">Select master</button>
+        </section>
         <section><h3>Current brief {project?.brief ? `(version ${project.brief.version})` : ""}</h3><pre data-testid="current-project-brief">{project ? project.brief ? displayText(project.brief.text) : "No brief has been recorded." : "Current brief unavailable."}</pre></section>
         <section className="conversation-history">
           <div className="section-heading"><h3>Recorded history</h3><button disabled={state.busy || !state.connected || !project} onClick={() => void state.refreshHistory()} data-testid="refresh-conversation">First history page</button></div>

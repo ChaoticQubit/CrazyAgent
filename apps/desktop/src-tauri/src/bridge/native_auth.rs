@@ -9,6 +9,7 @@ use crazyagent::protocol::RequestId;
 use serde::Serialize;
 
 mod presentation;
+mod claude;
 
 #[derive(Serialize)]
 pub struct NativeAuthView {
@@ -35,6 +36,8 @@ pub(super) struct Operation {
     request_id: RequestId,
     generation: Option<u64>,
     unresolved: bool,
+    claude_prompt: Option<(u64, String)>,
+    claude_input_attempted: bool,
 }
 
 enum Original {
@@ -135,6 +138,9 @@ impl NativeBridge {
     }
 
     pub(super) fn allow_new_auth(&self) -> Result<(), BridgeError> {
+        if self.profile_pending() {
+            return Err(failure("account_profile_recovery_required"));
+        }
         if self
             .native_auth
             .as_ref()
@@ -153,6 +159,8 @@ impl NativeBridge {
             request_id,
             generation: None,
             unresolved: true,
+            claude_prompt: None,
+            claude_input_attempted: false,
         });
         let operation = self.native_auth.as_ref().expect("retained auth operation");
         assert_eq!(operation.original.id(), &operation.request_id);
@@ -184,6 +192,7 @@ impl NativeBridge {
             .as_mut()
             .ok_or_else(|| failure("native_auth_operation_missing"))?;
         operation.request_id = request.clone();
+        operation.claude_prompt = None;
         assert_ne!(operation.original.id(), &request);
         Ok(request)
     }
@@ -193,6 +202,9 @@ impl NativeBridge {
         ticket: &str,
         result: Result<NativeAuthReply, EngineError>,
     ) -> Result<NativeAuthView, BridgeError> {
+        if let Some(operation) = self.native_auth.as_mut() {
+            operation.claude_prompt = None;
+        }
         let reply = match result {
             Ok(reply) => reply,
             Err(error) => {
@@ -221,13 +233,27 @@ impl NativeBridge {
                 | NativeAuthPhase::AuthenticatedObserved
                 | NativeAuthPhase::UnauthenticatedObserved
         );
-        presentation::project(ticket, reply)
+        let view = presentation::project(ticket, reply)?;
+        if view.display_error.is_none()
+            && let Some(presentation::Challenge::ClaudeOfficial {
+                accepts_code: true,
+                prompt_id: Some(prompt),
+                ..
+            }) = &view.challenge
+        {
+            operation.claude_prompt = Some((
+                prompt.parse().map_err(|_| failure("native_auth_cannot_display_safely"))?,
+                view.engine_epoch.clone(),
+            ));
+        }
+        Ok(view)
     }
 
     fn auth_failure(&mut self, error: BridgeError) -> BridgeError {
         if matches!(
             error.code,
             "not_connected" | "owner_revoked" | "native_auth_outcome_unknown_read_same_operation"
+                | "native_auth_claude_input_outcome_unknown"
         ) {
             if let Some(controller) = self.controller.as_mut() {
                 controller.detach();
@@ -277,7 +303,7 @@ fn auth_id() -> Result<RequestId, BridgeError> {
     RequestId::new(id).map_err(|_| failure("native_auth_identity_unavailable"))
 }
 
-fn auth_error(error: EngineError) -> BridgeError {
+pub(super) fn auth_error(error: EngineError) -> BridgeError {
     failure(match error.0.as_str() {
         "controller_disconnected" => "not_connected",
         "native_auth_database_mismatch" => "native_auth_database_mismatch",

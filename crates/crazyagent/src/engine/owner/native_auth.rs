@@ -4,7 +4,7 @@ use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-mod presentation;
+pub(crate) mod presentation;
 
 #[cfg(test)]
 mod presentation_tests;
@@ -77,6 +77,8 @@ pub enum NativeAuthPhase {
     AuthenticatedObserved,
     UnauthenticatedObserved,
     Cancelling,
+    Failed,
+    Cancelled,
     Unavailable,
     Uncertain,
 }
@@ -90,6 +92,8 @@ impl NativeAuthPhase {
             Self::AuthenticatedObserved => "authenticated_observed",
             Self::UnauthenticatedObserved => "unauthenticated_observed",
             Self::Cancelling => "cancelling",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
             Self::Unavailable => "unavailable",
             Self::Uncertain => "uncertain",
         }
@@ -139,6 +143,7 @@ pub struct NativeAuthReply {
     pub engine_epoch: String,
     pub fact: NativeAuthFact,
     pub challenge: Option<NativeAuthChallenge>,
+    pub claude_challenge: Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge>,
     pub account: Option<NativeAuthAccount>,
 }
 
@@ -151,9 +156,218 @@ impl fmt::Debug for NativeAuthReply {
             .field("engine_epoch", &self.engine_epoch)
             .field("fact", &self.fact)
             .field("challenge", &self.challenge.as_ref().map(|_| "[REDACTED]"))
+            .field("claude_challenge", &self.claude_challenge.as_ref().map(|_| "[REDACTED]"))
             .field("account", &self.account.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CodexAuthObservation {
+    LoginStarted {
+        id: i64,
+        login_id: String,
+        url: String,
+        user_code: Option<String>,
+    },
+    LoginCompleted { login_id: Option<String>, success: bool },
+    AccountRead {
+        id: i64,
+        account: Option<CodexObservedAccount>,
+        requires_openai_auth: bool,
+    },
+    LoginCanceled { id: i64, canceled: bool },
+    LoggedOut { id: i64 },
+    RequestFailed { id: i64, method: String },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum CodexObservedAccount {
+    ApiKey,
+    Chatgpt { email: Option<String>, #[serde(rename = "planType")] plan_type: String },
+    AmazonBedrock {
+        #[serde(rename = "usesCodexManagedCredentials")]
+        uses_codex_managed_credentials: bool,
+    },
+}
+
+impl CodexObservedAccount {
+    fn from_native(account: crate::adapters::codex::AuthAccount) -> Self {
+        use crate::adapters::codex::AuthAccount;
+        match account {
+            AuthAccount::ApiKey => Self::ApiKey,
+            AuthAccount::Chatgpt { email, plan_type } => Self::Chatgpt {
+                email: email.map(|email| email.expose().to_owned()), plan_type,
+            },
+            AuthAccount::AmazonBedrock { uses_codex_managed_credentials } => {
+                Self::AmazonBedrock { uses_codex_managed_credentials }
+            }
+        }
+    }
+
+    fn native(&self) -> Result<crate::adapters::codex::AuthAccount, EngineError> {
+        let value = serde_json::to_value(self).map_err(|_| failure("native_auth_observation_invalid"))?;
+        crate::adapters::codex::auth_account(&value)
+            .map_err(|_| failure("native_auth_observation_invalid"))
+    }
+}
+
+impl CodexAuthObservation {
+    pub(crate) fn from_native(event: crate::adapters::codex::AuthControl) -> Result<Self, EngineError> {
+        use crate::adapters::codex::{AuthControl, LoginCancelStatus, LoginChallenge};
+        let observation = match event {
+            AuthControl::LoginStarted { id, challenge } => match challenge {
+                LoginChallenge::Browser { login_id, auth_url } => Self::LoginStarted {
+                    id, login_id, url: auth_url.expose().to_owned(), user_code: None,
+                },
+                LoginChallenge::DeviceCode { login_id, user_code, verification_url } => {
+                    Self::LoginStarted { id, login_id, url: verification_url.expose().to_owned(),
+                        user_code: Some(user_code.expose().to_owned()) }
+                }
+            },
+            AuthControl::LoginCompleted { login_id, success, .. } => {
+                Self::LoginCompleted { login_id, success }
+            }
+            AuthControl::AccountRead { id, account, requires_openai_auth } => Self::AccountRead {
+                id, account: account.map(CodexObservedAccount::from_native), requires_openai_auth,
+            },
+            AuthControl::LoginCanceled { id, status } => Self::LoginCanceled {
+                id, canceled: status == LoginCancelStatus::Canceled,
+            },
+            AuthControl::LoggedOut { id } => Self::LoggedOut { id },
+            AuthControl::RequestFailed { id, method, .. } => Self::RequestFailed {
+                id, method: method.to_owned(),
+            },
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
+    pub(crate) fn request_id(&self) -> Option<i64> {
+        match self {
+            Self::LoginCompleted { .. } => None,
+            Self::LoginStarted { id, .. } | Self::AccountRead { id, .. }
+                | Self::LoginCanceled { id, .. } | Self::LoggedOut { id }
+                | Self::RequestFailed { id, .. } => Some(*id),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), EngineError> {
+        if self.request_id().is_some_and(|id| id <= 0) {
+            return Err(failure("native_auth_observation_invalid"));
+        }
+        match self {
+            Self::LoginStarted { .. } => { self.challenge()?; }
+            Self::AccountRead { account: Some(account), .. } => { account.native()?; }
+            Self::LoginCompleted { login_id: Some(id), .. }
+                if id.is_empty() || id.len() > 256 || id.trim().is_empty()
+                    || id.chars().any(char::is_control) => {
+                return Err(failure("native_auth_observation_invalid"));
+            }
+            Self::RequestFailed { method, .. } if !matches!(method.as_str(),
+                "account/login/start" | "account/login/cancel" | "account/read" | "account/logout"
+            ) => return Err(failure("native_auth_observation_invalid")),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn challenge(&self) -> Result<Option<crate::adapters::codex::LoginChallenge>, EngineError> {
+        match self {
+            Self::LoginStarted { login_id, url, user_code, .. } => {
+                crate::adapters::codex::owner_login_challenge(login_id, url, user_code.as_deref())
+                    .map(Some).map_err(|_| failure("native_auth_observation_invalid"))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn account(&self) -> Result<Option<crate::adapters::codex::AuthAccount>, EngineError> {
+        match self {
+            Self::AccountRead { account: Some(account), .. } => account.native().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn apply(&self, fact: &mut NativeAuthFact) -> Result<(), EngineError> {
+        self.validate()?;
+        self.validate_action(fact)?;
+        if matches!(fact.phase, NativeAuthPhase::Uncertain | NativeAuthPhase::Unavailable) {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        if matches!(fact.phase, NativeAuthPhase::Failed | NativeAuthPhase::Cancelled)
+            && matches!(self, Self::AccountRead { .. }) {
+            return Ok(());
+        }
+        if fact.phase == NativeAuthPhase::Cancelling
+            && !matches!(self, Self::LoginCanceled { .. } | Self::RequestFailed { .. }) {
+            return Ok(());
+        }
+        let (phase, code) = match self {
+            Self::LoginStarted { .. } if fact.phase == NativeAuthPhase::Starting => {
+                (NativeAuthPhase::AwaitingOwner, None)
+            }
+            Self::LoginCompleted { success, .. } if fact.phase == NativeAuthPhase::AwaitingOwner => {
+                if *success { (NativeAuthPhase::CheckingAccount, None) }
+                else { (NativeAuthPhase::Failed, Some("native_auth_login_failed")) }
+            }
+            Self::AccountRead { account, .. }
+                if matches!(fact.phase, NativeAuthPhase::Starting | NativeAuthPhase::CheckingAccount) => {
+                if account.is_some() { (NativeAuthPhase::AuthenticatedObserved, None) }
+                else { (NativeAuthPhase::UnauthenticatedObserved, None) }
+            }
+            Self::LoggedOut { .. } if fact.phase == NativeAuthPhase::Starting => {
+                (NativeAuthPhase::CheckingAccount, None)
+            }
+            Self::LoginCanceled { canceled: true, .. } if fact.phase == NativeAuthPhase::Cancelling => {
+                (NativeAuthPhase::Cancelled, None)
+            }
+            Self::LoginCanceled { canceled: false, .. } if fact.phase == NativeAuthPhase::Cancelling => {
+                (NativeAuthPhase::Cancelling, None)
+            }
+            Self::RequestFailed { .. } if matches!(fact.phase, NativeAuthPhase::Starting
+                | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount | NativeAuthPhase::Cancelling) => {
+                (NativeAuthPhase::Failed, Some("native_auth_native_request_failed"))
+            }
+            _ => return Err(failure("native_auth_observation_order")),
+        };
+        fact.phase = phase;
+        fact.code = code.map(str::to_owned);
+        Ok(())
+    }
+
+    fn validate_action(&self, fact: &NativeAuthFact) -> Result<(), EngineError> {
+        if fact.binding.connection.harness.as_str() != "codex" {
+            return Err(failure("native_auth_method_mismatch"));
+        }
+        let valid = match (self, &fact.action) {
+            (Self::LoginStarted { user_code, .. }, NativeAuthAction::SignIn { method }) => {
+                matches!((user_code.is_some(), method),
+                    (false, NativeAuthMethod::CodexBrowser) | (true, NativeAuthMethod::CodexDeviceCode))
+            }
+            (Self::LoginCompleted { .. } | Self::LoginCanceled { .. },
+                NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode }) => true,
+            (Self::LoggedOut { .. }, NativeAuthAction::Logout) => true,
+            (Self::AccountRead { .. } | Self::RequestFailed { .. }, NativeAuthAction::Logout
+                | NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode }) => true,
+            _ => false,
+        };
+        if !valid { return Err(failure("native_auth_method_mismatch")); }
+        Ok(())
+    }
+}
+
+pub(crate) fn apply_codex_presentation(
+    reply: &mut NativeAuthReply,
+    challenge: Option<crate::adapters::codex::LoginChallenge>,
+    account: Option<crate::adapters::codex::AuthAccount>,
+) -> Result<(), EngineError> {
+    reply.challenge = challenge.map(NativeAuthChallenge);
+    reply.account = account.map(NativeAuthAccount::Codex);
+    presentation::encode(reply)?;
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -355,6 +569,7 @@ pub(crate) fn decode_reply(
                 engine_epoch,
                 fact: *fact,
                 challenge: None,
+                claude_challenge: None,
                 account: None,
             };
             presentation::apply(presentation, &mut reply).map_err(|_| outcome_unknown())?;

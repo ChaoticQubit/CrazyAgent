@@ -9,6 +9,9 @@ use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
 use std::path::Path;
 use std::time::Duration;
 
+mod account_profile;
+pub use account_profile::PendingAccountProfile;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerView {
     pub state: OwnerReadReply,
@@ -20,6 +23,7 @@ pub struct OwnerController {
     identity: OwnerConnectionIdentity,
     view: Option<ControllerView>,
     pending: Option<PendingMutation>,
+    pending_account_profile: Option<PendingAccountProfile>,
     kind: OwnerClientKind,
     timeout: Duration,
 }
@@ -68,6 +72,9 @@ impl OwnerController {
         &mut self,
         request: NativeAuthStart,
     ) -> Result<NativeAuthReply, EngineError> {
+        if self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
         self.client
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
@@ -97,10 +104,31 @@ impl OwnerController {
             .await
     }
 
+    pub async fn submit_claude_auth_code(
+        &mut self,
+        request: crate::engine::owner::ClaudeAuthInput,
+        secret: crate::engine::owner::AccountSecret,
+    ) -> Result<(), EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        if request.query.scope.expected_database_instance != self.identity.database_instance() {
+            return Err(EngineError("native_auth_database_mismatch".into()));
+        }
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .submit_claude_auth_code(request, secret)
+            .await
+    }
+
     pub async fn logout_native_auth(
         &mut self,
         request: NativeAuthLogout,
     ) -> Result<NativeAuthReply, EngineError> {
+        if self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
         self.client
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
@@ -124,6 +152,7 @@ impl OwnerController {
                 identity,
                 view: None,
                 pending: None,
+                pending_account_profile: None,
                 kind,
                 timeout,
             },
@@ -144,6 +173,7 @@ impl OwnerController {
             identity,
             view: None,
             pending: None,
+            pending_account_profile: None,
             kind,
             timeout,
         })
@@ -213,6 +243,10 @@ impl OwnerController {
         {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
+        if self.pending_account_profile.as_ref().is_some_and(|pending|
+            pending.identity.database_instance() != identity.database_instance()) {
+            return Err(EngineError("controller_pending_database_mismatch".into()));
+        }
         if self.identity.database_instance() != identity.database_instance() {
             self.view = None;
         }
@@ -229,7 +263,7 @@ impl OwnerController {
         mutation: OwnerMutation,
         generation: u64,
     ) -> Result<&PendingMutation, EngineError> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
             return Err(EngineError("controller_pending_intent".into()));
         }
         if self.client.is_none() || generation == 0 {

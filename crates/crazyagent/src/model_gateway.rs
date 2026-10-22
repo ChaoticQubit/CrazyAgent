@@ -1,6 +1,10 @@
 use crate::config::{EffectiveConfig, ModelConnection, ProviderQuotaPolicy};
 use crate::coordination::Role;
 use crate::engine::EngineError;
+use crate::engine::owner::{
+    NativeAuthAction, NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeProfileBinding,
+};
+use crate::master_session::RcliConfiguredProfileProof;
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, RequestId, TaskId};
 use crate::routing::{ResourceBudget, RouteRequest, validate_pool_scope};
 use rusqlite::{Connection, Transaction};
@@ -9,6 +13,14 @@ use std::collections::BTreeSet;
 
 #[path = "storage/model_gateway.rs"]
 mod persistence;
+
+#[cfg(test)]
+mod initial_conversation_tests;
+
+#[cfg(test)]
+mod local_completion_tests;
+#[cfg(test)]
+mod configured_conversation_tests;
 
 const OBSERVATION_LIFETIME_MAX_MS: u64 = 86_400_000;
 const ATTEMPTS_MAX: usize = 64;
@@ -132,6 +144,24 @@ pub struct Attempt {
 pub struct AttemptStart {
     pub attempt: Attempt,
     pub replayed: bool,
+}
+
+pub(crate) struct InitialConversationAuth<'a> {
+    pub fact: &'a NativeAuthFact,
+    pub binding: &'a NativeProfileBinding,
+    pub generation: u64,
+}
+
+pub(crate) struct ConfiguredInitialConversationAuth<'a> {
+    pub proof: &'a RcliConfiguredProfileProof,
+    pub binding: &'a NativeProfileBinding,
+    pub generation: u64,
+}
+
+enum AttemptPurpose<'a> {
+    Ordinary,
+    InitialConversation(InitialConversationAuth<'a>),
+    ConfiguredInitialConversation(ConfiguredInitialConversationAuth<'a>),
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -425,11 +455,168 @@ pub fn begin_attempt(
     request: &AttemptRequest,
     now_ms: u64,
 ) -> Result<AttemptStart, EngineError> {
+    begin_attempt_for(
+        tx,
+        pinned,
+        current,
+        request,
+        now_ms,
+        AttemptPurpose::Ordinary,
+    )
+}
+
+pub(crate) fn begin_initial_conversation_attempt(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    auth: InitialConversationAuth<'_>,
+    now_ms: u64,
+) -> Result<AttemptStart, EngineError> {
+    begin_attempt_for(
+        tx,
+        pinned,
+        current,
+        request,
+        now_ms,
+        AttemptPurpose::InitialConversation(auth),
+    )
+}
+
+pub(crate) fn begin_configured_initial_conversation_attempt(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    auth: ConfiguredInitialConversationAuth<'_>,
+    now_ms: u64,
+) -> Result<AttemptStart, EngineError> {
+    begin_attempt_for(
+        tx,
+        pinned,
+        current,
+        request,
+        now_ms,
+        AttemptPurpose::ConfiguredInitialConversation(auth),
+    )
+}
+
+fn validate_initial_conversation(
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    auth: &InitialConversationAuth<'_>,
+) -> Result<(), EngineError> {
+    if request.role != Role::ProjectLeader
+        || !request.route.required_capabilities.is_empty()
+        || request.previous_attempt.is_some()
+    {
+        return Err(error("gateway_initial_conversation_scope"));
+    }
+    let method_matches = match &auth.fact.action {
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
+        } => auth.binding.connection.harness.as_str() == "codex",
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::ClaudeOfficial,
+        } => auth.binding.connection.harness.as_str() == "claude",
+        NativeAuthAction::Logout => false,
+    };
+    if auth.fact.phase != NativeAuthPhase::AuthenticatedObserved || !method_matches {
+        return Err(error("gateway_initial_authentication_required"));
+    }
+    if auth.generation == 0
+        || auth.fact.generation != auth.generation
+        || &auth.fact.binding != auth.binding
+        || auth.binding.config_id != pinned.id
+        || auth.binding.config_id != current.id
+        || auth.binding.connection.account_ref != request.route.account_ref
+        || !matches!(
+            auth.binding.connection.auth,
+            crate::config::ModelAuthentication::NativeManaged { .. }
+        )
+        || !pinned
+            .settings
+            .model_access
+            .as_ref()
+            .is_some_and(|catalog| catalog.connections.contains(&auth.binding.connection))
+    {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    live_connection(current, request, &auth.binding.connection)?;
+    assert_eq!(auth.fact.generation, auth.generation);
+    assert_eq!(&auth.fact.binding, auth.binding);
+    Ok(())
+}
+
+fn initial_conversation_eligible(
+    state: &ConnectionState,
+    route: &RouteRequest,
+    policy: ProviderQuotaPolicy,
+    now_ms: u64,
+) -> Result<(), EngineError> {
+    if state.health != Health::Unknown {
+        return eligible(state, route, policy);
+    }
+    if state.observed_at_ms.is_some_and(|at| now_ms < at)
+        || state.valid_until_ms.is_some_and(|until| now_ms >= until)
+    {
+        return Err(error("gateway_initial_readiness_stale"));
+    }
+    match state.quota {
+        Quota::Unknown if policy == ProviderQuotaPolicy::Strict => {
+            return Err(error("gateway_quota_unknown"));
+        }
+        Quota::Exhausted => return Err(error("gateway_quota_exhausted")),
+        Quota::Unknown => {}
+    }
+    if state.cooldown_until_ms.is_some() {
+        return Err(error("gateway_cooldown"));
+    }
+    assert_eq!(state.health, Health::Unknown);
+    assert!(route.required_capabilities.is_empty());
+    assert_eq!(policy, ProviderQuotaPolicy::BoundedAttempt);
+    Ok(())
+}
+
+fn begin_attempt_for(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    now_ms: u64,
+    purpose: AttemptPurpose<'_>,
+) -> Result<AttemptStart, EngineError> {
     if now_ms > i64::MAX as u64 {
         return Err(error("gateway_time_bounds"));
     }
     validate_authority(pinned, request)?;
     validate_authority(current, request)?;
+    let initial = match purpose {
+        AttemptPurpose::Ordinary => None,
+        AttemptPurpose::InitialConversation(auth) => {
+            validate_initial_conversation(pinned, current, request, &auth)?;
+            Some(auth.binding)
+        }
+        AttemptPurpose::ConfiguredInitialConversation(auth) => {
+            if request.role != Role::ProjectLeader
+                || !request.route.required_capabilities.is_empty()
+                || request.previous_attempt.is_some()
+            {
+                return Err(error("gateway_initial_conversation_scope"));
+            }
+            crate::storage::validate_configured_initial_conversation_receipt(
+                tx,
+                pinned,
+                current,
+                request,
+                auth.proof,
+                auth.binding,
+                auth.generation,
+            )?;
+            Some(auth.binding)
+        }
+    };
     if let Some(attempt) = read_attempt(tx, &request.id)? {
         if attempt.request != *request || attempt.config_id != pinned.id {
             return Err(error("gateway_attempt_conflict"));
@@ -480,6 +667,11 @@ pub fn begin_attempt(
                 .iter()
                 .find(|connection| &connection.id == id)
         })
+        .filter(|connection| {
+            initial
+                .as_ref()
+                .is_none_or(|binding| *connection == &binding.connection)
+        })
         .collect();
     candidates.sort_by_key(|connection| connection.account_ref != request.route.account_ref);
     let preferred = candidates
@@ -508,7 +700,12 @@ pub fn begin_attempt(
             continue;
         }
         let state = connection_state(tx, connection, now_ms)?;
-        if let Err(failure) = eligible(&state, &request.route, policy) {
+        let eligibility = if initial.is_some() {
+            initial_conversation_eligible(&state, &request.route, policy, now_ms)
+        } else {
+            eligible(&state, &request.route, policy)
+        };
+        if let Err(failure) = eligibility {
             if same_account && state.quota == Quota::Exhausted {
                 quota_fallback = true;
             }
@@ -520,13 +717,17 @@ pub fn begin_attempt(
         } else {
             "quota_failover"
         };
+        let mut reasons = vec![reason.into(), "bounded_attempt_quota_unknown".into()];
+        if initial.is_some() && state.health == Health::Unknown {
+            reasons.push("initial_conversation_readiness_unknown".into());
+        }
         let attempt = Attempt {
             request: request.clone(),
             config_id: pinned.id.clone(),
             connection: connection.clone(),
             connection_revision: connection_revision(connection)?,
             selected_at_ms: now_ms,
-            reasons: vec![reason.into(), "bounded_attempt_quota_unknown".into()],
+            reasons,
             completion: None,
         };
         persistence::insert_attempt(tx, &attempt)?;
@@ -544,6 +745,23 @@ pub fn finish_attempt(
     tx: &Transaction<'_>,
     id: &RequestId,
     completion: &AttemptCompletion,
+) -> Result<(), EngineError> {
+    finish_attempt_inner(tx, id, completion, true)
+}
+
+pub(crate) fn finish_attempt_without_observation(
+    tx: &Transaction<'_>,
+    id: &RequestId,
+    completion: &AttemptCompletion,
+) -> Result<(), EngineError> {
+    finish_attempt_inner(tx, id, completion, false)
+}
+
+fn finish_attempt_inner(
+    tx: &Transaction<'_>,
+    id: &RequestId,
+    completion: &AttemptCompletion,
+    record_observation: bool,
 ) -> Result<(), EngineError> {
     let attempt = read_attempt(tx, id)?.ok_or_else(|| error("gateway_attempt_missing"))?;
     if let Some(previous) = &attempt.completion {
@@ -567,7 +785,9 @@ pub fn finish_attempt(
     {
         return Err(error("gateway_completion_bounds"));
     }
-    if let AttemptOutcome::Failed(kind) = &completion.outcome {
+    if record_observation
+        && let AttemptOutcome::Failed(kind) = &completion.outcome
+    {
         let kind = match kind {
             FailureKind::QuotaExhausted => ObservationKind::QuotaExhausted {
                 retry_at_ms: completion.retry_at_ms,

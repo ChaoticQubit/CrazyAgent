@@ -1,4 +1,5 @@
 use super::RegisteredNativeAuthHost;
+use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -18,6 +19,79 @@ fn native_auth_registered_executable_retains_real_file_identity() {
     let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
     assert_eq!(registered.verified_path().unwrap(), path);
     assert_eq!(registered.verified_path().unwrap(), path);
+}
+
+#[test]
+fn native_auth_registered_executable_verified_sha256_matches_actual_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "codex");
+    let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    let digest = registered.verified_sha256().unwrap();
+    assert_eq!(digest, format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap())));
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+#[test]
+fn native_auth_registered_executable_verified_sha256_rejects_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "codex");
+    let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    std::fs::write(&path, b"changed-executable").unwrap();
+    assert!(registered.verified_sha256().is_err());
+}
+
+#[test]
+fn native_auth_registered_executable_verified_sha256_rejects_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "codex");
+    let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    let replacement = executable(root.path(), "replacement");
+    std::fs::rename(replacement, &path).unwrap();
+    assert!(registered.verified_sha256().is_err());
+}
+
+#[test]
+fn native_auth_custodian_command_keeps_self_and_codex_pins_distinct() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let codex_path = executable(root.path(), "codex");
+    let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
+    let command = super::custodian_command(&path, root.path(), Some(&codex)).unwrap();
+    assert_eq!(command.get_program(), path.as_os_str());
+    let arguments: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
+    assert_eq!(arguments, vec![
+        std::ffi::OsString::from("native-auth-custodian"),
+        root.path().as_os_str().to_owned(),
+        std::ffi::OsString::from("--codex-executable"),
+        codex_path.into_os_string(),
+        std::ffi::OsString::from("--codex-sha256"),
+        codex.verified_sha256().unwrap().into(),
+    ]);
+    assert_eq!(command.get_envs().count(), 0);
+    assert_eq!(command.get_current_dir(), Some(root.path()));
+}
+
+#[test]
+fn native_auth_custodian_command_without_codex_preserves_default_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let command = super::custodian_command(&path, root.path(), None).unwrap();
+    let arguments: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
+    assert_eq!(arguments, vec![
+        std::ffi::OsString::from("native-auth-custodian"),
+        root.path().as_os_str().to_owned(),
+    ]);
+}
+
+#[test]
+fn native_auth_custodian_command_rejects_changed_codex_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let codex_path = executable(root.path(), "codex");
+    let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
+    std::fs::write(codex_path, b"changed").unwrap();
+    assert!(super::custodian_command(&path, root.path(), Some(&codex)).is_err());
 }
 
 #[test]

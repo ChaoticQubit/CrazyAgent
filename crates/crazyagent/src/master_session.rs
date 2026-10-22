@@ -1,17 +1,70 @@
-use crate::config::{EffectiveConfig, ModelEndpoint};
+use crate::config::{EffectiveConfig, ModelConnection, ModelEndpoint};
 use crate::coordination::Role;
 use crate::engine::EngineError;
-use crate::engine::owner::{OwnerProvenance, is_hex_id};
+use crate::engine::owner::{NativeAuthFact, NativeProfileBinding, OwnerProvenance, is_hex_id};
 use crate::model_gateway::Attempt;
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId, TaskId};
 use crate::routing::{RouteRequest, validate_pool_scope};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub(crate) const SESSIONS_MAX: usize = 64;
 pub(crate) const TURNS_MAX: usize = 1024;
 pub(crate) const METADATA_BYTES_MAX: usize = 16384;
 pub(crate) const PAGE_BYTES_MAX: usize = 32768;
 pub(crate) const PAGE_ITEMS_MAX: u8 = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RcliConfiguredProfileProof {
+    pub(crate) registration_id: RequestId,
+    pub(crate) generation: u64,
+    pub(crate) database_instance: String,
+    pub(crate) engine_epoch: String,
+    pub(crate) config_id: ConfigId,
+    pub(crate) source_hash: String,
+    pub(crate) at_revision: Cursor,
+    pub(crate) connection: ModelConnection,
+    pub(crate) profile_ref: CredentialRef,
+    pub(crate) custody_id: String,
+    pub(crate) profile_config_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum MasterBootstrapAuth {
+    NativeSignIn(NativeAuthFact),
+    RcliConfigured(RcliConfiguredProfileProof),
+}
+
+impl MasterBootstrapAuth {
+    pub(crate) fn binding(&self) -> NativeProfileBinding {
+        match self {
+            Self::NativeSignIn(fact) => fact.binding.clone(),
+            Self::RcliConfigured(proof) => NativeProfileBinding {
+                database_instance: proof.database_instance.clone(),
+                engine_epoch: proof.engine_epoch.clone(),
+                config_id: proof.config_id.clone(),
+                source_hash: proof.source_hash.clone(),
+                at_revision: proof.at_revision.clone(),
+                connection: proof.connection.clone(),
+                custody_id: proof.custody_id.clone(),
+            },
+        }
+    }
+}
+
+impl From<&NativeAuthFact> for MasterBootstrapAuth {
+    fn from(fact: &NativeAuthFact) -> Self {
+        Self::NativeSignIn(fact.clone())
+    }
+}
+
+impl From<&MasterBootstrapAuth> for MasterBootstrapAuth {
+    fn from(proof: &MasterBootstrapAuth) -> Self {
+        proof.clone()
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +96,35 @@ pub enum MasterTurnPhase {
     Failed,
     Cancelled,
     Uncertain,
+}
+
+impl MasterTurnPhase {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::Prepared => "prepared",
+            Self::Delivering => "delivering",
+            Self::Running => "running",
+            Self::WaitingApproval => "waiting_approval",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Uncertain => "uncertain",
+        }
+    }
+
+    pub(crate) fn outstanding(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::Prepared
+                | Self::Delivering
+                | Self::Running
+                | Self::WaitingApproval
+                | Self::Uncertain
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +174,24 @@ pub struct MasterSessionView {
     pub version: Cursor,
     pub current_turn: Option<RequestId>,
     pub owner: OwnerProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RcliProfileRegistration {
+    pub expected_session: MasterSessionView,
+    pub expected_connection: ModelConnection,
+    pub configured_home: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RcliProfileRegistrationMetadata {
+    pub project_id: ProjectId,
+    pub session_id: SessionId,
+    pub profile_ref: CredentialRef,
+    pub registration_id: RequestId,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +279,9 @@ pub enum MasterOwnerAction {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    RegisterRcliProfile {
+        registration: Box<RcliProfileRegistration>,
+    },
 }
 
 pub(crate) fn error(value: impl std::fmt::Display) -> EngineError {
@@ -203,7 +306,9 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
                 return Err(error("master_text_bounds"));
             }
         }
-        MasterOwnerAction::Cancel { .. } | MasterOwnerAction::Close { .. } => {}
+        MasterOwnerAction::Cancel { .. }
+        | MasterOwnerAction::Close { .. }
+        | MasterOwnerAction::RegisterRcliProfile { .. } => {}
     }
     Ok(())
 }

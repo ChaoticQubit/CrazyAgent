@@ -460,7 +460,7 @@ pub(super) fn retain_direct_child(
     Ok(())
 }
 
-pub(super) fn cleanup_direct_child(
+pub(in crate::engine) fn cleanup_direct_child(
     child: &mut Child,
     deadline: Instant,
 ) -> io::Result<Option<ExitStatus>> {
@@ -501,19 +501,36 @@ use crate::protocol::RequestId;
 
 pub(in crate::engine) struct CustodySession {
     child: Option<Child>,
+    child_group: Option<Pid>,
     child_attempted: bool,
+    status_child: StatusChild,
     guard: Option<NativeProfileUse>,
+}
+
+#[derive(PartialEq, Eq)]
+enum StatusChild {
+    Unprepared,
+    Prepared,
+    Retained,
 }
 
 pub(in crate::engine) struct Retirement {
     guard: NativeProfileUse,
+    kind: RetirementKind,
+}
+
+enum RetirementKind {
+    NoEffect,
+    ChildReaped,
 }
 
 impl CustodySession {
     pub(in crate::engine) fn new(guard: NativeProfileUse) -> Self {
         let session = Self {
             child: None,
+            child_group: None,
             child_attempted: false,
+            status_child: StatusChild::Unprepared,
             guard: Some(guard),
         };
         assert!(session.child.is_none());
@@ -538,14 +555,36 @@ impl CustodySession {
     ) -> Result<(), (EngineError, Child)> {
         let previously_attempted = self.child_attempted;
         self.child_attempted = true;
+        if self.status_child == StatusChild::Prepared {
+            if let Err(error) = self.revalidate_reaped_child() {
+                return Err((error, child));
+            }
+            let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
+            let group = group.filter(|pid| rustix::process::getpgid(Some(*pid)) == Ok(*pid));
+            let Some(group) = group else {
+                return Err((
+                    EngineError("native_auth_child_cleanup_uncertain".into()),
+                    child,
+                ));
+            };
+            let previous = self.child.replace(child);
+            assert!(previous.is_some());
+            self.child_group = Some(group);
+            self.status_child = StatusChild::Retained;
+            assert!(self.child_attempted);
+            return Ok(());
+        }
         if previously_attempted {
             return Err((
                 EngineError("native_auth_child_already_attempted".into()),
                 child,
             ));
         }
+        let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
+        let group = group.filter(|pid| rustix::process::getpgid(Some(*pid)) == Ok(*pid));
         match retain_direct_child(&mut self.child, child) {
             Ok(()) => {
+                self.child_group = group;
                 assert!(self.child_attempted);
                 assert!(self.child.is_some());
                 Ok(())
@@ -555,6 +594,109 @@ impl CustodySession {
                 child,
             )),
         }
+    }
+
+    pub(in crate::engine) fn prepare_status_child(&mut self) -> Result<(), EngineError> {
+        if self.status_child != StatusChild::Unprepared {
+            return Err(EngineError("native_auth_status_child_already_prepared".into()));
+        }
+        self.revalidate_reaped_child()?;
+        self.status_child = StatusChild::Prepared;
+        assert!(self.child_attempted);
+        assert!(self.child.is_some());
+        Ok(())
+    }
+
+    fn revalidate_reaped_child(&mut self) -> Result<(), EngineError> {
+        let group = self
+            .child_group
+            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()));
+        let child = self.child_mut()?;
+        if child.try_wait().map_err(crate::engine::io_error)?.is_none() {
+            return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
+        }
+        let group = group?;
+        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+            return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
+        }
+        self.guard
+            .as_ref()
+            .expect("session retains physical guard")
+            .revalidate_retained()
+    }
+
+    pub(in crate::engine) fn profile_path(
+        &self,
+    ) -> Result<std::path::PathBuf, EngineError> {
+        self.guard
+            .as_ref()
+            .expect("session retains its physical guard")
+            .profile_path()
+    }
+
+    pub(in crate::engine) fn child_mut(&mut self) -> Result<&mut Child, EngineError> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| EngineError("native_auth_child_not_retained".into()))?;
+        assert!(self.child_attempted);
+        Ok(child)
+    }
+
+    pub(in crate::engine) async fn observe_codex(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+        event: crate::adapters::codex::AuthControl,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        channel.observe_codex(guard, event).await
+    }
+
+    pub(in crate::engine) async fn observe_claude(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+        event: super::claude_auth::types::ClaudeAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        let guard = self.guard.as_ref().expect("session retains its physical guard");
+        channel.observe_claude(guard, event).await
+    }
+
+    pub(in crate::engine) async fn take_claude_input(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+    ) -> Result<Option<crate::engine::owner::AccountSecret>, EngineError> {
+        let guard = self.guard.as_ref().expect("session retains its physical guard");
+        channel.take_claude_input(guard).await
+    }
+
+    pub(in crate::engine) fn seal_after_child_reaped(
+        mut self,
+    ) -> Result<Retirement, EngineError> {
+        let group = self
+            .child_group
+            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()));
+        let child = self.child_mut()?;
+        if child.try_wait().map_err(crate::engine::io_error)?.is_none() {
+            return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
+        }
+        let group = group?;
+        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+            return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
+        }
+        let guard = self.guard.as_ref().expect("session retains physical guard");
+        guard.revalidate_retained()?;
+        self.child.take();
+        self.child_group.take();
+        let guard = self.guard.take().expect("validated physical guard remains retained");
+        assert!(self.child.is_none());
+        assert!(self.child_group.is_none());
+        Ok(Retirement {
+            guard,
+            kind: RetirementKind::ChildReaped,
+        })
     }
 
     pub(in crate::engine) fn seal_without_effect(mut self) -> Result<Retirement, EngineError> {
@@ -574,20 +716,62 @@ impl CustodySession {
             .expect("validated physical guard remains retained");
         assert!(self.child.is_none());
         assert!(!self.child_attempted);
-        Ok(Retirement { guard })
+        Ok(Retirement {
+            guard,
+            kind: RetirementKind::NoEffect,
+        })
     }
 }
 
 impl Drop for CustodySession {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
-            match cleanup_direct_child(child, Instant::now() + DROP_TIME) {
-                Ok(Some(_)) => {}
-                Ok(None) => eprintln!("native_auth_direct_child_cleanup_deadline_uncertain"),
-                Err(_) => eprintln!("native_auth_direct_child_cleanup_error_uncertain"),
+            let deadline = Instant::now() + DROP_TIME;
+            let cleaned = match self.child_group {
+                Some(group) => cleanup_owned_group(child, group, deadline),
+                None => cleanup_direct_child(child, deadline).map(|status| status.is_some()),
+            };
+            if !matches!(cleaned, Ok(true)) {
+                eprintln!("native_auth_child_cleanup_uncertain");
+                if let Some(guard) = self.guard.take() {
+                    std::mem::forget(guard);
+                }
             }
         }
     }
+}
+
+pub(super) fn cleanup_owned_group(
+    child: &mut Child,
+    group: Pid,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let direct_id = child.id();
+    let direct = Pid::from_raw(i32::try_from(direct_id).map_err(io::Error::other)?)
+        .ok_or_else(|| io::Error::other("invalid direct child identity"))?;
+    if group != direct {
+        return Err(io::Error::other("child group is not dedicated"));
+    }
+    let started = Instant::now();
+    let deadline = deadline.min(started + DROP_TIME);
+    let mut signalled = false;
+    while Instant::now() < deadline {
+        let reaped = child.try_wait()?.is_some();
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) if reaped => return Ok(true),
+            Err(rustix::io::Errno::SRCH) => {}
+            Ok(()) if !signalled => {
+                rustix::process::kill_process_group(group, Signal::KILL)?;
+                signalled = true;
+            }
+            Ok(()) => {}
+            Err(error) => return Err(error.into()),
+        }
+        assert_eq!(group, direct);
+        assert_eq!(child.id(), direct_id);
+        sleep_until(deadline);
+    }
+    Ok(false)
 }
 
 impl Retirement {
@@ -599,7 +783,30 @@ impl Retirement {
         generation: u64,
         purpose: NativeProfileUsePurpose,
     ) -> Result<(), EngineError> {
+        if !matches!(self.kind, RetirementKind::NoEffect) {
+            return Err(EngineError(
+                "native_auth_child_effect_requires_retirement".into(),
+            ));
+        }
+        self.guard
+            .revalidate(host, binding, operation_id, generation, purpose)
+    }
+
+    pub(in crate::engine) fn revalidate_after_child_reaped(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+    ) -> Result<(), EngineError> {
+        if !matches!(self.kind, RetirementKind::ChildReaped) {
+            return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
+        }
         self.guard
             .revalidate(host, binding, operation_id, generation, purpose)
     }
 }
+
+#[cfg(test)]
+mod retirement_tests;

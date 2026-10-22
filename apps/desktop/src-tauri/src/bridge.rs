@@ -15,8 +15,13 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod account_profile;
+mod account_setup;
+mod master;
 mod model_access;
 mod native_auth;
+pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
+pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
 pub use native_auth::NativeAuthView;
 
@@ -199,6 +204,7 @@ pub struct NativeBridge {
     model_access: Option<model_access::Selection>,
     model_access_next: Option<crazyagent::engine::owner::ModelAccessCursor>,
     native_auth: Option<native_auth::Operation>,
+    account_profile: Option<account_profile::Operation>,
 }
 
 impl NativeBridge {
@@ -215,6 +221,7 @@ impl NativeBridge {
             model_access: None,
             model_access_next: None,
             native_auth: None,
+            account_profile: None,
         }
     }
 
@@ -254,10 +261,11 @@ impl NativeBridge {
     pub fn status(&self) -> ConnectionStatus {
         ConnectionStatus {
             connected: self.ordinary.is_some(),
-            pending: self
-                .controller
-                .as_ref()
-                .is_some_and(|c| c.pending().is_some()),
+            pending: self.profile_pending()
+                || self
+                    .controller
+                    .as_ref()
+                    .is_some_and(|c| c.pending().is_some()),
         }
     }
 
@@ -475,7 +483,8 @@ impl NativeBridge {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
                 match operation.result {
                     OwnerResult::Applied => ActionOutcome::Applied,
-                    OwnerResult::DispatchPrepared { .. } => {
+                    OwnerResult::DispatchPrepared { .. }
+                    | OwnerResult::RcliProfileRegistered { .. } => {
                         return Err(failure("unexpected_reply"));
                     }
                     OwnerResult::Rejected { code } => {

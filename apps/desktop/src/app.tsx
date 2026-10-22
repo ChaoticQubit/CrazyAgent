@@ -48,6 +48,26 @@ export function App() {
   return <OwnerView state={state} />;
 }
 
+function PreviewStart({ state }: { state: ReturnType<typeof useOwnerBrowser> }) {
+  const blocked = state.busy || !state.connected;
+  return <section className="notice" aria-label="Getting started">
+    <h2>Accounts and sign-in</h2>
+    <p>{state.connected ? "Choose a connection to sign in through its official harness." :
+      "Connect to the engine first. Then choose a connection for official account sign-in."}
+      {" "}Review your account pool, create or open a project, then select its master.</p>
+    <div className="button-row">
+      <button disabled={blocked} onClick={() => void state.showSettings("connections")}
+        data-testid="preview-sign-in">Sign in / manage accounts</button>
+      <button disabled={blocked} onClick={() => void state.showSettings("pools")}
+        data-testid="preview-account-pools">View account pools</button>
+      <button disabled={blocked} onClick={() => void state.showProjects()}
+        data-testid="preview-projects">Create or open a project</button>
+    </div>
+    <p className="muted">Configured references and sign-in observations are shown separately.
+      The engine checks readiness and admission before a master can run.</p>
+  </section>;
+}
+
 export function OwnerView({ state }: { state: ReturnType<typeof useOwnerBrowser> }) {
   return <div className="app-shell">
     <Sidebar connected={state.connected} view={state.view} approvals={state.showApprovals} conversation={state.showConversation} settings={state.showSettings} projects={state.showProjects} />
@@ -56,6 +76,7 @@ export function OwnerView({ state }: { state: ReturnType<typeof useOwnerBrowser>
         <div><p className="eyebrow">Human decisions</p><h1>{state.view === "settings" ? "Settings" : state.view === "projects" ? "Projects" : state.view === "conversation" ? "Project conversation" : "Approvals"}</h1><p className="muted">{state.view === "settings" ? "Model access metadata, published by the authenticated engine owner." : state.view === "projects" ? "Declare explicit local repositories without starting work." : state.view === "conversation" ? "Durable owner messages and explicit versioned briefs from the engine." : "Inspect the engine's verification contract before granting approval."}</p></div>
         <button onClick={() => void state.reconnect()} disabled={state.busy} data-testid="connect-owner">{state.connected ? "Reconnect" : "Connect to engine"}</button>
       </header>
+      <PreviewStart state={state} />
       <div aria-live="polite" aria-atomic="true" className="notice-region">
         {state.error && <p role="alert" className="error">{state.error}</p>}
         {state.notice && <p role="status" className="notice">{state.notice}</p>}

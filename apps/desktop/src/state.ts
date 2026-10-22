@@ -4,18 +4,22 @@ import {
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
   revokeBaseline, sendMessage, status,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
-  startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth,
+  startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth, submitClaudeAuthCode,
+  prepareManagedAccount, prepareConfiguredAccount, accountAuthCapabilities,
+  configureAccountProfile, readAccountProfile,
 } from "./engine-client";
 import type {
   ActionReceipt, BaselineDetail, BaselinePage, HistoryPage, IntentReceipt,
   PendingIntent, ProjectDetail, ProjectPage,
   ModelAccessCollection, ModelAccessPage, ModelAccessDetail,
+  ManagedAccountPlan, ConfiguredAccountPlan, AccountAuthCapabilitiesReply, AccountProfileView,
+  ModelAccessRecord, ModelAccessEdit, AccountPool,
 } from "./engine-client";
-import { editFromForm, newForm, formFromRecord, rebaseForm } from "./model-access";
+import { editFromForm, newForm, formFromRecord, rebaseForm, managedAccountInput, configuredAccountInput, setPoolConnection, withPoolProject } from "./model-access";
 import type { ModelAccessForm } from "./model-access";
 import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens/projects";
 import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
-import { nativeAuthFailureCode, reduceNativeAuth } from "./native-auth";
+import { nativeAuthFailureCode, reduceNativeAuth, nativeClaudeInputAllowed, validateClaudeAuthCode } from "./native-auth";
 import type { NativeAuthCommand, NativeAuthState } from "./native-auth";
 import type { PanelAction } from "./screens/native-auth";
 
@@ -29,6 +33,32 @@ export interface Draft {
 export interface ProjectDrafts {
   message: Draft;
   brief: Draft;
+}
+
+interface ManagedSetup {
+  plan: ManagedAccountPlan | ConfiguredAccountPlan;
+  next: number;
+  waiting?: number;
+  verifying?: boolean;
+  message: string;
+}
+
+interface PoolAssignment {
+  pool: AccountPool;
+  projectId: string;
+  generation: number;
+  verifying: boolean;
+}
+
+interface AccountProfileSetup {
+  detail: ModelAccessDetail;
+  capabilities: AccountAuthCapabilitiesReply;
+  navigation: number;
+  generation?: number;
+  result?: AccountProfileView;
+  uncertain: boolean;
+  submitting: boolean;
+  message: string;
 }
 
 function receiptMessage(receipt: ActionReceipt | IntentReceipt): string {
@@ -58,9 +88,19 @@ export function useOwnerBrowser() {
   const [modelCollection, setModelCollection] = useState<ModelAccessCollection>("accounts");
   const [modelPage, setModelPage] = useState<ModelAccessPage>();
   const [modelDetail, setModelDetail] = useState<ModelAccessDetail>();
+  const [poolConnections, setPoolConnections] = useState<ModelAccessPage>();
+  const [poolProjectId, setPoolProjectId] = useState("");
+  const [poolAssignment, setPoolAssignment] = useState<PoolAssignment>();
+  const currentPoolAssignment = useRef(poolAssignment);
   const [modelForm, setModelForm] = useState<{ value: ModelAccessForm; generation: number }>();
   const activeCollection = useRef<ModelAccessCollection>("accounts");
   const currentModelForm = useRef(modelForm);
+  const [accountDraft, setAccountDraft] = useState({ provider: "codex", label: "", url: "", model: "" });
+  const currentAccountDraft = useRef(accountDraft);
+  const [managedSetup, setManagedSetup] = useState<ManagedSetup>();
+  const currentManagedSetup = useRef(managedSetup);
+  const [accountProfile, setAccountProfile] = useState<AccountProfileSetup>();
+  const currentAccountProfile = useRef(accountProfile);
   const selectedModel = useRef("");
   const [nativeAuth, setNativeAuth] = useState<NativeAuthState>();
   const currentNativeAuth = useRef(nativeAuth);
@@ -112,10 +152,12 @@ export function useOwnerBrowser() {
     setHistoryPage((old) => old ? { ...old, fresh: false } : old);
     setModelPage((old) => old ? { ...old, fresh: false } : old);
     setModelDetail((old) => old ? { ...old, fresh: false } : old);
+    setPoolConnections((old) => old ? { ...old, fresh: false } : old);
   }
 
   function changeView(next: typeof view) {
     closeNativeAuth();
+    if (!currentAccountProfile.current?.uncertain && !currentAccountProfile.current?.submitting) retainAccountProfile(undefined);
     navigation.current = nextGeneration();
     stale();
     activeView.current = next;
@@ -142,10 +184,16 @@ export function useOwnerBrowser() {
     } finally {
       try {
         const native = await status();
-        setPending(native.pending);
+        setPending(native.pending || Boolean(currentAccountProfile.current?.uncertain || currentAccountProfile.current?.submitting));
         setConnected(native.connected);
         if (!native.connected) stale();
-        setIntent(await pendingIntent());
+        const retainedIntent = await pendingIntent();
+        setIntent(retainedIntent);
+        const setup = currentManagedSetup.current;
+        if (!native.pending && !retainedIntent && setup?.waiting !== undefined) {
+          retainManagedSetup({ ...setup, waiting: undefined,
+            message: "The native bridge has no pending request for this step. Review current owner state before explicitly continuing." });
+        }
       } catch {
         setConnected(false);
         stale();
@@ -193,7 +241,7 @@ export function useOwnerBrowser() {
     setHistoryPage(undefined);
     const result = await connect();
     setConnected(result.connected);
-    setPending(result.pending);
+    setPending(result.pending || Boolean(currentAccountProfile.current?.uncertain || currentAccountProfile.current?.submitting));
     if (activeView.current === "approvals") setPage(await baselines());
     else if (activeView.current === "settings") {
       await loadModels();
@@ -246,6 +294,30 @@ export function useOwnerBrowser() {
       return;
     }
     if (receipt.kind === "model_access") {
+      const assignment = currentPoolAssignment.current;
+      if (assignment && String(assignment.generation) === receipt.generation) {
+        setPending(receipt.pending);
+        stale();
+        setNotice(`Pool assignment: ${receiptMessage(receipt)} Exact readback is required before use.`);
+        if (receipt.outcome === "applied" && !receipt.pending) {
+          retainPoolAssignment({ ...assignment, verifying: true });
+          await verifyPoolAssignment();
+        } else if (!receipt.pending) retainPoolAssignment(undefined);
+        return;
+      }
+      const setup = currentManagedSetup.current;
+      if (setup?.waiting !== undefined && String(setup.waiting) === receipt.generation) {
+        setPending(receipt.pending);
+        stale();
+        retainManagedSetup({ ...setup, message: receiptMessage(receipt) });
+        if (receipt.outcome === "applied" && !receipt.pending) {
+          retainManagedSetup({ ...setup, waiting: undefined, verifying: true, message: "The owner recorded this step. Verifying its exact saved record." });
+          await verifyManagedStep();
+        } else if (!receipt.pending) {
+          retainManagedSetup({ ...setup, waiting: undefined, message: `${receiptMessage(receipt)} Review current owner state before continuing.` });
+        }
+        return;
+      }
       setPending(receipt.pending);
       setNotice(`Model metadata: ${receiptMessage(receipt)}` + (receipt.rejection ? ` ${errorMessage({ code: receipt.rejection })}` : ""));
       stale();
@@ -299,6 +371,7 @@ export function useOwnerBrowser() {
     updateNativeAuth({ kind: "invalidate" });
     selectedModel.current = "";
     setModelDetail(undefined);
+    setPoolConnections(undefined);
     const page = await modelAccessPage(collection, next);
     if (activeView.current === "settings" && collection === activeCollection.current) setModelPage(page);
   }
@@ -316,6 +389,36 @@ export function useOwnerBrowser() {
     } catch (failure) {
       updateNativeAuth({ kind: "failure", navigation: current, request,
         code: nativeAuthFailureCode(failure) });
+    }
+  }
+
+  async function submitNativeClaudeCode(code: string) {
+    try {
+      validateClaudeAuthCode(code);
+      if (running.current || !connected || pending || currentModelForm.current ||
+        activeView.current !== "settings" || activeCollection.current !== "connections" ||
+        !nativeClaudeInputAllowed(currentNativeAuth.current, false)) return;
+      const selected = currentNativeAuth.current;
+      if (!selected || selected.context.navigation !== navigation.current) return;
+      const current = navigation.current;
+      const ticket = selected.context.ticket;
+      const request = nextGeneration();
+      updateNativeAuth({ kind: "claude_input_begin", request });
+      if (currentNativeAuth.current?.claude_input?.request !== request) return;
+      await run(async () => {
+        try {
+          const delivery = submitClaudeAuthCode(ticket, code);
+          code = "";
+          await delivery;
+          updateNativeAuth({ kind: "claude_input_accepted", navigation: current, request });
+        } catch {
+          updateNativeAuth({ kind: "claude_input_failure", navigation: current, request });
+        } finally {
+          code = "";
+        }
+      });
+    } finally {
+      code = "";
     }
   }
 
@@ -387,6 +490,155 @@ export function useOwnerBrowser() {
     setModelForm(retained);
   }
 
+  function retainPoolAssignment(value: PoolAssignment | undefined) {
+    currentPoolAssignment.current = value;
+    setPoolAssignment(value);
+  }
+
+  async function verifyPoolAssignment() {
+    const assignment = currentPoolAssignment.current;
+    if (!assignment) return;
+    const detail = await inspectModelAccess("pools", assignment.pool.id);
+    if (currentPoolAssignment.current !== assignment) return;
+    if (!detail.fresh || !detail.writable || detail.record.kind !== "pool" ||
+      JSON.stringify(detail.record.pool) !== JSON.stringify(assignment.pool)) {
+      throw new Error("The exact saved pool assignment is not verified. Refresh and reconcile the retained intent before using it.");
+    }
+    retainPoolAssignment(undefined);
+    if (currentModelForm.current?.generation === assignment.generation) {
+      currentModelForm.current = undefined;
+      setModelForm(undefined);
+    }
+    if (activeView.current === "settings" && activeCollection.current === "pools") {
+      setModelDetail(detail);
+      selectedModel.current = assignment.pool.id;
+    }
+    setNotice(`Saved and verified pool ${assignment.pool.id} for project ${assignment.projectId} and project_leader. Authentication and execution readiness are separate.`);
+  }
+
+  function retainManagedSetup(value: ManagedSetup | undefined) {
+    currentManagedSetup.current = value;
+    setManagedSetup(value);
+  }
+
+  function retainAccountProfile(value: AccountProfileSetup | undefined) {
+    currentAccountProfile.current = value;
+    setAccountProfile(value);
+  }
+
+  function acceptAccountProfile(context: AccountProfileSetup, reply: AccountProfileView) {
+    if (currentAccountProfile.current !== context) throw new Error("The private operation context changed. Read the original operation before continuing.");
+    if (reply.ticket !== context.detail.ticket || reply.generation !== String(context.generation) ||
+      reply.reply.database_instance !== context.capabilities.database_instance || reply.reply.engine_epoch !== context.capabilities.engine_epoch ||
+      (context.result && context.result.reply.request_id !== reply.reply.request_id)) {
+      throw new Error("The private operation identity changed. Its outcome remains uncertain.");
+    }
+    if (reply.reply.outcome !== "not_recorded") {
+      const receipt = reply.reply.outcome.configured_only.receipt;
+      if (receipt.config_id !== context.detail.config_id || receipt.source_hash !== context.detail.source_hash ||
+        context.detail.record.kind !== "connection" || JSON.stringify(receipt.connection) !== JSON.stringify(context.detail.record.connection)) {
+        throw new Error("Private profile readback does not match the exact saved connection. No readiness is claimed.");
+      }
+    }
+    retainAccountProfile({ ...context, result: reply, uncertain: reply.pending, submitting: false,
+      message: reply.reply.outcome === "not_recorded" ? (reply.pending ?
+        "Not recorded is not a cancellation barrier. Keep reading the original operation; no key will be resent." :
+        "The owner closed the original operation without recording a profile. Explicitly read the current capability before a new submission.") :
+        "Configured only: the owner verified this exact private profile. Authentication, model readiness and engine admission remain separate." });
+  }
+
+  async function submitAccountProfile(secret: string | undefined) {
+    const context = currentAccountProfile.current;
+    if (!context || context.uncertain || context.submitting || context.result || context.navigation !== navigation.current ||
+      activeView.current !== "settings" || !connected || pending || context.capabilities.configured !== "available" ||
+      context.detail.record.kind !== "connection" || !modelDetail?.fresh || modelDetail.ticket !== context.detail.ticket) return;
+    const usesKey = context.detail.record.connection.auth.method === "api_key";
+    if (usesKey !== (secret !== undefined)) throw new Error("The private entry method does not match the saved connection.");
+    const submitted = { ...context, generation: nextGeneration(), uncertain: true, submitting: true,
+      message: "Sending one private profile request. The key is not retained or automatically replayed." };
+    retainAccountProfile(submitted);
+    try {
+      const reply = await configureAccountProfile(context.detail.ticket, secret, submitted.generation);
+      acceptAccountProfile(submitted, reply);
+    } catch {
+      if (currentAccountProfile.current === submitted) retainAccountProfile({ ...submitted, submitting: false,
+        message: "The private submission did not return a verified result. Read its original operation before any new submission. The key was not retained." });
+    }
+  }
+
+  function managedStep(setup: ManagedSetup): { collection: ModelAccessCollection; record: ModelAccessRecord; edit: ModelAccessEdit; id: string } {
+    const { connection, pool } = setup.plan;
+    if (setup.next === 0) return { collection: "accounts", id: connection.account_ref, record: { kind: "account", account_ref: connection.account_ref }, edit: { kind: "add_account", account_ref: connection.account_ref } };
+    if (setup.next === 1) return { collection: "connections", id: connection.id, record: { kind: "connection", connection }, edit: { kind: "create_connection", connection } };
+    if (setup.next === 2) return { collection: "pools", id: pool.id, record: { kind: "pool", pool }, edit: { kind: "create_pool", pool } };
+    throw new Error("Account setup already verified all three configuration records.");
+  }
+
+  async function verifyManagedStep() {
+    const setup = currentManagedSetup.current;
+    if (!setup?.verifying) return;
+    const step = managedStep(setup);
+    const detail = await inspectModelAccess(step.collection, step.id);
+    if (currentManagedSetup.current !== setup) return;
+    if (!detail.fresh || !detail.writable || JSON.stringify(detail.record) !== JSON.stringify(step.record)) {
+      throw new Error("The saved account record could not be verified exactly. The original setup remains retained.");
+    }
+    retainManagedSetup({ ...setup, next: setup.next + 1, verifying: false,
+      message: setup.next === 2 ? "Account, connection and pool are configured. Sign-in or private profile setup is a separate owner action." : "This exact configuration record was verified. Continue with the remaining saved identities." });
+  }
+
+  async function inspectManagedAccount() {
+    const setup = currentManagedSetup.current;
+    if (!setup || setup.next !== 3 || activeView.current !== "settings" || currentAccountProfile.current?.uncertain) return;
+    closeNativeAuth();
+    activeCollection.current = "connections";
+    setModelCollection("connections");
+    setModelPage(undefined);
+    const current = navigation.current;
+    const detail = await inspectModelAccess("connections", setup.plan.connection.id);
+    if (currentManagedSetup.current !== setup || current !== navigation.current || activeView.current !== "settings") return;
+    if (!detail.fresh || !detail.writable || detail.record.kind !== "connection" || JSON.stringify(detail.record.connection) !== JSON.stringify(setup.plan.connection)) {
+      throw new Error("The configured connection changed. Inspect its current record before sign-in.");
+    }
+    selectedModel.current = setup.plan.connection.id;
+    setModelDetail(detail);
+    if (setup.plan.provider === "codex" || setup.plan.provider === "claude") {
+      updateNativeAuth({ kind: "open", detail, navigation: current });
+    } else {
+      const capabilities = await accountAuthCapabilities(detail.ticket);
+      if (currentManagedSetup.current !== setup || current !== navigation.current || activeView.current !== "settings") return;
+      if (capabilities.config_id !== detail.config_id || capabilities.source_hash !== detail.source_hash ||
+        JSON.stringify(capabilities.connection) !== JSON.stringify(setup.plan.connection)) throw new Error("Private setup capability does not match the saved connection. Refresh before proceeding.");
+      retainAccountProfile({ detail, capabilities, navigation: current, uncertain: false, submitting: false,
+        message: capabilities.configured === "available" ? "The owner permits private configuration for this exact saved connection. Confirm the separate action below." :
+          "The owner reports this private producer unavailable. Endpoint configuration is saved; no authentication or readiness is claimed." });
+    }
+  }
+
+  async function continueManagedAccount() {
+    const current = navigation.current;
+    if (activeView.current !== "settings" || currentModelForm.current) return;
+    closeNativeAuth();
+    if (currentManagedSetup.current?.verifying) await verifyManagedStep();
+    for (let stepIndex = 0; stepIndex < 3; stepIndex += 1) {
+      const setup = currentManagedSetup.current;
+      if (!setup || setup.waiting !== undefined || setup.verifying || setup.next === 3 || current !== navigation.current || activeView.current !== "settings") break;
+      const step = managedStep(setup);
+      const page = await modelAccessPage(step.collection);
+      if (currentManagedSetup.current !== setup || current !== navigation.current || activeView.current !== "settings") return;
+      if (!page.fresh || !page.writable) throw { code: "settings_read_only" };
+      activeCollection.current = step.collection;
+      setModelCollection(step.collection);
+      setModelPage(page);
+      setModelDetail(undefined);
+      const waiting = nextGeneration();
+      retainManagedSetup({ ...setup, waiting, message: "Saving one configuration record through the authenticated owner." });
+      await finishIntent(await editModelAccess(page.ticket, step.edit, waiting));
+      if (currentManagedSetup.current?.next === setup.next) break;
+    }
+    if (current === navigation.current) await inspectManagedAccount();
+  }
+
   function retainProjectDraft(event: Parameters<typeof reduceProjectDraft>[1]) {
     currentProjectForm.current = reduceProjectDraft(currentProjectForm.current, event);
     setProjectForm(currentProjectForm.current);
@@ -417,7 +669,130 @@ export function useOwnerBrowser() {
     projectPage, project, historyPage, projectId, drafts,
     projectForm, createdProject, editProject, discardProject,
     modelCollection, modelPage, modelDetail, modelForm,
-    nativeAuth, openNativeAuth, nativeAuthAction, closeNativeAuth,
+    poolConnections, poolProjectId, poolAssignment,
+    loadPoolProjects: (next = false) => run(async () => {
+      const retained = currentModelForm.current;
+      if (!connected || pending || activeView.current !== "settings" || activeCollection.current !== "pools" ||
+        !retained || retained.value.collection !== "pools" || retained.value.action !== "replace") return;
+      if (next && (!projectPage?.fresh || !projectPage.has_more)) throw { code: "no_next_page" };
+      const current = navigation.current;
+      stale();
+      const choices = await projects(next);
+      if (currentModelForm.current !== retained || current !== navigation.current ||
+        activeView.current !== "settings" || activeCollection.current !== "pools") return;
+      setProjectPage(choices);
+      setPoolProjectId("");
+      setNotice("Choose an actual project, then explicitly confirm saving this pool for its project_leader role.");
+    }),
+    changePoolProject: (id: string) => {
+      if (running.current || pending || !connected || !projectPage?.fresh ||
+        activeView.current !== "settings" || activeCollection.current !== "pools" ||
+        !projectPage.items.some((row) => row.id === id)) return;
+      setPoolProjectId(id);
+    },
+    confirmPoolProject: () => run(async () => {
+      const retained = currentModelForm.current;
+      const original = modelDetail;
+      if (!connected || pending || currentPoolAssignment.current || !retained ||
+        retained.value.collection !== "pools" || retained.value.action !== "replace" ||
+        original?.record.kind !== "pool" || original.record.pool.id !== retained.value.id ||
+        !projectPage?.fresh || !projectPage.items.some((row) => row.id === poolProjectId) ||
+        activeView.current !== "settings" || activeCollection.current !== "pools") return;
+      const current = navigation.current;
+      const chosen = poolProjectId;
+      stale();
+      const opened = await openProject(chosen);
+      if (current !== navigation.current || currentModelForm.current !== retained || activeView.current !== "settings") return;
+      if (!opened.fresh || opened.project_id !== chosen) throw { code: "invalid_project" };
+      const basis = await inspectModelAccess("pools", retained.value.id);
+      if (current !== navigation.current || currentModelForm.current !== retained || activeView.current !== "settings") return;
+      setModelDetail(basis);
+      if (!basis.fresh || !basis.writable || JSON.stringify(basis.record) !== JSON.stringify(original.record)) {
+        throw new Error("The saved pool changed. Refresh and review the retained draft before confirming its assignment.");
+      }
+      const value = withPoolProject(rebaseForm(retained.value, basis), opened);
+      const edit = editFromForm(value);
+      if (edit.kind !== "replace_pool") throw new Error("Project assignment requires an existing pool replacement.");
+      retainModelForm(value);
+      const generation = currentModelForm.current!.generation;
+      retainPoolAssignment({ pool: edit.pool, projectId: chosen, generation, verifying: false });
+      await finishIntent(await editModelAccess(value.ticket, edit, generation));
+    }, true),
+    verifyPoolAssignment: () => run(async () => {
+      if (connected && !pending) await verifyPoolAssignment();
+    }),
+    loadPoolConnections: (next = false) => run(async () => {
+      const retained = currentModelForm.current;
+      if (!connected || pending || activeView.current !== "settings" || activeCollection.current !== "pools" ||
+        !retained || retained.value.collection !== "pools" || retained.value.action === "remove") return;
+      if (next && (!poolConnections?.fresh || !poolConnections.has_more)) throw { code: "no_next_page" };
+      const current = navigation.current;
+      closeNativeAuth();
+      stale();
+      const choices = await modelAccessPage("connections", next);
+      if (currentModelForm.current !== retained || current !== navigation.current ||
+        activeView.current !== "settings" || activeCollection.current !== "pools") return;
+      setPoolConnections(choices);
+      setNotice("Saved connections loaded. Choose members, then Refresh and review retained form before saving the pool.");
+    }),
+    changePoolConnection: (id: string, selected: boolean) => {
+      const retained = currentModelForm.current;
+      if (running.current || pending || !connected || activeView.current !== "settings" ||
+        activeCollection.current !== "pools" || !retained || !poolConnections?.fresh ||
+        !poolConnections.items.some((record) => record.kind === "connection" && record.connection.id === id)) return;
+      try { retainModelForm(setPoolConnection(retained.value, id, selected)); setError(""); }
+      catch (failure) { setError(failure instanceof Error ? failure.message : "The pool selection could not be retained."); }
+    },
+    accountDraft, managedSetup, accountProfile,
+    submitAccountSecret: (secret: string) => run(() => submitAccountProfile(secret)),
+    configureLocalAccount: () => run(() => submitAccountProfile(undefined)),
+    reconcileAccountProfile: () => run(async () => {
+      const context = currentAccountProfile.current;
+      if (!context?.uncertain || context.submitting || !connected) return;
+      try { acceptAccountProfile(context, await readAccountProfile()); }
+      catch {
+        if (currentAccountProfile.current === context) retainAccountProfile({ ...context,
+          message: "The original private operation remains unresolved. No key was retained or resent. Restore its owner connection and read again." });
+      }
+    }),
+    changeAccountDraft: (patch: Partial<typeof accountDraft>) => {
+      if (currentManagedSetup.current || currentAccountProfile.current?.uncertain || running.current) return;
+      const value = { ...currentAccountDraft.current, ...patch };
+      if (!["codex", "claude", "api_key", "local"].includes(value.provider) ||
+        new TextEncoder().encode(value.label).length > 96 || value.url.length > 2048 || value.model.length > 256 ||
+        Object.values(value).some((field) => /[\u0000-\u001f\u007f-\u009f]/u.test(field))) {
+        setError("Account draft exceeds its input bounds. Previous values are retained.");
+        return;
+      }
+      currentAccountDraft.current = value;
+      setAccountDraft(value);
+      setError("");
+    },
+    submitManagedAccount: () => run(async () => {
+      if (!connected || pending || currentManagedSetup.current || currentAccountProfile.current?.uncertain || currentModelForm.current || currentPoolAssignment.current || activeView.current !== "settings") return;
+      const draft = currentAccountDraft.current;
+      const current = navigation.current;
+      let plan: ManagedAccountPlan | ConfiguredAccountPlan;
+      if (draft.provider === "codex" || draft.provider === "claude") {
+        const input = managedAccountInput(draft.provider, draft.label);
+        plan = await prepareManagedAccount(input.provider, input.label);
+      } else {
+        const input = configuredAccountInput(draft.provider, draft.label, draft.url, draft.model);
+        plan = await prepareConfiguredAccount(input.provider, input.label, input.url, input.model);
+      }
+      retainAccountProfile(undefined);
+      retainManagedSetup({ plan, next: 0, message: "Native-generated configuration identities retained. No sign-in or private submission has started." });
+      if (current === navigation.current && activeView.current === "settings") await continueManagedAccount();
+    }, true),
+    continueManagedAccount: () => run(async () => { if (connected && !pending) await continueManagedAccount(); }, true),
+    inspectManagedAccount: () => run(async () => { if (connected && !pending) await inspectManagedAccount(); }),
+    closeManagedAccount: () => {
+      if (running.current || pending || currentAccountProfile.current?.uncertain || currentManagedSetup.current?.waiting !== undefined) return;
+      retainManagedSetup(undefined);
+      retainAccountProfile(undefined);
+      setNotice("Account setup closed. Any saved account, connection and pool remain available in settings.");
+    },
+    nativeAuth, openNativeAuth, nativeAuthAction, closeNativeAuth, submitNativeClaudeCode,
     reconnect: () => run(reconnect),
     refresh: (next = false) => run(() => refresh(next)),
     select: (id: string) => run(async () => setDetail(await inspectBaseline(id))),
@@ -466,7 +841,7 @@ export function useOwnerBrowser() {
       });
     },
     createModel: () => run(async () => {
-      if (currentModelForm.current || pending || activeView.current !== "settings") return;
+      if (currentModelForm.current || currentPoolAssignment.current || pending || activeView.current !== "settings") return;
       closeNativeAuth();
       updateNativeAuth({ kind: "invalidate" });
       const collection = activeCollection.current;
@@ -474,12 +849,14 @@ export function useOwnerBrowser() {
       if (activeView.current !== "settings" || collection !== activeCollection.current) return;
       setModelPage(page);
       setModelDetail(undefined);
+      setPoolConnections(undefined);
       if (page.writable) retainModelForm(newForm(collection, page.ticket));
     }),
     editModel: (remove = false) => {
-      if (!modelDetail?.fresh || !modelDetail.writable || currentModelForm.current || pending) return;
+      if (!modelDetail?.fresh || !modelDetail.writable || currentModelForm.current || currentPoolAssignment.current || pending) return;
       closeNativeAuth();
       updateNativeAuth({ kind: "invalidate" });
+      setPoolConnections(undefined);
       try { retainModelForm(formFromRecord(modelDetail.record, modelDetail.ticket, remove)); }
       catch { setError("The metadata form could not be retained. Preserve its values before restarting."); }
     },
@@ -503,16 +880,24 @@ export function useOwnerBrowser() {
       activeCollection.current = form.collection;
       setModelCollection(form.collection);
       const basis = form.action === "create" ? await modelAccessPage(form.collection) : await inspectModelAccess(form.collection, form.id);
+      setPoolConnections((old) => old ? { ...old, fresh: false } : old);
       if (form.action === "create") { setModelPage(basis as ModelAccessPage); setModelDetail(undefined); }
       else setModelDetail(basis as ModelAccessDetail);
       if (!basis.writable) throw { code: "settings_read_only" };
       if (currentModelForm.current === retained) retainModelForm(rebaseForm(form, basis));
       setNotice("Latest owner metadata loaded. Review the retained values before explicitly saving.");
     }),
-    discardModelForm: () => { currentModelForm.current = undefined; setModelForm(undefined); },
+    discardModelForm: () => {
+      if (pending || running.current || (currentPoolAssignment.current && !connected)) return;
+      if (currentPoolAssignment.current) {
+        retainPoolAssignment(undefined);
+        setNotice("Local assignment draft discarded. Inspect the current saved pool before use; no binding success is claimed.");
+      }
+      currentModelForm.current = undefined; setModelForm(undefined); setPoolConnections(undefined); setPoolProjectId("");
+    },
     submitModel: () => run(async () => {
       const retained = currentModelForm.current;
-      if (!retained || pending || activeView.current !== "settings") return;
+      if (!retained || pending || currentPoolAssignment.current || activeView.current !== "settings") return;
       let edit;
       try { edit = editFromForm(retained.value); }
       catch (failure) { setError(failure instanceof Error ? failure.message : "Invalid metadata form."); return; }

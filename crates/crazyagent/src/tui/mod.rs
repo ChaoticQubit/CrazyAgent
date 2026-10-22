@@ -95,6 +95,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
     let result = (|| {
         let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
         let _guard = TerminalGuard::enter()?;
+        let _ = event::poll(Duration::ZERO).map_err(|e| TuiError(e.to_string()))?;
         let (width, height) = crossterm::terminal::size().map_err(|e| TuiError(e.to_string()))?;
         let area = bounded_area(width, height);
         let mut terminal = Terminal::with_options(

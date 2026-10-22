@@ -216,3 +216,65 @@ fn native_auth_custodian_cli_rejects_regular_stdin_without_changing_its_flags() 
     );
     assert_eq!(rustix::fs::fcntl_getfl(&input).unwrap(), original_flags);
 }
+
+#[test]
+fn engine_codex_executable_relative_path_rejects_before_config_or_runtime_io() {
+    let root = private_root();
+    let runtime = root.path().join("runtime-not-created");
+    let base: Vec<OsString> = vec![
+        "engine".into(),
+        runtime.as_os_str().to_owned(),
+        root.path().join("absent-global.toml").into_os_string(),
+        root.path().join("absent-project.toml").into_os_string(),
+        "e.sock".into(),
+    ];
+    for suffix in [
+        vec!["--codex-executable", "relative-codex"],
+        vec!["--writable-settings", "--codex-executable", "relative-codex"],
+        vec!["--codex-executable", "relative-codex", "--writable-settings"],
+    ] {
+        let mut args = base.clone();
+        args.extend(suffix.into_iter().map(OsString::from));
+        assert_rejection(
+            observe(root.path(), &args, &[], true),
+            "native_auth_host_executable_unsafe",
+        );
+        assert!(!runtime.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn native_auth_custodian_cli_explicit_codex_keeps_private_bootstrap_requirement() {
+    let root = private_root();
+    let mut args = arguments(root.path());
+    args.extend([
+        OsString::from("--codex-executable"),
+        root.path().join("codex-not-opened").into_os_string(),
+        OsString::from("--codex-sha256"),
+        OsString::from("0".repeat(64)),
+    ]);
+    assert_rejection(
+        observe(root.path(), &args, &[], true),
+        "native_auth_bootstrap_truncated",
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn native_auth_custodian_cli_explicit_codex_rejects_invalid_pin_before_bootstrap() {
+    let root = private_root();
+    for (executable, digest, expected) in [
+        (OsString::from("relative-codex"), "0".repeat(64), "native_auth_host_executable_unsafe"),
+        (root.path().join("codex").into_os_string(), "0".repeat(63), "native_auth_host_executable_digest_invalid"),
+        (root.path().join("codex").into_os_string(), "A".repeat(64), "native_auth_host_executable_digest_invalid"),
+    ] {
+        let mut args = arguments(root.path());
+        args.extend([
+            OsString::from("--codex-executable"), executable,
+            OsString::from("--codex-sha256"), digest.into(),
+        ]);
+        assert_rejection(observe(root.path(), &args, &[], true), expected);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}

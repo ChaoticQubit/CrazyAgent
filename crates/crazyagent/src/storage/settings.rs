@@ -201,6 +201,13 @@ impl SettingsSources {
         Ok(sources)
     }
 
+    pub(super) fn retained_paths(&self) -> (PathBuf, PathBuf) {
+        (
+            self.global.path.join(&self.global.name),
+            self.project.path.join(&self.project.name),
+        )
+    }
+
     fn snapshot(&self) -> Result<SourceState, EngineError> {
         let named = self.global.read_name(&self.lease_name)?;
         if named.identity != Some(identity(&self.lease.metadata().map_err(error)?)) {
@@ -632,6 +639,36 @@ pub(super) fn verified_source_hash(
     }
 }
 
+pub(super) fn verified_source_hash_at(
+    config: &EffectiveConfig,
+    global: &Path,
+    project: &Path,
+) -> Result<String, EngineError> {
+    let global = SourceFile::open(global)?;
+    let project = SourceFile::open(project)?;
+    if global.path.join(&global.name) == project.path.join(&project.name) {
+        return Err(error("settings_sources_overlap"));
+    }
+    let source_id = crate::memory::hash(
+        &serde_json::to_vec(&(
+            global.path.join(&global.name),
+            global.identity,
+            project.path.join(&project.name),
+            project.identity,
+        ))
+        .map_err(error)?,
+    );
+    let snapshot = SourceState {
+        source_id,
+        global: global.read()?,
+        project: project.read()?,
+    };
+    if snapshot.config()?.id != config.id {
+        return Err(error("settings_source_conflict"));
+    }
+    snapshot.hash()
+}
+
 pub(super) fn read(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -756,3 +793,6 @@ pub(super) fn read(
     }
     Ok(reply)
 }
+
+#[cfg(test)]
+mod source_access_tests;

@@ -447,6 +447,7 @@ fn unit_signed_out_reply(job: &Job, email: &str) -> NativeAuthReply {
             code: None,
         },
         challenge: None,
+        claude_challenge: None,
         account: Some(NativeAuthAccount::Claude(
             claude::decode_auth_status(&serde_json::to_vec(&status).unwrap()).unwrap(),
         )),
@@ -1064,6 +1065,7 @@ async fn unit_replacement_reply_without_account_clears_previous_presentation() {
             engine_epoch: read.context.basis.identity.engine_epoch().into(),
             fact,
             challenge: None,
+            claude_challenge: None,
             account: None,
         };
         state
@@ -1112,6 +1114,7 @@ async fn unit_generation_and_custody_changes_cannot_replace_pinned_operation() {
                 engine_epoch: basis.identity.engine_epoch().into(),
                 fact,
                 challenge: None,
+                claude_challenge: None,
                 account: None,
             };
             let _ = state.apply(Event {
@@ -1241,3 +1244,11 @@ async fn real_compact_and_tiny_rendering_use_panel_body_without_changing_metadat
     })
     .await;
 }
+
+mod account_onboarding;
+mod pool_assignment;
+mod account_profile;
+
+mod claude_code;
+mod preview;
+mod managed_setup;

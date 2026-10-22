@@ -1,6 +1,9 @@
+import { useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { NativeAuthCommand, NativeAuthState, NativeAuthView } from "../native-auth";
 import {
   nativeAuthActive, nativeAuthAllowed, nativeAuthError, nativeAuthText, safeChallenge,
+  nativeClaudeInputAllowed, validateClaudeAuthCode,
 } from "../native-auth";
 
 export { reduceNativeAuth } from "../native-auth";
@@ -15,10 +18,49 @@ function Challenge({ value }: { value: NonNullable<NativeAuthView["challenge"]> 
   if (value.kind === "codex_browser") return <dl className="identity-grid">
     <Field label="Browser sign-in URL" value={value.auth_url} />
   </dl>;
+  if (value.kind === "claude_official") return <dl className="identity-grid">
+    <Field label="Official Claude sign-in URL" value={value.auth_url} />
+  </dl>;
   return <dl className="identity-grid">
     <Field label="Device code" value={value.user_code} />
     <Field label="Verification URL" value={value.verification_url} />
   </dl>;
+}
+
+function ClaudeInput({ input, onSubmit }: {
+  input: RefObject<HTMLInputElement | null>; onSubmit?: (code: string) => Promise<void>;
+}) {
+  const [invalid, setInvalid] = useState(false);
+  useEffect(() => {
+    const element = input.current;
+    return () => { if (element) element.value = ""; };
+  }, [input]);
+  return <form onSubmit={async (event) => {
+    event.preventDefault();
+    let code = input.current?.value ?? "";
+    if (input.current) input.current.value = "";
+    setInvalid(false);
+    try {
+      validateClaudeAuthCode(code);
+      if (!onSubmit) return;
+      const sending = onSubmit(code);
+      code = "";
+      await sending;
+    } catch {
+      setInvalid(true);
+    } finally {
+      code = "";
+    }
+  }}>
+    <label htmlFor="native-auth-claude-code">Complete fallback code and state</label>
+    <input id="native-auth-claude-code" ref={input} type="password" maxLength={8192}
+      autoComplete="off" spellCheck={false} autoCapitalize="none"
+      data-testid="native-auth-claude-code" />
+    <p>Use this only when the official Claude process requests a code. It is sent once privately
+      for this operation and is not retained in a draft.</p>
+    {invalid && <p role="alert">{nativeAuthError("native_auth_claude_input_invalid")}</p>}
+    <button type="submit" disabled={!onSubmit}>Send code once</button>
+  </form>;
 }
 
 function Account({ value }: { value: NonNullable<NativeAuthView["account"]> }) {
@@ -69,6 +111,10 @@ function Observation({ state }: { state: NativeAuthState }) {
     {value?.challenge && <Challenge value={value.challenge} />}
     {value?.account && <Account value={value.account} />}
     {state.in_flight && <p role="status">Owner authentication request in progress.</p>}
+    {state.claude_input?.status === "sending" && <p role="status">Sending private code once.</p>}
+    {state.claude_input?.status === "accepted" && <p role="status">
+      Private input acknowledged. Read the original operation for the actual account observation.
+    </p>}
   </>;
 }
 
@@ -99,15 +145,21 @@ function Actions({ state, onAction }: {
   </div>;
 }
 
-export function NativeAuthPanel({ state, onAction, onClose, blocked = false }: {
+export function NativeAuthPanel({ state, onAction, onClose, onClaudeCode, blocked = false }: {
   state: NativeAuthState | undefined; onAction: (action: PanelAction) => void; onClose: () => void;
+  onClaudeCode?: (code: string) => Promise<void>;
   blocked?: boolean;
 }) {
+  const input = useRef<HTMLInputElement>(null);
+  const clearAndClose = () => {
+    if (input.current) input.current.value = "";
+    onClose();
+  };
   if (!state?.open) return null;
   return <section className="metadata-form native-auth-panel" role="dialog"
     aria-label="Native authentication" aria-busy={Boolean(state.in_flight)}
     data-testid="native-auth-panel" onKeyDown={(event) => {
-      if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+      if (event.key === "Escape") { event.stopPropagation(); clearAndClose(); }
     }}>
     <h2>Native authentication</h2>
     <p>Account observation does not establish native delivery or execution.</p>
@@ -118,11 +170,14 @@ export function NativeAuthPanel({ state, onAction, onClose, blocked = false }: {
       <Field label="Settings source" value={state.context.source_hash} />
     </dl>
     <Observation state={state} />
+    {nativeClaudeInputAllowed(state, blocked) && <ClaudeInput
+      key={state.operation!.operation_id + ":" + state.operation!.generation + ":" + state.context.ticket}
+      input={input} onSubmit={onClaudeCode} />}
     <Actions state={blocked ? { ...state, valid: false } : state} onAction={onAction} />
     <div className="button-row">
       <button type="button" disabled={blocked || Boolean(state.in_flight)}
         onClick={() => onAction("refresh")}>Refresh selected connection in Settings</button>
-      <button type="button" onClick={onClose}>Close</button>
+      <button type="button" onClick={clearAndClose}>Close</button>
     </div>
   </section>;
 }

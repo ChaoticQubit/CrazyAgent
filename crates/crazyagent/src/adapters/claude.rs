@@ -788,3 +788,7 @@ mod tests {
         p.state();
     }
 }
+
+#[cfg(test)]
+#[path = "claude/imp1035_status_tests.rs"]
+mod imp1035_status_tests;

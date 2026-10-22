@@ -9,7 +9,8 @@ export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account"
   "unavailable" | "uncertain";
 type StatusField = { state: "missing" } | { state: "null" } | { state: "value"; text: string };
 type Challenge = { kind: "codex_browser"; auth_url: string } |
-  { kind: "codex_device_code"; user_code: string; verification_url: string };
+  { kind: "codex_device_code"; user_code: string; verification_url: string } |
+  { kind: "claude_official"; auth_url: string; accepts_code: boolean; prompt_id: "1" | null };
 type Account = { kind: "codex_api_key" } |
   { kind: "codex_chatgpt"; email: string | null; plan_type: string } |
   { kind: "codex_amazon_bedrock"; uses_codex_managed_credentials: boolean } |
@@ -61,12 +62,16 @@ export interface NativeAuthState {
   recover?: boolean;
   recoverAction?: NativeAuthAction;
   recoveryContext?: Context;
+  claude_input?: { operation_id: string; generation: string; prompt_id: "1";
+    request: number; status: "sending" | "accepted" | "uncertain" };
 }
 
 type Event = { kind: "open"; detail: ModelAccessDetail; navigation: number } |
   { kind: "begin"; action: NativeAuthCommand; request: number } |
   { kind: "reply"; navigation: number; request: number; reply: NativeAuthView } |
   { kind: "failure"; navigation: number; request: number; code: string } |
+  { kind: "claude_input_begin"; request: number } |
+  { kind: "claude_input_accepted" | "claude_input_failure"; navigation: number; request: number } |
   { kind: "close" | "invalidate" | "confirm_logout" | "back" };
 
 type Target = Pick<Context, "connection" | "config_id" | "source_hash">;
@@ -88,6 +93,7 @@ function open(state: NativeAuthState | undefined, detail: ModelAccessDetail,
   const interrupted = Boolean(state?.in_flight);
   return { open: true, context, valid: Boolean(valid), confirming_logout: false,
     operation: state?.operation,
+    claude_input: state?.claude_input,
     recover: state?.recover || interrupted,
     recoverAction: state?.recoverAction ?? (state?.in_flight && actionFor(state.in_flight.action)),
     recoveryContext: state?.recoveryContext ?? (interrupted ? state?.context : undefined),
@@ -103,7 +109,7 @@ export function nativeAuthActive(state: NativeAuthState | undefined): boolean {
 }
 
 export function nativeAuthAllowed(state: NativeAuthState, action: NativeAuthCommand): boolean {
-  if (!state.open || !state.valid || state.in_flight) return false;
+  if (!state.open || !state.valid || state.in_flight || state.claude_input?.status === "sending") return false;
   if (action === "read" || action === "cancel") {
     const target = state.operation ?? state.recoveryContext;
     return Boolean(target && sameTarget(target, state.context));
@@ -150,10 +156,46 @@ export function nativeAuthText(value: string): string {
 }
 
 export function safeChallenge(challenge: Challenge): boolean {
+  if (challenge.kind === "claude_official") {
+    const prefix = "https://claude.com/cai/oauth/authorize?";
+    return typeof challenge.auth_url === "string" && challenge.auth_url.length <= 8192 &&
+      challenge.auth_url.startsWith(prefix) && challenge.auth_url.length > prefix.length &&
+      !/[^\x21-\x7e]|[#\\]/u.test(challenge.auth_url.slice(prefix.length)) &&
+      (challenge.accepts_code === true && challenge.prompt_id === "1" ||
+        challenge.accepts_code === false && challenge.prompt_id === null);
+  }
   const fields = challenge.kind === "codex_browser" ? [challenge.auth_url] :
-    [challenge.user_code, challenge.verification_url];
-  return fields.every((value) => !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
+    challenge.kind === "codex_device_code" ? [challenge.user_code, challenge.verification_url] : [];
+  return fields.length > 0 && fields.every((value) => typeof value === "string" &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
     !/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value));
+}
+
+export function validateClaudeAuthCode(value: unknown): void {
+  if (typeof value !== "string" || value.length > 8192 ||
+    !/^[\x21-\x22\x24-\x7e]+#[\x21-\x22\x24-\x7e]+$/u.test(value)) {
+    throw new Error("native_auth_claude_input_invalid");
+  }
+}
+
+export function nativeClaudeInputAllowed(state: NativeAuthState | undefined, blocked: boolean): boolean {
+  if (!state?.open || !state.valid || blocked || state.invalidated || state.rebound ||
+    state.recover || state.in_flight || state.context.harness !== "claude") return false;
+  const operation = state.operation;
+  const observed = state.presentation;
+  if (!operation || !observed || observed.display_error || observed.account ||
+    operation.phase !== "awaiting_owner" || observed.phase !== "awaiting_owner" ||
+    operation.action.kind !== "sign_in" || operation.action.method !== "claude_official" ||
+    !sameAction(operation.action, observed.action) ||
+    !sameTarget(operation, state.context) || observed.ticket !== state.context.ticket ||
+    !/^[1-9][0-9]{0,19}$/.test(operation.generation) ||
+    observed.challenge?.kind !== "claude_official" || !safeChallenge(observed.challenge) ||
+    !observed.challenge.accepts_code || observed.challenge.prompt_id !== "1") return false;
+  const fields = ["operation_id", "database_instance", "engine_epoch", "connection",
+    "config_id", "source_hash", "generation"] as const;
+  if (fields.some((field) => observed[field] !== operation[field])) return false;
+  return !(state.claude_input?.operation_id === operation.operation_id &&
+    state.claude_input.generation === operation.generation);
 }
 
 function presentationError(reply: NativeAuthView): string | undefined {
@@ -193,6 +235,28 @@ export function reduceNativeAuth(state: NativeAuthState | undefined,
   event: Event): NativeAuthState | undefined {
   if (event.kind === "open") return open(state, event.detail, event.navigation);
   if (!state) return undefined;
+  if (event.kind === "claude_input_begin") {
+    if (!nativeClaudeInputAllowed(state, false) || !Number.isSafeInteger(event.request) ||
+      event.request <= 0) return state;
+    const operation = state.operation;
+    if (!operation) throw new Error("native_auth_dispatch_invariant");
+    const next: NativeAuthState = { ...state, presentation: undefined, error: undefined,
+      claude_input: { operation_id: operation.operation_id, generation: operation.generation,
+        prompt_id: "1", request: event.request, status: "sending" } };
+    if (next.presentation || next.claude_input?.operation_id !== operation.operation_id ||
+      next.claude_input.request !== event.request) throw new Error("native_auth_dispatch_invariant");
+    return next;
+  }
+  if (event.kind === "claude_input_accepted" || event.kind === "claude_input_failure") {
+    const attempt = state.claude_input;
+    const operation = state.operation;
+    if (!attempt || !operation || event.navigation !== state.context.navigation ||
+      event.request !== attempt.request || attempt.status !== "sending" ||
+      attempt.operation_id !== operation.operation_id || attempt.generation !== operation.generation) return state;
+    return { ...state, presentation: undefined,
+      claude_input: { ...attempt, status: event.kind === "claude_input_accepted" ? "accepted" : "uncertain" },
+      error: event.kind === "claude_input_failure" ? "native_auth_claude_input_outcome_unknown" : undefined };
+  }
   if (event.kind === "close") return { ...state, open: false, presentation: undefined,
     confirming_logout: false };
   if (event.kind === "invalidate") return { ...state, valid: false, invalidated: true,
@@ -230,6 +294,10 @@ export function nativeAuthError(code: string): string {
       return "The selected owner metadata changed. Refresh and inspect the connection in Settings.";
     case "native_auth_outcome_unknown_read_same_operation":
       return "Delivery is uncertain. Reconnect and Read the original native operation.";
+    case "native_auth_claude_input_outcome_unknown":
+      return "Private code delivery is uncertain. Read or Cancel the original operation. Do not submit the code again.";
+    case "native_auth_claude_input_invalid":
+      return "Paste the complete code and state shown by the official Claude sign-in page.";
     default:
       return "The native authentication action is unavailable. " +
         "Refresh Settings and inspect its reason.";

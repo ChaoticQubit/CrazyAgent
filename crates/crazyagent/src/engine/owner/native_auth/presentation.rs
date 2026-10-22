@@ -10,8 +10,10 @@ use serde_json::json;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct WirePresentation {
+pub(in crate::engine) struct WirePresentation {
     challenge: Option<WireChallenge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude_challenge: Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge>,
     account: Option<WireAccount>,
 }
 
@@ -43,9 +45,9 @@ enum WireAccount {
     Claude(Box<ClaudeStatus>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClaudeStatus {
+pub(crate) struct ClaudeStatus {
     logged_in: bool,
     auth_method: String,
     api_provider: String,
@@ -56,7 +58,7 @@ struct ClaudeStatus {
     subscription_type: StatusField,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum StatusField {
     Missing,
@@ -68,9 +70,9 @@ fn invalid() -> EngineError {
     failure("native_auth_presentation_invalid")
 }
 
-pub(super) fn encode(reply: &NativeAuthReply) -> Result<Option<WirePresentation>, EngineError> {
+pub(in crate::engine) fn encode(reply: &NativeAuthReply) -> Result<Option<WirePresentation>, EngineError> {
     validate(reply)?;
-    if reply.challenge.is_none() && reply.account.is_none() {
+    if reply.challenge.is_none() && reply.claude_challenge.is_none() && reply.account.is_none() {
         return Ok(None);
     }
     let wire = WirePresentation {
@@ -78,6 +80,7 @@ pub(super) fn encode(reply: &NativeAuthReply) -> Result<Option<WirePresentation>
             .challenge
             .as_ref()
             .map(|value| WireChallenge::from_native(value.codex())),
+        claude_challenge: reply.claude_challenge.clone(),
         account: reply.account.as_ref().map(WireAccount::from_native),
     };
     if let Some(challenge) = &wire.challenge {
@@ -94,6 +97,7 @@ pub(super) fn apply(
     reply: &mut NativeAuthReply,
 ) -> Result<(), EngineError> {
     if let Some(wire) = wire {
+        reply.claude_challenge = wire.claude_challenge;
         reply.challenge = wire
             .challenge
             .as_ref()
@@ -109,11 +113,11 @@ pub(super) fn apply(
 }
 
 fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
-    if reply.challenge.is_none() && reply.account.is_none() {
+    if reply.challenge.is_none() && reply.claude_challenge.is_none() && reply.account.is_none() {
         return Ok(());
     }
     let connection = &reply.fact.binding.connection;
-    if reply.challenge.is_some() && reply.account.is_some()
+    if (usize::from(reply.challenge.is_some()) + usize::from(reply.claude_challenge.is_some()) + usize::from(reply.account.is_some())) > 1
         || reply.fact.binding.engine_epoch != reply.engine_epoch
         || connection.protocol.as_str() != "native"
         || !matches!(connection.endpoint, ModelEndpoint::Native {})
@@ -132,6 +136,14 @@ fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
     }
     if let Some(challenge) = &reply.challenge {
         validate_challenge(reply, challenge)?;
+    }
+    if let Some(challenge) = &reply.claude_challenge {
+        challenge.validate()?;
+        if reply.fact.phase != NativeAuthPhase::AwaitingOwner
+            || connection.harness.as_str() != "claude"
+            || reply.fact.action != (NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial }) {
+            return Err(invalid());
+        }
     }
     if let Some(account) = &reply.account {
         validate_account(reply, account)?;
@@ -253,7 +265,7 @@ impl WireAccount {
 }
 
 impl ClaudeStatus {
-    fn from_native(value: &claude::AuthStatus) -> Self {
+    pub(crate) fn from_native(value: &claude::AuthStatus) -> Self {
         Self {
             logged_in: value.logged_in,
             auth_method: method_name(&value.auth_method).into(),
@@ -266,7 +278,7 @@ impl ClaudeStatus {
         }
     }
 
-    fn materialize(&self) -> Result<claude::AuthStatus, EngineError> {
+    pub(crate) fn materialize(&self) -> Result<claude::AuthStatus, EngineError> {
         Ok(claude::AuthStatus {
             logged_in: self.logged_in,
             auth_method: method(&self.auth_method)?,

@@ -15,6 +15,28 @@ pub async fn run_native_auth_custodian(
     entry::run(runtime_dir, input).await.map(|_| ())
 }
 
+pub async fn run_native_auth_custodian_with_codex(
+    runtime_dir: &Path,
+    input: OwnedFd,
+    executable: &Path,
+    expected_sha256: &str,
+) -> Result<(), EngineError> {
+    entry::run_with_codex(runtime_dir, input, executable, expected_sha256)
+        .await
+        .map(|_| ())
+}
+
+pub async fn run_native_auth_custodian_with_claude(
+    runtime_dir: &Path,
+    input: OwnedFd,
+    executable: &Path,
+    expected_sha256: &str,
+) -> Result<(), EngineError> {
+    entry::run_with_claude(runtime_dir, input, executable, expected_sha256)
+        .await
+        .map(|_| ())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ExecutableIdentity {
     device: u64,
@@ -122,8 +144,87 @@ impl RegisteredNativeAuthHost {
         }
         Ok(&self.path)
     }
+
+    pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
+        self.verified_path()?;
+        Ok(self.digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
 }
 
+fn custodian_command(
+    executable: &Path,
+    runtime_dir: &Path,
+    codex: Option<&RegisteredNativeAuthHost>,
+) -> Result<std::process::Command, EngineError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(executable);
+    command.arg("native-auth-custodian").arg(runtime_dir);
+    if let Some(codex) = codex {
+        command
+            .arg("--codex-executable")
+            .arg(codex.verified_path()?)
+            .arg("--codex-sha256")
+            .arg(codex.verified_sha256()?);
+    }
+    command
+        .env_clear()
+        .current_dir(runtime_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    Ok(command)
+}
+
+pub(in crate::engine) async fn dispatch(
+    work: crate::storage::NativeAuthWork,
+    host: crate::engine::owner::transport::NativeAuthDispatchHost,
+) -> Result<(), EngineError> {
+    let executable = host.registered_executable()?;
+    let harness = work.fact().binding.connection.harness.as_str();
+    let codex = if harness == "codex" { host.registered_codex_executable()? } else { None };
+    let claude = if harness == "claude" { host.registered_claude_executable()? } else { None };
+    let runtime_dir = host.owner_runtime_dir()?;
+    let launch = host.prepare_native_auth_custody(work).await?;
+    let mut command = custodian_command(executable.verified_path()?, &runtime_dir, codex.as_deref())?;
+    if let Some(claude) = claude.as_ref() {
+        command.arg("--claude-executable").arg(claude.verified_path()?)
+            .arg("--claude-sha256").arg(claude.verified_sha256()?);
+    }
+    let mut child = command.spawn().map_err(io_error)?;
+    let Some(input) = child.stdin.take() else {
+        custody::cleanup_direct_child(
+            &mut child,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .map_err(io_error)?;
+        return Err(EngineError("native_auth_host_input_unavailable".into()));
+    };
+    if let Err((error, mut child)) = host.retain_child(child) {
+        custody::cleanup_direct_child(
+            &mut child,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .map_err(io_error)?;
+        return Err(error);
+    }
+    launch.write_bootstrap(input)?;
+    loop {
+        if let Some(status) = host.try_wait_child()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(EngineError("native_auth_host_child_failed".into()))
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+pub(in crate::engine) mod claude_auth;
+
+pub(in crate::engine) mod codex_auth;
 pub(super) mod custody;
 #[cfg(test)]
 mod custody_session_tests;
@@ -134,3 +235,5 @@ pub(in crate::engine) mod entry;
 mod entry_tests;
 #[cfg(test)]
 mod executable_tests;
+#[cfg(test)]
+mod hash_backend_tests;

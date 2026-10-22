@@ -187,6 +187,12 @@ export class HostChannel {
 }
 
 export async function runExecutable(argv: string[]): Promise<void> {
+  if (argv[0] === "--private-key-write") {
+    if (argv.length !== 2) throw new Error("rcli_private_key_profile_rejected");
+    const { runPrivateProviderKeyAction } = await import("./host.keys.ts");
+    await runPrivateProviderKeyAction(argv[1], process.stdin, process.stdout, AbortSignal.timeout(5000));
+    return;
+  }
   const launch = parseLaunch(argv);
   await within(admitLaunch(launch, process.env.HOME), 5000);
   const [{ Config }, { createAgentClient }, { buildPermissionContext }, { assembleClosedController }] = await within(Promise.all([

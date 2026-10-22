@@ -13,6 +13,10 @@ export function cancelNativeAuth(ticket: string): Promise<NativeAuthView> {
   return invoke<NativeAuthView>("desktop_cancel_native_auth", { ticket });
 }
 
+export function submitClaudeAuthCode(ticket: string, code: string): Promise<void> {
+  return invoke<void>("desktop_submit_claude_auth_code", { ticket, code });
+}
+
 export function logoutNativeAuth(ticket: string): Promise<NativeAuthView> {
   return invoke<NativeAuthView>("desktop_logout_native_auth", { ticket });
 }
@@ -94,6 +98,7 @@ export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
   const messages: Record<string, string> = {
+    account_setup_unavailable: "Native account setup is not connected in this build. The provider and label remain retained; no account was created or signed in.",
     settings_source_conflict: "Global or project settings changed outside this editor. The engine host must reconcile the configured sources; then refresh and review retained values.",
     settings_source_replaced: "The configured settings file was replaced. Reconnect after the engine host verifies its source grant.",
     settings_publication_pending: "The engine has an unresolved durable settings publication. Reconcile the original intent after the engine recovers it.",
@@ -254,6 +259,72 @@ export interface AccountPool {
   roles: string[];
   fallback_allowed: boolean;
   provider_quota_policy?: "bounded_attempt" | "strict";
+}
+
+export interface ManagedAccountPlan {
+  provider: "codex" | "claude";
+  label: string;
+  connection: ModelConnection;
+  pool: AccountPool;
+}
+
+export function prepareManagedAccount(provider: "codex" | "claude", label: string): Promise<ManagedAccountPlan> {
+  return invoke<ManagedAccountPlan>("desktop_prepare_managed_account", { provider, label });
+}
+
+export interface ConfiguredAccountPlan extends Omit<ManagedAccountPlan, "provider"> {
+  provider: "api_key" | "local";
+}
+
+export type ProducerCapability = "available" | { unavailable: { code: string } };
+
+export interface AccountAuthCapabilitiesReply {
+  request_id: string;
+  database_instance: string;
+  engine_epoch: string;
+  config_id: string;
+  source_hash: string;
+  connection: ModelConnection;
+  managed: { method: NativeAuthMethod; producer: ProducerCapability }[];
+  configured: ProducerCapability;
+}
+
+export interface AccountProfileReceipt {
+  config_id: string;
+  source_hash: string;
+  connection: ModelConnection;
+  profile_ref: string;
+  custody_id: string;
+  profile_config_sha256: string;
+  profile_generation: number;
+}
+
+export interface AccountProfileView {
+  ticket: string;
+  generation: string;
+  reply: {
+    request_id: string;
+    database_instance: string;
+    engine_epoch: string;
+    outcome: "not_recorded" | { configured_only: { receipt: AccountProfileReceipt; historical_replay: boolean } };
+  };
+  pending: boolean;
+}
+
+export function prepareConfiguredAccount(provider: "api_key" | "local", label: string, endpoint: string, model: string): Promise<ConfiguredAccountPlan> {
+  return invoke<ConfiguredAccountPlan>("desktop_prepare_configured_account", { provider, label, endpoint, model });
+}
+
+export function accountAuthCapabilities(ticket: string): Promise<AccountAuthCapabilitiesReply> {
+  return invoke<AccountAuthCapabilitiesReply>("desktop_account_auth_capabilities", { ticket });
+}
+
+export function configureAccountProfile(ticket: string, secret: string | undefined, generation: number): Promise<AccountProfileView> {
+  return invoke<AccountProfileView>("desktop_configure_account_profile", { ticket, secret, generation });
+}
+
+export function readAccountProfile(): Promise<AccountProfileView> {
+  return invoke<AccountProfileView>("desktop_read_account_profile");
 }
 
 export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };

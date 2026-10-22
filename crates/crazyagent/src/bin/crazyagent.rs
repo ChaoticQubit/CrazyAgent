@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
-crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings]\n\
+crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
@@ -94,9 +94,28 @@ fn main() -> ExitCode {
 }
 
 fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
-    if args.len() != 2 {
-        return Err("usage: crazyagent native-auth-custodian RUNTIME_DIR".into());
-    }
+    let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
+    let codex = match args.len() {
+        2 => None,
+        6 if (args[2] == "--codex-executable" && args[4] == "--codex-sha256")
+            || (args[2] == "--claude-executable" && args[4] == "--claude-sha256") => {
+            let executable = Path::new(&args[3]);
+            if !executable.is_absolute() {
+                return Err("native_auth_host_executable_unsafe".into());
+            }
+            let digest = args[5]
+                .to_str()
+                .filter(|value| {
+                    value.len() == 64
+                        && value.bytes().all(|byte| {
+                            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                        })
+                })
+                .ok_or("native_auth_host_executable_digest_invalid")?;
+            Some((executable, digest))
+        }
+        _ => return Err(usage.into()),
+    };
     let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
         .map(std::fs::File::from)
         .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
@@ -113,24 +132,84 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
         .build()
         .map_err(|error| error.to_string())?;
     runtime
-        .block_on(crazyagent::engine::run_native_auth_custodian(
-            Path::new(&args[1]),
-            input.into(),
-        ))
+        .block_on(async {
+            if let Some((executable, digest)) = codex {
+                if args[2] == "--claude-executable" {
+                    return crazyagent::engine::run_native_auth_custodian_with_claude(Path::new(&args[1]), input.into(), executable, digest).await;
+                }
+                crazyagent::engine::run_native_auth_custodian_with_codex(
+                    Path::new(&args[1]),
+                    input.into(),
+                    executable,
+                    digest,
+                )
+                .await
+            } else {
+                crazyagent::engine::run_native_auth_custodian(Path::new(&args[1]), input.into())
+                    .await
+            }
+        })
         .map_err(|error| error.to_string())
 }
 
-fn run_engine(args: &[OsString]) -> Result<(), String> {
-    let writable = args.len() == 6 && args[5] == "--writable-settings";
-    if args.len() != 5 && !writable {
-        return Err(
-            "usage: crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings]".into(),
-        );
+fn engine_options(args: &[OsString]) -> Result<(bool, Option<&Path>), String> {
+    let usage = "usage: crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH]";
+    if !(5..=8).contains(&args.len()) {
+        return Err(usage.into());
     }
+    let mut writable = false;
+    let mut codex = None;
+    let mut index = 5;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--writable-settings") if !writable => {
+                writable = true;
+                index += 1;
+            }
+            Some("--codex-executable") if codex.is_none() => {
+                let executable = args.get(index + 1).ok_or(usage)?;
+                let executable = Path::new(executable);
+                if !executable.is_absolute() {
+                    return Err("native_auth_host_executable_unsafe".into());
+                }
+                codex = Some(executable);
+                index += 2;
+            }
+            _ => return Err(usage.into()),
+        }
+        assert!(index <= args.len());
+    }
+    Ok((writable, codex))
+}
+
+fn engine_options_with_claude(args: &[OsString]) -> Result<(bool, Option<std::path::PathBuf>, Option<std::path::PathBuf>), String> {
+    if !(5..=10).contains(&args.len()) { return Err(USAGE.into()); }
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut claude = None;
+    let mut index = 0;
+    while index < args.len() {
+        if index >= 5 && args[index] == "--claude-executable" {
+            if claude.is_some() { return Err(USAGE.into()); }
+            let path = Path::new(args.get(index + 1).ok_or(USAGE)?);
+            if !path.is_absolute() { return Err("native_auth_host_executable_unsafe".into()); }
+            claude = Some(path.to_path_buf());
+            index += 2;
+        } else {
+            filtered.push(args[index].clone());
+            index += 1;
+        }
+        assert!(index <= args.len());
+    }
+    let (writable, codex) = engine_options(&filtered)?;
+    Ok((writable, codex.map(Path::to_path_buf), claude))
+}
+
+fn run_engine(args: &[OsString]) -> Result<(), String> {
+    let (writable, codex, claude) = engine_options_with_claude(args)?;
     let runtime_dir = Path::new(&args[1]);
     let socket_name = args[4].to_str().ok_or("invalid socket name")?;
     crazyagent::protocol::SessionId::new(socket_name).map_err(|e| e.to_string())?;
-    assert!((5..=6).contains(&args.len()));
+    assert!((5..=10).contains(&args.len()));
     assert!(!socket_name.contains('/'));
     let config = if writable {
         None
@@ -181,9 +260,25 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             }
             .map_err(|e| e.to_string())?;
             tokio::task::yield_now().await;
-            let ready = service
-                .ensure_ready(&stopped)
+            let ready = std::env::current_exe()
                 .map_err(|e| e.to_string())
+                .and_then(|executable| {
+                    service
+                        .register_native_auth_host(&executable)
+                        .map_err(|e| e.to_string())
+                })
+                .and_then(|()| {
+                    if let Some(executable) = codex.as_deref() {
+                        service
+                            .register_codex_executable(executable)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    if let Some(executable) = claude.as_deref() {
+                        service.register_claude_executable(executable).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })
+                .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| {
                     let mut output = io::stdout().lock();
                     writeln!(output, "ready")
@@ -305,4 +400,50 @@ fn write_report(source: &str, profile: &str) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer_pretty(&mut stdout, &report).map_err(|e| e.to_string())?;
     writeln!(stdout).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine_arguments() -> Vec<OsString> {
+        ["engine", "/private/tmp/runtime", "/global.toml", "/project.toml", "e.sock"]
+            .into_iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn engine_options_preserve_writable_settings_with_codex_in_both_orders() {
+        for options in [
+            vec!["--writable-settings", "--codex-executable", "/official/codex"],
+            vec!["--codex-executable", "/official/codex", "--writable-settings"],
+        ] {
+            let mut arguments = engine_arguments();
+            arguments.extend(options.into_iter().map(OsString::from));
+            let (writable, executable) = engine_options(&arguments).unwrap();
+            assert!(writable);
+            assert_eq!(executable, Some(Path::new("/official/codex")));
+        }
+    }
+
+    #[test]
+    fn engine_options_preserve_existing_no_codex_shapes() {
+        let mut arguments = engine_arguments();
+        assert_eq!(engine_options(&arguments).unwrap(), (false, None));
+        arguments.push("--writable-settings".into());
+        assert_eq!(engine_options(&arguments).unwrap(), (true, None));
+    }
+
+    #[test]
+    fn engine_options_reject_duplicate_unknown_and_missing_options() {
+        for options in [
+            vec!["--writable-settings", "--writable-settings"],
+            vec!["--codex-executable"],
+            vec!["--unknown"],
+            vec!["--codex-executable", "/official/codex", "--codex-executable"],
+        ] {
+            let mut arguments = engine_arguments();
+            arguments.extend(options.into_iter().map(OsString::from));
+            assert!(engine_options(&arguments).is_err());
+        }
+    }
 }

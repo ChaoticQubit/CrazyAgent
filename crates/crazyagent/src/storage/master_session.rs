@@ -1,26 +1,167 @@
 use super::{
-    check_owner_admission, owner_lookup, owner_record, owner_revision, persist_event_ids,
-    random_id, settings,
+    check_owner_admission, check_owner_host, native_profile_connection, owner_lookup, owner_record,
+    owner_revision, persist_event_ids, random_id, settings,
 };
-use crate::config::EffectiveConfig;
+use crate::config::{EffectiveConfig, ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::conversation::ConversationMutation;
-use crate::engine::EngineError;
+use crate::coordination::Role;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::{EngineError, NativeProfileCustody};
 use crate::engine::owner::{
-    Admission, OwnerApplied, OwnerData, OwnerMutation, OwnerOperation, OwnerProvenance, OwnerRead,
-    OwnerReadReply, OwnerRequest, OwnerResult, is_hex_id,
+    Admission, HostStamp, NativeAuthAction, NativeAuthPhase, NativeAuthStart,
+    OwnerApplied, OwnerData, OwnerMutation, OwnerOperation, OwnerProvenance, OwnerRead,
+    OwnerReadReply, OwnerRequest, OwnerResult, PreparedNativeProfile, NativeProfileBinding, is_hex_id,
 };
+use crate::engine::owner::account_profile::{AccountProfileReceipt, AccountProfileRequest};
 use crate::master_session::{
-    METADATA_BYTES_MAX, MasterCursor, MasterOwnerAction, MasterReason, MasterSessionPhase,
-    MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX,
+    METADATA_BYTES_MAX, MasterBackend, MasterBootstrapAuth, RcliConfiguredProfileProof, RcliProfileRegistration,
+    RcliProfileRegistrationMetadata, MasterCursor, MasterOwnerAction, MasterReason, MasterReply,
+    MasterRuntimeView, MasterSessionPhase, MasterSessionView, MasterTurnPage, MasterTurnPhase,
+    MasterTurnView, PAGE_BYTES_MAX,
     SESSIONS_MAX, TURNS_MAX, error, validate_action, validate_page, validate_selection,
 };
 use crate::protocol::{
-    ClientId, ConfigId, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, SessionId, TaskId,
+    ClientId, ConfigId, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, SessionId,
+    StoredProject, TaskId,
 };
+use crate::model_gateway::{
+    self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest, Effects, FailureKind,
+    ConfiguredInitialConversationAuth, InitialConversationAuth,
+};
+use crate::worktrees::{LeaseState, WorktreeLease};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) enum MasterRuntimeCommand {
+    RegisterRcliProfile { host: HostStamp, project_id: ProjectId, session_id: SessionId, configured_home: PathBuf },
+    Route { host: HostStamp, project_id: ProjectId, session_id: SessionId, turn_id: RequestId },
+    Prepare { host: HostStamp, project_id: ProjectId, session_id: SessionId, turn_id: RequestId },
+    Inspect { host: HostStamp, project_id: ProjectId, session_id: SessionId, turn_id: RequestId },
+    AcquireProfile { host: HostStamp, project_id: ProjectId, session_id: SessionId, turn_id: RequestId, attempt_id: RequestId },
+    Observe { host: HostStamp, project_id: ProjectId, session_id: SessionId, turn_id: RequestId, attempt_id: RequestId, observation: MasterRuntimeObservation },
+}
+
+pub(crate) enum MasterRuntimeObservation {
+    Running { runtime: MasterRuntimeView },
+    Response { reply: MasterReply },
+    Failed { reason: MasterReason },
+    Cancelled,
+    Disconnected,
+}
+
+pub(crate) struct PreparedMasterTurn {
+    pub(crate) text: String,
+    pub(crate) session: MasterSessionView,
+    pub(crate) attempt: Attempt,
+    pub(crate) profile: PreparedNativeProfile,
+    pub(crate) repository: PathBuf,
+    pub(crate) cwd: PathBuf,
+    pub(crate) worktree_lease: RequestId,
+    pub(crate) lease: WorktreeLease,
+}
+
+pub(crate) enum MasterRuntimeResult {
+    ConfiguredProfile(Box<RcliConfiguredProfileProof>),
+    Prepared(Box<PreparedMasterTurn>),
+    Turn(Box<MasterTurnView>),
+    Profile(Box<NativeProfileUse>),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct MasterStopBinding {
+    db_instance: String,
+    project_id: ProjectId,
+    session_id: SessionId,
+    turn_id: RequestId,
+    input_cursor: Cursor,
+    provenance: OwnerProvenance,
+}
+
+impl MasterStopBinding {
+    pub(crate) fn from_fresh_submit(
+        host: &HostStamp,
+        request: &OwnerRequest,
+        applied: &OwnerApplied,
+    ) -> Result<Self, EngineError> {
+        let hash = request.mutation_hash()?;
+        let OwnerOperation::Apply {
+            mutation:
+                OwnerMutation::ProjectMaster {
+                    action:
+                        MasterOwnerAction::Submit {
+                            project_id,
+                            session_id,
+                            ..
+                        },
+                },
+        } = &request.operation
+        else {
+            return Err(error("master_stop_binding_mismatch"));
+        };
+        let provenance = &applied.provenance;
+        if applied.historical_replay
+            || applied.result != OwnerResult::Applied
+            || !is_hex_id(&host.db_instance)
+            || !is_hex_id(&host.engine_epoch)
+            || !is_hex_id(&provenance.owner_id)
+            || provenance.origin != "native_owner"
+            || provenance.engine_epoch != host.engine_epoch
+            || provenance.operation_id != request.request_id
+            || provenance.request_hash != hash
+            || provenance.admitted_epoch < 1
+            || provenance.resulting_epoch != provenance.admitted_epoch
+            || provenance.revision_before != request.expected_revision
+            || provenance.revision_before.value().checked_add(1)
+                != Some(provenance.revision_after.value())
+            || applied.current_revision != provenance.revision_after
+            || provenance.event_cursor.as_ref() != Some(&provenance.revision_after)
+        {
+            return Err(error("master_stop_binding_mismatch"));
+        }
+        Ok(Self {
+            db_instance: host.db_instance.clone(),
+            project_id: project_id.clone(),
+            session_id: session_id.clone(),
+            turn_id: request.request_id.clone(),
+            input_cursor: provenance.revision_after.clone(),
+            provenance: provenance.clone(),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Preparation {
+    attempt_id: RequestId,
+    auth: MasterBootstrapAuth,
+    worktree_lease: RequestId,
+    lease: WorktreeLease,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredRegistration {
+    proof: RcliConfiguredProfileProof,
+    session_id: SessionId,
+    project_id: ProjectId,
+    bootstrap_task_id: TaskId,
+    owner: OwnerProvenance,
+    global_source: PathBuf,
+    project_source: PathBuf,
+    database_path: PathBuf,
+    database_identity: (u64, u64),
+}
+
+const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    session TEXT NOT NULL UNIQUE CHECK(length(session) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
+)";
 
 const SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
@@ -32,7 +173,7 @@ const SESSIONS: &str = "CREATE TABLE master_sessions (
 )";
 const CURRENT: &str = "CREATE UNIQUE INDEX master_current_project ON master_sessions(project) WHERE phase='configured'";
 const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(project,created DESC)";
-const TURNS: &str = "CREATE TABLE master_turns (
+const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
     id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
@@ -42,10 +183,28 @@ const TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
-const OUTSTANDING: &str =
+const LEGACY_OUTSTANDING: &str =
     "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase='queued'";
+const TURNS: &str = "CREATE TABLE master_turns (
+    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
+    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    input INTEGER NOT NULL UNIQUE CHECK(input > 0),
+    phase TEXT NOT NULL CHECK(phase IN ('queued','blocked','prepared','delivering','running','waiting_approval','succeeded','failed','cancelled','uncertain')),
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    PRIMARY KEY(session,ordinal),
+    UNIQUE(session,id)
+)";
+const OUTSTANDING: &str = "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain')";
+const PREPARATIONS: &str = "CREATE TABLE master_preparations (
+    session TEXT NOT NULL,
+    turn TEXT NOT NULL,
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    PRIMARY KEY(session,turn),
+    FOREIGN KEY(session,turn) REFERENCES master_turns(session,id)
+)";
 const SESSION_COLUMNS: &str = "CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,CASE WHEN length(CAST(project AS BLOB))<=128 THEN project END,created,version,CASE WHEN length(phase)<=10 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
-const TURN_COLUMNS: &str = "CASE WHEN length(CAST(session AS BLOB))<=128 THEN session END,ordinal,CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,input,CASE WHEN length(phase)<=10 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
+const TURN_COLUMNS: &str = "CASE WHEN length(CAST(session AS BLOB))<=128 THEN session END,ordinal,CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,input,CASE WHEN length(phase)<=16 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
@@ -55,12 +214,13 @@ pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
         ("master_latest_project", LATEST),
         ("master_turns", TURNS),
         ("master_outstanding", OUTSTANDING),
+        ("master_preparations", PREPARATIONS),
     ]
     .into_iter()
     .map(|(name, sql)| (name.to_owned(), sql.to_owned()))
     .collect();
     {
-        let mut statement = tx.prepare("SELECT CASE WHEN length(name)<=128 THEN name END,CASE WHEN length(CAST(sql AS BLOB))<=4096 THEN sql END FROM sqlite_schema WHERE sql IS NOT NULL AND (name GLOB 'master_*' OR tbl_name IN ('master_sessions','master_turns')) ORDER BY name LIMIT 6").map_err(error)?;
+        let mut statement = tx.prepare("SELECT CASE WHEN length(name)<=128 THEN name END,CASE WHEN length(CAST(sql AS BLOB))<=4096 THEN sql END FROM sqlite_schema WHERE sql IS NOT NULL AND (name GLOB 'master_*' OR tbl_name IN ('master_sessions','master_turns','master_preparations')) ORDER BY name LIMIT 7").map_err(error)?;
         let actual = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -69,12 +229,32 @@ pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
             .collect::<Result<BTreeMap<_, _>, _>>()
             .map_err(error)?;
         if actual.is_empty() {
-            for sql in [SESSIONS, CURRENT, LATEST, TURNS, OUTSTANDING] {
+            for sql in [SESSIONS, CURRENT, LATEST, TURNS, OUTSTANDING, PREPARATIONS] {
                 tx.execute_batch(sql).map_err(error)?;
             }
         } else if actual != expected {
-            return Err(error("master_schema_conflict"));
+            let mut legacy = expected.clone();
+            legacy.remove("master_preparations");
+            legacy.insert("master_turns".into(), LEGACY_TURNS.into());
+            legacy.insert("master_outstanding".into(), LEGACY_OUTSTANDING.into());
+            if actual != legacy {
+                return Err(error("master_schema_conflict"));
+            }
+            tx.execute_batch("DROP INDEX master_outstanding; ALTER TABLE master_turns RENAME TO master_turns_legacy").map_err(error)?;
+            tx.execute_batch(TURNS).map_err(error)?;
+            tx.execute_batch("INSERT INTO master_turns SELECT session,ordinal,id,input,phase,body FROM master_turns_legacy; DROP TABLE master_turns_legacy").map_err(error)?;
+            tx.execute_batch(OUTSTANDING).map_err(error)?;
+            tx.execute_batch(PREPARATIONS).map_err(error)?;
         }
+    }
+    let schema: Option<String> = tx.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='configured_master_profiles'",
+        [], |row| row.get(0),
+    ).optional().map_err(error)?;
+    match schema {
+        Some(schema) if schema != CONFIGURED_PROFILES => return Err(error("master_configured_schema_conflict")),
+        Some(_) => {}
+        None => tx.execute_batch(CONFIGURED_PROFILES).map_err(error)?,
     }
     tx.commit().map_err(error)
 }
@@ -171,7 +351,7 @@ fn decode_session(
         return Err(error("master_open_provenance"));
     }
     let mut statement = tx
-        .prepare("SELECT CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END FROM master_turns WHERE session=?1 AND phase='queued' LIMIT 2")
+        .prepare("SELECT CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END FROM master_turns WHERE session=?1 AND phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain') LIMIT 2")
         .map_err(error)?;
     let mut rows = statement
         .query([session.session_id.as_str()])
@@ -191,7 +371,7 @@ fn decode_session(
     if let Some(id) = &session.current_turn {
         let turn = load_turn(tx, &session, id, revision)?
             .ok_or_else(|| error("master_current_turn_record"))?;
-        if turn.phase != MasterTurnPhase::Queued {
+        if !turn.phase.outstanding() {
             return Err(error("master_current_turn_record"));
         }
     }
@@ -241,11 +421,6 @@ fn decode_turn(
     let stored_phase: String = row.get(4).map_err(error)?;
     let body: String = row.get(5).map_err(error)?;
     let turn: MasterTurnView = serde_json::from_str(&body).map_err(error)?;
-    let expected_phase = match turn.phase {
-        MasterTurnPhase::Queued if turn.reason.is_none() => "queued",
-        MasterTurnPhase::Cancelled if turn.reason == Some(MasterReason::Cancelled) => "cancelled",
-        _ => return Err(error("master_runtime_state_unqualified")),
-    };
     if stored_session != session.session_id.as_str()
         || turn.session_id != session.session_id
         || turn.id.as_str() != id
@@ -256,10 +431,7 @@ fn decode_turn(
         || input > revision
         || input > session.version.value()
         || turn.input_cursor.value() != input
-        || expected_phase != stored_phase
-        || turn.attempt.is_some()
-        || turn.runtime.is_some()
-        || turn.reply.is_some()
+        || turn.phase.name() != stored_phase
     {
         return Err(error("master_turn_record"));
     }
@@ -296,6 +468,7 @@ fn decode_turn(
     if original.mutation_hash()? != provenance.request_hash {
         return Err(error("master_submit_provenance"));
     }
+    validate_runtime_record(tx, session, &turn)?;
     Ok(turn)
 }
 
@@ -332,16 +505,1486 @@ fn save_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(),
     Ok(())
 }
 
-fn cancel_turn(tx: &Transaction<'_>, mut turn: MasterTurnView) -> Result<(), EngineError> {
-    if turn.phase != MasterTurnPhase::Queued {
+fn cancel_turn(
+    tx: &Transaction<'_>,
+    mut turn: MasterTurnView,
+) -> Result<MasterTurnView, EngineError> {
+    if !turn.phase.outstanding() {
         return Err(error("master_turn_not_queued"));
+    }
+    let queued = turn.phase == MasterTurnPhase::Queued;
+    if queued {
+        assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+    } else {
+        complete_local(tx, &mut turn, MasterTurnPhase::Cancelled)?;
     }
     turn.phase = MasterTurnPhase::Cancelled;
     turn.reason = Some(MasterReason::Cancelled);
-    let changed = tx.execute("UPDATE master_turns SET phase='cancelled',body=?1 WHERE session=?2 AND id=?3 AND phase='queued'", params![encode(&turn)?, turn.session_id.as_str(), turn.id.as_str()]).map_err(error)?;
-    assert_eq!(changed, 1);
-    assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+    if queued {
+        let changed = tx.execute("UPDATE master_turns SET phase='cancelled',body=?1 WHERE session=?2 AND id=?3 AND phase='queued'", params![encode(&turn)?, turn.session_id.as_str(), turn.id.as_str()]).map_err(error)?;
+        assert_eq!(changed, 1);
+        assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+    } else {
+        save_turn(tx, &turn)?;
+    }
+    Ok(turn)
+}
+
+fn preparation(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Preparation, EngineError> {
+    let body: Option<String> = tx.query_row(
+        "SELECT CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM master_preparations WHERE session=?1 AND turn=?2",
+        params![session.session_id.as_str(), turn.id.as_str()], |row| row.get(0),
+    ).optional().map_err(error)?;
+    let record: Preparation = serde_json::from_str(
+        &body.ok_or_else(|| error("master_preparation_missing"))?,
+    ).map_err(error)?;
+    let attempt = turn.attempt.as_ref().ok_or_else(|| error("master_attempt_missing"))?;
+    if record.attempt_id != attempt.request.id
+        || record.auth.binding().connection != attempt.connection
+        || record.auth.binding().config_id != session.config_id
+        || record.auth.binding().source_hash != session.source_hash
+        || record.lease.project_id != session.project_id
+        || record.lease.task_id != session.bootstrap_task_id
+        || record.lease.owner_session != session.session_id
+        || record.lease.state != LeaseState::Ready
+        || record.lease.native_descendant.is_some()
+    {
+        return Err(error("master_preparation_record"));
+    }
+    Ok(record)
+}
+
+fn validate_runtime(runtime: &MasterRuntimeView) -> Result<(), EngineError> {
+    if !is_hex_id(&runtime.artifact_sha256)
+        || runtime.native_session_id.as_ref().is_some_and(|id| {
+            id.is_empty() || id.len() > 128 || id.chars().any(char::is_control)
+        })
+    {
+        return Err(error("master_runtime_provenance"));
+    }
     Ok(())
+}
+
+fn validate_runtime_record(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<(), EngineError> {
+    let valid = match turn.phase {
+        MasterTurnPhase::Queued => turn.reason.is_none() && turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none(),
+        MasterTurnPhase::Blocked => turn.reason.is_some() && turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none(),
+        MasterTurnPhase::Prepared | MasterTurnPhase::Delivering => turn.reason.is_none() && turn.attempt.is_some() && turn.runtime.is_none() && turn.reply.is_none(),
+        MasterTurnPhase::Running => turn.reason.is_none() && turn.attempt.is_some() && turn.runtime.is_some() && turn.reply.is_none(),
+        MasterTurnPhase::Succeeded => turn.reason.is_none() && turn.attempt.is_some() && turn.runtime.is_some() && turn.reply.is_some(),
+        MasterTurnPhase::Failed => turn.reason.is_some() && turn.attempt.is_some() && turn.reply.is_none(),
+        MasterTurnPhase::Cancelled => turn.reason == Some(MasterReason::Cancelled) && turn.reply.is_none(),
+        MasterTurnPhase::Uncertain => turn.reason == Some(MasterReason::CaptureIncomplete) && turn.attempt.is_some() && turn.reply.is_none(),
+        MasterTurnPhase::WaitingApproval => false,
+    };
+    if !valid {
+        return Err(error("master_runtime_state_unqualified"));
+    }
+    if let Some(attempt) = &turn.attempt {
+        if model_gateway::read_attempt(tx, &attempt.request.id)?.as_ref() != Some(attempt)
+            || attempt.config_id != session.config_id
+            || attempt.request.project_id != session.project_id
+            || attempt.request.task_id != session.bootstrap_task_id
+            || attempt.request.role != Role::ProjectLeader
+            || attempt.request.pool_ref != session.selection.pool_ref
+            || attempt.request.target_profile_ref != session.selection.target_profile_ref
+            || attempt.request.route != session.selection.route
+            || attempt.request.previous_attempt.is_some()
+            || (matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running) && attempt.completion.is_some())
+            || (matches!(turn.phase, MasterTurnPhase::Succeeded | MasterTurnPhase::Failed | MasterTurnPhase::Cancelled | MasterTurnPhase::Uncertain) && attempt.completion.is_none())
+        {
+            return Err(error("master_attempt_provenance"));
+        }
+        preparation(tx, session, turn)?;
+        if let Some(runtime) = &turn.runtime {
+            validate_runtime(runtime)?;
+        }
+        if let Some(reply) = &turn.reply {
+            let runtime = turn.runtime.as_ref().ok_or_else(|| error("master_runtime_missing"))?;
+            if reply.text.is_empty() || reply.text.len() > 8192
+                || reply.text.contains('\0')
+                || reply.provenance.attempt_id != attempt.request.id
+                || reply.provenance.runtime_ref != runtime.runtime_ref
+                || reply.provenance.capture_sequence == 0
+                || attempt.completion.as_ref().is_none_or(|completion| completion.outcome != AttemptOutcome::Succeeded || completion.effects != Effects::Committed)
+            {
+                return Err(error("master_reply_provenance"));
+            }
+        }
+    } else if turn.runtime.is_some() || turn.reply.is_some() {
+        return Err(error("master_runtime_state_unqualified"));
+    }
+    Ok(())
+}
+
+fn now_ms() -> Result<u64, EngineError> {
+    u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(error)?.as_millis())
+        .map_err(error)
+}
+
+fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineError> {
+    let changed = tx.execute(
+        "UPDATE master_turns SET phase=?1,body=?2 WHERE session=?3 AND id=?4",
+        params![turn.phase.name(), encode(turn)?, turn.session_id.as_str(), turn.id.as_str()],
+    ).map_err(error)?;
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
+fn persist_runtime(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &mut MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<(), EngineError> {
+    let next = owner_revision(tx)?.checked_add(1).ok_or_else(|| error("master_integer_bounds"))?;
+    signed(next)?;
+    if !turn.phase.outstanding() && session.current_turn.as_ref() == Some(&turn.id) {
+        session.current_turn = None;
+    }
+    session.version = Cursor::new(next);
+    save_turn(tx, turn)?;
+    save_session(tx, session)?;
+    persist_event_ids(tx, config, &turn.id, &ClientId::new("master-runtime").map_err(error)?, next)?;
+    assert!(!tx.is_autocommit());
+    Ok(())
+}
+
+fn complete_local(
+    tx: &Transaction<'_>,
+    turn: &mut MasterTurnView,
+    terminal: MasterTurnPhase,
+) -> Result<(), EngineError> {
+    let Some(attempt) = &turn.attempt else {
+        return Ok(());
+    };
+    if attempt.completion.is_some() {
+        return Ok(());
+    }
+    let completion = AttemptCompletion {
+        outcome: AttemptOutcome::Failed(FailureKind::Unknown),
+        effects: if turn.phase == MasterTurnPhase::Prepared && terminal != MasterTurnPhase::Uncertain {
+            Effects::None
+        } else {
+            Effects::Uncertain
+        },
+        finished_at_ms: now_ms()?.max(attempt.selected_at_ms),
+        retry_at_ms: None,
+    };
+    model_gateway::finish_attempt_without_observation(tx, &attempt.request.id, &completion)?;
+    turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
+    assert!(turn.attempt.as_ref().is_some_and(|attempt| attempt.completion.is_some()));
+    Ok(())
+}
+
+fn load_runtime_turn(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    project: &ProjectId,
+    session_id: &SessionId,
+    turn_id: &RequestId,
+) -> Result<(MasterSessionView, MasterTurnView), EngineError> {
+    check_owner_host(tx, host)?;
+    let revision = owner_revision(tx)?;
+    let session = load_session(tx, session_id, revision)?
+        .ok_or_else(|| error("master_session_missing"))?;
+    if &session.project_id != project {
+        return Err(error("master_session_scope_conflict"));
+    }
+    let turn = load_turn(tx, &session, turn_id, revision)?
+        .ok_or_else(|| error("master_turn_missing"))?;
+    Ok((session, turn))
+}
+
+pub(super) fn settle_stopped_commit(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    binding: &MasterStopBinding,
+) -> Result<MasterTurnView, EngineError> {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let provenance = &binding.provenance;
+    if binding.db_instance != host.db_instance
+        || provenance.origin != "native_owner"
+        || provenance.engine_epoch != host.engine_epoch
+        || provenance.operation_id != binding.turn_id
+        || provenance.revision_after != binding.input_cursor
+        || provenance.event_cursor.as_ref() != Some(&binding.input_cursor)
+        || provenance.revision_before.value().checked_add(1) != Some(binding.input_cursor.value())
+        || provenance.admitted_epoch < 1
+        || provenance.resulting_epoch != provenance.admitted_epoch
+    {
+        return Err(error("master_stop_binding_mismatch"));
+    }
+    let (stored, result) = owner_lookup(
+        &tx,
+        "native_owner",
+        &provenance.owner_id,
+        &provenance.operation_id,
+        Some(&provenance.request_hash),
+    )?
+    .ok_or_else(|| error("master_stop_binding_mismatch"))?;
+    if stored != *provenance
+        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
+    {
+        return Err(error("master_stop_binding_mismatch"));
+    }
+    let (mut session, mut turn) = load_runtime_turn(
+        &tx,
+        host,
+        &binding.project_id,
+        &binding.session_id,
+        &binding.turn_id,
+    )?;
+    if turn.input_cursor != binding.input_cursor {
+        return Err(error("master_stop_binding_mismatch"));
+    }
+    if turn.phase.outstanding() && session.current_turn.as_ref() != Some(&turn.id) {
+        return Err(error("master_turn_not_current"));
+    }
+    match turn.phase {
+        MasterTurnPhase::Queued | MasterTurnPhase::Prepared => {
+            turn = cancel_turn(&tx, turn)?;
+        }
+        MasterTurnPhase::Delivering | MasterTurnPhase::Running => {
+            complete_local(&tx, &mut turn, MasterTurnPhase::Uncertain)?;
+            turn.phase = MasterTurnPhase::Uncertain;
+            turn.reason = Some(MasterReason::CaptureIncomplete);
+        }
+        MasterTurnPhase::Blocked
+        | MasterTurnPhase::Succeeded
+        | MasterTurnPhase::Failed
+        | MasterTurnPhase::Cancelled
+        | MasterTurnPhase::Uncertain => {
+            tx.commit().map_err(error)?;
+            return Ok(turn);
+        }
+        MasterTurnPhase::WaitingApproval => {
+            return Err(error("master_runtime_state_unqualified"));
+        }
+    }
+    persist_runtime(&tx, config, &mut session, &turn)?;
+    tx.commit().map_err(error)?;
+    Ok(turn)
+}
+
+fn current_scope(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<(), EngineError> {
+    settings::ensure_clear(tx)?;
+    check_owner_admission(tx, &Admission {
+        db_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(),
+        owner_id: session.owner.owner_id.clone(),
+        owner_epoch: session.owner.resulting_epoch,
+    })?;
+    if session.owner.engine_epoch != host.engine_epoch
+        || session.config_id != config.id
+        || session.source_hash != settings::verified_source_hash(config, sources)?
+    {
+        return Err(error("master_source_conflict"));
+    }
+    validate_selection(config, &session.project_id, &session.selection)?;
+    if turn.phase.outstanding()
+        && (session.phase != MasterSessionPhase::Configured || session.current_turn.as_ref() != Some(&turn.id))
+    {
+        return Err(error("master_turn_not_current"));
+    }
+    Ok(())
+}
+
+fn configured_connection<'a>(
+    config: &'a EffectiveConfig,
+    session: &MasterSessionView,
+) -> Result<&'a ModelConnection, EngineError> {
+    validate_selection(config, &session.project_id, &session.selection)?;
+    if session.selection.backend != MasterBackend::Rcli {
+        return Err(error("master_runtime_backend_unsupported"));
+    }
+    let catalog = config.settings.model_access.as_ref().ok_or_else(|| error("master_pool_missing"))?;
+    let pool = catalog.pools.iter().find(|pool| pool.id == session.selection.pool_ref)
+        .ok_or_else(|| error("master_pool_missing"))?;
+    let mut candidates = catalog.connections.iter().filter(|connection| {
+        pool.members.contains(&connection.id)
+            && connection.account_ref == session.selection.route.account_ref
+            && connection.harness.as_str() == "rcli"
+            && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+            && matches!(connection.auth, ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {})
+    });
+    let connection = candidates.next().ok_or_else(|| error("rcli_profile_configuration_required"))?;
+    if candidates.next().is_some() {
+        return Err(error("master_rcli_connection_ambiguous"));
+    }
+    Ok(connection)
+}
+
+fn registration(
+    tx: &Transaction<'_>,
+    session: &SessionId,
+) -> Result<Option<ConfiguredRegistration>, EngineError> {
+    let row: Option<(String, String)> = tx.query_row(
+        "SELECT id,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM configured_master_profiles WHERE session=?1",
+        [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(error)?;
+    row.map(|(id, body)| {
+        let record: ConfiguredRegistration = serde_json::from_str(&body).map_err(error)?;
+        if record.session_id != *session || record.proof.registration_id.as_str() != id {
+            return Err(error("master_configured_receipt_conflict"));
+        }
+        Ok(record)
+    }).transpose()
+}
+
+fn validate_registration(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    record: &ConfiguredRegistration,
+) -> Result<(), EngineError> {
+    let proof = &record.proof;
+    let host = HostStamp { db_instance: proof.database_instance.clone(), engine_epoch: proof.engine_epoch.clone() };
+    check_owner_host(tx, &host)?;
+    check_owner_admission(tx, &Admission {
+        db_instance: host.db_instance.clone(), engine_epoch: host.engine_epoch.clone(),
+        owner_id: session.owner.owner_id.clone(), owner_epoch: session.owner.resulting_epoch,
+    })?;
+    settings::ensure_clear(tx)?;
+    let committed = load_session(tx, &record.session_id, owner_revision(tx)?)?
+        .ok_or_else(|| error("master_session_missing"))?;
+    if committed != *session || session.phase != MasterSessionPhase::Configured
+        || record.project_id != session.project_id || record.bootstrap_task_id != session.bootstrap_task_id
+        || record.owner != session.owner || session.owner.engine_epoch != host.engine_epoch
+        || proof.config_id != session.config_id || proof.source_hash != session.source_hash
+        || proof.profile_ref != session.selection.target_profile_ref
+        || session.selection.backend != MasterBackend::Rcli
+        || proof.at_revision.value() < session.owner.revision_after.value()
+        || proof.at_revision.value() > owner_revision(tx)? || proof.generation == 0
+        || !is_hex_id(&proof.profile_config_sha256)
+        || tx.path().map(Path::new) != Some(record.database_path.as_path())
+    {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
+    if record.database_identity != (metadata.dev(), metadata.ino()) {
+        return Err(error("master_configured_database_changed"));
+    }
+    let config = crate::config::resolve_config(&record.global_source, &record.project_source)
+        .map_err(|failure| error(failure.0))?;
+    if config.id != proof.config_id || configured_connection(&config, session)? != &proof.connection
+        || settings::verified_source_hash_at(&config, &record.global_source, &record.project_source)? != proof.source_hash
+    {
+        return Err(error("master_configured_receipt_stale"));
+    }
+    let mut custody = NativeProfileCustody::capture(&record.database_path, &metadata)?;
+    let physical = custody.configured_rcli_profile(&host, &proof.connection, &proof.profile_ref)?;
+    if physical.profile_ref != proof.profile_ref || physical.custody_id != proof.custody_id
+        || physical.profile_config_sha256 != proof.profile_config_sha256
+        || physical.profile_generation != proof.generation
+    {
+        return Err(error("master_configured_receipt_stale"));
+    }
+    Ok(())
+}
+
+fn configured_auth(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+) -> Result<RcliConfiguredProfileProof, EngineError> {
+    let record = registration(tx, &session.session_id)?
+        .ok_or_else(|| error("rcli_profile_configuration_required"))?;
+    validate_registration(tx, session, &record)?;
+    if record.proof.database_instance != host.db_instance || record.proof.engine_epoch != host.engine_epoch
+        || record.proof.config_id != config.id
+        || configured_connection(config, session)? != &record.proof.connection
+        || settings::verified_source_hash_at(config, &record.global_source, &record.project_source)? != record.proof.source_hash
+    {
+        return Err(error("master_configured_receipt_stale"));
+    }
+    Ok(record.proof)
+}
+
+pub(super) fn validate_bootstrap_auth(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    auth: &MasterBootstrapAuth,
+) -> Result<(), EngineError> {
+    match auth {
+        MasterBootstrapAuth::RcliConfigured(proof) => {
+            let record = registration(tx, &session.session_id)?
+                .ok_or_else(|| error("rcli_profile_configuration_required"))?;
+            if record.proof != *proof {
+                return Err(error("master_configured_receipt_conflict"));
+            }
+            validate_registration(tx, session, &record)
+        }
+        MasterBootstrapAuth::NativeSignIn(fact) => {
+            match fact.phase {
+                NativeAuthPhase::AuthenticatedObserved => {}
+                NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount
+                | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Cancelling
+                | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled | NativeAuthPhase::Unavailable
+                | NativeAuthPhase::Uncertain => return Err(error("master_bootstrap_authentication_stale")),
+            }
+            if !matches!(fact.action, NativeAuthAction::SignIn { .. })
+                || fact.binding.config_id != session.config_id || fact.binding.source_hash != session.source_hash
+                || fact.binding.engine_epoch != session.owner.engine_epoch
+                || fact.binding.at_revision.value() > owner_revision(tx)?
+                || fact.binding.connection.account_ref != session.selection.route.account_ref
+            {
+                return Err(error("master_bootstrap_authentication_stale"));
+            }
+            let ModelAuthentication::NativeManaged { profile_ref } = &fact.binding.connection.auth else {
+                return Err(error("master_bootstrap_authentication_stale"));
+            };
+            let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+            let actual: Option<Vec<u8>> = tx.query_row(
+                "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+                [&key], |row| row.get(0),
+            ).optional().map_err(error)?;
+            let actual = crate::engine::owner::native_auth::decode_fact(
+                &actual.ok_or_else(|| error("master_bootstrap_authentication_stale"))?,
+            )?;
+            let host = HostStamp { db_instance: fact.binding.database_instance.clone(), engine_epoch: fact.binding.engine_epoch.clone() };
+            check_owner_host(tx, &host)?;
+            check_owner_admission(tx, &Admission { db_instance: host.db_instance, engine_epoch: host.engine_epoch,
+                owner_id: session.owner.owner_id.clone(), owner_epoch: session.owner.resulting_epoch })?;
+            let fenced: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)", [&key], |row| row.get(0)).map_err(error)?;
+            if actual != *fact || fenced {
+                return Err(error("master_bootstrap_authentication_stale"));
+            }
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn validate_configured_initial_conversation_receipt(
+    tx: &Transaction<'_>,
+    pinned: &EffectiveConfig,
+    current: &EffectiveConfig,
+    request: &AttemptRequest,
+    proof: &RcliConfiguredProfileProof,
+    binding: &NativeProfileBinding,
+    generation: u64,
+) -> Result<(), EngineError> {
+    let row: Option<String> = tx.query_row(
+        "SELECT session FROM configured_master_profiles WHERE id=?1", [proof.registration_id.as_str()], |row| row.get(0),
+    ).optional().map_err(error)?;
+    let session_id = SessionId::new(row.ok_or_else(|| error("master_configured_receipt_missing"))?).map_err(error)?;
+    let session = load_session(tx, &session_id, owner_revision(tx)?)?.ok_or_else(|| error("master_session_missing"))?;
+    let host = HostStamp { db_instance: proof.database_instance.clone(), engine_epoch: proof.engine_epoch.clone() };
+    let actual = configured_auth(tx, current, &host, &session)?;
+    if actual != *proof || pinned.id != current.id || pinned.id != proof.config_id
+        || binding != &MasterBootstrapAuth::RcliConfigured(actual).binding() || generation != proof.generation
+        || request.project_id != session.project_id || request.task_id != session.bootstrap_task_id
+        || request.role != Role::ProjectLeader || request.pool_ref != session.selection.pool_ref
+        || request.target_profile_ref != session.selection.target_profile_ref || request.route != session.selection.route
+        || request.previous_attempt.is_some() || !request.route.required_capabilities.is_empty()
+    {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    let first: Option<String> = tx.query_row("SELECT id FROM master_turns WHERE session=?1 AND ordinal=1",
+        [session.session_id.as_str()], |row| row.get(0)).optional().map_err(error)?;
+    let turn_id = RequestId::new(first.ok_or_else(|| error("master_turn_missing"))?).map_err(error)?;
+    let turn = load_turn(tx, &session, &turn_id, owner_revision(tx)?)?.ok_or_else(|| error("master_turn_missing"))?;
+    let replay = model_gateway::read_attempt(tx, &request.id)?;
+    let valid = match replay {
+        Some(attempt) => attempt.request == *request && attempt.config_id == pinned.id
+            && attempt.connection == proof.connection
+            && (turn.attempt.as_ref().map(|attempt| &attempt.request.id) == Some(&request.id)
+                || (turn.phase == MasterTurnPhase::Queued && session.current_turn.as_ref() == Some(&turn.id))),
+        None => turn.phase == MasterTurnPhase::Queued && turn.attempt.is_none()
+            && session.current_turn.as_ref() == Some(&turn.id),
+    };
+    if turn.ordinal != 1 || !valid {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    let prior: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_gateway_attempts WHERE task_id=?1 AND id<>?2)",
+        params![request.task_id.as_str(), request.id.as_str()], |row| row.get(0),
+    ).map_err(error)?;
+    if prior {
+        return Err(error("gateway_initial_authentication_stale"));
+    }
+    Ok(())
+}
+
+fn authenticated(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+) -> Result<MasterBootstrapAuth, EngineError> {
+    let fact = current_auth(tx, config, host, session)?;
+    let custody = custody.as_mut().map_err(|error| error.clone())?;
+    match &fact {
+        MasterBootstrapAuth::NativeSignIn(fact) => {
+            let (custody_id, _) = custody.prepare(host, &fact.binding.connection)?;
+            if custody_id != fact.binding.custody_id {
+                return Err(error("native_profile_identity_changed"));
+            }
+        }
+        MasterBootstrapAuth::RcliConfigured(proof) => {
+            let physical = custody.configured_rcli_profile(host, &proof.connection, &proof.profile_ref)?;
+            if physical.profile_ref != proof.profile_ref || physical.custody_id != proof.custody_id
+                || physical.profile_config_sha256 != proof.profile_config_sha256
+                || physical.profile_generation != proof.generation
+            {
+                return Err(error("master_configured_receipt_stale"));
+            }
+        }
+    }
+    Ok(fact)
+}
+
+fn current_auth(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+) -> Result<MasterBootstrapAuth, EngineError> {
+    if session.selection.backend == MasterBackend::Rcli {
+        return configured_auth(tx, config, host, session).map(MasterBootstrapAuth::RcliConfigured);
+    }
+    let connection = native_profile_connection(config, &session.selection.target_profile_ref)?;
+    let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return Err(error("native_profile_not_managed"));
+    };
+    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let row: Option<(String, i64, String, Vec<u8>, Vec<u8>)> = tx.query_row(
+        "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+        [&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(error)?;
+    let (id, generation, phase, request, bytes) = row.ok_or_else(|| error("master_authentication_unknown"))?;
+    if request.len() > 8192 {
+        return Err(error("native_auth_request_bounds"));
+    }
+    let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+    let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
+    match fact.phase {
+        NativeAuthPhase::AuthenticatedObserved => {}
+        NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount
+        | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Cancelling
+        | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled | NativeAuthPhase::Unavailable
+        | NativeAuthPhase::Uncertain => return Err(error("master_authentication_stale")),
+    }
+    if fact.operation_id.as_str() != id || signed(fact.generation)? != generation
+        || fact.phase.name() != phase || fact.phase != NativeAuthPhase::AuthenticatedObserved
+        || fact.action != (NativeAuthAction::SignIn { method: start.method })
+        || start.request_id != fact.operation_id
+        || start.scope.expected_database_instance != host.db_instance
+        || start.scope.connection != connection.id
+        || start.scope.expected_config_id != session.config_id
+        || start.scope.expected_source_hash != session.source_hash
+        || fact.binding.database_instance != host.db_instance
+        || fact.binding.engine_epoch != host.engine_epoch
+        || fact.binding.connection != *connection
+        || fact.binding.config_id != session.config_id
+        || fact.binding.source_hash != session.source_hash
+        || fact.binding.at_revision.value() > owner_revision(tx)?
+    {
+        return Err(error("master_authentication_stale"));
+    }
+    let fenced: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)", [&key], |row| row.get(0)).map_err(error)?;
+    if fenced {
+        return Err(error("native_profile_in_use"));
+    }
+    Ok(MasterBootstrapAuth::NativeSignIn(fact))
+}
+
+fn ready_lease(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    auth: &MasterBootstrapAuth,
+) -> Result<(RequestId, WorktreeLease), EngineError> {
+    let (allocation, lease) = super::master_bootstrap::ready(tx, session, auth)?;
+    if lease.project_id != session.project_id || lease.task_id != session.bootstrap_task_id
+        || lease.owner_session != session.session_id || lease.native_descendant.is_some()
+        || lease.state != LeaseState::Ready
+        || !Path::new(&lease.repository).is_absolute() || !Path::new(&lease.path).is_absolute()
+    {
+        return Err(error("master_worktree_provenance"));
+    }
+    Ok((allocation, lease))
+}
+
+fn checked_prompt(
+    session_id: &SessionId,
+    turn_id: &RequestId,
+    message: &str,
+    brief: Option<&str>,
+) -> Result<String, EngineError> {
+    let length = match brief {
+        Some(brief) => brief
+            .len()
+            .checked_add(2)
+            .and_then(|length| length.checked_add(message.len()))
+            .ok_or_else(|| error("master_input_too_large"))?,
+        None => message.len(),
+    };
+    if length > 16384 {
+        return Err(error("master_input_too_large"));
+    }
+    let mut text = String::with_capacity(length);
+    if let Some(brief) = brief {
+        text.push_str(brief);
+        text.push_str("\n\n");
+    }
+    text.push_str(message);
+    assert_eq!(text.len(), length);
+    let control: crate::rcli_host::Control = serde_json::from_value(serde_json::json!({
+        "protocol_version": crate::rcli_host::HOST_PROTOCOL_VERSION,
+        "session_id": session_id.as_str(),
+        "request_id": "rcli-control-4096",
+        "control": { "kind": "prompt", "turn_id": turn_id.as_str(), "text": &text },
+    }))
+    .map_err(error)?;
+    crate::rcli_host::encode_control(&control).map_err(|failure| {
+        if failure.0 == "invalid frame length" {
+            error("master_input_too_large")
+        } else {
+            error(failure)
+        }
+    })?;
+    Ok(text)
+}
+
+fn current_prompt(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn_id: &RequestId,
+    message: &str,
+) -> Result<String, EngineError> {
+    let brief: Option<String> = tx.query_row(
+        "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND kind='brief' ORDER BY brief_version DESC LIMIT 1",
+        [session.project_id.as_str()], |row| row.get(0),
+    ).optional().map_err(error)?;
+    checked_prompt(&session.session_id, turn_id, message, brief.as_deref())
+}
+
+fn prompt(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    let message: String = tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)?;
+    current_prompt(tx, session, &turn.id, &message)
+}
+
+fn preflight_turn(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+) -> Result<bool, EngineError> {
+    match prompt(tx, session, turn) {
+        Ok(_) => Ok(true),
+        Err(failure) if failure.0 == "master_input_too_large" => {
+            let phase = match turn.phase {
+                MasterTurnPhase::Queued => MasterTurnPhase::Blocked,
+                MasterTurnPhase::Prepared => {
+                    complete_local(tx, turn, MasterTurnPhase::Failed)?;
+                    MasterTurnPhase::Failed
+                }
+                _ => return Err(failure),
+            };
+            turn.phase = phase;
+            turn.reason = Some(MasterReason::CapacityUnavailable);
+            persist_runtime(tx, config, session, turn)?;
+            Ok(false)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+fn bundle(
+    tx: &Transaction<'_>,
+    session: MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<MasterRuntimeResult, EngineError> {
+    let record = preparation(tx, &session, turn)?;
+    let attempt = turn.attempt.clone().ok_or_else(|| error("master_attempt_missing"))?;
+    let prepared = PreparedMasterTurn {
+        text: prompt(tx, &session, turn)?,
+        session,
+        attempt,
+        profile: PreparedNativeProfile::from_binding(record.auth.binding()),
+        repository: PathBuf::from(&record.lease.repository),
+        cwd: PathBuf::from(&record.lease.path),
+        worktree_lease: record.worktree_lease,
+        lease: record.lease,
+    };
+    assert_eq!(prepared.attempt.request.task_id, prepared.session.bootstrap_task_id);
+    Ok(MasterRuntimeResult::Prepared(Box::new(prepared)))
+}
+
+fn admission_reason(code: &str) -> MasterReason {
+    match code {
+        "gateway_health_unknown" | "gateway_initial_authentication_required" => MasterReason::ReadinessUnknown,
+        "gateway_initial_readiness_stale" | "gateway_initial_authentication_stale" => MasterReason::ReadinessStale,
+        "gateway_invalid_authentication" => MasterReason::InvalidAuthentication,
+        "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
+        "gateway_quota_unknown" => MasterReason::QuotaUnknown,
+        "gateway_rate_limited" => MasterReason::RateLimited,
+        "gateway_cooldown" => MasterReason::CooldownActive,
+        "gateway_capability_unavailable" | "gateway_incompatible_connection" => MasterReason::UnsupportedCapability,
+        "gateway_connection_changed_or_denied" | "gateway_route_denied" => MasterReason::ConnectionChanged,
+        "gateway_attempt_active" | "gateway_attempt_limit" => MasterReason::CapacityUnavailable,
+        _ => MasterReason::RuntimeUnavailable,
+    }
+}
+
+fn verify_preparation(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Preparation, EngineError> {
+    let record = preparation(tx, session, turn)?;
+    if current_auth(tx, config, host, session)? != record.auth {
+        return Err(error("master_authentication_stale"));
+    }
+    let (allocation, lease) = ready_lease(tx, session, &record.auth)?;
+    if allocation != record.worktree_lease || lease != record.lease {
+        return Err(error("master_worktree_provenance"));
+    }
+    Ok(record)
+}
+
+fn block_unsupported_backend(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+) -> Result<bool, EngineError> {
+    if session.selection.backend == MasterBackend::Rcli || !turn.phase.outstanding() {
+        return Ok(false);
+    }
+    if turn.phase != MasterTurnPhase::Queued {
+        return Err(error("master_runtime_backend_unsupported"));
+    }
+    turn.phase = MasterTurnPhase::Blocked;
+    turn.reason = Some(MasterReason::UnsupportedCapability);
+    persist_runtime(tx, config, session, turn)?;
+    Ok(true)
+}
+
+fn prepare_turn(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+) -> Result<MasterRuntimeResult, EngineError> {
+    current_scope(tx, config, sources, host, session, turn)?;
+    if block_unsupported_backend(tx, config, session, turn)? {
+        return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+    }
+    if turn.phase == MasterTurnPhase::Prepared {
+        verify_preparation(tx, config, host, session, turn)?;
+        if !preflight_turn(tx, config, session, turn)? {
+            return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+        }
+        return bundle(tx, session.clone(), turn);
+    }
+    if turn.phase != MasterTurnPhase::Queued {
+        return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+    }
+    if !preflight_turn(tx, config, session, turn)? {
+        return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+    }
+    let auth = authenticated(tx, config, host, session, custody)?;
+    let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
+    let request = AttemptRequest {
+        id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
+        task_id: session.bootstrap_task_id.clone(),
+        project_id: session.project_id.clone(),
+        role: Role::ProjectLeader,
+        pool_ref: session.selection.pool_ref.clone(),
+        target_profile_ref: session.selection.target_profile_ref.clone(),
+        route: session.selection.route.clone(),
+        previous_attempt: None,
+    };
+    tx.execute_batch("SAVEPOINT master_admission").map_err(error)?;
+    let admitted = if turn.ordinal == 1 && request.route.required_capabilities.is_empty() {
+        match &auth {
+            MasterBootstrapAuth::NativeSignIn(fact) => model_gateway::begin_initial_conversation_attempt(
+                tx, config, config, &request,
+                InitialConversationAuth { fact, binding: &fact.binding, generation: fact.generation }, now_ms()?),
+            MasterBootstrapAuth::RcliConfigured(proof) => model_gateway::begin_configured_initial_conversation_attempt(
+                tx, config, config, &request,
+                ConfiguredInitialConversationAuth { proof, binding: &auth.binding(), generation: proof.generation }, now_ms()?),
+        }
+    } else {
+        model_gateway::begin_attempt(tx, config, config, &request, now_ms()?)
+    };
+    let attempt = match admitted {
+        Ok(start) => {
+            tx.execute_batch("RELEASE master_admission").map_err(error)?;
+            start.attempt
+        }
+        Err(failure) => {
+            tx.execute_batch("ROLLBACK TO master_admission; RELEASE master_admission").map_err(error)?;
+            turn.phase = MasterTurnPhase::Blocked;
+            turn.reason = Some(admission_reason(&failure.0));
+            persist_runtime(tx, config, session, turn)?;
+            return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+        }
+    };
+    if attempt.connection != auth.binding().connection {
+        return Err(error("master_attempt_connection_conflict"));
+    }
+    let record = Preparation { attempt_id: attempt.request.id.clone(), auth, worktree_lease, lease };
+    let inserted = tx.execute("INSERT INTO master_preparations(session,turn,body) VALUES (?1,?2,?3)", params![session.session_id.as_str(), turn.id.as_str(), encode(&record)?]).map_err(error)?;
+    assert_eq!(inserted, 1);
+    turn.attempt = Some(attempt);
+    turn.phase = MasterTurnPhase::Prepared;
+    persist_runtime(tx, config, session, turn)?;
+    current_scope(tx, config, sources, host, session, turn)?;
+    bundle(tx, session.clone(), turn)
+}
+
+fn observe_turn(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+    observation: MasterRuntimeObservation,
+) -> Result<(), EngineError> {
+    if turn.phase == MasterTurnPhase::Cancelled {
+        return Ok(());
+    }
+    match observation {
+        MasterRuntimeObservation::Running { runtime } => {
+            validate_runtime(&runtime)?;
+            if let Some(previous) = &turn.runtime {
+                if previous.runtime_ref != runtime.runtime_ref
+                    || previous.artifact_sha256 != runtime.artifact_sha256
+                    || previous.native_session_id.as_ref().is_some_and(|id| runtime.native_session_id.as_ref() != Some(id))
+                {
+                    return Err(error("master_runtime_conflict"));
+                }
+                if previous == &runtime && turn.phase == MasterTurnPhase::Running {
+                    return Ok(());
+                }
+            }
+            if !matches!(turn.phase, MasterTurnPhase::Delivering | MasterTurnPhase::Running) {
+                return Err(error("master_runtime_transition"));
+            }
+            turn.runtime = Some(runtime);
+            turn.phase = MasterTurnPhase::Running;
+        }
+        MasterRuntimeObservation::Response { reply } => {
+            if turn.phase == MasterTurnPhase::Succeeded && turn.reply.as_ref() == Some(&reply) {
+                return Ok(());
+            }
+            if turn.phase != MasterTurnPhase::Running {
+                return Err(error("master_runtime_transition"));
+            }
+            let attempt = turn.attempt.as_ref().ok_or_else(|| error("master_attempt_missing"))?;
+            let runtime = turn.runtime.as_ref().ok_or_else(|| error("master_runtime_missing"))?;
+            if reply.text.trim().is_empty() || reply.text.len() > 8192 || reply.text.contains('\0')
+                || reply.provenance.attempt_id != attempt.request.id
+                || reply.provenance.runtime_ref != runtime.runtime_ref
+                || reply.provenance.capture_sequence == 0
+            {
+                return Err(error("master_reply_provenance"));
+            }
+            let completion = AttemptCompletion {
+                outcome: AttemptOutcome::Succeeded, effects: Effects::Committed,
+                finished_at_ms: now_ms()?.max(attempt.selected_at_ms), retry_at_ms: None,
+            };
+            model_gateway::finish_attempt(tx, &attempt.request.id, &completion)?;
+            turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
+            turn.reply = Some(reply);
+            turn.phase = MasterTurnPhase::Succeeded;
+        }
+        MasterRuntimeObservation::Failed { reason } => {
+            if turn.phase == MasterTurnPhase::Failed && turn.reason == Some(reason) {
+                return Ok(());
+            }
+            if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running) {
+                return Err(error("master_runtime_transition"));
+            }
+            let provider = match reason {
+                MasterReason::InvalidAuthentication => Some(FailureKind::InvalidAuthentication),
+                MasterReason::QuotaExhausted => Some(FailureKind::QuotaExhausted),
+                MasterReason::RateLimited => Some(FailureKind::RateLimited),
+                _ => None,
+            };
+            if let Some(kind) = provider {
+                let attempt = turn.attempt.as_ref().ok_or_else(|| error("master_attempt_missing"))?;
+                let completion = AttemptCompletion {
+                    outcome: AttemptOutcome::Failed(kind), effects: Effects::Uncertain,
+                    finished_at_ms: now_ms()?.max(attempt.selected_at_ms), retry_at_ms: None,
+                };
+                model_gateway::finish_attempt(tx, &attempt.request.id, &completion)?;
+                turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
+            } else {
+                complete_local(tx, turn, MasterTurnPhase::Failed)?;
+            }
+            turn.phase = MasterTurnPhase::Failed;
+            turn.reason = Some(reason);
+        }
+        MasterRuntimeObservation::Cancelled => {
+            if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running | MasterTurnPhase::Uncertain) {
+                return Err(error("master_runtime_transition"));
+            }
+            complete_local(tx, turn, MasterTurnPhase::Cancelled)?;
+            turn.phase = MasterTurnPhase::Cancelled;
+            turn.reason = Some(MasterReason::Cancelled);
+        }
+        MasterRuntimeObservation::Disconnected => {
+            if turn.phase == MasterTurnPhase::Uncertain {
+                return Ok(());
+            }
+            if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running) {
+                return Err(error("master_runtime_transition"));
+            }
+            complete_local(tx, turn, MasterTurnPhase::Uncertain)?;
+            turn.phase = MasterTurnPhase::Uncertain;
+            turn.reason = Some(MasterReason::CaptureIncomplete);
+        }
+    }
+    persist_runtime(tx, config, session, turn)
+}
+
+fn provision_bootstrap(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    path: &Path,
+    command: &MasterRuntimeCommand,
+) -> Result<(), EngineError> {
+    let MasterRuntimeCommand::Prepare { host, project_id, session_id, turn_id } = command else {
+        return Ok(());
+    };
+    let tx = db.transaction().map_err(error)?;
+    let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
+    current_scope(&tx, config, sources, host, &session, &turn)?;
+    if turn.phase != MasterTurnPhase::Queued || session.selection.backend != MasterBackend::Rcli {
+        return Ok(());
+    }
+    if !preflight_turn(&tx, config, &mut session, &mut turn)? {
+        tx.commit().map_err(error)?;
+        return Ok(());
+    }
+    let auth = authenticated(&tx, config, host, &session, custody)?;
+    match ready_lease(&tx, &session, &auth) {
+        Ok(_) => return Ok(()),
+        Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
+        Err(failure) => return Err(failure),
+    }
+    let body: String = tx.query_row(
+        "SELECT body FROM projects WHERE id=?1", [project_id.as_str()], |row| row.get(0),
+    ).map_err(error)?;
+    let project: StoredProject = serde_json::from_str(&body).map_err(error)?;
+    project.spec.validate().map_err(error)?;
+    if project.project_id != *project_id {
+        return Err(error("master_project_scope_conflict"));
+    }
+    let repository = project.spec.repositories.first().ok_or_else(|| error("master_repository_missing"))?;
+    let runtime_dir = path.parent().ok_or_else(|| error("master_runtime_directory_missing"))?;
+    super::master_bootstrap::reserve(&tx, runtime_dir, &session, repository, &auth)?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
+    crate::worktrees::provision(db, &session.bootstrap_task_id, repository)?;
+    assert!(db.is_autocommit());
+    Ok(())
+}
+
+fn registration_session(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    project_id: &ProjectId,
+    session_id: &SessionId,
+) -> Result<MasterSessionView, EngineError> {
+    check_owner_host(tx, host)?;
+    settings::ensure_clear(tx)?;
+    let session = load_session(tx, session_id, owner_revision(tx)?)?
+        .ok_or_else(|| error("master_session_missing"))?;
+    check_owner_admission(tx, &Admission {
+        db_instance: host.db_instance.clone(), engine_epoch: host.engine_epoch.clone(),
+        owner_id: session.owner.owner_id.clone(), owner_epoch: session.owner.resulting_epoch,
+    })?;
+    if session.project_id != *project_id || session.phase != MasterSessionPhase::Configured
+        || session.owner.engine_epoch != host.engine_epoch || session.config_id != config.id
+        || session.source_hash != settings::verified_source_hash(config, sources)?
+    {
+        return Err(error("master_source_conflict"));
+    }
+    configured_connection(config, &session)?;
+    Ok(session)
+}
+
+fn produce_rcli_profile(
+    db: &Connection,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    connection: ModelConnection,
+    configured_home: &Path,
+    at_revision: Cursor,
+) -> Result<RcliConfiguredProfileProof, EngineError> {
+    assert!(db.is_autocommit());
+    let metadata = custody.as_mut().map_err(|failure| failure.clone())?
+        .register_configured_rcli_profile(host, &connection, &session.selection.target_profile_ref, configured_home)?;
+    if metadata.profile_ref != session.selection.target_profile_ref {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    let proof = RcliConfiguredProfileProof {
+        registration_id: RequestId::new(format!("master-profile-{}", random_id()?)).map_err(error)?,
+        generation: metadata.profile_generation, database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(), config_id: session.config_id.clone(), source_hash: session.source_hash.clone(),
+        at_revision, connection, profile_ref: metadata.profile_ref,
+        custody_id: metadata.custody_id, profile_config_sha256: metadata.profile_config_sha256,
+    };
+    if proof.generation == 0 || !is_hex_id(&proof.profile_config_sha256) {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    Ok(proof)
+}
+
+fn publish_rcli_profile(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: &settings::SettingsSources,
+    host: &HostStamp,
+    expected: &MasterSessionView,
+    mut proof: RcliConfiguredProfileProof,
+) -> Result<RcliConfiguredProfileProof, EngineError> {
+    let session = registration_session(tx, config, Some(sources), host, &expected.project_id, &expected.session_id)?;
+    if session != *expected || proof.profile_ref != session.selection.target_profile_ref
+        || configured_connection(config, &session)? != &proof.connection
+    {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    let (global_source, project_source) = sources.retained_paths();
+    if let Some(record) = registration(tx, &session.session_id)? {
+        validate_registration(tx, &session, &record)?;
+        if record.proof.connection != proof.connection || record.proof.custody_id != proof.custody_id
+            || record.proof.profile_config_sha256 != proof.profile_config_sha256
+            || record.proof.generation != proof.generation
+            || record.global_source != global_source || record.project_source != project_source
+        {
+            return Err(error("master_configured_receipt_conflict"));
+        }
+        return Ok(record.proof);
+    }
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM configured_master_profiles", [], |row| row.get(0)).map_err(error)?;
+    if count >= SESSIONS_MAX as i64 {
+        return Err(error("master_configured_receipt_limit"));
+    }
+    let database_path = PathBuf::from(tx.path().ok_or_else(|| error("master_runtime_directory_missing"))?);
+    let database_metadata = std::fs::symlink_metadata(&database_path).map_err(error)?;
+    proof.at_revision = Cursor::new(owner_revision(tx)?);
+    let record = ConfiguredRegistration {
+        proof: proof.clone(), session_id: session.session_id.clone(), project_id: session.project_id.clone(),
+        bootstrap_task_id: session.bootstrap_task_id.clone(), owner: session.owner.clone(), global_source, project_source,
+        database_path, database_identity: (database_metadata.dev(), database_metadata.ino()),
+    };
+    validate_registration(tx, &session, &record)?;
+    let inserted = tx.execute("INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?2,?3)",
+        params![proof.registration_id.as_str(), session.session_id.as_str(), encode(&record)?]).map_err(error)?;
+    assert_eq!(inserted, 1);
+    Ok(proof)
+}
+
+fn adopt_account_profile(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: &settings::SettingsSources,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    session: &MasterSessionView,
+) -> Result<(), EngineError> {
+    if session.selection.backend != MasterBackend::Rcli {
+        return Ok(());
+    }
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='account_profile_operations')",
+        [], |row| row.get(0),
+    ).map_err(error)?;
+    if !exists {
+        return Ok(());
+    }
+    let connection = match configured_connection(config, session) {
+        Ok(connection) => connection,
+        Err(failure) if failure.0 == "rcli_profile_configuration_required" => return Ok(()),
+        Err(failure) => return Err(failure),
+    };
+    let mut statement = tx.prepare(
+        "SELECT request_id,CASE WHEN length(request)<=8192 THEN request END,CASE WHEN length(receipt)<=16384 THEN receipt END FROM account_profile_operations WHERE owner_id=?1 AND owner_epoch=?2 AND phase='committed' ORDER BY request_id LIMIT 1025",
+    ).map_err(error)?;
+    let mut rows = statement.query(params![session.owner.owner_id, session.owner.resulting_epoch])
+        .map_err(error)?;
+    let mut receipt: Option<AccountProfileReceipt> = None;
+    let mut count = 0;
+    while let Some(row) = rows.next().map_err(error)? {
+        count += 1;
+        if count > 1024 {
+            return Err(error("account_profile_operations_full"));
+        }
+        let id: String = row.get(0).map_err(error)?;
+        let request_bytes: Vec<u8> = row.get(1).map_err(error)?;
+        let receipt_bytes: Vec<u8> = row.get(2).map_err(error)?;
+        let request: AccountProfileRequest = serde_json::from_slice(&request_bytes).map_err(error)?;
+        let candidate: AccountProfileReceipt = serde_json::from_slice(&receipt_bytes).map_err(error)?;
+        crate::engine::owner::account_profile::authorize_account_profile_scope(
+            &request.scope, &host.db_instance, &candidate.config_id,
+            &candidate.source_hash, &candidate.connection,
+        )?;
+        if request.request_id.as_str() != id || candidate.profile_generation == 0
+            || !is_hex_id(candidate.config_id.as_str()) || !is_hex_id(&candidate.source_hash)
+            || !is_hex_id(&candidate.custody_id) || !is_hex_id(&candidate.profile_config_sha256)
+        {
+            return Err(error("account_profile_record_invalid"));
+        }
+        if candidate.connection != *connection
+            || candidate.profile_ref != session.selection.target_profile_ref
+        {
+            continue;
+        }
+        if receipt.as_ref().is_some_and(|previous| {
+            previous.custody_id != candidate.custody_id
+                || previous.profile_config_sha256 != candidate.profile_config_sha256
+                || previous.profile_generation != candidate.profile_generation
+        }) {
+            return Err(error("master_configured_receipt_conflict"));
+        }
+        receipt = Some(candidate);
+    }
+    let Some(receipt) = receipt else {
+        return Ok(());
+    };
+    let metadata = custody.as_mut().map_err(|failure| failure.clone())?
+        .configured_rcli_profile(host, connection, &session.selection.target_profile_ref)?;
+    if metadata.profile_ref != receipt.profile_ref || metadata.custody_id != receipt.custody_id
+        || metadata.profile_config_sha256 != receipt.profile_config_sha256
+        || metadata.profile_generation != receipt.profile_generation
+    {
+        return Err(error("master_configured_receipt_stale"));
+    }
+    let proof = RcliConfiguredProfileProof {
+        registration_id: RequestId::new(format!("master-profile-{}", random_id()?)).map_err(error)?,
+        generation: metadata.profile_generation, database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(), config_id: session.config_id.clone(),
+        source_hash: session.source_hash.clone(), at_revision: Cursor::new(owner_revision(tx)?),
+        connection: connection.clone(), profile_ref: metadata.profile_ref,
+        custody_id: metadata.custody_id, profile_config_sha256: metadata.profile_config_sha256,
+    };
+    publish_rcli_profile(tx, config, sources, host, session, proof)?;
+    Ok(())
+}
+
+fn register_rcli_profile(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    project_id: &ProjectId,
+    session_id: &SessionId,
+    configured_home: &Path,
+) -> Result<MasterRuntimeResult, EngineError> {
+    let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
+    let tx = db.transaction().map_err(error)?;
+    let original = registration_session(&tx, config, Some(sources), host, project_id, session_id)?;
+    let connection = configured_connection(config, &original)?.clone();
+    let revision = Cursor::new(owner_revision(&tx)?);
+    tx.commit().map_err(error)?;
+    let candidate = produce_rcli_profile(db, custody, host, &original, connection, configured_home, revision)?;
+    let tx = db.transaction().map_err(error)?;
+    let proof = publish_rcli_profile(&tx, config, sources, host, &original, candidate)?;
+    tx.commit().map_err(error)?;
+    Ok(MasterRuntimeResult::ConfiguredProfile(Box::new(proof)))
+}
+
+fn rcli_registration_scope(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    sources: &settings::SettingsSources,
+    host: &HostStamp,
+    admission: &Admission,
+    registration: &RcliProfileRegistration,
+) -> Result<MasterSessionView, EngineError> {
+    let expected = &registration.expected_session;
+    let session = registration_session(tx, config, Some(sources), host, &expected.project_id, &expected.session_id)?;
+    if session != *expected || session.owner.owner_id != admission.owner_id
+        || session.owner.resulting_epoch != admission.owner_epoch
+        || session.owner.engine_epoch != admission.engine_epoch
+        || host.db_instance != admission.db_instance || host.engine_epoch != admission.engine_epoch
+        || configured_connection(config, &session)? != &registration.expected_connection
+    {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    Ok(session)
+}
+
+fn record_rcli_registration(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    admission: &Admission,
+    request: &OwnerRequest,
+    result: OwnerResult,
+) -> Result<OwnerApplied, EngineError> {
+    let registered = match &result {
+        OwnerResult::RcliProfileRegistered { .. } => true,
+        OwnerResult::Rejected { .. } => false,
+        _ => return Err(error("master_mutation_result")),
+    };
+    let revision = owner_revision(tx)?;
+    let next = if registered {
+        let next = revision.checked_add(1).ok_or_else(|| error("revision_exhausted"))?;
+        signed(next)?;
+        persist_event_ids(tx, config, &request.request_id,
+            &ClientId::new(format!("owner:{}", admission.owner_id)).map_err(error)?, next)?;
+        next
+    } else {
+        revision
+    };
+    let provenance = OwnerProvenance {
+        origin: "native_owner".into(), owner_id: admission.owner_id.clone(),
+        operation_id: request.request_id.clone(), request_hash: request.mutation_hash()?,
+        engine_epoch: admission.engine_epoch.clone(), admitted_epoch: admission.owner_epoch,
+        resulting_epoch: admission.owner_epoch, revision_before: Cursor::new(revision),
+        revision_after: Cursor::new(next), event_cursor: registered.then_some(Cursor::new(next)),
+    };
+    let hash = Sha256::digest(serde_json::to_vec(request).map_err(error)?);
+    owner_record(tx, &provenance, &hash, &serde_json::to_vec(&result).map_err(error)?)?;
+    assert_eq!(owner_revision(tx)?, provenance.revision_after.value());
+    Ok(OwnerApplied { result, provenance, historical_replay: false, current_revision: Cursor::new(next) })
+}
+
+pub(super) fn apply_rcli_profile_registration(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    admission: &Admission,
+    request: &OwnerRequest,
+) -> Result<OwnerApplied, EngineError> {
+    request.validate()?;
+    let OwnerOperation::Apply { mutation: OwnerMutation::ProjectMaster { action } } = &request.operation else {
+        return Err(error("master_action_required"));
+    };
+    let MasterOwnerAction::RegisterRcliProfile { registration } = action else {
+        return Err(error("master_action_required"));
+    };
+    validate_action(action)?;
+    let hash_text = request.mutation_hash()?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(error)?;
+    check_owner_admission(&tx, admission)?;
+    check_owner_host(&tx, host)?;
+    let revision = owner_revision(&tx)?;
+    if let Some((provenance, result)) = owner_lookup(&tx, "native_owner", &admission.owner_id,
+        &request.request_id, Some(&hash_text))?
+    {
+        return Ok(OwnerApplied {
+            result: serde_json::from_slice(&result).map_err(error)?, provenance,
+            historical_replay: true, current_revision: Cursor::new(revision),
+        });
+    }
+    if request.expected_revision.value() != revision {
+        let applied = record_rcli_registration(&tx, config, admission, request,
+            OwnerResult::Rejected { code: "stale_revision".into() })?;
+        tx.commit().map_err(error)?;
+        return Ok(applied);
+    }
+    let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
+    let preflight = (|| -> Result<MasterSessionView, EngineError> {
+        let session = rcli_registration_scope(&tx, config, sources, host, admission, registration)?;
+        let config_path = registration.configured_home.join(".backboard/config.json");
+        match std::fs::symlink_metadata(&config_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(error("master_rcli_config_symlink"));
+            }
+            Ok(_) => {}
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+                return Err(error("master_rcli_config_missing"));
+            }
+            Err(failure) => return Err(error(failure)),
+        }
+        if let Some(record) = self::registration(&tx, &session.session_id)? {
+            validate_registration(&tx, &session, &record)?;
+        }
+        Ok(session)
+    })();
+    let original = match preflight {
+        Ok(session) => session,
+        Err(failure) if matches!(failure.0.as_str(),
+            "master_source_conflict" | "master_session_missing"
+                | "master_configured_receipt_conflict" | "master_configured_receipt_stale"
+                | "master_configured_database_changed" | "settings_source_conflict"
+                | "master_rcli_config_missing" | "master_rcli_config_symlink"
+                | "rcli_profile_identity_changed" | "rcli_profile_config_changed"
+                | "rcli_profile_binding_conflict") => {
+            let applied = record_rcli_registration(&tx, config, admission, request,
+                OwnerResult::Rejected { code: failure.0 })?;
+            tx.commit().map_err(error)?;
+            return Ok(applied);
+        }
+        Err(failure) => return Err(failure),
+    };
+    let connection = configured_connection(config, &original)?.clone();
+    tx.commit().map_err(error)?;
+    let candidate = produce_rcli_profile(db, custody, host, &original, connection,
+        &registration.configured_home, Cursor::new(revision))?;
+
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(error)?;
+    check_owner_admission(&tx, admission)?;
+    check_owner_host(&tx, host)?;
+    let revision = owner_revision(&tx)?;
+    if let Some((provenance, result)) = owner_lookup(&tx, "native_owner", &admission.owner_id,
+        &request.request_id, Some(&hash_text))?
+    {
+        return Ok(OwnerApplied {
+            result: serde_json::from_slice(&result).map_err(error)?, provenance,
+            historical_replay: true, current_revision: Cursor::new(revision),
+        });
+    }
+    let prepared = (|| -> Result<OwnerApplied, EngineError> {
+        let result = if request.expected_revision.value() != revision {
+            OwnerResult::Rejected { code: "stale_revision".into() }
+        } else {
+            let session = rcli_registration_scope(&tx, config, sources, host, admission, registration)?;
+            let proof = publish_rcli_profile(&tx, config, sources, host, &session, candidate)?;
+            OwnerResult::RcliProfileRegistered {
+                registration: Box::new(RcliProfileRegistrationMetadata {
+                    project_id: session.project_id, session_id: session.session_id,
+                    profile_ref: proof.profile_ref, registration_id: proof.registration_id,
+                    generation: proof.generation,
+                }),
+            }
+        };
+        record_rcli_registration(&tx, config, admission, request, result)
+    })();
+    let applied = match prepared {
+        Ok(applied) => applied,
+        Err(failure) => {
+            tx.rollback().map_err(|_| error("master_rollback_outcome_unknown"))?;
+            return Err(failure);
+        }
+    };
+    tx.commit().map_err(error)?;
+    Ok(applied)
+}
+
+pub(super) fn runtime(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    path: &Path,
+    command: MasterRuntimeCommand,
+) -> Result<MasterRuntimeResult, EngineError> {
+    if let MasterRuntimeCommand::RegisterRcliProfile { host, project_id, session_id, configured_home } = command {
+        return register_rcli_profile(db, config, sources, custody, &host, &project_id, &session_id, &configured_home);
+    }
+    provision_bootstrap(db, config, sources, custody, path, &command)?;
+    let tx = db.transaction().map_err(error)?;
+    let (host, project_id, session_id, turn_id) = match &command {
+        MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Route { host, project_id, session_id, turn_id }
+        | MasterRuntimeCommand::Prepare { host, project_id, session_id, turn_id }
+        | MasterRuntimeCommand::Inspect { host, project_id, session_id, turn_id }
+        | MasterRuntimeCommand::AcquireProfile { host, project_id, session_id, turn_id, .. }
+        | MasterRuntimeCommand::Observe { host, project_id, session_id, turn_id, .. } => (host, project_id, session_id, turn_id),
+    };
+    let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
+    match command {
+        MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Route { ref host, .. } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            block_unsupported_backend(&tx, config, &mut session, &mut turn)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::Prepare { ref host, .. } => {
+            let result = prepare_turn(&tx, config, sources, custody, host, &mut session, &mut turn)?;
+            tx.commit().map_err(error)?;
+            Ok(result)
+        }
+        MasterRuntimeCommand::Inspect { ref host, .. } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            if turn.attempt.is_some() && matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running) {
+                verify_preparation(&tx, config, host, &session, &turn)?;
+            }
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::AcquireProfile { ref host, ref attempt_id, .. } => {
+            if turn.attempt.as_ref().map(|attempt| &attempt.request.id) != Some(attempt_id) {
+                return Err(error("master_attempt_identity_conflict"));
+            }
+            if turn.phase != MasterTurnPhase::Prepared {
+                tx.commit().map_err(error)?;
+                return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
+            }
+            if session.selection.backend != MasterBackend::Rcli {
+                return Err(error("master_runtime_backend_unsupported"));
+            }
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            let record = verify_preparation(&tx, config, host, &session, &turn)?;
+            turn.phase = MasterTurnPhase::Delivering;
+            persist_runtime(&tx, config, &mut session, &turn)?;
+            tx.commit().map_err(error)?;
+            assert!(db.is_autocommit());
+            let custody = custody.as_mut().map_err(|error| error.clone())?;
+            let guard = match &record.auth {
+                MasterBootstrapAuth::RcliConfigured(proof) => custody.acquire_configured_rcli_use(
+                    host, &record.auth.binding(), &proof.profile_ref, &turn.id, turn.ordinal,
+                )?,
+                MasterBootstrapAuth::NativeSignIn(fact) => custody.acquire_use(
+                    host, &fact.binding, &turn.id, turn.ordinal, NativeProfileUsePurpose::Execution,
+                )?,
+            };
+            Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::Observe { ref host, ref attempt_id, observation, .. } => {
+            if turn.attempt.as_ref().map(|attempt| &attempt.request.id) != Some(attempt_id) {
+                return Err(error("master_attempt_identity_conflict"));
+            }
+            let record = preparation(&tx, &session, &turn)?;
+            if record.auth.binding().database_instance != host.db_instance || record.auth.binding().engine_epoch != host.engine_epoch {
+                return Err(error("master_runtime_host_conflict"));
+            }
+            let stopping = matches!(observation, MasterRuntimeObservation::Failed { reason: MasterReason::ScopeRevoked } | MasterRuntimeObservation::Cancelled | MasterRuntimeObservation::Disconnected);
+            if turn.phase != MasterTurnPhase::Cancelled && !stopping {
+                current_scope(&tx, config, sources, host, &session, &turn)?;
+                if turn.phase != MasterTurnPhase::Succeeded && turn.phase != MasterTurnPhase::Failed {
+                    verify_preparation(&tx, config, host, &session, &turn)?;
+                }
+            }
+            observe_turn(&tx, config, &mut session, &mut turn, observation)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+    }
 }
 
 fn reject(code: &str) -> Outcome {
@@ -426,7 +2069,9 @@ fn execute(
             project_id,
             session_id,
         } => (project_id, session_id),
-        MasterOwnerAction::Open { .. } => return Err(error("master_action_invalid")),
+        MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
+            return Err(error("master_action_invalid"));
+        }
     };
     let Some(mut session) = load_session(tx, id, revision)? else {
         return Ok(reject("master_session_missing"));
@@ -451,6 +2096,14 @@ fn execute(
             }
             if count >= i64::try_from(TURNS_MAX).map_err(error)? {
                 return Ok(reject("master_turn_capacity"));
+            }
+            if session.selection.backend == MasterBackend::Rcli
+                && let Err(failure) = current_prompt(tx, &session, &provenance.operation_id, text)
+            {
+                if failure.0 == "master_input_too_large" {
+                    return Ok(reject(&failure.0));
+                }
+                return Err(failure);
             }
             let input = ConversationMutation::AppendMessage {
                 project_id: project.clone(),
@@ -497,7 +2150,9 @@ fn execute(
             session.current_turn = None;
             session.phase = MasterSessionPhase::Closed;
         }
-        MasterOwnerAction::Open { .. } => return Err(error("master_action_invalid")),
+        MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
+            return Err(error("master_action_invalid"));
+        }
     }
     session.version = Cursor::new(next);
     save_session(tx, &session)?;
@@ -509,6 +2164,8 @@ pub(super) fn apply(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
     admission: &Admission,
     request: &OwnerRequest,
 ) -> Result<OwnerApplied, EngineError> {
@@ -525,6 +2182,7 @@ pub(super) fn apply(
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(error)?;
+    check_owner_host(&tx, host)?;
     check_owner_admission(&tx, admission)?;
     let revision = owner_revision(&tx)?;
     if let Some((provenance, result)) = owner_lookup(
@@ -554,6 +2212,10 @@ pub(super) fn apply(
             revision_after: Cursor::new(revision),
             event_cursor: None,
         };
+        let opening = sources.is_some() && matches!(action, MasterOwnerAction::Open { .. });
+        if opening {
+            tx.execute_batch("SAVEPOINT master_open_adoption").map_err(error)?;
+        }
         let outcome = if request.expected_revision.value() != revision {
             reject("stale_revision")
         } else {
@@ -590,6 +2252,32 @@ pub(super) fn apply(
             &hash,
             &serde_json::to_vec(&result).map_err(error)?,
         )?;
+        if result == OwnerResult::Applied
+            && let MasterOwnerAction::Open { project_id, .. } = action
+            && let Some(sources) = sources
+        {
+            let session = latest(&tx, project_id, owner_revision(&tx)?)?
+                .ok_or_else(|| error("master_session_missing"))?;
+            match adopt_account_profile(&tx, config, sources, custody, host, &session) {
+                Ok(()) => {}
+                Err(failure) if failure.0 == "rcli_profile_identity_changed" => {
+                    tx.execute_batch("ROLLBACK TO master_open_adoption; RELEASE master_open_adoption")
+                        .map_err(error)?;
+                    assert_eq!(owner_revision(&tx)?, revision);
+                    provenance.revision_after = Cursor::new(revision);
+                    provenance.event_cursor = None;
+                    let result = OwnerResult::Rejected { code: failure.0 };
+                    owner_record(
+                        &tx, &provenance, &hash, &serde_json::to_vec(&result).map_err(error)?,
+                    )?;
+                    return Ok((result, provenance));
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+        if opening {
+            tx.execute_batch("RELEASE master_open_adoption").map_err(error)?;
+        }
         Ok((result, provenance))
     })();
     let (result, provenance) = match prepared {
@@ -762,4 +2450,426 @@ pub(super) fn read(
         config_id: config.id.clone(),
         data,
     })
+}
+
+#[cfg(test)]
+mod brief_tests;
+
+#[cfg(test)]
+mod rcli_configured_tests {
+    use super::*;
+
+    mod stop_settlement_tests {
+        include!("master_session/stop_settlement_tests.rs");
+    }
+
+    mod brief_boundary_tests {
+        include!("master_session/brief_boundary_tests.rs");
+    }
+    use crate::engine::owner::{ModelAccessCollection, Started};
+    use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
+    use crate::protocol::{CredentialRef, ProjectSpec};
+    use crate::routing::{ResourceBudget, RouteRequest};
+    use crate::storage::{Job, Storage};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use tokio::sync::oneshot;
+
+    const CONFIG: &str = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = ["local-profile"]
+[routing]
+approved_accounts = ["local-account"]
+global_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+project_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+task_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+[model_access]
+accounts = ["local-account"]
+[[model_access.connections]]
+id = "local-connection"
+provider = "local-provider"
+harness = "rcli"
+protocol = "openai-chat"
+account_ref = "local-account"
+endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }
+model = { id = "local-model", author = "local-author" }
+auth = { method = "none" }
+[[model_access.pools]]
+id = "local-pool"
+members = ["local-connection"]
+projects = ["rcli-project"]
+roles = ["project_leader"]
+fallback_allowed = false
+"#;
+
+    const PROMPT: &str = "Describe this project in one sentence without using tools.";
+
+    struct Fixture {
+        storage: Storage,
+        config: EffectiveConfig,
+        started: Started,
+        session: MasterSessionView,
+        turn: MasterTurnView,
+        path: PathBuf,
+        global: PathBuf,
+        home: PathBuf,
+        repository: PathBuf,
+        root: tempfile::TempDir,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Snapshot {
+        revision: u64,
+        turn: String,
+        counts: [i64; 6],
+    }
+
+    fn reference(value: &str) -> CredentialRef {
+        CredentialRef::new(value).unwrap()
+    }
+
+    fn private_file(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn git(repository: &Path, home: &Path, arguments: &[&str]) {
+        let output = Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+            .args(["-c", "user.name=Master storage fixture", "-c", "user.email=master-storage@example.invalid"])
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "actual Git fixture failed: {output:?}");
+    }
+
+    async fn owner_read(storage: &Storage, started: &Started, query: OwnerRead) -> OwnerReadReply {
+        let (send, receive) = oneshot::channel();
+        storage.sender.try_send(Job::OwnerRead(started.owners[0].admission.clone(), query, send))
+            .unwrap_or_else(|_| panic!("actual owner read queue unavailable"));
+        receive.await.unwrap().unwrap()
+    }
+
+    async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
+        let basis = owner_read(storage, started, OwnerRead::Capabilities).await;
+        let (send, receive) = oneshot::channel();
+        storage.sender.try_send(Job::OwnerApply(started.owners[0].admission.clone(), OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: basis.revision,
+            operation: OwnerOperation::Apply { mutation },
+        }, send)).unwrap_or_else(|_| panic!("actual owner mutation queue unavailable"));
+        assert_eq!(receive.await.unwrap().unwrap().result, OwnerResult::Applied);
+    }
+
+    impl Fixture {
+        async fn new(with_repository: bool) -> Self {
+            Self::new_with_message(with_repository, PROMPT).await
+        }
+
+        async fn new_with_message(with_repository: bool, message: &str) -> Self {
+            let root = tempfile::Builder::new().prefix("ca-mrc-").tempdir_in("/private/tmp").unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let global = root.path().join("global.toml");
+            private_file(&global, CONFIG.as_bytes());
+            let home = root.path().join("configured-home");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sdk = home.join(".backboard");
+            std::fs::create_dir(&sdk).unwrap();
+            std::fs::set_permissions(&sdk, std::fs::Permissions::from_mode(0o700)).unwrap();
+            private_file(&sdk.join("config.json"), &serde_json::to_vec(&serde_json::json!({
+                "model": {"provider": "local-provider", "model": "local-model"},
+                "providers": [{"id": "local-provider", "name": "Local provider",
+                    "protocol": "openai-chat", "baseUrl": "http://127.0.0.1:11434/v1",
+                    "auth": {"type": "none"}}]
+            })).unwrap());
+            let repository = root.path().join("repository");
+            if with_repository {
+                std::fs::create_dir(&repository).unwrap();
+                git(&repository, root.path(), &["init", "--initial-branch=trunk"]);
+                private_file(&repository.join("README"), b"Actual committed master workspace fixture.\n");
+                git(&repository, root.path(), &["add", "README"]);
+                git(&repository, root.path(), &["commit", "-m", "Initialize master workspace fixture"]);
+            }
+            let path = root.path().join("engine.db");
+            let (storage, config) = Storage::open_with_settings_sources(
+                &path, &global, &root.path().join("project.toml"),
+            ).await.unwrap();
+            let (send, receive) = oneshot::channel();
+            storage.sender.try_send(Job::OwnerStart(send))
+                .unwrap_or_else(|_| panic!("actual owner start queue unavailable"));
+            let started = receive.await.unwrap().unwrap();
+            let project = ProjectId::new("rcli-project").unwrap();
+            owner_apply(&storage, &started, "create-rcli-project", OwnerMutation::CreateProject {
+                project_id: project.clone(),
+                spec: ProjectSpec { name: "Configured local master".into(), repositories: if with_repository {
+                    vec![repository.to_str().unwrap().into()]
+                } else { vec![] } },
+            }).await;
+            let basis = owner_read(&storage, &started, OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools, cursor: None, limit: 1,
+            }).await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(&storage, &started, "open-rcli-master", OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Open {
+                    project_id: project.clone(), expected_config_id: basis.config_id,
+                    expected_source_hash: source_hash,
+                    selection: MasterSelection {
+                        backend: MasterBackend::Rcli, pool_ref: reference("local-pool"),
+                        target_profile_ref: reference("local-profile"),
+                        route: RouteRequest {
+                            preferred_target: Some(reference("local-profile")),
+                            required_target: Some(reference("local-profile")),
+                            required_capabilities: vec![], account_ref: reference("local-account"),
+                            budget_ref: reference("conversation-budget"), resources: ResourceBudget::unit(),
+                        },
+                    },
+                },
+            }).await;
+            let state = owner_read(&storage, &started, OwnerRead::ProjectMaster { project_id: project.clone() }).await;
+            let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+                panic!("actual committed master session missing");
+            };
+            owner_apply(&storage, &started, "submit-rcli-turn", OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: project.clone(), session_id: session.session_id.clone(), text: message.into(),
+                },
+            }).await;
+            let state = owner_read(&storage, &started, OwnerRead::ProjectMaster { project_id: project.clone() }).await;
+            let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+                panic!("actual submitted master session missing");
+            };
+            let state = owner_read(&storage, &started, OwnerRead::ProjectMasterTurns {
+                project_id: project, session_id: session.session_id.clone(), cursor: None, limit: 1,
+            }).await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual queued master turn missing");
+            };
+            assert_eq!(page.turns.len(), 1);
+            let turn = page.turns.into_iter().next().unwrap();
+            assert_eq!(turn.phase, MasterTurnPhase::Queued);
+            assert_eq!(turn.attempt, None);
+            assert_eq!(turn.runtime, None);
+            assert_eq!(turn.reply, None);
+            Self { storage, config, started, session, turn, path, global, home, repository, root }
+        }
+
+        async fn runtime(&self, command: MasterRuntimeCommand) -> Result<MasterRuntimeResult, EngineError> {
+            let (send, receive) = oneshot::channel();
+            self.storage.sender.try_send(Job::MasterRuntime(Box::new(command), send))
+                .unwrap_or_else(|_| panic!("actual master runtime queue unavailable"));
+            receive.await.unwrap()
+        }
+
+        async fn register(&self) -> RcliConfiguredProfileProof {
+            let result = self.runtime(MasterRuntimeCommand::RegisterRcliProfile {
+                host: self.started.host.clone(), project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(), configured_home: self.home.clone(),
+            }).await.unwrap();
+            let MasterRuntimeResult::ConfiguredProfile(proof) = result else {
+                panic!("actual configured profile receipt missing");
+            };
+            *proof
+        }
+
+        fn prepare(&self) -> MasterRuntimeCommand {
+            MasterRuntimeCommand::Prepare {
+                host: self.started.host.clone(), project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(), turn_id: self.turn.id.clone(),
+            }
+        }
+
+        fn db(&self) -> Connection {
+            let db = Connection::open_with_flags(&self.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(1)).unwrap();
+            db
+        }
+
+        fn snapshot(&self) -> Snapshot {
+            let mut db = self.db();
+            let tx = db.transaction().unwrap();
+            let tables = ["master_preparations", "model_gateway_attempts", "model_gateway_observations",
+                "native_auth_operations", "worktree_leases", "bootstrap_workspaces"];
+            let counts = tables.map(|table| tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
+                |row| row.get::<_, i64>(0)).unwrap());
+            let snapshot = Snapshot {
+                revision: owner_revision(&tx).unwrap(),
+                turn: tx.query_row("SELECT body FROM master_turns WHERE session=?1 AND id=?2",
+                    params![self.session.session_id.as_str(), self.turn.id.as_str()], |row| row.get(0)).unwrap(),
+                counts,
+            };
+            drop(tx);
+            snapshot
+        }
+
+        async fn close(self) {
+            let (send, receive) = oneshot::channel();
+            self.storage.sender.try_send(Job::OwnerStop(self.started.host, send))
+                .unwrap_or_else(|_| panic!("actual owner stop queue unavailable"));
+            receive.await.unwrap().unwrap();
+            let (send, receive) = oneshot::channel();
+            self.storage.sender.try_send(Job::Close(send))
+                .unwrap_or_else(|_| panic!("actual actor close queue unavailable"));
+            receive.await.unwrap().unwrap();
+            assert!(self.root.path().is_dir());
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_local_rcli_prepares_real_lease_and_claims_one_producer_without_ready() {
+        let case = Fixture::new(true).await;
+        let original_config = std::fs::read(case.home.join(".backboard/config.json")).unwrap();
+        let proof = case.register().await;
+        assert_eq!(case.register().await, proof);
+        assert_eq!(proof.database_instance, case.started.host.db_instance);
+        assert_eq!(proof.engine_epoch, case.started.host.engine_epoch);
+        assert_eq!(proof.config_id, case.config.id);
+        assert_eq!(proof.source_hash, case.session.source_hash);
+        assert_eq!(proof.profile_ref, case.session.selection.target_profile_ref);
+        assert_eq!(proof.connection.harness, reference("rcli"));
+        assert_eq!(proof.connection.auth, ModelAuthentication::None {});
+        assert_eq!(proof.profile_config_sha256, format!("{:x}", Sha256::digest(&original_config)));
+        assert!(proof.generation > 0);
+        assert!(!proof.custody_id.is_empty());
+        let result = case.runtime(case.prepare()).await.unwrap();
+        let MasterRuntimeResult::Prepared(prepared) = result else {
+            panic!("registered local RCLI must prepare the actual first conversation");
+        };
+        assert_eq!(prepared.text, PROMPT);
+        assert_eq!(prepared.session.session_id, case.session.session_id);
+        assert_eq!(prepared.session.bootstrap_task_id, case.session.bootstrap_task_id);
+        assert_eq!(prepared.attempt.request.project_id, case.session.project_id);
+        assert_eq!(prepared.attempt.request.task_id, case.session.bootstrap_task_id);
+        assert_eq!(prepared.attempt.request.role, Role::ProjectLeader);
+        assert!(prepared.attempt.request.route.required_capabilities.is_empty());
+        assert!(prepared.attempt.request.previous_attempt.is_none());
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert!(prepared.attempt.completion.is_none());
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.project_id, case.session.project_id);
+        assert_eq!(prepared.lease.task_id, case.session.bootstrap_task_id);
+        assert_eq!(prepared.lease.owner_session, case.session.session_id);
+        assert_eq!(prepared.cwd, PathBuf::from(&prepared.lease.path));
+        assert_eq!(prepared.repository, case.repository);
+        assert!(prepared.cwd.is_dir());
+        assert!(prepared.cwd.join(".git").is_file());
+        {
+            let mut db = case.db();
+            let tx = db.transaction().unwrap();
+            let auth = MasterBootstrapAuth::RcliConfigured(proof.clone());
+            validate_bootstrap_auth(&tx, &prepared.session, &auth).unwrap();
+            let (allocation, lease) = super::super::master_bootstrap::ready(&tx, &prepared.session, &auth).unwrap();
+            assert_eq!(allocation, prepared.worktree_lease);
+            assert_eq!(lease, prepared.lease);
+            assert_eq!(model_gateway::read_attempt(&tx, &prepared.attempt.request.id).unwrap(), Some(prepared.attempt.clone()));
+            let body: String = tx.query_row("SELECT body FROM master_preparations WHERE session=?1 AND turn=?2",
+                params![case.session.session_id.as_str(), case.turn.id.as_str()], |row| row.get(0)).unwrap();
+            let record: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(record["auth"], serde_json::to_value(&auth).unwrap());
+            let state = model_gateway::connection_state(&tx, &proof.connection, now_ms().unwrap()).unwrap();
+            assert_eq!(state.health, model_gateway::Health::Unknown);
+            assert_eq!(state.quota, model_gateway::Quota::Unknown);
+            assert_eq!(state.observed_at_ms, None);
+        }
+        let acquire = || MasterRuntimeCommand::AcquireProfile {
+            host: case.started.host.clone(), project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(), turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+        };
+        let MasterRuntimeResult::Profile(guard) = case.runtime(acquire()).await.unwrap() else {
+            panic!("actual configured RCLI Execution guard missing");
+        };
+        let MasterRuntimeResult::Turn(duplicate) = case.runtime(acquire()).await.unwrap() else {
+            panic!("duplicate acquisition must return the current turn");
+        };
+        assert_eq!(duplicate.phase, MasterTurnPhase::Delivering);
+        assert_eq!(duplicate.attempt.as_ref(), Some(&prepared.attempt));
+        assert_eq!(duplicate.runtime, None);
+        assert_eq!(duplicate.reply, None);
+        assert_eq!(duplicate.reason, None);
+        drop(guard);
+        let snapshot = case.snapshot();
+        assert_eq!(snapshot.counts, [1, 1, 0, 0, 1, 1]);
+        assert_eq!(std::fs::read(case.home.join(".backboard/config.json")).unwrap(), original_config);
+        assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn unregistered_local_rcli_is_configuration_required_without_admission_or_allocation() {
+        let case = Fixture::new(false).await;
+        let before = case.snapshot();
+        let result = case.runtime(case.prepare()).await;
+        assert_eq!(result.err().unwrap().0, "rcli_profile_configuration_required");
+        assert_eq!(case.snapshot(), before);
+        assert_eq!(before.counts, [0; 6]);
+        assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_receipt_cannot_be_replaced_by_a_constructed_proof() {
+        let case = Fixture::new(false).await;
+        let proof = case.register().await;
+        let before = case.snapshot();
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        validate_bootstrap_auth(&tx, &case.session, &MasterBootstrapAuth::RcliConfigured(proof.clone())).unwrap();
+        for field in 0..11 {
+            let mut changed = proof.clone();
+            match field {
+                0 => changed.registration_id = RequestId::new("unregistered-proof").unwrap(),
+                1 => changed.generation = changed.generation.checked_add(1).unwrap(),
+                2 => changed.engine_epoch = "0".repeat(64),
+                3 => changed.config_id = ConfigId::new("0".repeat(64)).unwrap(),
+                4 => changed.source_hash = "0".repeat(64),
+                5 => changed.profile_ref = reference("unregistered-profile"),
+                6 => changed.connection.account_ref = reference("foreign-account"),
+                7 => changed.profile_config_sha256 = "0".repeat(64),
+                8 => changed.database_instance = "0".repeat(64),
+                9 => changed.custody_id = "unregistered-custody".into(),
+                10 => changed.at_revision = Cursor::new(u64::MAX),
+                _ => unreachable!(),
+            }
+            assert!(validate_bootstrap_auth(&tx, &case.session,
+                &MasterBootstrapAuth::RcliConfigured(changed)).is_err(), "constructed proof field {field} was trusted");
+        }
+        drop(tx);
+        drop(db);
+        assert_eq!(case.snapshot(), before);
+        assert_eq!(before.counts, [0; 6]);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_registration_does_not_bypass_current_settings_or_host_epoch() {
+        let case = Fixture::new(false).await;
+        case.register().await;
+        let before = case.snapshot();
+        let mut foreign = case.started.host.clone();
+        foreign.engine_epoch = "0".repeat(64);
+        let result = case.runtime(MasterRuntimeCommand::Prepare {
+            host: foreign, project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(), turn_id: case.turn.id.clone(),
+        }).await;
+        assert_eq!(result.err().unwrap().0, "owner_runtime_stale");
+        assert_eq!(case.snapshot(), before);
+        private_file(&case.global, CONFIG.replace("timeout_ms = 2000", "timeout_ms = 2001").as_bytes());
+        let result = case.runtime(case.prepare()).await;
+        assert_eq!(result.err().unwrap().0, "settings_source_conflict");
+        assert_eq!(case.snapshot(), before);
+        case.close().await;
+    }
 }

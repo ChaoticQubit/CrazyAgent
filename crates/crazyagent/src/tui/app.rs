@@ -301,6 +301,11 @@ impl App {
     }
 
     pub fn draft(&self) -> &str {
+        if self.focus == Focus::Settings
+            && let Some(home) = self.model_access.home_draft()
+        {
+            return home;
+        }
         if self.declaration.open {
             if self.declaration.field == 0 {
                 &self.declaration.name
@@ -363,6 +368,12 @@ impl App {
                 self.scroll = 0;
                 return Ok(());
             }
+            if matches!(event, UiEvent::Character('h')) && self.master.is_open() {
+                self.master
+                    .configure_home(self.model_access.selected_homes());
+                self.assert_consistent();
+                return Ok(());
+            }
             if matches!(event, UiEvent::Submit)
                 && self.master.is_open()
                 && (self.conversation_pending.is_some()
@@ -409,6 +420,9 @@ impl App {
             self.advance_navigation()?;
         }
         if self.focus == Focus::Settings {
+            let project = self.selected_project()
+                .map(|project| (project.project_id.clone(), project.spec.name.clone()));
+            self.model_access.select_assignment_project(project);
             if matches!(event, UiEvent::Submit) && self.conversation_pending.is_some() {
                 return Err(
                     "A conversation owner intent is unresolved; metadata values retained".into(),
@@ -570,6 +584,15 @@ impl App {
                         },
                     });
                     self.submitted_generation = Some(self.draft_generation);
+                } else if self.focus == Focus::Projects {
+                    if self.selected_project().is_none() {
+                        return Err("Select an actual project to open its Conversation".into());
+                    }
+                    self.advance_navigation()?;
+                    self.unassigned = false;
+                    self.focus = Focus::Conversation;
+                    self.scroll = 0;
+                    self.notice("Selected project Conversation; draft retained");
                 } else {
                     self.queue_conversation()?;
                 }
@@ -1057,6 +1080,9 @@ impl App {
     }
 
     pub(super) fn draft_label(&self) -> String {
+        if self.focus == Focus::Settings && self.model_access.home_draft().is_some() {
+            return "SDK home | Enter selects transient intent | Esc retains input".into();
+        }
         if self.declaration.open {
             return if self.declaration.field == 0 {
                 "Declared project name".into()
@@ -1069,7 +1095,7 @@ impl App {
             };
         }
         if self.master.is_open() {
-            return "Master setup | Enter Open | Esc retains conversation draft".into();
+            return self.master.draft_label().into();
         }
         if self.creating_project {
             return "Project name".into();

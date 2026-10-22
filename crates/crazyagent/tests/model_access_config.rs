@@ -167,7 +167,7 @@ fn catalog_rejects_duplicate_dangling_oversized_and_incompatible_metadata() {
             "members = [\"connection\"]",
             "members = ['connection','connection']",
         ),
-        HTTP_CATALOG.replace("roles = [\"worker\"]", "roles = []"),
+        HTTP_CATALOG.replace("members = [\"connection\"]", "members = []"),
         HTTP_CATALOG.replace(
             "projects = [\"project\"]",
             "projects = ['project','project']",
@@ -436,4 +436,52 @@ fn quota_policy_rejects_unknown_values_and_untyped_catalog_fields() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn imp1038_unassigned_and_partial_catalog_scopes_round_trip() {
+    for (projects, roles) in [("[]", "[]"), ("[]", "[\"worker\"]"), ("[\"project\"]", "[]")] {
+        let input = HTTP_CATALOG
+            .replace("projects = [\"project\"]", &format!("projects = {projects}"))
+            .replace("roles = [\"worker\"]", &format!("roles = {roles}"));
+        let config = load_catalog(&input, "").expect("unassigned catalog scopes are valid");
+        config.validate().unwrap();
+        let pool = &config.settings.model_access.as_ref().unwrap().pools[0];
+        assert_eq!(pool.projects.is_empty(), projects == "[]");
+        assert_eq!(pool.roles.is_empty(), roles == "[]");
+        assert_eq!(pool.members[0].as_str(), "connection");
+        let restored: EffectiveConfig =
+            serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, config);
+    }
+}
+
+#[test]
+fn imp1038_unassigned_catalog_retains_membership_uniqueness_and_bounds() {
+    let unassigned = HTTP_CATALOG
+        .replace("projects = [\"project\"]", "projects = []")
+        .replace("roles = [\"worker\"]", "roles = []");
+    let mut cases = vec![
+        unassigned.replace("members = [\"connection\"]", "members = []"),
+        unassigned.replace("members = [\"connection\"]", "members = ['missing']"),
+        unassigned.replace(
+            "members = [\"connection\"]",
+            "members = ['connection','connection']",
+        ),
+        unassigned.replace("projects = []", "projects = ['project','project']"),
+        unassigned.replace("roles = []", "roles = ['worker','worker']"),
+    ];
+    for field in ["projects", "roles"] {
+        cases.push(unassigned.replace(
+            &format!("{field} = []"),
+            &format!(
+                "{field} = {:?}",
+                (0..65).map(|i| format!("scope{i}")).collect::<Vec<_>>()
+            ),
+        ));
+    }
+    for input in cases {
+        assert_eq!(load_catalog(&input, "").unwrap_err().0, "invalid_model_access");
+    }
 }

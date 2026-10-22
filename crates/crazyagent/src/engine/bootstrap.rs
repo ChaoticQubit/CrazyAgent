@@ -445,6 +445,42 @@ fn check_path_length(path: &Path) -> Result<(), EngineError> {
 }
 
 impl EngineService {
+    pub fn register_native_auth_host(&mut self, executable: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        self.owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .register_native_auth_host(host)
+    }
+
+    pub fn register_codex_executable(&mut self, executable: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        self.owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .register_codex_executable(host)
+    }
+
+    pub fn register_claude_executable(&mut self, executable: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        self.owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .register_claude_executable(host)
+    }
+
     pub async fn prepare_runner(
         &mut self,
         attempt: &crate::worker_dispatch::AttemptRef,
@@ -841,6 +877,14 @@ impl EngineService {
     pub async fn shutdown(&mut self) -> Result<(), EngineError> {
         assert!(!self.closed);
         let mut errors = Vec::new();
+        if let Some(owner) = self.owner_runtime.as_ref() {
+            if let Err(error) = owner.invalidate_native_auth_dispatch() {
+                errors.push(error.0);
+            }
+            if let Err(error) = owner.drain_native_auth_dispatch().await {
+                errors.push(error.0);
+            }
+        }
         if let Some(locator) = self.locator.take() {
             let result = locator.verify(&self.anchor).and_then(|()| {
                 rustix::fs::unlinkat(

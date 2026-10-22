@@ -4,17 +4,21 @@ pub mod bridge;
 mod native_refresh_observation;
 
 use bridge::{
-    ActionReceipt, BaselineDetail, BaselinePage, BridgeError, ConnectionStatus, HistoryPage,
-    IntentReceipt, ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent,
-    ProjectDetail, ProjectPage,
+    AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError,
+    ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
+    ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
+    ProjectPage,
 };
 use crazyagent::config::ModelAccessEdit;
-use crazyagent::engine::owner::{ModelAccessCollection, NativeAuthMethod};
+use crazyagent::engine::owner::{
+    AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
+};
 use crazyagent::protocol::ProjectSpec;
+use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
 
-pub struct NativeState(Mutex<NativeBridge>);
+pub struct NativeState(Arc<Mutex<NativeBridge>>);
 
 fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     if window.label() != "main" {
@@ -200,6 +204,82 @@ async fn desktop_retry_intent(
 }
 
 #[tauri::command]
+async fn desktop_prepare_managed_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    provider: String,
+    label: String,
+) -> Result<ManagedAccountPlan, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .prepare_managed_account(&provider, &label)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_prepare_configured_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    provider: String,
+    label: String,
+    endpoint: String,
+    model: String,
+) -> Result<ConfiguredAccountPlan, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .prepare_configured_account(&provider, &label, &endpoint, &model)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_account_auth_capabilities(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<AccountAuthCapabilitiesReply, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.account_auth_capabilities(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_configure_account_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    secret: Option<String>,
+    generation: u64,
+) -> Result<AccountProfileView, BridgeError> {
+    main_window(&window)?;
+    let secret = secret
+        .map(|value| AccountSecret::new(value.into_bytes()))
+        .transpose()
+        .map_err(|_| BridgeError {
+            code: "account_secret_invalid",
+        })?;
+    let mut bridge = Arc::clone(&state.0)
+        .try_lock_owned()
+        .map_err(|_| BridgeError { code: "busy" })?;
+    tauri::async_runtime::spawn(async move {
+        bridge
+            .configure_account_profile(&ticket, secret, generation)
+            .await
+    })
+    .await
+    .map_err(|_| BridgeError {
+        code: "account_profile_outcome_unknown_read_same_request",
+    })?
+}
+
+#[tauri::command]
+async fn desktop_read_account_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<AccountProfileView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.read_account_profile().await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -267,6 +347,25 @@ async fn desktop_cancel_native_auth(
 }
 
 #[tauri::command]
+async fn desktop_submit_claude_auth_code(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    code: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let secret = NativeBridge::claude_auth_secret(code)?;
+    let mut bridge = Arc::clone(&state.0)
+        .try_lock_owned()
+        .map_err(|_| BridgeError { code: "busy" })?;
+    tauri::async_runtime::spawn(async move {
+        bridge.submit_claude_auth_code(&ticket, secret).await
+    })
+    .await
+    .map_err(|_| BridgeError { code: "native_auth_claude_input_outcome_unknown" })?
+}
+
+#[tauri::command]
 async fn desktop_logout_native_auth(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -279,7 +378,7 @@ async fn desktop_logout_native_auth(
 pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
-        .manage(NativeState(Mutex::new(NativeBridge::new(socket))))
+        .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -298,6 +397,11 @@ pub fn run() {
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,
+            desktop_prepare_managed_account,
+            desktop_prepare_configured_account,
+            desktop_account_auth_capabilities,
+            desktop_configure_account_profile,
+            desktop_read_account_profile,
             desktop_model_access_page,
             desktop_inspect_model_access,
             desktop_edit_model_access,
@@ -305,6 +409,7 @@ pub fn run() {
             desktop_read_native_auth,
             desktop_cancel_native_auth,
             desktop_logout_native_auth,
+            desktop_submit_claude_auth_code,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

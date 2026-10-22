@@ -13,6 +13,11 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
+mod configured_rcli;
+mod generated_configured_rcli;
+pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
+use configured_rcli::lock;
+
 const ROOT: &str = "native-profiles";
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
@@ -272,6 +277,7 @@ pub(crate) struct NativeProfileUse {
     profile: Directory,
     home: Directory,
     manifest: Manifest,
+    configured: Option<configured_rcli::ConfiguredRcliUse>,
     key: String,
     host: HostStamp,
     binding: NativeProfileBinding,
@@ -281,7 +287,21 @@ pub(crate) struct NativeProfileUse {
 }
 
 impl NativeProfileUse {
-    pub(in crate::engine) fn revalidate_retained(&self) -> Result<(), EngineError> {
+    pub(in crate::engine) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
+        self.revalidate_retained()?;
+        if let Some(configured) = &self.configured {
+            return Ok(configured.path().to_path_buf());
+        }
+        Ok(self
+            .custody
+            .anchor
+            .path
+            .join(ROOT)
+            .join(&self.key)
+            .join("home"))
+    }
+
+    pub(crate) fn revalidate_retained(&self) -> Result<(), EngineError> {
         self.revalidate(
             &self.host,
             &self.binding,
@@ -314,9 +334,14 @@ impl NativeProfileUse {
         self.root_manifest.verify(&self.root.file)?;
         self.profile
             .verify(&self.root.file, OsStr::new(&self.key))?;
-        self.home.verify(&self.profile.file, OsStr::new("home"))?;
         self.manifest.verify(&self.profile.file)?;
-        require_profile_entries(&self.profile.file)?;
+        if let Some(configured) = &self.configured {
+            configured.verify(&self.home, &binding.connection)?;
+            configured_rcli::require_entries(&self.profile.file)?;
+        } else {
+            self.home.verify(&self.profile.file, OsStr::new("home"))?;
+            require_profile_entries(&self.profile.file)?;
+        }
         let slots = scan_slots(&self.root.file)?;
         if slots.get(&self.key) != Some(&self.profile.identity)
             || self
@@ -459,6 +484,7 @@ impl NativeProfileCustody {
             profile,
             home,
             manifest,
+            configured: None,
             key: key.clone(),
             host: host.clone(),
             binding: binding.clone(),
@@ -793,3 +819,6 @@ mod tests {
 
 #[cfg(test)]
 mod use_tests;
+
+#[cfg(test)]
+mod configured_rcli_tests;

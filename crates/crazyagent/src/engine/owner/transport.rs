@@ -1,4 +1,13 @@
 use super::*;
+mod master_runtime;
+mod master_host_launch;
+mod master_dispatch;
+mod master_rcli;
+mod master_rcli_launch;
+#[cfg(test)]
+mod master_auto_dispatch_tests;
+#[cfg(test)]
+mod master_dispatch_tests;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
@@ -20,9 +29,11 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+mod account_profile;
 mod native_auth;
 pub(crate) mod native_auth_channel;
-use native_auth_channel::NativeAuthSlot;
+pub(crate) use native_auth_channel::NativeAuthDispatchHost;
+use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
 mod native_auth_channel_tests;
 #[cfg(test)]
@@ -326,6 +337,8 @@ struct Authority {
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
     native_auth: Mutex<Option<NativeAuthSlot>>,
+    native_auth_host: Mutex<NativeAuthHostRegistration>,
+    native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
 }
 
@@ -676,18 +689,24 @@ impl Authority {
         {
             return Ok(());
         }
-        slot.registration.active = false;
-        if registration.active {
-            let mut token = [0; 32];
-            getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
-            self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
-            slot.file.write_all_at(&token, 0).map_err(io_error)?;
-            slot.file.sync_all().map_err(io_error)?;
-            self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
-            slot.token = token;
-        }
-        slot.registration = registration;
-        Ok(())
+        let previous = slot.registration.admission.clone();
+        let result = (|| {
+            slot.registration.active = false;
+            if registration.active {
+                let mut token = [0; 32];
+                getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+                slot.file.write_all_at(&token, 0).map_err(io_error)?;
+                slot.file.sync_all().map_err(io_error)?;
+                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+                slot.token = token;
+            }
+            slot.registration = registration;
+            Ok(())
+        })();
+        drop(slots);
+        let cleanup = self.invalidate_native_auth_dispatch(Some(&previous));
+        result.and(cleanup)
     }
 
     fn cleanup(&self) -> Result<(), EngineError> {
@@ -1005,6 +1024,8 @@ impl OwnerServer {
                 slots: Mutex::new(slots),
                 runners: Mutex::new(Vec::new()),
                 native_auth: Mutex::new(None),
+                native_auth_host: Mutex::new(NativeAuthHostRegistration::default()),
+                native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
             });
             Ok::<_, EngineError>((listener, authority))
@@ -1091,8 +1112,18 @@ impl OwnerServer {
         let mut custody = tokio::task::JoinSet::new();
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
+            let dispatching = self.authority.native_auth_dispatch_pending();
             tokio::select! {
                 _ = &mut stop => break Ok(()),
+                _ = self.authority.native_auth_changed.notified() => {}
+                result = self.authority.native_auth_dispatch_finished(), if dispatching => {
+                    if result.is_err() {
+                        eprintln!("native_auth_dispatch_failed_fence_retained");
+                    }
+                    if self.authority.drain_native_auth_dispatch(&self.engine).await.is_err() {
+                        eprintln!("native_auth_dispatch_cleanup_uncertain");
+                    }
+                }
                 _ = async { match expiry { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => {
                     self.authority.expire_native_auth(&self.engine).await;
                 }
@@ -1127,13 +1158,16 @@ impl OwnerServer {
         self.authority
             .usable
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.authority.stop_native_auth();
+        let invalidated = self.authority.stop_native_auth();
         handshakes.abort_all();
         custody.abort_all();
         clients.abort_all();
         while handshakes.join_next().await.is_some() {}
         while custody.join_next().await.is_some() {}
         while clients.join_next().await.is_some() {}
+        let drained = self.authority.drain_native_auth_dispatch(&self.engine).await;
+        invalidated?;
+        drained?;
         let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
             .await
             .map_err(|_| failure("owner_stop_outcome_unknown"))?;
@@ -1587,6 +1621,12 @@ async fn serve_authenticated_owner(
         let frame = read_frame(&mut stream).await?;
         let selector: serde_json::Value =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
+        if selector.get("claude_auth_input").is_some() {
+            return native_auth_channel::claude::serve_input(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("account_profile").is_some() {
+            return account_profile::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
         if selector.get("native_auth").is_some() {
             return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
                 .await;

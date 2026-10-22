@@ -6,6 +6,23 @@ use serde_json::{Number, Value};
 use std::fmt;
 use std::io::Read;
 
+#[path = "rcli_host/master.rs"]
+mod master;
+#[path = "rcli_host/master_launch.rs"]
+mod master_launch;
+#[path = "rcli_host/master_process.rs"]
+mod master_process;
+#[path = "rcli_host/master_reply.rs"]
+mod master_reply;
+
+pub use master::{RcliMasterCompletion, RcliMasterHost, RcliMasterObservation, RcliMasterStatus};
+pub use master_launch::{RcliMasterBinding, RcliMasterLaunch};
+pub(crate) use master_launch::{checked_configured_profile, configured_sdk_connection};
+
+#[cfg(test)]
+#[path = "rcli_host/master_tests.rs"]
+mod master_tests;
+
 pub const HOST_PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

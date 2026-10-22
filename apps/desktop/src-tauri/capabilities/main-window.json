@@ -22,6 +22,12 @@
     "allow-desktop-pending-intent",
     "allow-desktop-reconcile-intent",
     "allow-desktop-retry-intent",
+    "allow-desktop-prepare-managed-account",
+    "allow-desktop-start-native-auth",
+    "allow-desktop-read-native-auth",
+    "allow-desktop-cancel-native-auth",
+    "allow-desktop-logout-native-auth",
+    "allow-desktop-submit-claude-auth-code",
     "allow-desktop-model-access-page",
     "allow-desktop-inspect-model-access",
     "allow-desktop-edit-model-access"

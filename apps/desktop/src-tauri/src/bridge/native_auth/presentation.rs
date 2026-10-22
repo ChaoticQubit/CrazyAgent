@@ -1,6 +1,6 @@
 use super::{BridgeError, NativeAuthReply, NativeAuthView, bounded, failure};
 use crazyagent::adapters::{claude, codex};
-use crazyagent::engine::owner::NativeAuthAccount;
+use crazyagent::engine::owner::{NativeAuthAccount, NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -12,6 +12,11 @@ pub enum Challenge {
     CodexDeviceCode {
         user_code: String,
         verification_url: String,
+    },
+    ClaudeOfficial {
+        auth_url: String,
+        accepts_code: bool,
+        prompt_id: Option<String>,
     },
 }
 
@@ -50,6 +55,26 @@ enum StatusField {
 }
 
 pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuthView, BridgeError> {
+    let projected = if let Some(value) = &reply.claude_challenge {
+        if reply.challenge.is_none()
+            && reply.account.is_none()
+            && reply.fact.phase == NativeAuthPhase::AwaitingOwner
+            && reply.fact.action == (NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial })
+            && reply.fact.binding.connection.harness.as_str() == "claude"
+            && safe_claude_url(value.url())
+        {
+            Some(Challenge::ClaudeOfficial {
+                auth_url: value.url().into(),
+                accepts_code: value.accepts_code(),
+                prompt_id: value.prompt_id().map(|id| id.to_string()),
+            })
+        } else {
+            None
+        }
+    } else {
+        reply.challenge.as_ref().and_then(|value| challenge(value.codex()))
+    };
+    let has_challenge = reply.challenge.is_some() || reply.claude_challenge.is_some();
     let mut view = NativeAuthView {
         ticket: ticket.into(),
         request_id: reply.request_id.as_str().into(),
@@ -63,14 +88,11 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
         action: reply.fact.action,
         phase: reply.fact.phase,
         code: reply.fact.code,
-        challenge: reply
-            .challenge
-            .as_ref()
-            .and_then(|value| challenge(value.codex())),
+        challenge: projected,
         account: reply.account.as_ref().map(account),
         display_error: None,
     };
-    if reply.challenge.is_some() && view.challenge.is_none() {
+    if has_challenge && view.challenge.is_none() {
         view.display_error = Some("native_auth_cannot_display_safely");
     }
     let length = serde_json::to_vec(&view)
@@ -82,6 +104,15 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
         view.display_error = Some("native_auth_presentation_limit");
     }
     bounded(view)
+}
+
+fn safe_claude_url(value: &str) -> bool {
+    value.len() <= 8192
+        && value.strip_prefix("https://claude.com/cai/oauth/authorize?").is_some_and(|query| {
+            !query.is_empty() && query.bytes().all(|byte| {
+                byte.is_ascii_graphic() && !matches!(byte, b'#' | b'\\')
+            })
+        })
 }
 
 fn exact(value: &str) -> bool {

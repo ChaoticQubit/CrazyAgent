@@ -1,5 +1,6 @@
 use super::app::UiEvent;
 use super::client::MutationDelivery;
+use super::model_access::{HomeSelection, rcli_home_supported};
 use crate::client_controller::OwnerController;
 use crate::config::{AccountPool, ModelAccess, ModelConnection, ModelEndpoint};
 use crate::conversation::{ConversationContent, ConversationCursor, ConversationEntry};
@@ -10,7 +11,8 @@ use crate::engine::owner::{
 };
 use crate::master_session::{
     MasterBackend, MasterCursor, MasterOwnerAction, MasterSelection, MasterSessionPhase,
-    MasterSessionView, MasterTurnPhase, MasterTurnView,
+    MasterSessionView, MasterTurnPhase, MasterTurnView, RcliProfileRegistration,
+    RcliProfileRegistrationMetadata,
 };
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::routing::{ResourceBudget, RouteRequest};
@@ -114,6 +116,14 @@ struct Pending {
     operation: Option<(RequestId, String)>,
     receipt: Option<OwnerProvenance>,
     retry_allowed: bool,
+    registration: Option<RegisteredHome>,
+}
+
+struct RegisteredHome {
+    identity: OwnerConnectionIdentity,
+    metadata: RcliProfileRegistrationMetadata,
+    provenance: OwnerProvenance,
+    historical: bool,
 }
 
 pub(super) struct State {
@@ -129,6 +139,8 @@ pub(super) struct State {
     next_read: Instant,
     pending: Option<Pending>,
     job: Option<Job>,
+    home_confirmation: Option<RcliProfileRegistration>,
+    registered_home: Option<RegisteredHome>,
     pub notice: String,
 }
 
@@ -147,6 +159,8 @@ impl Default for State {
             next_read: Instant::now(),
             pending: None,
             job: None,
+            home_confirmation: None,
+            registered_home: None,
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -161,6 +175,7 @@ impl State {
         ready: bool,
     ) -> Result<(), String> {
         if self.identity != identity || self.project != project {
+            self.home_confirmation = None;
             self.generation = self
                 .generation
                 .checked_add(1)
@@ -180,6 +195,7 @@ impl State {
     }
 
     pub fn access(&mut self) {
+        self.home_confirmation = None;
         self.catalog = None;
         self.catalog_attempted = false;
         self.view = None;
@@ -206,6 +222,7 @@ impl State {
     }
 
     pub fn open(&mut self) -> Result<(), String> {
+        self.home_confirmation = None;
         let project = self
             .project
             .clone()
@@ -235,6 +252,10 @@ impl State {
             });
             self.forms.len() - 1
         };
+        if self.pending.is_none() {
+            self.catalog = None;
+            self.catalog_attempted = false;
+        }
         self.forms[index].open = true;
         self.forms[index].field = 0;
         self.defaults();
@@ -249,16 +270,88 @@ impl State {
 
     pub fn draft(&self) -> Option<&str> {
         let form = &self.forms[self.form_index()?];
-        if !form.open {
+        if !form.open || form.field < 4 {
             return None;
         }
-        Some(match form.field {
-            0 => backend_label(form.backend),
-            1 => form.pool.as_ref().map_or("", CredentialRef::as_str),
-            2 => form.account.as_ref().map_or("", CredentialRef::as_str),
-            3 => form.target.as_ref().map_or("", CredentialRef::as_str),
-            field => &form.values[field - 4],
+        Some(&form.values[form.field - 4])
+    }
+
+    pub fn draft_label(&self) -> &'static str {
+        if self.home_confirmation.is_some() {
+            "Register configured SDK home | Enter confirms | Esc retains conversation draft"
+        } else {
+            "Master setup | Enter Open | Esc retains conversation draft"
+        }
+    }
+
+    pub fn configure_home<'a>(&mut self, homes: impl Iterator<Item = HomeSelection<'a>>) {
+        self.home_confirmation = None;
+        match self.home_intent(homes) {
+            Ok(intent) => {
+                self.home_confirmation = Some(intent);
+                self.notice =
+                    "Review actual session, connection, sandbox and selected SDK home".into();
+            }
+            Err(reason) => self.notice = format!("SDK home registration disabled: {reason}"),
+        }
+    }
+
+    fn home_intent<'a>(
+        &self,
+        mut homes: impl Iterator<Item = HomeSelection<'a>>,
+    ) -> Result<RcliProfileRegistration, String> {
+        if !self.is_open() || self.has_pending() || !self.ready {
+            return Err("an idle actual owner and open master setup are required".into());
+        }
+        let session = self
+            .view
+            .as_ref()
+            .and_then(|view| view.session.as_ref())
+            .filter(|session| {
+                session.phase == MasterSessionPhase::Configured
+                    && session.selection.backend == MasterBackend::Rcli
+                    && session.current_turn.is_none()
+            })
+            .ok_or("Open an RCLI master and wait for its actual Configured read first")?;
+        if self.selection()? != session.selection {
+            return Err("setup differs from the actual master; review and Open it first".into());
+        }
+        let catalog = self
+            .catalog
+            .as_ref()
+            .ok_or("current owner catalog unavailable")?;
+        if catalog.config_id != session.config_id || catalog.source_hash != session.source_hash {
+            return Err("catalog and session basis differ; refresh before registration".into());
+        }
+        let connection = catalog.rcli_connection(session)?;
+        let home = homes
+            .find(|home| {
+                Some(&home.basis.identity) == self.identity.as_ref()
+                    && home.basis.writable
+                    && home.basis.config_id == catalog.config_id
+                    && home.basis.source_hash == catalog.source_hash
+                    && home.connection == connection
+            })
+            .ok_or("select this connection's SDK home in Settings with h first")?;
+        Ok(RcliProfileRegistration {
+            expected_session: session.clone(),
+            expected_connection: connection.clone(),
+            configured_home: home.configured_home.clone(),
         })
+    }
+
+    fn submit_home(&mut self, index: usize) -> Result<(), String> {
+        let intent = self.home_confirmation.as_ref().unwrap();
+        if self.view.as_ref().and_then(|view| view.session.as_ref())
+            != Some(&intent.expected_session)
+            || self.selection()? != intent.expected_session.selection
+        {
+            return Err("SDK home confirmation is stale; draft retained; reopen with h".into());
+        }
+        let action = MasterOwnerAction::RegisterRcliProfile {
+            registration: Box::new(intent.clone()),
+        };
+        self.enqueue(action, self.forms[index].generation)
     }
 
     fn defaults(&mut self) {
@@ -282,6 +375,30 @@ impl State {
             return Ok(false);
         }
         let index = self.form_index().unwrap();
+        if self.home_confirmation.is_some() {
+            match event {
+                UiEvent::Resize(..) | UiEvent::Scroll(_) => return Ok(false),
+                UiEvent::CancelMaster | UiEvent::CloseMaster => {
+                    self.home_confirmation = None;
+                    return Ok(false);
+                }
+                UiEvent::ToggleBrief
+                | UiEvent::ToggleUnassigned
+                | UiEvent::HistoryNext
+                | UiEvent::HistoryFirst => {
+                    self.home_confirmation = None;
+                    self.forms[index].open = false;
+                    return Ok(false);
+                }
+                UiEvent::Submit => self.submit_home(index)?,
+                UiEvent::Cancel => {
+                    self.home_confirmation = None;
+                    self.forms[index].open = false;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
         match event {
             UiEvent::FocusNext | UiEvent::FocusPrevious => {
                 let delta = if matches!(event, UiEvent::FocusNext) {
@@ -416,6 +533,7 @@ impl State {
             operation: None,
             receipt: None,
             retry_allowed: false,
+            registration: None,
         });
         self.notice = "Master intent queued for the actual owner; drafts retained".into();
         Ok(())
@@ -655,21 +773,38 @@ impl State {
     }
 
     fn finish_read(&mut self, submission: &Submission) {
-        self.pending = None;
-        if let MasterOwnerAction::Open { .. } = submission.action
-            && let Some(form) = self.forms.iter_mut().find(|form| {
-                form.database.as_deref() == Some(submission.identity.database_instance())
-                    && &form.project == action_project(&submission.action)
-            })
-            && form.generation == submission.generation
+        let pending = self
+            .pending
+            .take()
+            .expect("a confirmed read retains its intent");
+        let registered = pending.registration.is_some();
+        if registered {
+            self.registered_home = pending.registration;
+            self.home_confirmation = None;
+        }
+        if matches!(
+            submission.action,
+            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. }
+        ) && let Some(form) = self.forms.iter_mut().find(|form| {
+            form.database.as_deref() == Some(submission.identity.database_instance())
+                && &form.project == action_project(&submission.action)
+        }) && form.generation == submission.generation
         {
             form.open = false;
         }
-        self.notice = concat!(
-            "Actual master receipt and read agree; ",
-            "native delivery/authentication remain unsupported"
-        )
-        .into();
+        self.notice = if registered {
+            concat!(
+                "Registered configured profile; owner receipt and session read agree; ",
+                "no sign-in observed"
+            )
+            .into()
+        } else {
+            concat!(
+                "Actual master receipt and read agree; ",
+                "native delivery/authentication remain unsupported"
+            )
+            .into()
+        };
     }
 
     fn apply_mutation(
@@ -769,6 +904,14 @@ impl State {
         }
         match applied.result {
             OwnerResult::Applied => {
+                if matches!(
+                    self.pending.as_ref().unwrap().submission.action,
+                    MasterOwnerAction::RegisterRcliProfile { .. }
+                ) {
+                    return Err(
+                        "Registration requires the actual configured-profile receipt".into(),
+                    );
+                }
                 self.pending.as_mut().unwrap().receipt = Some(applied.provenance);
                 self.next_read = Instant::now();
                 self.notice = concat!(
@@ -777,6 +920,13 @@ impl State {
                 )
                 .into();
             }
+            OwnerResult::RcliProfileRegistered { registration } => {
+                self.accept_registration(
+                    *registration,
+                    applied.provenance,
+                    applied.historical_replay,
+                )?;
+            }
             OwnerResult::Rejected { code } => {
                 self.pending = None;
                 self.notice =
@@ -784,6 +934,43 @@ impl State {
             }
             _ => return Err("Unexpected master owner result".into()),
         }
+        Ok(())
+    }
+
+    fn accept_registration(
+        &mut self,
+        metadata: RcliProfileRegistrationMetadata,
+        provenance: OwnerProvenance,
+        historical: bool,
+    ) -> Result<(), String> {
+        let pending = self.pending.as_mut().unwrap();
+        let MasterOwnerAction::RegisterRcliProfile { registration } = &pending.submission.action
+        else {
+            return Err("Unexpected configured-profile receipt for another master action".into());
+        };
+        let session = &registration.expected_session;
+        if metadata.project_id != session.project_id
+            || metadata.session_id != session.session_id
+            || metadata.profile_ref != session.selection.target_profile_ref
+            || metadata.generation == 0
+        {
+            return Err(
+                "Configured-profile receipt scope mismatch; original intent retained".into(),
+            );
+        }
+        pending.registration = Some(RegisteredHome {
+            identity: pending.submission.identity.clone(),
+            metadata,
+            provenance: provenance.clone(),
+            historical,
+        });
+        pending.receipt = Some(provenance);
+        self.next_read = Instant::now();
+        self.notice = concat!(
+            "Owner recorded configured profile; ",
+            "waiting for the matching actual session read"
+        )
+        .into();
         Ok(())
     }
 
@@ -825,6 +1012,13 @@ impl State {
         let Some(receipt) = &pending.receipt else {
             return Ok(None);
         };
+        if matches!(
+            pending.submission.action,
+            MasterOwnerAction::RegisterRcliProfile { .. }
+        ) && pending.registration.is_none()
+        {
+            return Err("Configured-profile receipt metadata missing".into());
+        }
         if action_project(&pending.submission.action) != &context.project
             || pending.submission.identity.database_instance()
                 != context.identity.database_instance()
@@ -850,7 +1044,11 @@ impl State {
             lines.push("Select a project before Configure master".into());
         }
         if self.is_open() {
-            self.setup_lines(&mut lines);
+            if let Some(intent) = &self.home_confirmation {
+                registration_lines(intent, &mut lines);
+            } else {
+                self.setup_lines(&mut lines);
+            }
         } else if let Some(view) = &self.view {
             view.lines(&mut lines);
         } else {
@@ -859,6 +1057,7 @@ impl State {
         if let Some(pending) = &self.pending {
             lines.push(pending.line());
         }
+        self.registration_lines(&mut lines);
         if self.is_open() || self.pending.is_some() || self.view.is_none() {
             lines.push(self.notice.clone());
         }
@@ -879,9 +1078,56 @@ impl State {
         lines.join("\n")
     }
 
+    fn registration_lines(&self, lines: &mut Vec<String>) {
+        let Some(registered) = self.registered_home.as_ref().filter(|registered| {
+            self.project.as_ref() == Some(&registered.metadata.project_id)
+                && self.identity.as_ref().is_some_and(|identity| {
+                    identity.database_instance() == registered.identity.database_instance()
+                })
+        }) else {
+            return;
+        };
+        let current = self.ready
+            && self.identity.as_ref() == Some(&registered.identity)
+            && self
+                .view
+                .as_ref()
+                .and_then(|view| view.session.as_ref())
+                .is_some_and(|session| {
+                    session.session_id == registered.metadata.session_id
+                        && session.phase == MasterSessionPhase::Configured
+                });
+        lines.push(format!(
+            "{}Registered configured profile | session {} | sandbox {} | generation {}",
+            if current && !registered.historical {
+                ""
+            } else {
+                "Historical receipt: "
+            },
+            registered.metadata.session_id.as_str(),
+            registered.metadata.profile_ref.as_str(),
+            registered.metadata.generation
+        ));
+        lines.push(format!(
+            "Registration {} | original owner operation {} | no sign-in observation",
+            registered.metadata.registration_id.as_str(),
+            registered.provenance.operation_id.as_str()
+        ));
+    }
+
     fn setup_lines(&self, lines: &mut Vec<String>) {
         self.forms[self.form_index().unwrap()].lines(lines);
+        lines.push(
+            "h Register SDK home | requires actual Open/read and selected connection home".into(),
+        );
         if let Some(catalog) = &self.catalog {
+            if catalog.models.pools.iter().any(|pool| {
+                pool.projects.is_empty() || pool.roles.is_empty()
+            }) {
+                lines.push(
+                    "Unassigned pools do not route; Settings > Pools > a Assign to project".into(),
+                );
+            }
             lines.push(format!(
                 "Owner catalog revision {} | config {} | source {}",
                 catalog.revision.value(),
@@ -919,6 +1165,7 @@ impl State {
         if let Some(pending) = &self.pending {
             assert!(pending.submission.generation > 0);
             assert!(pending.receipt.is_none() || pending.operation.is_some());
+            assert!(pending.registration.is_none() || pending.receipt.is_some());
         }
     }
 }
@@ -996,6 +1243,11 @@ impl View {
             MasterOwnerAction::Close { session_id, .. } => {
                 session.session_id == *session_id
                     && session.phase == MasterSessionPhase::Closed
+                    && session.current_turn.is_none()
+            }
+            MasterOwnerAction::RegisterRcliProfile { registration } => {
+                session == &registration.expected_session
+                    && session.phase == MasterSessionPhase::Configured
                     && session.current_turn.is_none()
             }
         })
@@ -1159,6 +1411,27 @@ impl Form {
 }
 
 impl Catalog {
+    fn rcli_connection(&self, session: &MasterSessionView) -> Result<&ModelConnection, String> {
+        let pool = self
+            .models
+            .pools
+            .iter()
+            .find(|pool| pool.id == session.selection.pool_ref)
+            .ok_or("actual session pool missing from current owner catalog")?;
+        let mut connections = self.models.connections.iter().filter(|connection| {
+            pool.members.contains(&connection.id)
+                && connection.account_ref == session.selection.route.account_ref
+                && rcli_home_supported(connection)
+        });
+        let connection = connections.next().ok_or("RCLI connection unavailable")?;
+        if connections.next().is_some() {
+            return Err(
+                "RCLI connection is ambiguous; inspect the selected pool in Settings".into(),
+            );
+        }
+        Ok(connection)
+    }
+
     fn pools(&self, form: &Form) -> Vec<&AccountPool> {
         self.models
             .pools
@@ -1231,7 +1504,33 @@ pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
         | MasterOwnerAction::Close { project_id, .. } => project_id,
+        MasterOwnerAction::RegisterRcliProfile { registration } => {
+            &registration.expected_session.project_id
+        }
     }
+}
+
+fn registration_lines(intent: &RcliProfileRegistration, lines: &mut Vec<String>) {
+    let session = &intent.expected_session;
+    lines.push("Register configured SDK home".into());
+    lines.push(format!("SDK home: {}", intent.configured_home.display()));
+    lines.push(format!(
+        "Project {} | session {}",
+        session.project_id.as_str(),
+        session.session_id.as_str()
+    ));
+    lines.push(format!(
+        "Connection {} | account {} | pool {}",
+        intent.expected_connection.id.as_str(),
+        intent.expected_connection.account_ref.as_str(),
+        session.selection.pool_ref.as_str()
+    ));
+    lines.push(format!(
+        "Execution sandbox {} | credential profile is separate",
+        session.selection.target_profile_ref.as_str()
+    ));
+    lines.push("Enter confirms registration only | Esc retains conversation draft".into());
+    lines.push("No login, prompt or authentication observation is performed".into());
 }
 
 fn backend_label(backend: MasterBackend) -> &'static str {

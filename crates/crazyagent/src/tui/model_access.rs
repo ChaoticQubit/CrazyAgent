@@ -7,10 +7,17 @@ use crate::config::{
 };
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
+    AccountAuthCapabilitiesReply, AccountProfileReply, AccountProfileRequest, AccountSecret,
     ModelAccessCollection, ModelAccessCursor, ModelAccessRecord, OwnerData, OwnerRead,
     OwnerReadReply, OwnerResponse, OwnerResult,
 };
 use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
+use std::path::PathBuf;
+
+pub(super) mod account_profile;
+mod managed_setup;
+mod pool_assignment;
+mod pool_setup;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Basis {
@@ -28,9 +35,40 @@ pub(super) struct Submission {
     pub edit: ModelAccessEdit,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProfileSubmission {
+    pub basis: Basis,
+    pub connection: ModelConnection,
+    pub generation: u64,
+    pub request: AccountProfileRequest,
+}
+
+pub(super) struct HomeSelection<'a> {
+    pub basis: &'a Basis,
+    pub connection: &'a ModelConnection,
+    pub configured_home: &'a PathBuf,
+}
+
+struct HomeDraft {
+    basis: Basis,
+    connection: ModelConnection,
+    value: String,
+    selected: Option<PathBuf>,
+}
+
 pub(super) enum Job {
+    ClaudeCode(Box<native_auth::claude_code::Job>),
     NativeAuth(Box<native_auth::Job>),
+    AccountProfileConfigure {
+        submission: ProfileSubmission,
+        secret: Option<AccountSecret>,
+    },
+    AccountProfileRead {
+        submission: ProfileSubmission,
+    },
+    AccountProfileCapabilities {
+        submission: ProfileSubmission,
+    },
     Read {
         identity: OwnerConnectionIdentity,
         generation: u64,
@@ -43,7 +81,17 @@ pub(super) enum Job {
 }
 
 pub(super) enum Event {
+    ClaudeCode(Box<native_auth::claude_code::Event>),
     NativeAuth(Box<native_auth::Event>),
+    AccountProfile {
+        submission: ProfileSubmission,
+        result: Result<Box<AccountProfileReply>, String>,
+        retained: bool,
+    },
+    AccountProfileCapabilities {
+        submission: ProfileSubmission,
+        result: Result<Box<AccountAuthCapabilitiesReply>, String>,
+    },
     Read {
         identity: OwnerConnectionIdentity,
         generation: u64,
@@ -67,6 +115,11 @@ enum RecordAction {
 
 pub(super) struct State {
     native_auth: native_auth::State,
+    profile: account_profile::Profile,
+    managed_setup: Option<managed_setup::Setup>,
+    pool_setup: Option<pool_setup::Setup>,
+    assignment: Option<pool_assignment::Assignment>,
+    assignment_project: Option<(crate::protocol::ProjectId, String)>,
     identity: Option<OwnerConnectionIdentity>,
     ready: bool,
     pub pinned: bool,
@@ -85,6 +138,8 @@ pub(super) struct State {
     editing: bool,
     confirmation: Option<(ModelAccessRecord, Basis)>,
     record: Option<ModelAccessRecord>,
+    homes: Vec<HomeDraft>,
+    home_editor: Option<usize>,
     pending: Option<Submission>,
     operation: Option<(RequestId, String)>,
     retry_allowed: bool,
@@ -96,6 +151,11 @@ impl Default for State {
     fn default() -> Self {
         Self {
             native_auth: native_auth::State::default(),
+            profile: account_profile::Profile::default(),
+            managed_setup: None,
+            pool_setup: None,
+            assignment: None,
+            assignment_project: None,
             identity: None,
             ready: false,
             pinned: false,
@@ -114,6 +174,8 @@ impl Default for State {
             editing: false,
             confirmation: None,
             record: None,
+            homes: Vec::new(),
+            home_editor: None,
             pending: None,
             operation: None,
             retry_allowed: false,
@@ -125,6 +187,7 @@ impl Default for State {
 
 impl State {
     pub fn access(&mut self, identity: Option<OwnerConnectionIdentity>, ready: bool) {
+        self.discard_unsent_profile();
         self.native_auth.access(identity.clone(), ready);
         self.ready = ready;
         if let Some(identity) = identity {
@@ -137,6 +200,7 @@ impl State {
         self.flight = None;
         self.confirmation = None;
         self.record = None;
+        self.home_editor = None;
         self.needs_page = true;
         self.rebase = false;
         self.job = None;
@@ -147,15 +211,19 @@ impl State {
             });
             self.notice = "Reconnected; reconciling the exact original request".into();
         }
+        self.access_profile();
         self.assert_consistent();
     }
 
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some() || self.native_auth.has_pending()
+        self.pending.is_some() || self.native_auth.has_pending() || self.profile.has_pending()
     }
 
     pub fn loading(&self) -> bool {
-        self.flight.is_some() || self.job.is_some() || self.native_auth.loading()
+        self.flight.is_some()
+            || self.job.is_some()
+            || self.native_auth.loading()
+            || self.profile.loading()
     }
 
     pub fn disconnected(&self) -> bool {
@@ -166,10 +234,23 @@ impl State {
         if !self.ready {
             return Ok(None);
         }
+        if let Some(job) = self.native_auth.code_request() {
+            return Ok(Some(Job::ClaudeCode(Box::new(job))));
+        }
         if let Some(job) = self.native_auth.request() {
             return Ok(Some(Job::NativeAuth(Box::new(job))));
         }
+        if let Some(job) = self.request_profile() {
+            return Ok(Some(job));
+        }
+        self.request_managed_setup()?;
+        self.request_pool_setup()?;
+        self.request_assignment()?;
         if self.job.is_none()
+            && self.managed_setup.is_none()
+            && self.pool_setup.is_none()
+            && self.assignment.is_none()
+            && !self.profile.is_open()
             && active
             && !self.pinned
             && self.needs_page
@@ -188,6 +269,9 @@ impl State {
     pub fn retry(&mut self) -> bool {
         if !self.ready || self.job.is_some() {
             return false;
+        }
+        if self.retry_profile() {
+            return true;
         }
         let Some(submission) = &self.pending else {
             return false;
@@ -242,8 +326,23 @@ impl State {
     }
 
     pub fn reduce(&mut self, event: &UiEvent) -> Result<bool, String> {
+        if self.profile.is_open() {
+            return self.reduce_profile(event);
+        }
         if self.native_auth.is_open() {
             return self.native_auth.reduce(event);
+        }
+        if self.home_editor.is_some() {
+            return self.reduce_home(event);
+        }
+        if self.managed_setup.is_some() {
+            return self.reduce_managed_setup(event);
+        }
+        if self.pool_setup.is_some() {
+            return self.reduce_pool_setup(event);
+        }
+        if self.assignment.is_some() {
+            return self.reduce_assignment(event);
         }
         if matches!(event, UiEvent::ConfigureMaster) {
             return self.open_native_auth();
@@ -393,6 +492,23 @@ impl State {
             };
         }
         match event {
+            UiEvent::Character('a')
+                if !self.pinned && self.collection == ModelAccessCollection::Pools =>
+            {
+                self.begin_assignment()?;
+            }
+            UiEvent::Character('k') if !self.pinned => self.open_profile()?,
+            UiEvent::Character('h') if !self.pinned => self.open_home()?,
+            UiEvent::Character('n')
+                if !self.pinned && self.collection == ModelAccessCollection::Pools =>
+            {
+                self.begin_pool_setup(self.writable()?, None)?;
+            }
+            UiEvent::Character('a')
+                if !self.pinned && self.collection == ModelAccessCollection::Accounts =>
+            {
+                self.begin_managed_setup()?;
+            }
             UiEvent::Character(character @ ('1' | '2' | '3' | '4')) => {
                 self.explicit = true;
                 self.pinned = *character == '4';
@@ -488,6 +604,103 @@ impl State {
         Ok(())
     }
 
+    fn open_home(&mut self) -> Result<(), String> {
+        if self.loading() || self.has_pending() {
+            return Err("Wait for the current owner operation before selecting an SDK home".into());
+        }
+        let basis = self.writable()?;
+        let Some(ModelAccessRecord::Connection { connection }) = &self.record else {
+            return Err("Inspect an actual RCLI connection before selecting its SDK home".into());
+        };
+        if !rcli_home_supported(connection) || self.items.get(self.selected) != self.record.as_ref()
+        {
+            return Err("SDK home requires an inspected RCLI API-key or local connection".into());
+        }
+        let index = self.homes.iter().position(|home| {
+            home.basis.identity == basis.identity && home.connection == *connection
+        });
+        let index = if let Some(index) = index {
+            let home = &mut self.homes[index];
+            if home.basis.config_id != basis.config_id
+                || home.basis.source_hash != basis.source_hash
+            {
+                home.selected = None;
+            }
+            home.basis = basis;
+            index
+        } else {
+            if self.homes.len() >= 128 {
+                return Err("SDK home draft capacity reached; existing input retained".into());
+            }
+            self.homes.push(HomeDraft {
+                basis,
+                connection: connection.clone(),
+                value: String::new(),
+                selected: None,
+            });
+            self.homes.len() - 1
+        };
+        self.home_editor = Some(index);
+        self.notice = "SDK home is transient intent; Enter selects, Esc retains input".into();
+        Ok(())
+    }
+
+    fn reduce_home(&mut self, event: &UiEvent) -> Result<bool, String> {
+        let home = &mut self.homes[self.home_editor.unwrap()];
+        match event {
+            UiEvent::Resize(..) | UiEvent::Scroll(_) => return Ok(false),
+            UiEvent::Character(character) => {
+                if character.is_control() || home.value.len() + character.len_utf8() > 4096 {
+                    return Err("SDK home requires at most 4096 literal UTF-8 bytes".into());
+                }
+                home.value.push(*character);
+            }
+            UiEvent::Backspace => {
+                home.value.pop();
+            }
+            UiEvent::Submit => {
+                let path = PathBuf::from(&home.value);
+                if !path.is_absolute() {
+                    return Err("Select a literal absolute SDK home; input retained".into());
+                }
+                home.selected = Some(path);
+                self.home_editor = None;
+                self.notice = concat!(
+                    "Home selected; no registration or sign-in performed. ",
+                    "Open a repository master, then F2 and h to review registration"
+                )
+                .into();
+            }
+            UiEvent::Cancel | UiEvent::FocusNext | UiEvent::FocusPrevious => {
+                self.home_editor = None;
+                self.notice = "SDK home input retained; h resumes; no owner operation sent".into();
+                return Ok(matches!(event, UiEvent::Cancel));
+            }
+            _ => {}
+        }
+        self.assert_consistent();
+        Ok(true)
+    }
+
+    pub fn selected_homes(&self) -> impl Iterator<Item = HomeSelection<'_>> {
+        self.homes.iter().filter_map(|home| {
+            (self.ready && self.identity.as_ref() == Some(&home.basis.identity))
+                .then_some(home)
+                .and_then(|home| {
+                    home.selected.as_ref().map(|configured_home| HomeSelection {
+                        basis: &home.basis,
+                        connection: &home.connection,
+                        configured_home,
+                    })
+                })
+        })
+    }
+
+    pub fn home_draft(&self) -> Option<&str> {
+        self.home_editor
+            .map(|index| self.homes[index].value.as_str())
+    }
+
     fn submit(&mut self, basis: Basis, edit: ModelAccessEdit) -> Result<(), String> {
         if self.writable()? != basis {
             return Err(
@@ -517,6 +730,13 @@ impl State {
 
     pub fn apply(&mut self, event: Event) -> Result<(), String> {
         match event {
+            Event::ClaudeCode(event) => self.native_auth.apply_code(*event)?,
+            Event::AccountProfile { submission, result, retained } => {
+                self.apply_profile(submission, result, retained)?;
+            }
+            Event::AccountProfileCapabilities { submission, result } => {
+                self.apply_profile_capabilities(submission, result);
+            }
             Event::NativeAuth(event) => {
                 self.native_auth.apply(*event)?;
                 self.notice = "Native authentication observation updated; metadata retained".into();
@@ -554,6 +774,7 @@ impl State {
                 }
                 self.operation = operation;
                 self.retry_allowed = false;
+                let mut applied = false;
                 match result {
                     Ok(response) => match *response {
                         OwnerResponse::Applied { operation }
@@ -568,13 +789,16 @@ impl State {
                             }
                             match operation.result {
                                 OwnerResult::Applied => {
+                                    applied = true;
                                     self.notice = "Metadata saved; authentication and execution remain unavailable".into();
-                                    if !matches!(
-                                        submission.edit,
-                                        ModelAccessEdit::RemoveAccount { .. }
-                                            | ModelAccessEdit::RemoveConnection { .. }
-                                            | ModelAccessEdit::RemovePool { .. }
-                                    ) {
+                                    if self.managed_setup.is_none()
+                                        && !matches!(
+                                            submission.edit,
+                                            ModelAccessEdit::RemoveAccount { .. }
+                                                | ModelAccessEdit::RemoveConnection { .. }
+                                                | ModelAccessEdit::RemovePool { .. }
+                                        )
+                                    {
                                         self.form = None;
                                         self.editing = false;
                                     }
@@ -593,6 +817,12 @@ impl State {
                                 }
                                 OwnerResult::DispatchPrepared { .. } => {
                                     return Err("Unexpected dispatch result for metadata".into());
+                                }
+                                OwnerResult::RcliProfileRegistered { .. } => {
+                                    return Err(
+                                        "Unexpected profile registration result for metadata"
+                                            .into(),
+                                    );
                                 }
                             }
                         }
@@ -624,6 +854,9 @@ impl State {
                     self.operation = None;
                     self.basis = None;
                     self.needs_page = true;
+                    self.settle_managed_setup(applied);
+                    self.settle_pool_setup(applied);
+                    self.settle_assignment(applied);
                 }
             }
         }
@@ -666,6 +899,15 @@ impl State {
             source_hash,
             writable,
         };
+        if self.accept_assignment_read(&query, &reply.data, &basis)? {
+            return Ok(());
+        }
+        if self.accept_pool_read(&query, &reply.data, &basis)? {
+            return Ok(());
+        }
+        if self.accept_managed_read(&query, &reply.data, &basis)? {
+            return Ok(());
+        }
         match (query, reply.data) {
             (
                 OwnerRead::ModelAccessPage { collection, .. },
@@ -714,10 +956,14 @@ impl State {
                     if !basis.writable {
                         return Err("Read-only metadata record".into());
                     }
-                    self.form = Some(Form::replace(record, basis.clone())?);
-                    self.editing = true;
-                    self.notice =
-                        "Replace form loaded from the actual record; identity is fixed".into();
+                    if let ModelAccessRecord::Pool { pool } = record {
+                        self.begin_pool_setup(basis.clone(), Some(pool))?;
+                    } else {
+                        self.form = Some(Form::replace(record, basis.clone())?);
+                        self.editing = true;
+                        self.notice =
+                            "Replace form loaded from the actual record; identity is fixed".into();
+                    }
                 }
                 RecordAction::Remove => {
                     if !basis.writable {
@@ -739,9 +985,50 @@ impl State {
             .map(|(id, hash)| format!("Original request: {} {hash}", id.as_str()))
     }
 
+    fn setup_lines(&self) -> Vec<String> {
+        if self.pinned || self.editing || self.confirmation.is_some() || self.pending.is_some() {
+            return Vec::new();
+        }
+        if self.collection == ModelAccessCollection::Accounts {
+            return vec![
+                "Account setup | a Sign in to a provider | 3 Account pools".into(),
+                "Advanced: 2 Connections, n Create | existing managed connection: F2".into(),
+            ];
+        }
+        if self.collection == ModelAccessCollection::Connections
+            && self.ready
+            && self.basis.as_ref().is_some_and(|basis| basis.writable)
+            && matches!(self.items.get(self.selected),
+                Some(ModelAccessRecord::Connection { connection })
+                    if native_auth::supported(connection))
+        {
+            return vec!["F2 Sign in | inspect the selected native connection first".into()];
+        }
+        if matches!(&self.record, Some(ModelAccessRecord::Connection { connection })
+            if rcli_home_supported(connection))
+        {
+            return vec![
+                "k Private profile setup | h Advanced SDK home selection".into(),
+            ];
+        }
+        Vec::new()
+    }
+
     pub fn render(&self, compact: bool) -> String {
+        if self.profile.is_open() {
+            return self.profile_render();
+        }
         if self.native_auth.is_open() {
             return self.native_auth.render(compact);
+        }
+        if let Some(setup) = &self.managed_setup {
+            return setup.render(&self.notice, self.pending_label(), compact);
+        }
+        if let Some(setup) = &self.pool_setup {
+            return setup.render(&self.notice, self.pending_label());
+        }
+        if let Some(assignment) = &self.assignment {
+            return assignment.render(&self.notice, self.pending_label());
         }
         let authority = if self.ready && self.basis.as_ref().is_some_and(|basis| basis.writable) {
             "Writable: host-granted metadata sources"
@@ -751,9 +1038,9 @@ impl State {
         let mut lines = vec![
             "Model access".into(),
             if compact {
-                "Metadata only; authentication unavailable".into()
+                "Metadata only; account references are not sign-in observations".into()
             } else {
-                "Metadata only; authentication and native execution unavailable".into()
+                "Metadata only; authentication is a separate explicit owner operation".into()
             },
             authority.into(),
             if compact {
@@ -766,10 +1053,20 @@ impl State {
                 .take(if compact { 56 } else { 160 })
                 .collect(),
         ];
+        lines.extend(self.setup_lines());
+        lines.extend(self.native_auth.last_authentication(self.basis.as_ref()));
         if let Some(label) = self.pending_label() {
             lines.push(label);
         }
-        if let Some((record, _)) = &self.confirmation {
+        if let Some(index) = self.home_editor {
+            let home = &self.homes[index];
+            lines.push(format!(
+                "SDK home | connection {}",
+                home.connection.id.as_str()
+            ));
+            lines.push(home.value.clone());
+            lines.push("Enter selects home only | Esc retains input | no credential reads".into());
+        } else if let Some((record, _)) = &self.confirmation {
             lines.push(format!(
                 "Remove {:?} {}?",
                 self.collection,
@@ -791,17 +1088,22 @@ impl State {
             ));
             let start = self.selected.saturating_sub(2);
             for (index, record) in self.items.iter().enumerate().skip(start).take(5) {
+                let unassigned = matches!(record, ModelAccessRecord::Pool { pool }
+                    if pool.projects.is_empty() || pool.roles.is_empty());
                 lines.push(format!(
-                    "{} {}",
+                    "{} {}{}",
                     if index == self.selected { ">" } else { " " },
-                    record.id().as_str()
+                    record.id().as_str(),
+                    if unassigned { " | Unassigned" } else { "" }
                 ));
             }
             if let Some(record) = &self.record {
                 lines.extend(record_lines(record));
             }
             lines.push(if self.collection == ModelAccessCollection::Accounts {
-                "a Add account | d Remove".into()
+                "a Sign in to a provider | d Remove".into()
+            } else if self.collection == ModelAccessCollection::Pools {
+                "a Assign | n Create | e Replace | d Remove".into()
             } else {
                 "n Create | e Replace | d Remove".into()
             });
@@ -811,6 +1113,27 @@ impl State {
     }
 
     fn assert_consistent(&self) {
+        if let Some(assignment) = &self.assignment {
+            assignment.assert_consistent(self.pending.as_ref());
+            assert!(self.pool_setup.is_none() && self.managed_setup.is_none());
+        }
+        if let Some(setup) = &self.pool_setup {
+            setup.assert_consistent();
+        }
+        assert!(self.pool_setup.is_none() || self.managed_setup.is_none());
+        if let Some(setup) = &self.managed_setup {
+            setup.assert_consistent();
+        }
+        assert!(self.homes.len() <= 128);
+        assert!(
+            self.home_editor
+                .is_none_or(|index| index < self.homes.len())
+        );
+        assert!(self.homes.iter().all(|home| {
+            home.value.len() <= 4096
+                && !home.value.chars().any(char::is_control)
+                && home.selected.as_ref().is_none_or(|path| path.is_absolute())
+        }));
         assert!(self.items.len() <= 16);
         assert!(if self.items.is_empty() {
             self.selected == 0
@@ -820,10 +1143,20 @@ impl State {
         assert!(!self.editing || self.form.is_some());
         assert!(self.operation.is_none() || self.pending.is_some());
         assert!(!self.retry_allowed || self.pending.is_some());
+        assert!(self.pending.is_none() || !self.profile.has_pending());
         if let Some(form) = &self.form {
             form.assert_consistent();
         }
     }
+}
+
+pub(super) fn rcli_home_supported(connection: &ModelConnection) -> bool {
+    connection.harness.as_str() == "rcli"
+        && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+        && matches!(
+            connection.auth,
+            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
+        )
 }
 
 #[cfg(test)]

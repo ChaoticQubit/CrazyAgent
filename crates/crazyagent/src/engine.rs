@@ -11,10 +11,15 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
+pub mod codex_host;
+pub(crate) mod claude_host;
 mod native_auth_host;
 pub mod owner;
 
-pub use native_auth_host::run_native_auth_custodian;
+pub use native_auth_host::{
+    run_native_auth_custodian, run_native_auth_custodian_with_codex,
+    run_native_auth_custodian_with_claude,
+};
 
 pub(crate) use bootstrap::NativeProfileCustody;
 

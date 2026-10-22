@@ -20,6 +20,28 @@ fn assert_no_effect_fact(actual: &NativeAuthFact, committed: &NativeAuthFact) {
 }
 
 #[tokio::test]
+async fn native_auth_custodian_entry_codex_digest_mismatch_never_retires_without_effect() {
+    channel_case(|case| async move {
+        let (committed, launch) = case.launch("entry-codex-pin-mismatch").await;
+        let executable = case.root.join("codex-pin-only");
+        std::fs::write(&executable, b"pin-validation-only").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before = case.snapshot();
+        let error = crate::engine::native_auth_host::entry::run_with_codex(
+            &case.root, bootstrap_input(&case.token()), &executable, &"0".repeat(64),
+        ).await.unwrap_err();
+        assert_eq!(error.0, "native_auth_host_executable_changed");
+        let after = case.snapshot();
+        assert_eq!(after.fences, before.fences);
+        assert_eq!(after.facts[0].operation_id, committed.operation_id);
+        assert_ne!(after.facts[0].phase, NativeAuthPhase::Unavailable);
+        let probe = case.probe();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        drop((probe, launch));
+    }).await;
+}
+
+#[tokio::test]
 async fn native_auth_custodian_entry_run_retires_real_committed_work_and_preserves_replay() {
     channel_case(|case| async move {
         let (committed, launch) = case.launch("entry-run-sign-in").await;

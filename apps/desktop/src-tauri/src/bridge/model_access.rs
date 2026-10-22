@@ -39,6 +39,21 @@ impl NativeBridge {
         &self,
         ticket: &str,
     ) -> Result<(NativeAuthScope, ModelConnection), BridgeError> {
+        let (scope, connection) = self.selected_model_connection(ticket)?;
+        if connection.protocol.as_str() != "native"
+            || !matches!(connection.endpoint, ModelEndpoint::Native {})
+            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+            || !matches!(connection.harness.as_str(), "codex" | "claude")
+        {
+            return Err(failure("native_profile_not_managed"));
+        }
+        Ok((scope, connection))
+    }
+
+    pub(super) fn selected_model_connection(
+        &self,
+        ticket: &str,
+    ) -> Result<(NativeAuthScope, ModelConnection), BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
@@ -68,13 +83,6 @@ impl NativeBridge {
         else {
             return Err(failure("stale_model_access"));
         };
-        if connection.protocol.as_str() != "native"
-            || !matches!(connection.endpoint, ModelEndpoint::Native {})
-            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
-            || !matches!(connection.harness.as_str(), "codex" | "claude")
-        {
-            return Err(failure("native_profile_not_managed"));
-        }
         Ok((
             NativeAuthScope {
                 expected_database_instance: controller.identity().database_instance().into(),

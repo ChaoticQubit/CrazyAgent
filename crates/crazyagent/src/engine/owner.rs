@@ -1,5 +1,15 @@
+pub(crate) mod account_profile;
+
 pub(crate) mod native_auth;
 pub(crate) mod transport;
+
+pub use account_profile::{
+    AccountAuthCapabilitiesReply, AccountProfileOutcome, AccountProfileReceipt, AccountProfileReply,
+    AccountProfileRequest, AccountSecret, ManagedAuthCapability, ProducerCapability,
+};
+
+pub use crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge;
+pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
@@ -545,6 +555,9 @@ pub enum OwnerResult {
     Applied,
     DispatchPrepared { dispatch_id: RequestId },
     VerificationUnavailable { attempt_id: RequestId },
+    RcliProfileRegistered {
+        registration: Box<crate::master_session::RcliProfileRegistrationMetadata>,
+    },
     Rejected { code: String },
 }
 

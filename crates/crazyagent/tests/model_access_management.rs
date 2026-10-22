@@ -1440,3 +1440,100 @@ async fn quota_policy_owner_rejects_stale_config_or_source_without_publication()
         assert_eq!(publications, 0);
     }
 }
+
+#[tokio::test]
+async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
+    use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
+
+    let fixture = Fixture::start(true, "").await;
+    let projects = read(
+        &fixture.client,
+        OwnerRead::Page {
+            view: OwnerView::Projects,
+            cursor: None,
+            limit: 16,
+        },
+    )
+    .await;
+    assert!(matches!(projects.data, OwnerData::Page { items, next: None } if items.is_empty()));
+    for (id, edit) in [
+        (
+            "unassigned-account",
+            ModelAccessEdit::AddAccount {
+                account_ref: reference("account"),
+            },
+        ),
+        (
+            "unassigned-connection",
+            ModelAccessEdit::CreateConnection {
+                connection: connection(),
+            },
+        ),
+    ] {
+        assert_eq!(fixture.edit(id, edit).await.result, OwnerResult::Applied);
+    }
+    let pool = AccountPool {
+        id: reference("unassigned-pool"),
+        members: vec![reference("connection")],
+        projects: vec![],
+        roles: vec![],
+        fallback_allowed: false,
+        provider_quota_policy: ProviderQuotaPolicy::Strict,
+    };
+    let receipt = fixture
+        .edit("unassigned-pool", ModelAccessEdit::CreatePool { pool: pool.clone() })
+        .await;
+    let record = read(
+        &fixture.client,
+        OwnerRead::ModelAccessRecord {
+            collection: ModelAccessCollection::Pools,
+            id: pool.id.clone(),
+        },
+    )
+    .await;
+    let projects = read(
+        &fixture.client,
+        OwnerRead::Page {
+            view: OwnerView::Projects,
+            cursor: None,
+            limit: 16,
+        },
+    )
+    .await;
+    let root = fixture.close().await;
+    assert_eq!(receipt.result, OwnerResult::Applied);
+    assert_eq!(receipt.current_revision.value(), 3);
+    assert!(matches!(
+        record.data,
+        OwnerData::ModelAccessRecord { record: ModelAccessRecord::Pool { pool: actual }, .. }
+            if actual == pool
+    ));
+    assert!(matches!(projects.data, OwnerData::Page { items, next: None } if items.is_empty()));
+    let global = root.path().join("global.toml");
+    let project = root.path().join("project.toml");
+    let config = resolve_config(&global, &project).unwrap();
+    assert_eq!(config.settings.model_access.as_ref().unwrap().pools, vec![pool.clone()]);
+    let engine = Arc::new(
+        Engine::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+            .await
+            .unwrap(),
+    );
+    let fixture = Fixture::bind(root, engine, &config).await;
+    let record = read(
+        &fixture.client,
+        OwnerRead::ModelAccessRecord {
+            collection: ModelAccessCollection::Pools,
+            id: pool.id.clone(),
+        },
+    )
+    .await;
+    let root = fixture.close().await;
+    assert_eq!(record.revision.value(), 3);
+    assert!(matches!(
+        record.data,
+        OwnerData::ModelAccessRecord { record: ModelAccessRecord::Pool { pool: actual }, .. }
+            if actual == pool
+    ));
+    assert_eq!(resolve_config(&global, &project).unwrap(), config);
+    assert!(root.path().join("engine.db").is_file());
+}

@@ -1,4 +1,4 @@
-import type { AccountPool, ModelAccessCollection, ModelAccessRecord, ModelAccessEdit, ModelAuthentication, ModelConnection } from "./engine-client.ts";
+import type { AccountPool, ModelAccessCollection, ModelAccessRecord, ModelAccessEdit, ModelAuthentication, ModelConnection, ProjectDetail } from "./engine-client.ts";
 
 export interface ModelAccessForm {
   collection: ModelAccessCollection;
@@ -20,6 +20,44 @@ export interface ModelAccessForm {
   roles: string;
   fallback: boolean;
   providerQuotaPolicy: NonNullable<AccountPool["provider_quota_policy"]>;
+}
+
+export interface ManagedAccountInput {
+  provider: "codex" | "claude";
+  label: string;
+}
+
+export function managedAccountInput(provider: unknown, label: unknown): ManagedAccountInput {
+  if (provider !== "codex" && provider !== "claude") throw new Error("Choose Codex or Claude.");
+  if (typeof label !== "string") throw new Error("Enter an optional account label.");
+  if (/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(label)) {
+    throw new Error("The account label must fit on one line without display controls.");
+  }
+  const value = label.trim();
+  if (new TextEncoder().encode(value).length > 96) throw new Error("Account labels allow at most 96 UTF-8 bytes.");
+  return { provider, label: value };
+}
+
+export function configuredAccountInput(provider: unknown, label: unknown, endpoint: unknown, model: unknown): {
+  provider: "api_key" | "local"; label: string; url: string; model: string;
+} {
+  if (provider !== "api_key" && provider !== "local") throw new Error("Choose API key or local endpoint setup.");
+  const value = managedAccountInput("codex", label).label;
+  if (typeof endpoint !== "string" || new TextEncoder().encode(endpoint).length > 2048) throw new Error("Endpoint allows at most 2048 UTF-8 bytes.");
+  if (!endpoint || /[\s\\\u0000-\u001f\u007f-\u009f]/u.test(endpoint)) throw new Error("Enter a valid HTTP or HTTPS endpoint without credentials, query or fragment.");
+  let url: URL;
+  try { url = new URL(endpoint); }
+  catch { throw new Error(provider === "local" ? "No-key setup requires an HTTP loopback endpoint." : "Enter a valid HTTP or HTTPS endpoint."); }
+  const host = url.hostname.toLowerCase();
+  const loopback = host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/u.test(host);
+  if (provider === "local" && (url.protocol !== "http:" || !loopback)) throw new Error("No-key setup requires an HTTP loopback endpoint.");
+  if (!["http:", "https:"].includes(url.protocol) || !host || url.username || url.password || url.search || url.hash || endpoint.includes("?") || endpoint.includes("#")) {
+    throw new Error("Enter an HTTP or HTTPS endpoint without credentials, query or fragment.");
+  }
+  if (typeof model !== "string" || /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(model) || !model.trim() || new TextEncoder().encode(model.trim()).length > 256) {
+    throw new Error("A model name is required on one line, at most 256 UTF-8 bytes.");
+  }
+  return { provider, label: value, url: endpoint, model: model.trim() };
 }
 
 export function newForm(collection: ModelAccessCollection, ticket: string): ModelAccessForm {
@@ -58,10 +96,33 @@ function reference(value: string): string {
   return value;
 }
 
-function references(value: string): string[] {
+function references(value: string, allowEmpty = false): string[] {
+  if (allowEmpty && value.trim() === "") return [];
   const items = value.split(",").map((item) => reference(item.trim()));
   if (items.length > 64 || new Set(items).size !== items.length) throw new Error("Enter 1 to 64 unique references separated by commas.");
   return items;
+}
+
+export function setPoolConnection(form: ModelAccessForm, id: string, selected: boolean): ModelAccessForm {
+  if (form.collection !== "pools" || form.action === "remove") throw new Error("Choose connections only for an editable pool.");
+  const connection = reference(id);
+  const members = references(form.members, true);
+  if (members.includes(connection) === selected) return form;
+  if (selected && members.length === 64) throw new Error("An account pool allows at most 64 connections.");
+  return { ...form, members: (selected ? [...members, connection] : members.filter((member) => member !== connection)).join(", ") };
+}
+
+export function withPoolProject(form: ModelAccessForm, project: Pick<ProjectDetail, "project_id" | "fresh">): ModelAccessForm {
+  if (form.collection !== "pools" || form.action !== "replace" || !project.fresh) {
+    throw new Error("Inspect a saved pool and open the selected project before confirming its assignment.");
+  }
+  const id = reference(project.project_id);
+  const projects = references(form.projects, true);
+  const roles = references(form.roles, true);
+  if (!projects.includes(id)) projects.push(id);
+  if (!roles.includes("project_leader")) roles.push("project_leader");
+  if (projects.length > 64 || roles.length > 64) throw new Error("A pool allows at most 64 project and 64 role assignments.");
+  return { ...form, projects: projects.join(", "), roles: roles.join(", ") };
 }
 
 export function editFromForm(form: ModelAccessForm): ModelAccessEdit {
@@ -73,7 +134,7 @@ export function editFromForm(form: ModelAccessForm): ModelAccessEdit {
   if (form.action === "remove") return { kind: form.collection === "connections" ? "remove_connection" : "remove_pool", id };
   if (form.collection === "pools") {
     const policy = quotaPolicy(form.providerQuotaPolicy);
-    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, members: references(form.members), projects: references(form.projects), roles: references(form.roles), fallback_allowed: form.fallback, ...(policy === "strict" ? { provider_quota_policy: policy } : {}) } };
+    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, members: references(form.members), projects: references(form.projects, true), roles: references(form.roles, true), fallback_allowed: form.fallback, ...(policy === "strict" ? { provider_quota_policy: policy } : {}) } };
   }
   if (!/^[A-Za-z0-9_.:/@+-]{1,256}$/.test(form.model)) throw new Error("Model ID requires 1 to 256 safe ASCII model identifier characters.");
   if (form.endpoint === "native" && form.protocol !== "native") throw new Error("Native endpoints require the native protocol.");

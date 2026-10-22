@@ -1,9 +1,12 @@
 use super::*;
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
-    Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
+    CodexAuthObservation, Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX,
+    decode_fact, encode_fact,
 };
-use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyRetirement;
+use crate::engine::owner::transport::native_auth_channel::{
+    NativeAuthCustodyObservation, NativeAuthCustodyRetirement,
+};
 
 impl Clone for Command {
     fn clone(&self) -> Self {
@@ -174,11 +177,35 @@ pub(crate) fn check_native_auth_custody(
     let fact = validate_dispatch(&tx, config, sources, dispatch)?;
     if !matches!(
         fact.phase,
-        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling | NativeAuthPhase::AwaitingOwner
+            | NativeAuthPhase::CheckingAccount | NativeAuthPhase::AuthenticatedObserved
+            | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled
     ) {
         return Err(error("native_auth_recovery_required"));
     }
     tx.commit().map_err(error)?;
+    Ok(fact)
+}
+
+pub(crate) fn observe_native_auth_custody(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    observation: NativeAuthCustodyObservation,
+) -> Result<NativeAuthFact, EngineError> {
+    settings::ensure_clear(db)?;
+    observation.validate_session()?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let mut fact = validate_dispatch(&tx, config, sources, observation.dispatch())?;
+    observation.apply(&mut fact)?;
+    store_fact(&tx, &fact)?;
+    let stored = validate_dispatch(&tx, config, sources, observation.dispatch())?;
+    assert_eq!(stored, fact);
+    observation.validate_session()?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
     Ok(fact)
 }
 
@@ -302,13 +329,18 @@ fn commit_native_auth_custody(
         .map_err(error)?;
     let dispatch = retirement.dispatch();
     let mut fact = validate_dispatch(&tx, config, sources, dispatch)?;
-    if !matches!(
-        fact.phase,
-        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
-    ) {
+    let valid = if retirement.after_child_reaped() {
+        matches!(fact.phase, NativeAuthPhase::AuthenticatedObserved
+            | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled)
+    } else {
+        matches!(fact.phase, NativeAuthPhase::Starting | NativeAuthPhase::Cancelling)
+    };
+    if !valid {
         return Err(error("native_auth_recovery_required"));
     }
-    apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+    if !retirement.after_child_reaped() {
+        apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+    }
     store_fact(&tx, &fact)?;
     validate_dispatch(&tx, config, sources, dispatch)?;
     retirement.validate_session()?;
@@ -334,6 +366,7 @@ fn commit_native_auth_custody(
 pub(crate) enum NativeAuthHostUpdate {
     CustodyUncertain,
     Unavailable,
+    Codex(CodexAuthObservation),
 }
 
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
@@ -657,7 +690,7 @@ fn load_fact(tx: &Transaction<'_>, id: &RequestId) -> Result<NativeAuthFact, Eng
         row.ok_or_else(|| error("native_auth_operation_missing"))?;
     let fact = decode_fact(&bytes)?;
     if &fact.operation_id != id
-        || phase != fact.phase.name()
+        || phase != stored_phase(fact.phase)
         || key != profile_key(&fact.binding.connection)?
         || i64::try_from(fact.generation).ok() != Some(generation)
     {
@@ -718,6 +751,7 @@ fn apply_update(
     update: NativeAuthHostUpdate,
 ) -> Result<(), EngineError> {
     match update {
+        NativeAuthHostUpdate::Codex(observation) => observation.apply(fact)?,
         NativeAuthHostUpdate::CustodyUncertain => {
             fact.phase = NativeAuthPhase::Uncertain;
             fact.code = Some("native_auth_recovery_required".into());
@@ -739,7 +773,7 @@ fn store_fact(tx: &Transaction<'_>, fact: &NativeAuthFact) -> Result<(), EngineE
             "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
             params![
                 encode_fact(fact)?,
-                fact.phase.name(),
+                stored_phase(fact.phase),
                 fact.operation_id.as_str(),
                 i64::try_from(fact.generation)
                     .map_err(|_| error("native_auth_generation_bounds"))?
@@ -748,6 +782,13 @@ fn store_fact(tx: &Transaction<'_>, fact: &NativeAuthFact) -> Result<(), EngineE
         .map_err(error)?;
     assert_eq!(updated, 1);
     Ok(())
+}
+
+fn stored_phase(phase: NativeAuthPhase) -> &'static str {
+    match phase {
+        NativeAuthPhase::Failed | NativeAuthPhase::Cancelled => "unavailable",
+        _ => phase.name(),
+    }
 }
 
 fn prepare_requested_profile(
@@ -970,7 +1011,7 @@ fn record(
                 sql_generation,
                 request,
                 bytes,
-                fact.phase.name()
+                stored_phase(fact.phase)
             ],
         )
         .map_err(error)?;
@@ -985,6 +1026,7 @@ fn reply(admission: &Admission, command: &Command, fact: NativeAuthFact) -> Nati
         engine_epoch: admission.engine_epoch.clone(),
         fact,
         challenge: None,
+        claude_challenge: None,
         account: None,
     }
 }

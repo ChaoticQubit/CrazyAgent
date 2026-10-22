@@ -18,6 +18,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+mod account_profile;
+mod claude_code;
+
 enum WorkerMode {
     #[cfg(test)]
     Ordinary(Box<Client>),
@@ -303,6 +306,11 @@ impl Connection {
                                 &event,
                                 model_access::Event::Read { result: Err(_), .. }
                                     | model_access::Event::Mutation {
+                                        result: Err(_),
+                                        retained: true,
+                                        ..
+                                    }
+                                    | model_access::Event::AccountProfile {
                                         result: Err(_),
                                         retained: true,
                                         ..
@@ -814,7 +822,7 @@ impl NativeOwner {
                     })
                     .await
                     .map_err(|error| bounded_problem(&error.0))?;
-                if !matches!(state.data, OwnerData::ProjectMaster { .. }) {
+                if !matches!(&state.data, OwnerData::ProjectMaster { .. }) {
                     return Err("master_fresh_read_required".into());
                 }
                 if let crate::master_session::MasterOwnerAction::Open {
@@ -823,6 +831,12 @@ impl NativeOwner {
                     && &state.config_id != expected_config_id
                 {
                     return Err("master_stale_catalog; inspect Settings".into());
+                }
+                if let crate::master_session::MasterOwnerAction::RegisterRcliProfile {
+                    registration,
+                } = &submission.action
+                {
+                    Self::prepare_rcli_registration(controller, &state, registration).await?;
                 }
                 let pending = controller
                     .begin_mutation(
@@ -858,6 +872,39 @@ impl NativeOwner {
         }
     }
 
+    async fn prepare_rcli_registration(
+        controller: &mut OwnerController,
+        state: &OwnerReadReply,
+        intent: &crate::master_session::RcliProfileRegistration,
+    ) -> Result<(), String> {
+        if !matches!(&state.data, OwnerData::ProjectMaster { session: Some(session) }
+            if session == &intent.expected_session
+                && session.phase == crate::master_session::MasterSessionPhase::Configured
+                && session.current_turn.is_none())
+            || state.config_id != intent.expected_session.config_id
+        {
+            return Err("rcli_registration_stale_session; reopen setup and review".into());
+        }
+        let record = controller
+            .read(OwnerRead::ModelAccessRecord {
+                collection: crate::engine::owner::ModelAccessCollection::Connections,
+                id: intent.expected_connection.id.clone(),
+            })
+            .await
+            .map_err(|error| bounded_problem(&error.0))?;
+        if record.revision != state.revision
+            || record.config_id != intent.expected_session.config_id
+            || !matches!(&record.data, OwnerData::ModelAccessRecord {
+                record: crate::engine::owner::ModelAccessRecord::Connection { connection },
+                source_hash, writable: true,
+            } if connection == &intent.expected_connection
+                && source_hash == &intent.expected_session.source_hash)
+        {
+            return Err("rcli_registration_stale_connection; inspect Settings".into());
+        }
+        Ok(())
+    }
+
     async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {
         if !self.ready {
             return Err("dispatch_owner_unavailable".into());
@@ -890,6 +937,18 @@ impl NativeOwner {
 
     async fn model_access(&mut self, job: model_access::Job) -> model_access::Event {
         match job {
+            model_access::Job::ClaudeCode(job) => {
+                model_access::Event::ClaudeCode(Box::new(self.claude_code(*job).await))
+            }
+            model_access::Job::AccountProfileConfigure { submission, secret } => {
+                self.account_profile_configure(submission, secret).await
+            }
+            model_access::Job::AccountProfileRead { submission } => {
+                self.account_profile_read(submission).await
+            }
+            model_access::Job::AccountProfileCapabilities { submission } => {
+                self.account_profile_capabilities(submission).await
+            }
             model_access::Job::NativeAuth(job) => {
                 let result = self.native_auth(&job).await;
                 model_access::Event::NativeAuth(Box::new(native_auth::Event { job: *job, result }))
