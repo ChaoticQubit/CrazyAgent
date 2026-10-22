@@ -1054,6 +1054,19 @@ fn authenticated(
     Ok(fact)
 }
 
+/// Names why the latest sign-in cannot authorize a master turn.
+/// Input: that sign-in's phase. Output: None when authenticated, the
+/// not-signed-in code when it finished without an account, else the stale code.
+fn sign_in_gap(phase: NativeAuthPhase) -> Option<&'static str> {
+    match phase {
+        NativeAuthPhase::AuthenticatedObserved => None,
+        NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed
+        | NativeAuthPhase::Cancelled | NativeAuthPhase::Unavailable => Some("master_authentication_unknown"),
+        NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount
+        | NativeAuthPhase::Cancelling | NativeAuthPhase::Uncertain => Some("master_authentication_stale"),
+    }
+}
+
 fn current_auth(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -1078,12 +1091,8 @@ fn current_auth(
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
     let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
-    match fact.phase {
-        NativeAuthPhase::AuthenticatedObserved => {}
-        NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount
-        | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Cancelling
-        | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled | NativeAuthPhase::Unavailable
-        | NativeAuthPhase::Uncertain => return Err(error("master_authentication_stale")),
+    if let Some(gap) = sign_in_gap(fact.phase) {
+        return Err(error(gap));
     }
     if fact.operation_id.as_str() != id || signed(fact.generation)? != generation
         || fact.phase.name() != phase || fact.phase != NativeAuthPhase::AuthenticatedObserved
@@ -2977,5 +2986,33 @@ fallback_allowed = false
         assert_eq!(result.err().unwrap().0, "settings_source_conflict");
         assert_eq!(case.snapshot(), before);
         case.close().await;
+    }
+}
+
+#[cfg(test)]
+mod sign_in_gap_tests {
+    use super::sign_in_gap;
+    use crate::engine::owner::native_auth::NativeAuthPhase;
+
+    #[test]
+    fn a_finished_sign_in_without_an_account_reads_as_not_signed_in() {
+        for phase in [
+            NativeAuthPhase::UnauthenticatedObserved,
+            NativeAuthPhase::Failed,
+            NativeAuthPhase::Cancelled,
+            NativeAuthPhase::Unavailable,
+        ] {
+            assert_eq!(sign_in_gap(phase), Some("master_authentication_unknown"), "{phase:?}");
+        }
+        for phase in [
+            NativeAuthPhase::Starting,
+            NativeAuthPhase::AwaitingOwner,
+            NativeAuthPhase::CheckingAccount,
+            NativeAuthPhase::Cancelling,
+            NativeAuthPhase::Uncertain,
+        ] {
+            assert_eq!(sign_in_gap(phase), Some("master_authentication_stale"), "{phase:?}");
+        }
+        assert_eq!(sign_in_gap(NativeAuthPhase::AuthenticatedObserved), None);
     }
 }
