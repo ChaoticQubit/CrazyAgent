@@ -26,6 +26,14 @@ fn main() {
         "desktop_model_access_page",
         "desktop_inspect_model_access",
         "desktop_edit_model_access",
+        "desktop_prepare_configured_account",
+        "desktop_account_auth_capabilities",
+        "desktop_configure_account_profile",
+        "desktop_read_account_profile",
+        "desktop_master_state",
+        "desktop_master_turns",
+        "desktop_open_master",
+        "desktop_submit_master",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

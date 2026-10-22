@@ -1,5 +1,5 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, failure};
-use crazyagent::engine::owner::{OwnerData, OwnerRead};
+use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
 };
@@ -132,7 +132,45 @@ impl NativeBridge {
         if project_id != &selected {
             return Err(failure("stale_selection"));
         }
-        Err(failure("master_bridge_unavailable"))
+        self.controller()?
+            .begin_mutation(OwnerMutation::ProjectMaster { action }, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Opens the selected project's master with the same defaults the TUI uses.
+    /// Inputs: the project selection ticket and a fresh draft generation. Output: the
+    /// owner intent receipt, or a plain-language reason when no assigned pool can run it.
+    pub async fn open_default_master(
+        &mut self,
+        ticket: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let action = crazyagent::tui::default_master_open(self.controller()?, &project_id)
+            .await
+            .map_err(|_| failure("master_open_unavailable"))?;
+        self.apply_master(ticket, action, generation).await
+    }
+
+    /// Sends one owner message to the selected project's open master session.
+    /// Inputs: selection ticket, the session id read from master state, message text and
+    /// a fresh draft generation. Output: the owner intent receipt for the queued turn.
+    pub async fn submit_master(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        text: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        if text.trim().is_empty() || text.len() > 8192 || text.contains('\0') {
+            return Err(failure("conversation_text_bounds"));
+        }
+        let action = MasterOwnerAction::Submit { project_id, session_id, text: text.into() };
+        self.apply_master(ticket, action, generation).await
     }
 }
 
@@ -419,6 +457,107 @@ fallback_allowed = false
         assert!(final_state.session.ok_or("configured session missing after cancel")?.current_turn.is_none());
         assert!(!declared.exists());
         assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_start_master_uses_only_the_pool_assigned_to_the_project() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-desktop-default-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let path = root.path().to_path_buf();
+        let mut body = tokio::spawn(async move { real_default_open_flow(&path).await });
+        let result = tokio::time::timeout(Duration::from_secs(20), &mut body).await;
+        if result.is_err() {
+            body.abort();
+            let _ = body.await;
+        }
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+        assert!(matches!(cleanup, Ok(Ok(()))), "actual engine cleanup failed");
+        result
+            .expect("real default master case exceeded 20 seconds")
+            .expect("real default master assertion failed after engine cleanup")
+            .expect("real default master setup or readback failed");
+    }
+
+    async fn real_default_open_flow(root: &Path) -> Result<(), String> {
+        let mut observer =
+            OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        for (generation, id) in [(1, "p"), (2, "q")] {
+            observer.read(OwnerRead::Capabilities).await.map_err(|error| error.to_string())?;
+            observer
+                .begin_mutation(
+                    OwnerMutation::CreateProject {
+                        project_id: ProjectId::new(id).unwrap(),
+                        spec: ProjectSpec {
+                            name: format!("Default master {id}"),
+                            repositories: vec![root.join(id).to_str().ok_or("private path encoding")?.into()],
+                        },
+                    },
+                    generation,
+                )
+                .map_err(|error| error.to_string())?;
+            let created = observer.send_pending().await.map_err(|error| error.to_string())?;
+            assert!(matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied));
+        }
+        let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+        bridge.connect().await.map_err(|error| error.code)?;
+        let unassigned = bridge.open_project("q").await.map_err(|error| error.code)?;
+        let refused = bridge.open_default_master(&unassigned.ticket, 1).await.unwrap_err();
+        assert_eq!(refused.code, "master_open_unavailable");
+        assert!(bridge.master_state(&unassigned.ticket).await.map_err(|error| error.code)?.session.is_none());
+        assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+        let selected = bridge.open_project("p").await.map_err(|error| error.code)?;
+        let stale = bridge.open_default_master(&unassigned.ticket, 2).await.unwrap_err();
+        assert_eq!(stale.code, "stale_selection");
+        let opened = bridge
+            .open_default_master(&selected.ticket, 3)
+            .await
+            .expect("Start master must open through the actual owner controller");
+        assert_eq!(opened.outcome, ActionOutcome::Applied);
+        assert!(!opened.pending);
+        let state = bridge.master_state(&selected.ticket).await.map_err(|error| error.code)?;
+        let session = state.session.ok_or("Start master left no configured session")?;
+        assert_eq!(session.phase, MasterSessionPhase::Configured);
+        assert_eq!(session.selection.backend, MasterBackend::Rcli);
+        assert_eq!(session.selection.pool_ref.as_str(), "configured-pool");
+        assert_eq!(session.selection.target_profile_ref.as_str(), "configured-profile");
+        assert_eq!(session.selection.route.account_ref.as_str(), "configured-account");
+        let refused_text = bridge
+            .submit_master(&selected.ticket, session.session_id.as_str(), "  ", 4)
+            .await
+            .unwrap_err();
+        assert_eq!(refused_text.code, "conversation_text_bounds");
+        let sent = bridge
+            .submit_master(&selected.ticket, session.session_id.as_str(), "Say hello.", 5)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(sent.outcome, ActionOutcome::Applied);
+        let turns = bridge
+            .master_turns(&selected.ticket, session.session_id.as_str(), None)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(turns.page.turns.len(), 1);
+        assert_eq!(turns.page.turns[0].id.as_str(), sent.intent.operation_id);
+        let other = bridge.open_project("q").await.map_err(|error| error.code)?;
+        assert!(bridge.master_state(&other.ticket).await.map_err(|error| error.code)?.session.is_none());
         Ok(())
     }
 }

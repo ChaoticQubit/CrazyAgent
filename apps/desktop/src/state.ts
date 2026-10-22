@@ -665,6 +665,7 @@ export function useOwnerBrowser() {
   useEffect(() => { void run(reconnect); }, []);
 
   return {
+    nextGeneration,
     page, detail, connected, pending, intent, busy, error, notice, view,
     projectPage, project, historyPage, projectId, drafts,
     projectForm, createdProject, editProject, discardProject,

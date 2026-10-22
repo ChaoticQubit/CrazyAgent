@@ -126,6 +126,10 @@ export function errorMessage(error: unknown): string {
     project_spec_bounds: "Use a nonblank name within 256 UTF-8 bytes and 1 to 64 absolute local paths within 4096 bytes each. The complete declaration must fit the native engine frame. Previous values are retained.",
     project_identity_unavailable: "A native project identity could not be generated. The draft is retained; reconnect before trying again.",
     draft_generation_limit: "This draft reached its safe generation limit. Preserve it before restarting.",
+    master_open_unavailable: "No account pool is assigned to this project as its master. Assign one in Settings > Pools, then start the master again.",
+    master_outcome_pending: "The engine has not confirmed this request yet. Use Reconcile intent at the top of the window, then refresh the master.",
+    stale_master: "The master conversation changed. Refresh it before sending again.",
+    invalid_session: "The master conversation identity is invalid. Refresh the master state.",
     conversation_text_bounds: "Text must be nonempty, contain no NUL, and fit within 8192 UTF-8 bytes. The draft was not submitted.",
     not_configured: "No engine connection was configured for this desktop session.",
     not_connected: "Connect to the engine before reading owner state.",
@@ -181,7 +185,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "master";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -360,4 +364,39 @@ export function inspectModelAccess(collection: ModelAccessCollection, id: string
 
 export function editModelAccess(ticket: string, edit: ModelAccessEdit, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_edit_model_access", { ticket, edit, generation });
+}
+
+export interface MasterTurn {
+  id: string;
+  ordinal: number;
+  phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
+  reason: string | null;
+  reply: { text: string } | null;
+}
+
+export interface MasterState {
+  project_id: string;
+  ticket: string;
+  session: { session_id: string; phase: "configured" | "closing" | "closed"; current_turn: string | null } | null;
+}
+
+export interface MasterTurns {
+  ticket: string;
+  page: { turns: MasterTurn[] };
+}
+
+export function masterState(ticket: string): Promise<MasterState> {
+  return invoke<MasterState>("desktop_master_state", { ticket });
+}
+
+export function masterTurns(ticket: string, sessionId: string): Promise<MasterTurns> {
+  return invoke<MasterTurns>("desktop_master_turns", { ticket, sessionId });
+}
+
+export function openMaster(ticket: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_open_master", { ticket, generation });
+}
+
+export function submitMaster(ticket: string, sessionId: string, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_submit_master", { ticket, sessionId, text, generation });
 }

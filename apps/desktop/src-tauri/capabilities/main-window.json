@@ -30,6 +30,14 @@
     "allow-desktop-submit-claude-auth-code",
     "allow-desktop-model-access-page",
     "allow-desktop-inspect-model-access",
-    "allow-desktop-edit-model-access"
+    "allow-desktop-edit-model-access",
+    "allow-desktop-prepare-configured-account",
+    "allow-desktop-account-auth-capabilities",
+    "allow-desktop-configure-account-profile",
+    "allow-desktop-read-account-profile",
+    "allow-desktop-master-state",
+    "allow-desktop-master-turns",
+    "allow-desktop-open-master",
+    "allow-desktop-submit-master"
   ]
 }

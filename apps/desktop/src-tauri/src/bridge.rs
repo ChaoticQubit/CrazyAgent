@@ -17,7 +17,7 @@ use std::time::Duration;
 
 mod account_profile;
 mod account_setup;
-mod master;
+pub mod master;
 mod model_access;
 mod native_auth;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
@@ -437,6 +437,17 @@ impl NativeBridge {
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::ProjectMaster { action } => match action {
+                crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
+                    ("master", Some(project_id.as_str().to_owned()), None)
+                }
+                crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
+                    return Err(failure("unexpected_pending_intent"));
+                }
+            },
             _ => return Err(failure("unexpected_pending_intent")),
         };
         bounded(Some(PendingIntent {

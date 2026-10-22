@@ -163,6 +163,53 @@ async fn desktop_send_message(
 }
 
 #[tauri::command]
+async fn desktop_master_state(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<bridge::master::MasterState, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.master_state(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_master_turns(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+) -> Result<bridge::master::MasterTurns, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.master_turns(&ticket, &session_id, None).await
+}
+
+#[tauri::command]
+async fn desktop_open_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.open_default_master(&ticket, generation).await
+}
+
+#[tauri::command]
+async fn desktop_submit_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .submit_master(&ticket, &session_id, &text, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_replace_brief(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -394,6 +441,10 @@ pub fn run() {
             desktop_history,
             desktop_send_message,
             desktop_replace_brief,
+            desktop_master_state,
+            desktop_master_turns,
+            desktop_open_master,
+            desktop_submit_master,
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,

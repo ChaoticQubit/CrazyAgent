@@ -37,7 +37,26 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
     assert_eq!(capability["windows"], json!(["main"]));
     assert_eq!(capability["webviews"], json!(["main"]));
     let permissions = capability["permissions"].as_array().unwrap();
-    assert_eq!(permissions.len(), 20);
+    let handlers: Vec<&str> = bindings
+        .split("generate_handler![")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    assert!(handlers.len() >= 34);
+    assert_eq!(permissions.len(), handlers.len());
+    for handler in &handlers {
+        assert_eq!(build.matches(&format!("\"{handler}\"")).count(), 1, "{handler} needs one build permission");
+        let allowed = format!("allow-{}", handler.replace('_', "-"));
+        assert_eq!(
+            permissions.iter().filter(|permission| **permission == allowed.as_str()).count(),
+            1,
+            "{handler} needs one main-window permission"
+        );
+    }
     assert_eq!(
         permissions
             .iter()
