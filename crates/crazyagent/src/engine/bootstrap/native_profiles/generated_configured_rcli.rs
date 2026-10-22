@@ -5,6 +5,19 @@ use std::io::Write;
 const HOMES: &str = "configured-sdk-homes";
 
 impl NativeProfileCustody {
+    /// Returns the SDK home this custody generates for a configured RCLI profile reference.
+    /// Input: the account setup profile reference. Output: the engine-owned home path,
+    /// which may not exist until account setup has configured that profile.
+    pub(crate) fn generated_configured_home(&self, profile_ref: &CredentialRef) -> std::path::PathBuf {
+        let home = self
+            .anchor
+            .path
+            .join(HOMES)
+            .join(digest(profile_ref.as_str().as_bytes()));
+        assert!(home.starts_with(&self.anchor.path));
+        home
+    }
+
     pub(crate) fn prepare_configured_rcli_profile(
         &mut self,
         host: &HostStamp,

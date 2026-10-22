@@ -229,6 +229,8 @@ fn master_lease_primitive_materializes_committed_source_without_task_authority()
     assert_eq!(ready[0].native_descendant, None);
     assert_eq!(std::fs::read(Path::new(&ready[0].path).join("tracked")).unwrap(), b"committed\n");
     assert_eq!(std::fs::read(case.repository.join("tracked")).unwrap(), b"owner dirty\n");
+    let mode = std::fs::symlink_metadata(&ready[0].path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "master worktree root must be private for the RCLI host cwd");
     let tasks: i64 = case.db.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0)).unwrap();
     let auth: i64 = case.db.query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| row.get(0)).unwrap();
     assert_eq!(tasks, 0);

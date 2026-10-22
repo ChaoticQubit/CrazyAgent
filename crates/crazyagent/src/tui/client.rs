@@ -18,6 +18,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+const MASTER_READ_ATTEMPTS: u32 = 4;
+
 mod account_profile;
 mod claude_code;
 
@@ -725,10 +727,18 @@ impl NativeOwner {
         match job {
             master_session::Job::Catalog { context } => {
                 let result = match self.master_controller(&context.identity) {
-                    Ok(controller) => tokio::time::timeout(
-                        Duration::from_secs(4),
-                        master_session::read_catalog(controller),
-                    )
+                    Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
+                        let mut attempts = 0;
+                        loop {
+                            attempts += 1;
+                            match master_session::read_catalog(&mut *controller).await {
+                                Err(problem)
+                                    if attempts < MASTER_READ_ATTEMPTS
+                                        && problem.starts_with("master_snapshot_changed") => {}
+                                result => break result,
+                            }
+                        }
+                    })
                     .await
                     .unwrap_or_else(|_| Err("master_catalog_deadline; inspect Settings".into()))
                     .map(Box::new),
@@ -741,10 +751,24 @@ impl NativeOwner {
                 confirmation,
             } => {
                 let result = match self.master_controller(&context.identity) {
-                    Ok(controller) => tokio::time::timeout(
-                        Duration::from_secs(4),
-                        master_session::read_view(controller, &context, confirmation.as_ref()),
-                    )
+                    Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
+                        let mut attempts = 0;
+                        loop {
+                            attempts += 1;
+                            match master_session::read_view(
+                                &mut *controller,
+                                &context,
+                                confirmation.as_ref(),
+                            )
+                            .await
+                            {
+                                Err(problem)
+                                    if attempts < MASTER_READ_ATTEMPTS
+                                        && problem.starts_with("master_snapshot_changed") => {}
+                                result => break result,
+                            }
+                        }
+                    })
                     .await
                     .unwrap_or_else(|_| Err("master_read_deadline".into()))
                     .map(Box::new),

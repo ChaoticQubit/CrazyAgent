@@ -148,6 +148,13 @@ impl State {
             self.notice = "Profile outcome pending; Ctrl-R reads the original request".into();
             return Ok(true);
         }
+        if matches!(event, UiEvent::FocusNext | UiEvent::FocusPrevious)
+            && self.profile.panel.as_ref().is_some_and(|panel| panel.receipt.is_some())
+        {
+            self.profile.panel = None;
+            self.notice = "Account ready. Next: create a project with its folder (Projects, N)".into();
+            return Ok(false);
+        }
         let result = match event {
             UiEvent::Submit => self.confirm_profile(),
             UiEvent::Character(character) => self.profile_character(*character),

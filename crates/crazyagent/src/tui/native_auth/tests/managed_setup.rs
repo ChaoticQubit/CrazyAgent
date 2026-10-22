@@ -148,6 +148,35 @@ async fn managed_setup_codex_label_commits_generated_settings_before_auth_method
 }
 
 #[tokio::test]
+async fn managed_setup_local_endpoint_opens_private_profile_setup_without_a_hidden_key() {
+    run(|case| async move {
+        let mut ui = empty_settings(&case).await;
+        ui.key(KeyCode::Char('a'));
+        for _ in 0..3 {
+            ui.key(KeyCode::Down);
+        }
+        assert!(views::body(&ui.app).contains("Local endpoint"));
+        ui.key(KeyCode::Enter);
+        for value in ["Laptop model", "http://127.0.0.1:11434/v1", "qwen2.5:0.5b"] {
+            for character in value.chars() {
+                ui.key(KeyCode::Char(character));
+            }
+            ui.key(KeyCode::Enter);
+        }
+        ui.drain().await;
+        let saved = saved_catalog(&case);
+        assert_eq!(saved.connections.len(), 1);
+        assert_eq!(saved.connections[0].harness.as_str(), "rcli");
+        let body = views::body(&ui.app);
+        assert!(body.contains("Private profile setup"), "{body}");
+        assert!(body.contains("qwen2.5:0.5b"), "{body}");
+        assert!(ui.app.model_access.notice.contains("Enter"), "{}", ui.app.model_access.notice);
+        assert_no_auth_start(&case);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn managed_setup_cancel_is_nonmutating_and_second_unlabelled_account_is_distinct() {
     run(|case| async move {
         let mut ui = empty_settings(&case).await;

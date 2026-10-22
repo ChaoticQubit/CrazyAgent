@@ -332,14 +332,20 @@ impl State {
             self.native_auth.open(basis.clone(), connection)?;
             self.notice = "Account setup saved; choose your sign-in method".into();
         } else {
+            let api_key = matches!(connection.auth, ModelAuthentication::ApiKey { .. });
             self.items = vec![ModelAccessRecord::Connection { connection }];
             self.selected = 0;
             self.collection = ModelAccessCollection::Connections;
-            self.notice = concat!(
-                "Account and Unassigned pool saved. Enter reads the connection; ",
-                "k opens private profile setup. No authentication or model reply verified."
-            )
-            .into();
+            self.managed_setup = None;
+            self.notice = match self.open_profile() {
+                Ok(()) if api_key => "Account saved. Type the API key, then press Enter to finish setup".into(),
+                Ok(()) => "Account saved. Press Enter to finish local endpoint setup".into(),
+                Err(_) => concat!(
+                    "Account and Unassigned pool saved. Enter reads the connection; ",
+                    "k opens private profile setup. No authentication or model reply verified."
+                )
+                .into(),
+            };
         }
         self.managed_setup = None;
         self.needs_page = true;

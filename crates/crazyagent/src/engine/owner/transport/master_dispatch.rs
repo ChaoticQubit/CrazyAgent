@@ -88,10 +88,17 @@ impl MasterDispatch {
         let session = session_id.clone();
         let turn = request.request_id.clone();
         let task = executor.spawn(async move {
-            runtime
+            let result = runtime
                 .drive_master_turn(&project, &session, &turn)
                 .await
-                .map(|_| ())
+                .map(|_| ());
+            if let Err(error) = &result {
+                eprintln!(
+                    "master_turn_not_completed cause={}",
+                    super::native_auth_dispatch_diagnostic(error)
+                );
+            }
+            result
         });
         self.entries.push(Dispatch {
             project_id: project_id.clone(),

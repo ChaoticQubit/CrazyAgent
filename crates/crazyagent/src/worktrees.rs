@@ -719,6 +719,9 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     {
         return Err(error("worktree_changed_during_materialization"));
     }
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
     let deadline = Instant::now() + Duration::from_secs(10);

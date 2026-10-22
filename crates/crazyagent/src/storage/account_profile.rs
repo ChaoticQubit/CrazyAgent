@@ -200,19 +200,26 @@ fn reply(admission: &Admission, request: &AccountProfileRequest, outcome: Accoun
         engine_epoch: admission.engine_epoch.clone(), outcome }
 }
 
+/// Returns the custody profile reference that account setup generates for an RCLI connection.
+/// Input: the configured connection. Output: its API-key credential reference, or a stable
+/// digest-derived reference for an unauthenticated local endpoint; other auth is rejected.
+pub(super) fn configured_profile_ref(connection: &ModelConnection) -> Result<CredentialRef, EngineError> {
+    match &connection.auth {
+        ModelAuthentication::ApiKey { credential_ref } => Ok(credential_ref.clone()),
+        ModelAuthentication::None {} => {
+            let bytes = serde_json::to_vec(connection).map_err(error)?;
+            CredentialRef::new(format!("configured-{:x}", Sha256::digest(bytes))).map_err(error)
+        }
+        _ => Err(error("account_profile_auth_unsupported")),
+    }
+}
+
 fn prepare(
     custody: &mut Result<NativeProfileCustody, EngineError>, admission: &Admission,
     request: &AccountProfileRequest, config: &EffectiveConfig, connection: ModelConnection,
     revision: u64, secret: Option<AccountSecret>,
 ) -> Result<Work, EngineError> {
-    let profile = match &connection.auth {
-        ModelAuthentication::ApiKey { credential_ref } => credential_ref.clone(),
-        ModelAuthentication::None {} => {
-            let bytes = serde_json::to_vec(&connection).map_err(error)?;
-            CredentialRef::new(format!("configured-{:x}", Sha256::digest(bytes))).map_err(error)?
-        }
-        _ => return Err(error("account_profile_auth_unsupported")),
-    };
+    let profile = configured_profile_ref(&connection)?;
     let custody = custody.as_mut().map_err(|failure| error(&failure.0))?;
     let host = HostStamp { db_instance: admission.db_instance.clone(), engine_epoch: admission.engine_epoch.clone() };
     let metadata = custody.prepare_configured_rcli_profile(&host, &connection, &profile, secret.as_ref())?;

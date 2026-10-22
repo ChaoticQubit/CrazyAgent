@@ -1723,6 +1723,44 @@ fn register_rcli_profile(
     Ok(MasterRuntimeResult::ConfiguredProfile(Box::new(proof)))
 }
 
+/// Registers the engine-generated SDK home for an unregistered configured RCLI master.
+/// Inputs: the actor database, settings, custody and the session being prepared.
+/// Output: Ok after registering, or Ok without change when the session is not an RCLI
+/// master awaiting registration or account setup has not generated its home yet.
+fn register_generated_rcli_profile(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    project_id: &ProjectId,
+    session_id: &SessionId,
+) -> Result<(), EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    let Some(session) = load_session(&tx, session_id, owner_revision(&tx)?)? else {
+        return Ok(());
+    };
+    if session.project_id != *project_id
+        || session.phase != MasterSessionPhase::Configured
+        || session.selection.backend != MasterBackend::Rcli
+        || registration(&tx, session_id)?.is_some()
+    {
+        return Ok(());
+    }
+    let Ok(connection) = configured_connection(config, &session) else {
+        return Ok(());
+    };
+    let profile_ref = super::account_profile::configured_profile_ref(connection)?;
+    drop(tx);
+    let home = custody.as_ref().map_err(|failure| failure.clone())?.generated_configured_home(&profile_ref);
+    if !home.join(".backboard/config.json").is_file() {
+        return Ok(());
+    }
+    register_rcli_profile(db, config, sources, custody, host, project_id, session_id, &home)?;
+    assert!(db.is_autocommit());
+    Ok(())
+}
+
 fn rcli_registration_scope(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -1904,6 +1942,9 @@ pub(super) fn runtime(
 ) -> Result<MasterRuntimeResult, EngineError> {
     if let MasterRuntimeCommand::RegisterRcliProfile { host, project_id, session_id, configured_home } = command {
         return register_rcli_profile(db, config, sources, custody, &host, &project_id, &session_id, &configured_home);
+    }
+    if let MasterRuntimeCommand::Prepare { host, project_id, session_id, .. } = &command {
+        register_generated_rcli_profile(db, config, sources, custody, host, project_id, session_id)?;
     }
     provision_bootstrap(db, config, sources, custody, path, &command)?;
     let tx = db.transaction().map_err(error)?;
@@ -2816,6 +2857,30 @@ fallback_allowed = false
         assert_eq!(case.snapshot(), before);
         assert_eq!(before.counts, [0; 6]);
         assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn engine_generated_local_rcli_home_registers_on_first_prepare_without_owner_path() {
+        let case = Fixture::new(true).await;
+        let connection = case.config.settings.model_access.as_ref().unwrap().connections[0].clone();
+        let profile_ref = super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!("{:x}", Sha256::digest(profile_ref.as_str().as_bytes())));
+        std::fs::rename(&case.home, &generated).unwrap();
+        let result = case.runtime(case.prepare()).await.unwrap();
+        let MasterRuntimeResult::Prepared(prepared) = result else {
+            panic!("an engine-generated SDK home must register and prepare the first conversation");
+        };
+        assert_eq!(prepared.text, PROMPT);
+        assert_eq!(prepared.attempt.connection, connection);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(&tx, &case.session.session_id).unwrap().unwrap();
+        assert_eq!(record.proof.profile_ref, case.session.selection.target_profile_ref);
+        drop(tx);
         case.close().await;
     }
 
