@@ -924,7 +924,10 @@ export function useOwnerBrowser() {
       setProjectId(id);
       setProject(undefined);
       setHistoryPage(undefined);
-      return read(() => loadProject(id));
+      return read(async () => {
+        await loadProjects();
+        await loadProject(id);
+      });
     },
     refreshProject: () => read(() => loadProject(activeProject.current)),
     refreshHistory: (next = false) => read(async () => {
