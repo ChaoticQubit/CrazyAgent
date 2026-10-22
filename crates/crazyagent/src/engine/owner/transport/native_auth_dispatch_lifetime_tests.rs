@@ -700,7 +700,9 @@ async fn native_auth_dispatch_lifetime_registration_after_committed_work_is_reje
 async fn native_auth_dispatch_lifetime_real_spawn_failure_keeps_dispatched_fence() {
     lifetime_case(|case| async move {
         let path = case.root.join("non-executable-image");
-        std::fs::write(&path, b"invalid native executable image\n").unwrap();
+        let mut image = vec![0xce, 0xfa, 0xed, 0xfe, 18, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+        image.resize(28, 0);
+        std::fs::write(&path, image).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         case.host
             .register_native_auth_host(RegisteredNativeAuthHost::capture(&path).unwrap())

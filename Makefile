@@ -13,7 +13,8 @@ lint:
 	cargo clippy --workspace --all-targets --offline -- -D warnings
 
 test:
-	cargo test --workspace --offline
+	cargo build -p crazyagent --bin crazyagent --offline
+	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --offline
 	$(MAKE) test-node
 
 test-node:
