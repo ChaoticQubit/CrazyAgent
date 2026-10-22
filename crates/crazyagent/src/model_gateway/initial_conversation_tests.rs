@@ -484,3 +484,39 @@ auth = { method = "native_managed", profile_ref = "auth-profile-b" }
     tx.rollback().unwrap();
     fixture.reject(100, "gateway_quota_exhausted");
 }
+
+#[test]
+fn initial_success_makes_the_next_ordinary_conversation_attempt_admissible() {
+    let mut fixture = Fixture::new(CATALOG);
+    let first = fixture.begin(100).unwrap();
+    let tx = fixture.database.transaction().unwrap();
+    finish_attempt(
+        &tx,
+        &first.attempt.request.id,
+        &AttemptCompletion {
+            outcome: AttemptOutcome::Succeeded,
+            effects: Effects::Committed,
+            finished_at_ms: 102,
+            retry_at_ms: None,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.request.id = RequestId::new("second-conversation-turn").unwrap();
+    let tx = fixture.database.transaction().unwrap();
+    let second = begin_attempt(&tx, &fixture.config, &fixture.config, &fixture.request, 103).unwrap();
+    assert!(!second.replayed);
+    assert_eq!(second.attempt.connection, first.attempt.connection);
+    assert!(!second.attempt.reasons.iter().any(|reason| reason == "initial_conversation_readiness_unknown"));
+    assert_eq!(
+        begin_attempt(&tx, &fixture.config, &fixture.config, &{
+            let mut third = fixture.request.clone();
+            third.id = RequestId::new("concurrent-conversation-turn").unwrap();
+            third
+        }, 104)
+        .unwrap_err()
+        .0,
+        "gateway_attempt_active"
+    );
+    tx.commit().unwrap();
+}

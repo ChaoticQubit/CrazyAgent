@@ -217,6 +217,7 @@ pub(super) fn insert_observation(
 pub(super) fn validate_attempt_chain(
     tx: &Transaction<'_>,
     request: &AttemptRequest,
+    after_success: bool,
 ) -> Result<(), EngineError> {
     let active: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM model_gateway_attempts WHERE task_id = ?1 AND completion IS NULL)",
@@ -227,8 +228,10 @@ pub(super) fn validate_attempt_chain(
     }
     let count: i64 = tx
         .query_row(
-            "SELECT count(*) FROM model_gateway_attempts WHERE task_id = ?1",
-            [request.task_id.as_str()],
+            "SELECT count(*) FROM model_gateway_attempts WHERE task_id = ?1 AND (?2 = 0 OR rowid > COALESCE(
+                (SELECT max(rowid) FROM model_gateway_attempts WHERE task_id = ?1
+                 AND json_extract(completion, '$.outcome') = 'Succeeded'), 0))",
+            params![request.task_id.as_str(), after_success],
             |row| row.get(0),
         )
         .map_err(error)?;

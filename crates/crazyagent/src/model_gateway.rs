@@ -23,6 +23,7 @@ mod local_completion_tests;
 mod configured_conversation_tests;
 
 const OBSERVATION_LIFETIME_MAX_MS: u64 = 86_400_000;
+const SUCCESS_READY_LIFETIME_MS: u64 = 3_600_000;
 const ATTEMPTS_MAX: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,7 +629,7 @@ fn begin_attempt_for(
         });
     }
     let previous = previous_accounts(tx, pinned, request, now_ms)?;
-    persistence::validate_attempt_chain(tx, request)?;
+    persistence::validate_attempt_chain(tx, request, initial.is_none())?;
     let catalog = pinned.settings.model_access.as_ref().unwrap();
     let pool = catalog
         .pools
@@ -820,11 +821,58 @@ fn finish_attempt_inner(
         validate_observation(&observation)?;
         persistence::insert_observation(tx, &observation)?;
     }
+    if record_observation && completion.outcome == AttemptOutcome::Succeeded {
+        record_success_observation(tx, id, &attempt, completion)?;
+    }
     persistence::complete_attempt(tx, id, completion)?;
     let stored = read_attempt(tx, id)?.ok_or_else(|| error("gateway_attempt_missing"))?;
     assert_eq!(stored.connection, attempt.connection);
     assert_eq!(stored.completion.as_ref(), Some(completion));
     Ok(())
+}
+
+/// Records that a connection answered successfully, so later attempts see it as ready.
+/// Inputs: the transaction, the finished attempt and its successful completion.
+/// Output: Ok after inserting a Ready observation that keeps the previously observed
+/// capabilities and leaves quota unknown; a newer existing observation is left unchanged.
+fn record_success_observation(
+    tx: &Transaction<'_>,
+    id: &RequestId,
+    attempt: &Attempt,
+    completion: &AttemptCompletion,
+) -> Result<(), EngineError> {
+    assert_eq!(completion.outcome, AttemptOutcome::Succeeded);
+    let latest = persistence::latest_observation(tx, &attempt.connection_revision)?;
+    if latest
+        .as_ref()
+        .is_some_and(|value| value.observed_at_ms > completion.finished_at_ms)
+    {
+        return Ok(());
+    }
+    let capabilities = match latest.as_ref().map(|value| &value.kind) {
+        Some(ObservationKind::Ready { capabilities, .. }) => capabilities.clone(),
+        _ => Vec::new(),
+    };
+    let sequence = latest
+        .map_or(Some(1), |value| value.sequence.checked_add(1))
+        .ok_or_else(|| error("gateway_observation_bounds"))?;
+    let observation = Observation {
+        id: RequestId::new(format!(
+            "success:{}",
+            crate::memory::hash(id.as_str().as_bytes())
+        ))
+        .map_err(error)?,
+        connection: attempt.connection.clone(),
+        sequence,
+        observed_at_ms: completion.finished_at_ms,
+        valid_until_ms: completion.finished_at_ms + SUCCESS_READY_LIFETIME_MS,
+        kind: ObservationKind::Ready {
+            remaining: None,
+            capabilities,
+        },
+    };
+    validate_observation(&observation)?;
+    persistence::insert_observation(tx, &observation)
 }
 
 pub fn read_attempt(

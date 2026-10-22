@@ -390,3 +390,32 @@ fn local_completion_caller_rollback_preserves_attempt_and_observation_rows() {
         assert_eq!(fixture.persisted(), fixture.begun);
     }
 }
+
+#[test]
+fn ordinary_success_records_ready_observation_that_admits_the_next_attempt() {
+    let mut fixture = Fixture::new();
+    let finished = AttemptCompletion {
+        outcome: AttemptOutcome::Succeeded,
+        effects: Effects::Committed,
+        finished_at_ms: 20_000,
+        retry_at_ms: None,
+    };
+    assert_eq!(
+        connection_state(&fixture.database, &fixture.original.connection, 20_001).unwrap().health,
+        Health::Unknown
+    );
+    let tx = fixture.database.transaction().unwrap();
+    finish_attempt(&tx, &fixture.request.id, &finished).unwrap();
+    tx.commit().unwrap();
+    let state = connection_state(&fixture.database, &fixture.original.connection, 20_001).unwrap();
+    assert_eq!(state.health, Health::Ready);
+    assert_eq!(state.quota, Quota::Unknown);
+    assert_eq!(state.capabilities, vec!["coding".to_owned()]);
+    let mut next = fixture.request.clone();
+    next.id = RequestId::new("local-completion-next-attempt").unwrap();
+    let tx = fixture.database.transaction().unwrap();
+    let selected = begin_attempt(&tx, &fixture.config, &fixture.config, &next, 20_001).unwrap();
+    assert!(!selected.replayed);
+    assert_eq!(selected.attempt.connection, fixture.original.connection);
+    tx.commit().unwrap();
+}
