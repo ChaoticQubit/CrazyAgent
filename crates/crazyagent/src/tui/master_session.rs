@@ -10,7 +10,7 @@ use crate::engine::owner::{
     OwnerProvenance, OwnerRead, OwnerReadReply, OwnerResponse, OwnerResult,
 };
 use crate::master_session::{
-    MasterBackend, MasterCursor, MasterOwnerAction, MasterSelection, MasterSessionPhase,
+    MasterBackend, MasterCursor, MasterOwnerAction, MasterReason, MasterSelection, MasterSessionPhase,
     MasterSessionView, MasterTurnPhase, MasterTurnView, RcliProfileRegistration,
     RcliProfileRegistrationMetadata,
 };
@@ -1562,13 +1562,21 @@ impl Catalog {
 }
 
 fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
-    lines.push(format!(
-        "Turn: {:?} | {} | input {} | reason {:?}",
-        turn.phase,
-        turn.id.as_str(),
-        turn.input_cursor.value(),
-        turn.reason
-    ));
+    let phase = match turn.phase {
+        MasterTurnPhase::Queued => "Queued",
+        MasterTurnPhase::Blocked => "Blocked",
+        MasterTurnPhase::Prepared | MasterTurnPhase::Delivering => "Starting",
+        MasterTurnPhase::Running => "Running",
+        MasterTurnPhase::WaitingApproval => "Waiting for approval",
+        MasterTurnPhase::Succeeded => "Replied",
+        MasterTurnPhase::Failed => "Failed",
+        MasterTurnPhase::Cancelled => "Cancelled",
+        MasterTurnPhase::Uncertain => "Outcome unclear",
+    };
+    lines.push(match &turn.reason {
+        Some(reason) => format!("Turn {}: {phase} | {}", turn.ordinal, reason_text(reason)),
+        None => format!("Turn {}: {phase}", turn.ordinal),
+    });
     if let Some(reply) = &turn.reply {
         lines.push(format!(
             "Actual reply | attempt {} | runtime {} | capture {} sequence {}\n{}",
@@ -2258,5 +2266,68 @@ pools = [
         let clipped = default_master_budget(&[roomy.clone(), tight.clone(), roomy]);
         assert_eq!(clipped.wall_time_ms, 90_000);
         assert!(clipped.fits(&tight));
+    }
+}
+
+/// Explains why a master turn stopped, in words the owner can act on.
+/// Input: the engine's turn reason. Output: a short plain sentence.
+fn reason_text(reason: &MasterReason) -> &'static str {
+    match reason {
+        MasterReason::ReadinessUnknown => {
+            "Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again"
+        }
+        MasterReason::ReadinessStale => {
+            "Sign-in is out of date: sign in again (Settings, 2 Connections, F2), then send again"
+        }
+        MasterReason::InvalidAuthentication => "Sign-in was rejected: sign in again, then send again",
+        MasterReason::QuotaUnknown => "Usage limit is unknown for this account",
+        MasterReason::QuotaExhausted => "Usage limit reached for this account",
+        MasterReason::RateLimited => "Rate limited; try again shortly",
+        MasterReason::CooldownActive => "Account is cooling down; try again shortly",
+        MasterReason::ConnectionChanged => {
+            "Account settings changed: check the master setup (F2), then send again"
+        }
+        MasterReason::ScopeRevoked => "Access to this project was revoked",
+        MasterReason::CapacityUnavailable => "Another turn is still running; wait for it",
+        MasterReason::BudgetExhausted => "Budget exhausted",
+        MasterReason::ProfileBusy => "Account is busy with a sign-in or another turn",
+        MasterReason::ApprovalRequired => "Needs your approval",
+        MasterReason::RuntimeUnavailable => "Model runtime unavailable",
+        MasterReason::CaptureIncomplete => "Reply was incomplete",
+        MasterReason::OutputLimit => "Reply was too long",
+        MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
+        MasterReason::Cancelled => "Cancelled",
+        MasterReason::Unknown => "Reason unknown",
+    }
+}
+
+#[cfg(test)]
+mod turn_line_tests {
+    use super::turn_lines;
+    use crate::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
+    use crate::protocol::{Cursor, RequestId, SessionId};
+
+    #[test]
+    fn a_blocked_turn_without_a_sign_in_tells_the_owner_what_to_do() {
+        let turn = MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Blocked,
+            reason: Some(MasterReason::ReadinessUnknown),
+            attempt: None,
+            runtime: None,
+            reply: None,
+        };
+        let mut lines = Vec::new();
+        turn_lines(&turn, &mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "Turn 1: Blocked | Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again"
+                    .to_string()
+            ]
+        );
     }
 }

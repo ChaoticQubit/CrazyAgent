@@ -64,6 +64,10 @@ test("turn status labels are plain language for every phase", () => {
   assert.equal(label("running"), "Thinking");
   assert.equal(label("succeeded"), "Replied");
   assert.equal(label("blocked", "runtime_unavailable"), "Blocked (runtime unavailable)");
+  assert.equal(label("blocked", "readiness_unknown"),
+    "Blocked: not signed in. Sign in to this account in Settings, then send again");
+  assert.equal(label("blocked", "readiness_stale"),
+    "Blocked: sign-in is out of date. Sign in again in Settings, then send again");
   assert.equal(label("uncertain"), "Outcome unclear");
   for (const phase of ["delivering", "waiting_approval", "failed", "cancelled"]) assert.ok(label(phase).length > 0);
 });

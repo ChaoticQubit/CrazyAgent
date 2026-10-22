@@ -68,6 +68,10 @@ const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "unc
 /** Plain-language label for one master turn phase.
  * Input: the engine turn phase and optional reason. Output: a short status sentence. */
 export function turnStatus(turn: MasterTurn): string {
+  if (turn.phase === "blocked" && turn.reason === "readiness_unknown")
+    return "Blocked: not signed in. Sign in to this account in Settings, then send again";
+  if (turn.phase === "blocked" && turn.reason === "readiness_stale")
+    return "Blocked: sign-in is out of date. Sign in again in Settings, then send again";
   const reason = turn.reason ? ` (${turn.reason.replaceAll("_", " ")})` : "";
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
