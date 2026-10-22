@@ -1281,6 +1281,13 @@ pub(super) async fn serve(
     .await;
     session.live.store(false, Ordering::SeqCst);
     if !matches!(retired, Ok(Ok(()))) {
+        if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+            let cause = match &retired {
+                Ok(Err(error)) => error.0.escape_debug().to_string(),
+                _ => "native_auth_session_deadline".into(),
+            };
+            eprintln!("native_auth_custody_session_failed cause={cause}");
+        }
         let _ = engine
             .native_auth_job(|reply| Job::NativeAuthCustodyLost(session.dispatch.clone(), reply))
             .await;

@@ -298,7 +298,7 @@ impl CodexAuthObservation {
             return Err(failure("native_auth_recovery_required"));
         }
         if matches!(fact.phase, NativeAuthPhase::Failed | NativeAuthPhase::Cancelled)
-            && matches!(self, Self::AccountRead { .. }) {
+            && matches!(self, Self::AccountRead { .. } | Self::LoginCompleted { success: false, .. }) {
             return Ok(());
         }
         if fact.phase == NativeAuthPhase::Cancelling
@@ -327,11 +327,29 @@ impl CodexAuthObservation {
             Self::LoginCanceled { canceled: false, .. } if fact.phase == NativeAuthPhase::Cancelling => {
                 (NativeAuthPhase::Cancelling, None)
             }
+            Self::LoginCanceled { canceled: true, .. } if fact.phase == NativeAuthPhase::AwaitingOwner => {
+                (NativeAuthPhase::Failed, Some("native_auth_sign_in_expired"))
+            }
             Self::RequestFailed { .. } if matches!(fact.phase, NativeAuthPhase::Starting
                 | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount | NativeAuthPhase::Cancelling) => {
                 (NativeAuthPhase::Failed, Some("native_auth_native_request_failed"))
             }
-            _ => return Err(failure("native_auth_observation_order")),
+            _ => {
+                if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+                    let event = match self {
+                        Self::LoginStarted { .. } => "login_started",
+                        Self::LoginCompleted { success: true, .. } => "login_completed_success",
+                        Self::LoginCompleted { .. } => "login_completed_failure",
+                        Self::AccountRead { .. } => "account_read",
+                        Self::LoggedOut { .. } => "logged_out",
+                        Self::LoginCanceled { canceled: true, .. } => "login_canceled",
+                        Self::LoginCanceled { .. } => "login_cancel_not_found",
+                        Self::RequestFailed { .. } => "request_failed",
+                    };
+                    eprintln!("native_auth_observation_order phase={} event={event}", fact.phase.name());
+                }
+                return Err(failure("native_auth_observation_order"));
+            }
         };
         fact.phase = phase;
         fact.code = code.map(str::to_owned);
@@ -664,5 +682,61 @@ mod binding_wire {
             connection: value.connection,
             custody_id: value.custody_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod late_completion_tests {
+    use super::*;
+
+    fn codex_fact(phase: NativeAuthPhase) -> NativeAuthFact {
+        let connection: ModelConnection = toml::from_str(
+            r#"id = "codex-connection"
+provider = "openai"
+harness = "codex"
+protocol = "native"
+account_ref = "codex-account"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "openai" }
+auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
+        )
+        .unwrap();
+        NativeAuthFact {
+            operation_id: RequestId::new("auth-operation").unwrap(),
+            action: NativeAuthAction::SignIn { method: NativeAuthMethod::CodexDeviceCode },
+            binding: NativeProfileBinding {
+                database_instance: "a".repeat(64),
+                engine_epoch: "b".repeat(64),
+                config_id: ConfigId::new("c".repeat(64)).unwrap(),
+                source_hash: "d".repeat(64),
+                at_revision: Cursor::new(1),
+                connection,
+                custody_id: "e".repeat(64),
+            },
+            generation: 1,
+            phase,
+            code: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_login_completion_after_cancel_keeps_the_cancelled_outcome() {
+        let late = CodexAuthObservation::LoginCompleted { login_id: Some("login-1".into()), success: false };
+        for phase in [NativeAuthPhase::Cancelled, NativeAuthPhase::Failed] {
+            let mut fact = codex_fact(phase);
+            late.apply(&mut fact).unwrap();
+            assert_eq!(fact.phase, phase);
+            assert_eq!(fact.code, None);
+        }
+        let expired = CodexAuthObservation::LoginCanceled { id: 3, canceled: true };
+        let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
+        expired.apply(&mut fact).unwrap();
+        assert_eq!(fact.phase, NativeAuthPhase::Failed);
+        assert_eq!(fact.code.as_deref(), Some("native_auth_sign_in_expired"));
+        late.apply(&mut fact).unwrap();
+        assert_eq!(fact.phase, NativeAuthPhase::Failed);
+        let succeeded = CodexAuthObservation::LoginCompleted { login_id: Some("login-1".into()), success: true };
+        let mut fact = codex_fact(NativeAuthPhase::Cancelled);
+        assert_eq!(succeeded.apply(&mut fact), Err(failure("native_auth_observation_order")));
     }
 }

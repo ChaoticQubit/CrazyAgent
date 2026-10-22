@@ -777,6 +777,7 @@ pub(super) fn public_problem(problem: &str) -> &'static str {
         "native_auth_not_active" => "native_auth_not_active",
         "native_auth_operation_missing" => "native_auth_operation_missing",
         "native_auth_recovery_required" => "native_auth_recovery_required",
+        "native_auth_sign_in_expired" => "Sign-in code expired before approval; start sign-in again",
         "native_auth_operation_conflict" => "native_auth_operation_conflict",
         "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
         "native_auth_operation_capacity" => "native_auth_operation_capacity",

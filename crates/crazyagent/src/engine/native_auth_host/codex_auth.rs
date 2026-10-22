@@ -19,6 +19,7 @@ const READ_BATCH: usize = 16;
 const POLL_TIME: Duration = Duration::from_millis(20);
 const CHECK_TIME: Duration = Duration::from_millis(100);
 const SIGN_IN_TIME: Duration = Duration::from_secs(590);
+const EXPIRY_MARGIN: Duration = Duration::from_secs(40);
 const LOGOUT_TIME: Duration = Duration::from_secs(5);
 const CLEANUP_TIME: Duration = Duration::from_secs(2);
 
@@ -292,6 +293,12 @@ impl Driver<'_> {
             }
             if self.done {
                 return Ok(());
+            }
+            if self.login_id.is_some()
+                && self.completion.is_none()
+                && Instant::now() + EXPIRY_MARGIN >= self.deadline
+            {
+                self.cancel_requested = true;
             }
             self.cancel().await?;
             if self.pipes.output.eof || self.session.child_mut()?.try_wait().map_err(io_error)?.is_some() {
