@@ -342,6 +342,7 @@ struct Authority {
     native_auth_host: Mutex<NativeAuthHostRegistration>,
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
+    master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
 }
 
 impl Authority {
@@ -1029,6 +1030,7 @@ impl OwnerServer {
                 native_auth_host: Mutex::new(NativeAuthHostRegistration::default()),
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
+                master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1157,6 +1159,9 @@ impl OwnerServer {
             assert!(handshakes.len() <= 3);
             assert!(custody.len() <= 1);
         };
+        if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
+            eprintln!("master_dispatch_shutdown cause={}", error.0);
+        }
         self.authority
             .usable
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1705,14 +1710,19 @@ async fn serve_authenticated_owner(
             }
             return write_owner_reply(&mut stream, result, id, mutation).await;
         }
+        let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
-        write_owner_reply(
-            &mut stream,
-            engine.dispatch_owner(a, request, None).await,
-            id,
-            mutation,
-        )
-        .await
+        let result = engine.dispatch_owner(a, request, None).await;
+        if let Ok(reply) = &result {
+            let runtime = OwnerRuntimeHandle {
+                engine: engine.clone(),
+                authority: authority.clone(),
+            };
+            if let Err(error) = authority.master_dispatch.lock().await.committed(runtime, &submitted, reply) {
+                eprintln!("master_dispatch_not_started cause={}", error.0);
+            }
+        }
+        write_owner_reply(&mut stream, result, id, mutation).await
     };
     let _ = tokio::time::timeout_at(deadline, exchange).await;
     let _ = stream.shutdown().await;
