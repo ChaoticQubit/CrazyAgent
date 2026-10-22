@@ -244,6 +244,8 @@ struct Envelope {
     error: Option<Value>,
     #[serde(default, deserialize_with = "present")]
     trace: Option<Value>,
+    #[serde(default, rename = "emittedAtMs", deserialize_with = "present")]
+    _emitted_at_ms: Option<Value>,
 }
 
 fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {

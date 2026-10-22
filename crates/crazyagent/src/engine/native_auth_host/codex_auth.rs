@@ -334,10 +334,11 @@ pub(in crate::engine) async fn run(
     };
     let result = driver.run().await;
     drop(driver);
-    if !cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP_TIME).map_err(io_error)? {
+    let cleaned = cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP_TIME);
+    result?;
+    if !cleaned.map_err(io_error)? {
         return Err(failure("native_auth_child_cleanup_uncertain"));
     }
-    result?;
     session.seal_after_child_reaped()
 }
 

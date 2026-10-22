@@ -761,10 +761,13 @@ pub(super) fn cleanup_owned_group(
             Err(rustix::io::Errno::SRCH) if reaped => return Ok(true),
             Err(rustix::io::Errno::SRCH) => {}
             Ok(()) if !signalled => {
-                rustix::process::kill_process_group(group, Signal::KILL)?;
+                match rustix::process::kill_process_group(group, Signal::KILL) {
+                    Ok(()) | Err(rustix::io::Errno::PERM) | Err(rustix::io::Errno::SRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
                 signalled = true;
             }
-            Ok(()) => {}
+            Ok(()) | Err(rustix::io::Errno::PERM) => {}
             Err(error) => return Err(error.into()),
         }
         assert_eq!(group, direct);

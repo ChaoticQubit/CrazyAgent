@@ -38,6 +38,8 @@ use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 mod native_auth_channel_tests;
 #[cfg(test)]
 mod native_auth_dispatch_lifetime_tests;
+#[cfg(test)]
+mod native_auth_dispatch_diagnostic_tests;
 
 const SOCKET: &str = "owner.sock";
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -1117,8 +1119,8 @@ impl OwnerServer {
                 _ = &mut stop => break Ok(()),
                 _ = self.authority.native_auth_changed.notified() => {}
                 result = self.authority.native_auth_dispatch_finished(), if dispatching => {
-                    if result.is_err() {
-                        eprintln!("native_auth_dispatch_failed_fence_retained");
+                    if let Err(error) = &result {
+                        eprintln!("{}", native_auth_dispatch_diagnostic(error));
                     }
                     if self.authority.drain_native_auth_dispatch(&self.engine).await.is_err() {
                         eprintln!("native_auth_dispatch_cleanup_uncertain");
@@ -1745,6 +1747,22 @@ async fn write_owner_reply(
     });
     let frame = encode_frame(&reply).map_err(|_| failure("owner_response_bounds"))?;
     stream.write_all(&frame).await.map_err(io_error)
+}
+
+/// Renders a single-line engine diagnostic for a failed native auth dispatch.
+/// Input: the dispatch error. Output: the line with the error code when it is a
+/// plain lowercase code, otherwise a redacted marker so private text never leaks.
+fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
+    let code = error.0.as_str();
+    let plain = !code.is_empty()
+        && code.len() <= 96
+        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    let cause = if plain {
+        code
+    } else {
+        "native_auth_dispatch_error_redacted"
+    };
+    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
 }
 
 fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Instant> {
