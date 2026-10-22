@@ -169,8 +169,23 @@ fn assert_locked(probe: &File) {
     ));
 }
 
+/// Proves the guard released its lock, waiting at most two seconds for a
+/// concurrent test's fork-to-exec window to close its inherited descriptor.
+/// Input: an independent descriptor on the guarded manifest.
 fn assert_released(probe: &File) {
-    flock(probe, FlockOperation::NonBlockingLockExclusive).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match flock(probe, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => break,
+            Err(error)
+                if (error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("guard lock was not released: {error:?}"),
+        }
+    }
     flock(probe, FlockOperation::Unlock).unwrap();
 }
 
