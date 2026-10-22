@@ -534,10 +534,8 @@ impl State {
                 self.notice = "Retained form explicitly discarded".into();
             }
             UiEvent::Character('a' | 'n') if !self.pinned => {
-                if matches!(event, UiEvent::Character('a'))
-                    != (self.collection == ModelAccessCollection::Accounts)
-                {
-                    self.notice = "Accounts use a; connections and pools use n".into();
+                if matches!(event, UiEvent::Character('a')) {
+                    self.notice = "Connections use n to create".into();
                     return Ok(());
                 }
                 let basis = match self.writable() {
@@ -993,7 +991,7 @@ impl State {
         if self.collection == ModelAccessCollection::Accounts {
             return vec![
                 "Account setup | a Sign in to a provider | 3 Account pools".into(),
-                "Advanced: 2 Connections, n Create | existing managed connection: F2".into(),
+                "Advanced: n Create reference-only account | 2 Connections | existing managed connection: F2".into(),
             ];
         }
         if self.collection == ModelAccessCollection::Connections
@@ -1102,7 +1100,7 @@ impl State {
                 lines.extend(record_lines(record));
             }
             lines.push(if self.collection == ModelAccessCollection::Accounts {
-                "a Sign in to a provider | d Remove".into()
+                "a Sign in to a provider | n Create reference | d Remove".into()
             } else if self.collection == ModelAccessCollection::Pools {
                 "a Assign | n Create | e Replace | d Remove".into()
             } else {

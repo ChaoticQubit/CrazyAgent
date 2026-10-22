@@ -173,7 +173,7 @@ impl Harness {
 
     async fn add_account(&mut self, id: &str) {
         self.collection('1').await;
-        self.key(KeyCode::Char('a'));
+        self.key(KeyCode::Char('n'));
         self.text(id);
         self.key(KeyCode::Enter);
         self.key(KeyCode::Enter);
@@ -352,19 +352,25 @@ async fn all_eight_keyboard_edits_persist_through_the_real_owner_engine() {
 
     h.collection('3').await;
     h.key(KeyCode::Char('n'));
-    h.fields(&["pool-one", "connection-one", "project-one", "worker", ""]);
+    assert!(h.render().contains("Pool label (optional)"));
+    h.text("Pool one");
+    h.key(KeyCode::Enter);
+    h.drain().await;
+    assert!(h.render().contains("connection-one"));
+    h.key(KeyCode::Char(' '));
+    h.key(KeyCode::Enter);
     h.key(KeyCode::Enter);
     h.drain().await;
     assert_eq!(h.metadata().pools.len(), 1);
+    let created = h.metadata().pools[0].clone();
+    assert_eq!(created.members[0].as_str(), "connection-one");
     h.key(KeyCode::Char('e'));
     h.drain().await;
-    for _ in 0..4 {
-        h.key(KeyCode::Tab);
-    }
-    h.key(KeyCode::Down);
+    assert!(h.render().contains("Choose connections"), "{}", h.render());
+    h.key(KeyCode::Enter);
     h.key(KeyCode::Enter);
     h.drain().await;
-    assert!(h.metadata().pools[0].fallback_allowed);
+    assert_eq!(h.metadata().pools, vec![created]);
 
     let before = std::fs::read(&h.global).unwrap();
     h.key(KeyCode::Char('d'));
@@ -401,7 +407,7 @@ async fn actual_read_only_grant_lists_pages_and_records_without_file_writes() {
     let mut h = Harness::new(false, &accounts).await;
     let before = std::fs::read(&h.global).unwrap();
     assert!(h.render().contains("Accounts: 16 records"));
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     assert!(h.render().contains("Read-only"));
     assert!(!h.app.model_access.has_pending());
     h.modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL);
@@ -462,7 +468,7 @@ async fn actual_validation_and_dependency_errors_retain_fields_and_references() 
 #[tokio::test]
 async fn actual_competing_owner_requires_explicit_refresh_of_retained_form() {
     let mut h = Harness::new(true, &[]).await;
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.text("tui-account");
     h.external_account("desktop-account").await;
     h.key(KeyCode::Enter);
@@ -488,7 +494,7 @@ async fn real_publication_failure_reconciles_original_request_after_restart() {
     let mut h = Harness::new(true, &[]).await;
     let db = rusqlite::Connection::open(h.root.path().join("engine.db")).unwrap();
     db.execute_batch("CREATE TRIGGER tui272_stop BEFORE INSERT ON owner_operations BEGIN SELECT RAISE(ABORT, 'tui272-publication-stop'); END;").unwrap();
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.text("recover-account");
     h.key(KeyCode::Enter);
     h.drain().await;
@@ -584,7 +590,7 @@ async fn actual_stale_cursor_is_discarded_before_first_page_refresh() {
 #[tokio::test]
 async fn reconnect_preserves_form_and_obeys_new_host_write_grant() {
     let mut h = Harness::new(true, &[]).await;
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.text("retained-account");
     h.restart(false).await;
     assert!(h.render().contains("retained-account"));
@@ -676,7 +682,7 @@ async fn actual_editor_state_invariants_trip_on_corrupt_selection_and_form() {
         .is_err()
     );
     h.app.model_access.selected = 0;
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.app.model_access.form.as_mut().unwrap().selected = 99;
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h
@@ -707,7 +713,7 @@ async fn actual_editor_state_invariants_trip_on_corrupt_selection_and_form() {
 async fn bounded_form_validation_and_escape_retain_values_without_a_write() {
     let mut h = Harness::new(true, &[]).await;
     let before = std::fs::read(&h.global).unwrap();
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.text(&"x".repeat(256));
     h.key(KeyCode::Char('界'));
     h.key(KeyCode::Char('\u{1b}'));
@@ -719,7 +725,7 @@ async fn bounded_form_validation_and_escape_retain_values_without_a_write() {
     assert!(!h.app.model_access.has_pending());
     assert!(h.app.model_access.notice.contains("1..128"));
     h.key(KeyCode::Esc);
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     assert_eq!(
         h.app.model_access.form.as_ref().unwrap().fields[0].value,
         "x".repeat(256)
@@ -727,7 +733,7 @@ async fn bounded_form_validation_and_escape_retain_values_without_a_write() {
     assert_eq!(std::fs::read(&h.global).unwrap(), before);
     h.key(KeyCode::Esc);
     h.key(KeyCode::Char('x'));
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     assert!(
         h.app.model_access.form.as_ref().unwrap().fields[0]
             .value
@@ -742,7 +748,7 @@ async fn real_not_recorded_barrier_allows_only_the_exact_explicit_retry() {
     let db = rusqlite::Connection::open(h.root.path().join("engine.db")).unwrap();
     db.execute_batch("CREATE TRIGGER tui272_prepare_stop BEFORE INSERT ON settings_publication BEGIN SELECT RAISE(ABORT, 'tui272-prepare-stop'); END;").unwrap();
     let before = std::fs::read(&h.global).unwrap();
-    h.key(KeyCode::Char('a'));
+    h.key(KeyCode::Char('n'));
     h.text("retry-account");
     h.key(KeyCode::Enter);
     h.drain().await;
