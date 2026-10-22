@@ -31,14 +31,23 @@ const EFFECT_TABLES: [&str; 6] = [
 ];
 const CATALOG: &str = r#"version = 1
 timeout_ms = 2000
-allowed_destinations = ["codex-target", "local-profile"]
+allowed_destinations = ["codex-target", "local-profile", "claude-target"]
 [routing]
-approved_accounts = ["codex-account", "local-account"]
+approved_accounts = ["codex-account", "local-account", "claude-account"]
 global_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
 project_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
 task_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
 [model_access]
-accounts = ["codex-account", "local-account"]
+accounts = ["codex-account", "local-account", "claude-account"]
+[[model_access.connections]]
+id = "claude-connection"
+provider = "anthropic"
+harness = "claude-code"
+protocol = "native"
+account_ref = "claude-account"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile" }
 [[model_access.connections]]
 id = "codex-connection"
 provider = "openai"
@@ -60,6 +69,12 @@ auth = { method = "none" }
 [[model_access.pools]]
 id = "codex-pool"
 members = ["codex-connection"]
+projects = ["p"]
+roles = ["project_leader"]
+fallback_allowed = false
+[[model_access.pools]]
+id = "claude-pool"
+members = ["claude-connection"]
 projects = ["p"]
 roles = ["project_leader"]
 fallback_allowed = false
@@ -95,7 +110,7 @@ fn selection(backend: MasterBackend) -> MasterSelection {
     let (pool, target, account) = match backend {
         MasterBackend::Codex => ("codex-pool", "codex-target", "codex-account"),
         MasterBackend::Rcli => ("local-pool", "local-profile", "local-account"),
-        MasterBackend::Claude => panic!("Claude is outside this routing fixture"),
+        MasterBackend::Claude => ("claude-pool", "claude-target", "claude-account"),
     };
     MasterSelection {
         backend,
@@ -561,8 +576,8 @@ fn unallocated(turn: &MasterTurnView, phase: MasterTurnPhase, reason: Option<Mas
 }
 
 #[tokio::test]
-async fn codex_drive_persists_unsupported_without_preparation_attempt_or_runtime() {
-    let case = Fixture::new(MasterBackend::Codex, false).await;
+async fn claude_drive_persists_unsupported_without_preparation_attempt_or_runtime() {
+    let case = Fixture::new(MasterBackend::Claude, false).await;
     let before = case.snapshot();
     assert!(!case.repository.exists());
     assert!(!case.home.exists());
@@ -599,8 +614,24 @@ async fn codex_drive_persists_unsupported_without_preparation_attempt_or_runtime
 }
 
 #[tokio::test]
-async fn unsupported_drive_replay_returns_the_same_persisted_view_without_new_work() {
+async fn codex_subscription_master_is_not_blocked_as_an_unsupported_backend() {
     let case = Fixture::new(MasterBackend::Codex, false).await;
+    let returned = case.drive().await;
+    let persisted = case.persisted_turn().await;
+    assert_ne!(persisted.reason, Some(MasterReason::UnsupportedCapability), "{returned:?}");
+    if let Ok(turn) = &returned {
+        assert_ne!(turn.reason, Some(MasterReason::UnsupportedCapability));
+    }
+    assert!(
+        !matches!(&returned, Err(error) if error.0.contains("master_runtime_backend_unsupported")),
+        "{returned:?}"
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn unsupported_drive_replay_returns_the_same_persisted_view_without_new_work() {
+    let case = Fixture::new(MasterBackend::Claude, false).await;
     let blocked = case.drive().await.unwrap();
     unallocated(
         &blocked,
@@ -620,7 +651,7 @@ async fn unsupported_drive_replay_returns_the_same_persisted_view_without_new_wo
     before.assert_no_effects();
     case.finish().await;
 
-    let cancelled = Fixture::new(MasterBackend::Codex, false).await;
+    let cancelled = Fixture::new(MasterBackend::Claude, false).await;
     cancelled.cancel().await;
     let persisted = cancelled.persisted_turn().await;
     unallocated(

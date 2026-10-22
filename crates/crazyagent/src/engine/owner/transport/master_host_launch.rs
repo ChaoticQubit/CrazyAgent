@@ -15,6 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
+const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const MASTER_CONFIG: [&str; 14] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
@@ -82,8 +83,25 @@ impl OwnerRuntimeHandle {
     }
 }
 
+/// Confirms the master launch keeps the subscription harness contained under DEC-076:
+/// read-only sandbox, approvals never granted, and no shell, patch, web or MCP tools.
+/// Input: none, the policy is the fixed launch configuration. Output: Ok when every
+/// containment setting is present, otherwise the unsupported-backend refusal.
 fn require_master_tool_policy() -> Result<(), EngineError> {
-    Err(failure("master_runtime_backend_unsupported"))
+    let required = [
+        "sandbox_mode=\"read-only\"",
+        "approval_policy=\"never\"",
+        "features.shell_tool=false",
+        "features.apply_patch_freeform=false",
+        "features.unified_exec=false",
+        "web_search=\"disabled\"",
+        "mcp_servers={}",
+    ];
+    if required.iter().all(|setting| MASTER_CONFIG.contains(setting)) {
+        Ok(())
+    } else {
+        Err(failure("master_runtime_backend_unsupported"))
+    }
 }
 
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
@@ -144,7 +162,9 @@ fn master_command(
         return Err(failure("master_runtime_binding"));
     }
     let mut command = Command::new(executable);
-    command.arg("-c").arg(format!("model=\"{model}\""));
+    if model != ACCOUNT_DEFAULT_MODEL {
+        command.arg("-c").arg(format!("model=\"{model}\""));
+    }
     for config in MASTER_CONFIG {
         command.arg("-c").arg(config);
     }
@@ -287,6 +307,24 @@ mod tests {
                 "{required}"
             );
         }
+        assert!(args.ends_with(&["app-server", "--listen", "stdio://"]));
+    }
+
+    #[test]
+    fn master_command_leaves_the_account_default_model_unpinned() {
+        let command = master_command(
+            Path::new("/registered/codex"),
+            Path::new("/private/profile"),
+            Path::new("/leased/worktree"),
+            ACCOUNT_DEFAULT_MODEL,
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg.starts_with("model=")), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""]));
         assert!(args.ends_with(&["app-server", "--listen", "stdio://"]));
     }
 

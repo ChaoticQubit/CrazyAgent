@@ -172,7 +172,11 @@ fn custodian_command(
         .current_dir(runtime_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .process_group(0);
     Ok(command)
 }

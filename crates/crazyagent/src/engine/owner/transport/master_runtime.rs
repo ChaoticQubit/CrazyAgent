@@ -396,7 +396,6 @@ impl OwnerRuntimeHandle {
         match active.host.observe_account().await? {
             AuthControl::AccountRead {
                 account: Some(AuthAccount::Chatgpt { .. }),
-                requires_openai_auth: false,
                 ..
             } => {}
             _ => return Err(failure("gateway_invalid_authentication")),
@@ -504,12 +503,9 @@ impl OwnerRuntimeHandle {
                 | EventKind::ProtocolFailure { .. } => {
                     return Err(failure("master_capture_incomplete"))
                 }
-                EventKind::ApprovalRequired { .. } => {
-                    return Err(failure("codex_host_approval_required"))
-                }
-                EventKind::UnsupportedRequest { .. } | EventKind::Unsupported { .. } => {
-                    return Err(failure("master_runtime_backend_unsupported"));
-                }
+                EventKind::ApprovalRequired { .. }
+                | EventKind::UnsupportedRequest { .. }
+                | EventKind::Unsupported { .. } => {}
                 EventKind::RequestFailed { .. }
                 | EventKind::AssistantError { .. }
                 | EventKind::TurnError {

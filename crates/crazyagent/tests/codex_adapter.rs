@@ -326,6 +326,28 @@ fn thread_notification_before_reply_is_correlated_without_finishing_the_request(
 }
 
 #[test]
+fn thread_notification_after_reply_is_the_same_thread_and_keeps_the_protocol_idle() {
+    let mut protocol = idle();
+    assert!(
+        protocol
+            .receive(&wire(
+                json!({"method":"thread/started","params":{"thread":thread()}})
+            ))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(protocol.state(), State::Idle);
+    let mut other = thread();
+    other["id"] = json!("thread-other");
+    assert_eq!(
+        protocol.receive(&wire(
+            json!({"method":"thread/started","params":{"thread":other}})
+        )),
+        Err(ProtocolError::StaleMessage)
+    );
+}
+
+#[test]
 fn turn_request_preserves_text_without_permission_overrides() {
     let mut protocol = idle();
     assert_eq!(protocol.start_turn(""), Err(ProtocolError::InvalidInput));

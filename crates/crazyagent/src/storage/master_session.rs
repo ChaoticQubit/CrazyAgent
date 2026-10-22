@@ -1275,7 +1275,7 @@ fn block_unsupported_backend(
     session: &mut MasterSessionView,
     turn: &mut MasterTurnView,
 ) -> Result<bool, EngineError> {
-    if session.selection.backend == MasterBackend::Rcli || !turn.phase.outstanding() {
+    if session.selection.backend != MasterBackend::Claude || !turn.phase.outstanding() {
         return Ok(false);
     }
     if turn.phase != MasterTurnPhase::Queued {
@@ -1483,7 +1483,7 @@ fn provision_bootstrap(
     let tx = db.transaction().map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
-    if turn.phase != MasterTurnPhase::Queued || session.selection.backend != MasterBackend::Rcli {
+    if turn.phase != MasterTurnPhase::Queued || session.selection.backend == MasterBackend::Claude {
         return Ok(());
     }
     if !preflight_turn(&tx, config, &mut session, &mut turn)? {
@@ -1986,7 +1986,7 @@ pub(super) fn runtime(
                 tx.commit().map_err(error)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
             }
-            if session.selection.backend != MasterBackend::Rcli {
+            if session.selection.backend == MasterBackend::Claude {
                 return Err(error("master_runtime_backend_unsupported"));
             }
             current_scope(&tx, config, sources, host, &session, &turn)?;

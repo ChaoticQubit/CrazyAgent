@@ -1039,10 +1039,15 @@ impl CodexProtocol {
                 .login_completed(&params)
                 .map(|control| Some(Event::AuthControl(control))),
             "thread/started" => {
-                let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() else {
-                    return Err(ProtocolError::StaleMessage);
-                };
-                self.observe_thread(&params["thread"], &cwd)
+                if let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() {
+                    return self.observe_thread(&params["thread"], &cwd);
+                }
+                let id = identifier(&params["thread"]["id"])?;
+                if self.thread_id.as_ref() == Some(&id) {
+                    Ok(None)
+                } else {
+                    Err(ProtocolError::StaleMessage)
+                }
             }
             "turn/started" | "turn/completed" => {
                 self.check_thread(&params)?;

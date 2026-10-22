@@ -101,6 +101,9 @@ impl MasterDispatch {
                     "master_turn_not_completed cause={}",
                     super::native_auth_dispatch_diagnostic(error)
                 );
+                if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+                    eprintln!("master_turn_debug_cause={}", error.0.escape_debug());
+                }
             }
             result
         });

@@ -237,6 +237,7 @@ impl State {
         if let Some(job) = self.native_auth.code_request() {
             return Ok(Some(Job::ClaudeCode(Box::new(job))));
         }
+        self.native_auth.poll_pending(std::time::Instant::now());
         if let Some(job) = self.native_auth.request() {
             return Ok(Some(Job::NativeAuth(Box::new(job))));
         }

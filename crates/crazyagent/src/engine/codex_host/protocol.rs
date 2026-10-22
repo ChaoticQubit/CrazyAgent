@@ -106,5 +106,25 @@ impl CodexHostProtocol {
 }
 
 fn protocol_error(error: ProtocolError) -> EngineError {
-    EngineError(format!("codex_host_protocol_{error:?}"))
+    let name = format!("{error:?}");
+    let mut code = String::from("codex_host_protocol");
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            code.push('_');
+        }
+        code.push(character.to_ascii_lowercase());
+    }
+    EngineError(code)
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::*;
+
+    #[test]
+    fn protocol_errors_become_plain_lowercase_codes() {
+        assert_eq!(protocol_error(ProtocolError::StaleMessage).0, "codex_host_protocol_stale_message");
+        assert_eq!(protocol_error(ProtocolError::InvalidState).0, "codex_host_protocol_invalid_state");
+        assert_eq!(protocol_error(ProtocolError::Disconnected).0, "codex_host_protocol_disconnected");
+    }
 }

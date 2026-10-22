@@ -4,6 +4,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+mod keychain;
 mod process;
 mod transcript;
 pub(crate) mod types;
@@ -120,7 +121,7 @@ async fn finish_failure(
             "native_auth_claude_native_exit" => ClaudeAuthFailure::NativeExit,
             "native_auth_claude_subscription_unsupported" => ClaudeAuthFailure::SubscriptionUnsupported,
             "native_auth_claude_profile_mismatch" => ClaudeAuthFailure::ProfileMismatch,
-            "native_auth_claude_launch_failed" | "native_auth_host_executable_changed"
+            "native_auth_claude_launch_failed" | "native_auth_claude_keychain_unavailable" | "native_auth_host_executable_changed"
                 | "native_auth_host_executable_unsafe" => ClaudeAuthFailure::LaunchFailed,
             "native_auth_claude_input_invalid" => ClaudeAuthFailure::InputInvalid,
             "native_auth_claude_destination_unsupported" => ClaudeAuthFailure::DestinationUnsupported,
@@ -154,6 +155,9 @@ pub(in crate::engine) async fn run(
         return Err(EngineError("native_auth_cancelled".into()));
     }
     let home = session.profile_path()?;
+    if let Err(error) = keychain::prepare_profile_keychain(&home) {
+        return finish_failure(session, channel, error).await;
+    }
     let first_result = run_child(&mut session, channel, executable, &home, first, deadline).await;
     match first_result {
         Ok(ChildOutput { exit: Some(0), .. }) => {}

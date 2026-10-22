@@ -539,8 +539,9 @@ const LOCAL_DESTINATION: &str = "local";
 
 /// Treats an explicit pool-to-project assignment as owner approval of the pool's accounts.
 /// Input: the edited global document and the validated catalog it now holds.
-/// Output: `routing.approved_accounts` gains every account of an assigned pool and an empty
-/// `allowed_destinations` gains the local execution target; nothing is ever removed.
+/// Output: `routing.approved_accounts` gains every account of an assigned pool, an empty
+/// `allowed_destinations` gains the local execution target and every signed-in connection
+/// of an assigned pool becomes an allowed master target; nothing is ever removed.
 fn approve_assigned_accounts(
     document: &mut toml_edit::DocumentMut,
     catalog: &ModelAccess,
@@ -560,6 +561,18 @@ fn approve_assigned_accounts(
     if assigned.is_empty() {
         return Ok(());
     }
+    let signed_in: Vec<&CredentialRef> = catalog
+        .pools
+        .iter()
+        .filter(|pool| !pool.projects.is_empty())
+        .flat_map(|pool| {
+            catalog.connections.iter().filter(|connection| {
+                pool.members.contains(&connection.id)
+                    && matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+            })
+        })
+        .map(|connection| &connection.id)
+        .collect();
     let shape = || ConfigError("routing_approval_shape".into());
     let routing = document
         .entry("routing")
@@ -583,6 +596,11 @@ fn approve_assigned_accounts(
         .ok_or_else(shape)?;
     if destinations.is_empty() {
         destinations.push(LOCAL_DESTINATION);
+    }
+    for connection in signed_in {
+        if !destinations.iter().any(|value| value.as_str() == Some(connection.as_str())) {
+            destinations.push(connection.as_str());
+        }
     }
     assert!(!destinations.is_empty());
     Ok(())
@@ -784,6 +802,34 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"])).unwrap();
         assert_eq!(again.settings.routing.approved_accounts.len(), 1);
         assert_eq!(again.settings.allowed_destinations.len(), 1);
+    }
+
+    #[test]
+    fn assigning_a_signed_in_pool_allows_its_connection_as_the_master_target() {
+        let global = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["codex-account"]
+connections = [{ id = "codex-connection", provider = "openai", harness = "codex", protocol = "native", account_ref = "codex-account", endpoint = { kind = "native" }, model = { id = "native-default", author = "openai" }, auth = { method = "native_managed", profile_ref = "codex-profile" } }]
+pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], roles = [], fallback_allowed = false }]
+"#;
+        let edit = ModelAccessEdit::ReplacePool {
+            pool: AccountPool {
+                id: CredentialRef::new("codex-pool").unwrap(),
+                members: vec![CredentialRef::new("codex-connection").unwrap()],
+                projects: vec![CredentialRef::new("demo").unwrap()],
+                roles: vec![CredentialRef::new("project_leader").unwrap()],
+                fallback_allowed: false,
+                provider_quota_policy: ProviderQuotaPolicy::default(),
+            },
+        };
+        let (bytes, config) = edit_model_access(global, "", &edit).unwrap();
+        let connection = CredentialRef::new("codex-connection").unwrap();
+        assert!(config.settings.allowed_destinations.contains(&connection));
+        let (_, again) = edit_model_access(&bytes, "", &edit).unwrap();
+        assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
     }
 
     #[test]

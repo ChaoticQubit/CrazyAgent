@@ -263,6 +263,7 @@ impl State {
         }
         self.forms[index].open = true;
         self.forms[index].field = 0;
+        self.prefer_assigned_backend();
         self.defaults();
         self.assert_consistent();
         Ok(())
@@ -359,6 +360,21 @@ impl State {
         self.enqueue(action, self.forms[index].generation)
     }
 
+    fn prefer_assigned_backend(&mut self) {
+        let (Some(index), Some(catalog)) = (self.form_index(), self.catalog.as_ref()) else {
+            return;
+        };
+        let form = &mut self.forms[index];
+        if form.pool.is_some() || !catalog.pools(form).is_empty() {
+            return;
+        }
+        if let Some(backend) = catalog.assigned_backend(form) {
+            form.backend = backend;
+            form.account = None;
+            form.target = None;
+        }
+    }
+
     fn defaults(&mut self) {
         let (Some(index), Some(catalog)) = (self.form_index(), self.catalog.as_ref()) else {
             return;
@@ -371,7 +387,7 @@ impl State {
             form.account = catalog.accounts(form).first().cloned();
         }
         if form.target.is_none() {
-            form.target = catalog.targets.first().cloned();
+            form.target = catalog.target(form);
         }
     }
 
@@ -713,6 +729,7 @@ impl State {
         match result {
             Ok(catalog) => {
                 self.catalog = Some(*catalog);
+                self.prefer_assigned_backend();
                 self.defaults();
                 self.notice = concat!(
                     "Actual owner catalog and policy loaded; ",
@@ -1323,6 +1340,7 @@ impl Form {
                     let selected = cycle(&choices, self.pool.as_ref(), forward);
                     if self.pool != selected {
                         self.account = None;
+                        self.target = None;
                     }
                     self.pool = selected;
                 }
@@ -1330,6 +1348,7 @@ impl Form {
             2 => {
                 if let Some(catalog) = catalog {
                     self.account = cycle(&catalog.accounts(self), self.account.as_ref(), forward);
+                    self.target = None;
                 }
             }
             3 => {
@@ -1355,6 +1374,7 @@ impl Form {
             .unwrap();
         self.backend = backends[(current + if forward { 1 } else { 2 }) % 3];
         self.account = None;
+        self.target = None;
         if catalog.is_some_and(|catalog| {
             !catalog
                 .pools(self)
@@ -1457,6 +1477,64 @@ impl Catalog {
                     })
             })
             .collect()
+    }
+
+    /// Names the first backend, in RCLI, Codex, Claude order, with a pool assigned to the
+    /// form's project as master. Input: the form, whose backend is ignored. Output: that
+    /// backend, or None when no pool is assigned to the project.
+    fn assigned_backend(&self, form: &Form) -> Option<MasterBackend> {
+        [MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude]
+            .into_iter()
+            .find(|backend| {
+                let probe = Form {
+                    database: None,
+                    project: form.project.clone(),
+                    backend: *backend,
+                    pool: None,
+                    account: None,
+                    target: None,
+                    values: form.values.clone(),
+                    field: 0,
+                    generation: form.generation,
+                    open: false,
+                    explicit: false,
+                };
+                !self.pools(&probe).is_empty()
+            })
+    }
+
+    /// Picks the execution target a new master of this form would use under DEC-076.
+    /// Input: the form's backend, pool and account. Output: for a signed-in backend, the
+    /// allowed connection of that account in the pool; for RCLI, the first allowed target
+    /// that is not a signed-in connection; None when policy allows no such target.
+    fn target(&self, form: &Form) -> Option<CredentialRef> {
+        if form.backend == MasterBackend::Rcli {
+            return self
+                .targets
+                .iter()
+                .find(|target| {
+                    !self.models.connections.iter().any(|connection| {
+                        &connection.id == *target
+                            && matches!(connection.endpoint, ModelEndpoint::Native {})
+                    })
+                })
+                .cloned();
+        }
+        let pool = self
+            .models
+            .pools
+            .iter()
+            .find(|pool| Some(&pool.id) == form.pool.as_ref())?;
+        self.models
+            .connections
+            .iter()
+            .find(|connection| {
+                pool.members.contains(&connection.id)
+                    && Some(&connection.account_ref) == form.account.as_ref()
+                    && backend_matches(form.backend, connection)
+                    && self.targets.contains(&connection.id)
+            })
+            .map(|connection| connection.id.clone())
     }
 
     fn accounts(&self, form: &Form) -> Vec<CredentialRef> {
@@ -2050,10 +2128,9 @@ pub async fn default_master_open(
             .first()
             .cloned()
             .ok_or("No approved account in the assigned pool")?;
+        form.account = Some(account.clone());
         let target = catalog
-            .targets
-            .first()
-            .cloned()
+            .target(&form)
             .ok_or("No allowed execution sandbox in settings")?;
         if catalog.capacities.iter().any(|capacity| !budget.fits(capacity)) {
             return Err("The default allowance exceeds current owner policy".into());
@@ -2083,6 +2160,91 @@ pub async fn default_master_open(
 #[cfg(test)]
 mod default_budget_tests {
     use super::*;
+
+    #[test]
+    fn signed_in_master_targets_its_own_connection_and_rcli_keeps_the_sandbox() {
+        let reference = |value: &str| CredentialRef::new(value).unwrap();
+        let models: ModelAccess = toml::from_str(r#"accounts = ["codex-account", "local-account"]
+connections = [
+  { id = "codex-connection", provider = "openai", harness = "codex", protocol = "native", account_ref = "codex-account", endpoint = { kind = "native" }, model = { id = "native-default", author = "openai" }, auth = { method = "native_managed", profile_ref = "codex-profile" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [
+  { id = "codex-pool", members = ["codex-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
+  { id = "local-pool", members = ["local-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
+]"#).unwrap();
+        let catalog = Catalog {
+            config_id: ConfigId::new("0".repeat(64)).unwrap(),
+            source_hash: "0".repeat(64),
+            revision: Cursor::new(1),
+            models,
+            approved: vec![reference("codex-account"), reference("local-account")],
+            targets: vec![reference("codex-connection"), reference("local")],
+            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+        };
+        let mut form = Form {
+            database: None,
+            project: ProjectId::new("demo").unwrap(),
+            backend: MasterBackend::Codex,
+            pool: Some(reference("codex-pool")),
+            account: Some(reference("codex-account")),
+            target: None,
+            values: budget_values(&ResourceBudget::unit()).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+        };
+        assert_eq!(catalog.target(&form), Some(reference("codex-connection")));
+        form.backend = MasterBackend::Rcli;
+        form.pool = Some(reference("local-pool"));
+        form.account = Some(reference("local-account"));
+        assert_eq!(catalog.target(&form), Some(reference("local")));
+    }
+
+    #[test]
+    fn master_setup_opens_on_the_backend_whose_pool_is_assigned() {
+        let reference = |value: &str| CredentialRef::new(value).unwrap();
+        let models = |local_projects: &str| -> ModelAccess {
+            toml::from_str(&format!(r#"accounts = ["codex-account", "local-account"]
+connections = [
+  {{ id = "codex-connection", provider = "openai", harness = "codex", protocol = "native", account_ref = "codex-account", endpoint = {{ kind = "native" }}, model = {{ id = "native-default", author = "openai" }}, auth = {{ method = "native_managed", profile_ref = "codex-profile" }} }},
+  {{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:11434/v1" }}, model = {{ id = "qwen", author = "openai-compatible" }}, auth = {{ method = "none" }} }},
+]
+pools = [
+  {{ id = "codex-pool", members = ["codex-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false }},
+  {{ id = "local-pool", members = ["local-connection"], projects = [{local_projects}], roles = ["project_leader"], fallback_allowed = false }},
+]"#)).unwrap()
+        };
+        let catalog = |models| Catalog {
+            config_id: ConfigId::new("0".repeat(64)).unwrap(),
+            source_hash: "0".repeat(64),
+            revision: Cursor::new(1),
+            models,
+            approved: vec![reference("codex-account"), reference("local-account")],
+            targets: vec![reference("codex-connection"), reference("local")],
+            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+        };
+        let mut form = Form {
+            database: None,
+            project: ProjectId::new("demo").unwrap(),
+            backend: MasterBackend::Rcli,
+            pool: None,
+            account: None,
+            target: None,
+            values: budget_values(&ResourceBudget::unit()).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+        };
+        let codex_only = catalog(models(""));
+        assert_eq!(codex_only.assigned_backend(&form), Some(MasterBackend::Codex));
+        let both = catalog(models("\"demo\""));
+        assert_eq!(both.assigned_backend(&form), Some(MasterBackend::Rcli));
+        form.project = ProjectId::new("other").unwrap();
+        assert_eq!(both.assigned_backend(&form), None);
+    }
 
     #[test]
     fn default_master_budget_allows_a_slow_local_turn_within_policy() {

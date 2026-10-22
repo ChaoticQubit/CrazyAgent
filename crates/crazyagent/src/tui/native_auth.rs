@@ -68,6 +68,7 @@ pub(super) struct State {
     confirmation: Option<bool>,
     scroll: u16,
     notice: &'static str,
+    polled: Option<std::time::Instant>,
 }
 
 impl Default for State {
@@ -87,6 +88,7 @@ impl Default for State {
             confirmation: None,
             scroll: 0,
             notice: "Select a managed native connection",
+            polled: None,
         }
     }
 }
@@ -240,6 +242,30 @@ impl State {
                     )
                 })
         })
+    }
+
+    /// Re-reads the original operation every two seconds while sign-in is still moving, so
+    /// the device code, browser link and final account appear without a manual read.
+    /// Input: the current time. Output: whether a read was queued; never while a Claude
+    /// code is being typed, a confirmation is open or another request is in flight.
+    pub(super) fn poll_pending(&mut self, now: std::time::Instant) -> bool {
+        if !self.open || !self.connected || !self.inspected || self.loading()
+            || self.confirmation.is_some() || self.claude_code.accepts_code()
+        {
+            return false;
+        }
+        let moving = self.retained.as_ref().and_then(|retained| retained.fact.as_ref()).is_some_and(|fact| {
+            matches!(
+                fact.phase,
+                NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner
+                    | NativeAuthPhase::CheckingAccount | NativeAuthPhase::Cancelling
+            )
+        });
+        if !moving || self.polled.is_some_and(|last| now < last + std::time::Duration::from_secs(2)) {
+            return false;
+        }
+        self.polled = Some(now);
+        self.enqueue_query(false).is_ok()
     }
 
     pub(super) fn loading(&self) -> bool {
