@@ -1765,8 +1765,8 @@ async fn write_owner_reply(
 fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
     let code = error.0.as_str();
     let plain = !code.is_empty()
-        && code.len() <= 96
-        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        && code.len() <= 192
+        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';'));
     let cause = if plain {
         code
     } else {

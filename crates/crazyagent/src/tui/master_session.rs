@@ -1996,3 +1996,66 @@ fn input_cursor(
     }
     Ok(())
 }
+
+/// Builds the master Open action the TUI submits with its default choices for a project.
+/// Inputs: a connected owner controller and the project. Output: an Open action using the
+/// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
+/// account, the first allowed sandbox and the unit allowance; or a plain-language reason.
+pub async fn default_master_open(
+    controller: &mut OwnerController,
+    project_id: &ProjectId,
+) -> Result<MasterOwnerAction, String> {
+    let catalog = read_catalog(controller).await?;
+    let budget = ResourceBudget::unit();
+    for backend in [MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude] {
+        let mut form = Form {
+            database: None,
+            project: project_id.clone(),
+            backend,
+            pool: None,
+            account: None,
+            target: None,
+            values: budget_values(&budget).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+        };
+        form.pool = catalog.pools(&form).first().map(|pool| pool.id.clone());
+        let Some(pool) = form.pool.clone() else {
+            continue;
+        };
+        let account = catalog
+            .accounts(&form)
+            .first()
+            .cloned()
+            .ok_or("No approved account in the assigned pool")?;
+        let target = catalog
+            .targets
+            .first()
+            .cloned()
+            .ok_or("No allowed execution sandbox in settings")?;
+        if catalog.capacities.iter().any(|capacity| !budget.fits(capacity)) {
+            return Err("The default allowance exceeds current owner policy".into());
+        }
+        return Ok(MasterOwnerAction::Open {
+            project_id: project_id.clone(),
+            expected_config_id: catalog.config_id.clone(),
+            expected_source_hash: catalog.source_hash.clone(),
+            selection: MasterSelection {
+                backend,
+                pool_ref: pool.clone(),
+                target_profile_ref: target.clone(),
+                route: RouteRequest {
+                    preferred_target: Some(target.clone()),
+                    required_target: Some(target),
+                    required_capabilities: Vec::new(),
+                    account_ref: account,
+                    budget_ref: pool,
+                    resources: budget,
+                },
+            },
+        });
+    }
+    Err("No account pool is assigned to this project as its master".into())
+}

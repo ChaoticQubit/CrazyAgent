@@ -300,7 +300,7 @@ impl OwnedProcess {
     fn observe_group(&mut self) -> io::Result<()> {
         if !self.group_absent {
             match rustix::process::test_kill_process_group(self.group_pid()) {
-                Ok(()) => {}
+                Ok(()) | Err(rustix::io::Errno::PERM) => {}
                 Err(rustix::io::Errno::SRCH) => self.group_absent = true,
                 Err(error) => return Err(error.into()),
             }
@@ -311,7 +311,7 @@ impl OwnedProcess {
     fn signal_group(&mut self, signal: Signal) -> io::Result<()> {
         if !self.group_absent {
             match rustix::process::kill_process_group(self.group_pid(), signal) {
-                Ok(()) => {}
+                Ok(()) | Err(rustix::io::Errno::PERM) => {}
                 Err(rustix::io::Errno::SRCH) => self.group_absent = true,
                 Err(error) => return Err(error.into()),
             }

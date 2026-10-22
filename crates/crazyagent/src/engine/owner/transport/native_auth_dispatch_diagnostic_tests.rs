@@ -44,3 +44,14 @@ fn native_auth_dispatch_diagnostic_redacts_known_code_with_newline_suffix() {
     assert!(!line.contains("opaque-private-text"));
     assert!(!line.contains('\n'));
 }
+
+#[test]
+fn native_auth_dispatch_diagnostic_shows_joined_internal_codes_but_not_paths() {
+    let joined = EngineError("master_runtime_cleanup_uncertain:rcli_master_wait_failed;rcli_master_closed".into());
+    assert_eq!(
+        native_auth_dispatch_diagnostic(&joined),
+        "native_auth_dispatch_failed_fence_retained cause=master_runtime_cleanup_uncertain:rcli_master_wait_failed;rcli_master_closed"
+    );
+    let path = EngineError("master_capture_unavailable:/private/tmp/secret".into());
+    assert!(!native_auth_dispatch_diagnostic(&path).contains("/private"));
+}

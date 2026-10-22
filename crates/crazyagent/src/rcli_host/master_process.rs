@@ -169,6 +169,7 @@ impl HostProcess {
             match rustix::process::test_kill_process_group(self.group()) {
                 Ok(()) => {}
                 Err(rustix::io::Errno::SRCH) => self.group_absent = true,
+                Err(rustix::io::Errno::PERM) => self.exited_group()?,
                 Err(_) => return Err(error("rcli_master_cleanup_incomplete")),
             }
         }
@@ -180,10 +181,29 @@ impl HostProcess {
             match rustix::process::kill_process_group(self.group(), signal) {
                 Ok(()) => {}
                 Err(rustix::io::Errno::SRCH) => self.group_absent = true,
+                Err(rustix::io::Errno::PERM) => self.exited_group()?,
                 Err(_) => return Err(error("rcli_master_cleanup_incomplete")),
             }
         }
         Ok(())
+    }
+
+    /// Settles a group signal refused with EPERM, which macOS returns while the group holds
+    /// only an exited, unreaped leader. Input: the retained child. Output: Ok after reaping
+    /// that leader and confirming the group is gone; any other state stays cleanup-uncertain.
+    fn exited_group(&mut self) -> Result<(), ProtocolError> {
+        self.reap()?;
+        if self.status.is_none() {
+            return Err(error("rcli_master_cleanup_incomplete"));
+        }
+        match rustix::process::test_kill_process_group(self.group()) {
+            Ok(()) => Ok(()),
+            Err(rustix::io::Errno::SRCH) => {
+                self.group_absent = true;
+                Ok(())
+            }
+            Err(_) => Err(error("rcli_master_cleanup_incomplete")),
+        }
     }
 
     pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
@@ -240,4 +260,30 @@ fn nonblocking(descriptor: &impl AsFd) -> Result<(), ProtocolError> {
     assert!(actual.contains(OFlags::NONBLOCK));
     assert!(actual.contains(flags));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    #[test]
+    fn exited_unreaped_host_group_is_not_cleanup_uncertainty() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(Stdio::piped()).process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(process.group()) != Err(rustix::io::Errno::PERM) {
+            assert!(Instant::now() < deadline, "host did not become an exited unreaped group");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process.status.is_none());
+        process.observe_group().unwrap();
+        process.signal(Signal::TERM).unwrap();
+        process.cleanup().unwrap();
+        assert!(process.status.is_some());
+        assert!(process.group_absent);
+    }
 }

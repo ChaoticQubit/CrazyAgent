@@ -10,6 +10,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+const DRIVE_ATTEMPTS: u32 = 6;
+const DRIVE_PAUSE: Duration = Duration::from_millis(750);
+const UNKNOWN_OUTCOME: &str = "owner_outcome_unknown_reconcile_same_identity";
 
 struct Dispatch {
     project_id: ProjectId,
@@ -88,10 +91,11 @@ impl MasterDispatch {
         let session = session_id.clone();
         let turn = request.request_id.clone();
         let task = executor.spawn(async move {
-            let result = runtime
-                .drive_master_turn(&project, &session, &turn)
-                .await
-                .map(|_| ());
+            let result = drive_until_settled(
+                || async { runtime.drive_master_turn(&project, &session, &turn).await.map(|_| ()) },
+                DRIVE_PAUSE,
+            )
+            .await;
             if let Err(error) = &result {
                 eprintln!(
                     "master_turn_not_completed cause={}",
@@ -191,6 +195,31 @@ impl Drop for MasterDispatch {
     }
 }
 
+/// Drives one master turn again under the same identity while the storage actor reports
+/// an unknown outcome, which asks the caller to reconcile by repeating the same request.
+/// Inputs: the drive step and the base pause, which grows linearly per attempt. Output:
+/// the first settled result, or the unknown outcome after DRIVE_ATTEMPTS tries.
+async fn drive_until_settled<F, Fut>(mut drive: F, pause: Duration) -> Result<(), EngineError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), EngineError>>,
+{
+    let mut attempt = 1;
+    loop {
+        let result = drive().await;
+        match result {
+            Err(error) if error.0 == UNKNOWN_OUTCOME && attempt < DRIVE_ATTEMPTS => {
+                tokio::time::sleep(pause * attempt).await;
+                attempt += 1;
+            }
+            settled => {
+                assert!(attempt <= DRIVE_ATTEMPTS);
+                return settled;
+            }
+        }
+    }
+}
+
 fn validate_commit(
     runtime: &OwnerRuntimeHandle,
     request: &OwnerRequest,
@@ -226,4 +255,42 @@ fn validate_commit(
         return Err(failure("master_dispatch_binding_mismatch"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    #[tokio::test]
+    async fn unknown_outcome_drives_the_same_turn_again_until_it_settles() {
+        let calls = AtomicU32::new(0);
+        let result = drive_until_settled(|| async {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(failure("owner_outcome_unknown_reconcile_same_identity"))
+            } else {
+                Ok(())
+            }
+        }, Duration::from_millis(1)).await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn other_failures_and_exhausted_retries_are_returned() {
+        let calls = AtomicU32::new(0);
+        let result = drive_until_settled(|| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(failure("master_repository_missing"))
+        }, Duration::from_millis(1)).await;
+        assert_eq!(result, Err(failure("master_repository_missing")));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let calls = AtomicU32::new(0);
+        let result = drive_until_settled(|| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(failure("owner_outcome_unknown_reconcile_same_identity"))
+        }, Duration::from_millis(1)).await;
+        assert_eq!(result, Err(failure("owner_outcome_unknown_reconcile_same_identity")));
+        assert_eq!(calls.load(Ordering::SeqCst), DRIVE_ATTEMPTS);
+    }
 }

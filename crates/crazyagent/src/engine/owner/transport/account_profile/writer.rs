@@ -58,7 +58,7 @@ impl Supervised {
             let reaped = child.try_wait().ok().flatten().is_some();
             match rustix::process::test_kill_process_group(group) {
                 Err(rustix::io::Errno::SRCH) if reaped => { self.settled = true; return true; }
-                Err(rustix::io::Errno::SRCH) => {}
+                Err(rustix::io::Errno::SRCH | rustix::io::Errno::PERM) => {}
                 Ok(()) => { let _ = rustix::process::kill_process_group(group, Signal::KILL); }
                 Err(_) => return false,
             }
@@ -212,4 +212,23 @@ fn drain_errors(descriptor: &OwnedFd, count: &mut usize, eof: &mut bool) -> Resu
     *count += bytes.len();
     bytes.fill(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exited_unreaped_writer_group_settles_cleanly() {
+        let child = Command::new("/bin/sh").args(["-c", "exit 0"]).process_group(0).spawn().unwrap();
+        let group = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let deadline = WallInstant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::PERM) {
+            assert!(WallInstant::now() < deadline, "writer did not become an exited unreaped group");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut supervised = Supervised { work: None, child: Some(child), group: Some(group), settled: false };
+        assert!(supervised.cleanup());
+        assert!(supervised.settled);
+    }
 }
