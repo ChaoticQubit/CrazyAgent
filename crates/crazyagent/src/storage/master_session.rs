@@ -1296,11 +1296,11 @@ fn block_unsupported_backend(
     Ok(true)
 }
 
-/// Blocks a queued turn whose master connection has no current sign-in, so
-/// the owner sees why instead of a turn that stays queued.
-/// Input: the failure from reading the sign-in. Output: true when the turn
-/// was blocked and persisted, false when the failure is not a sign-in gap.
-fn block_unauthenticated(
+/// Blocks a queued turn that cannot run until the owner acts: no current
+/// sign-in, or a master opened before the settings or engine changed.
+/// Input: the failure that stopped the turn. Output: true when the turn was
+/// blocked and persisted, false when the failure needs no owner action.
+fn block_unready(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     session: &mut MasterSessionView,
@@ -1310,7 +1310,9 @@ fn block_unauthenticated(
     let reason = match failure.0.as_str() {
         "master_authentication_unknown" => MasterReason::ReadinessUnknown,
         "master_authentication_stale" => MasterReason::ReadinessStale,
-        "native_profile_connection_missing" => MasterReason::ConnectionChanged,
+        "native_profile_connection_missing" | "master_source_conflict" => {
+            MasterReason::ConnectionChanged
+        }
         _ => return Ok(false),
     };
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
@@ -1349,7 +1351,7 @@ fn prepare_turn(
     let auth = match authenticated(tx, config, host, session, custody) {
         Ok(auth) => auth,
         Err(failure) => {
-            if block_unauthenticated(tx, config, session, turn, &failure)? {
+            if block_unready(tx, config, session, turn, &failure)? {
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
             }
             return Err(failure);
@@ -1534,7 +1536,7 @@ fn provision_bootstrap(
     let auth = match authenticated(&tx, config, host, &session, custody) {
         Ok(auth) => auth,
         Err(failure) => {
-            if block_unauthenticated(&tx, config, &mut session, &mut turn, &failure)? {
+            if block_unready(&tx, config, &mut session, &mut turn, &failure)? {
                 tx.commit().map_err(error)?;
                 return Ok(());
             }
@@ -2010,7 +2012,15 @@ pub(super) fn runtime(
     match command {
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
         MasterRuntimeCommand::Route { ref host, .. } => {
-            current_scope(&tx, config, sources, host, &session, &turn)?;
+            if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {
+                if turn.phase != MasterTurnPhase::Queued
+                    || !block_unready(&tx, config, &mut session, &mut turn, &failure)?
+                {
+                    return Err(failure);
+                }
+                tx.commit().map_err(error)?;
+                return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
+            }
             block_unsupported_backend(&tx, config, &mut session, &mut turn)?;
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))

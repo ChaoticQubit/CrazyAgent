@@ -2284,9 +2284,10 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::QuotaExhausted => "Usage limit reached for this account",
         MasterReason::RateLimited => "Rate limited; try again shortly",
         MasterReason::CooldownActive => "Account is cooling down; try again shortly",
-        MasterReason::ConnectionChanged => {
-            "Account settings changed: check the master setup (F2), then send again"
-        }
+        MasterReason::ConnectionChanged => concat!(
+            "Settings or engine changed since this master opened: ",
+            "close it (F4), open it again (F2, Enter), then send again"
+        ),
         MasterReason::ScopeRevoked => "Access to this project was revoked",
         MasterReason::CapacityUnavailable => "Another turn is still running; wait for it",
         MasterReason::BudgetExhausted => "Budget exhausted",
@@ -2326,6 +2327,16 @@ mod turn_line_tests {
             lines,
             vec![
                 "Turn 1: Blocked | Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again"
+                    .to_string()
+            ]
+        );
+        let changed = MasterTurnView { reason: Some(MasterReason::ConnectionChanged), ..turn };
+        let mut lines = Vec::new();
+        turn_lines(&changed, &mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "Turn 1: Blocked | Settings or engine changed since this master opened: close it (F4), open it again (F2, Enter), then send again"
                     .to_string()
             ]
         );

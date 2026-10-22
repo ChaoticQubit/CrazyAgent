@@ -316,6 +316,23 @@ impl DispatchFixture {
         (count("master_turns"), count("model_gateway_attempts"))
     }
 
+    async fn restart(&mut self) {
+        self.service.shutdown().await.unwrap();
+        self.service = EngineService::start_with_settings_sources(
+            self.root.path(),
+            "e.sock",
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+            &self._stop.subscribe(),
+        )
+        .await
+        .unwrap();
+        self.owner = OwnerClient::discover(self.root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+            .await
+            .unwrap()
+            .0;
+    }
+
     async fn finish(mut self) {
         self.service.shutdown().await.unwrap();
     }
@@ -548,6 +565,23 @@ async fn master_dispatch_blocks_a_codex_turn_without_a_current_sign_in() {
     assert_eq!(turn.id, submit.request_id);
     assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ReadinessUnknown));
     assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+    dispatcher.shutdown().await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_restart() {
+    let mut fixture = DispatchFixture::start().await;
+    fixture.create().await;
+    let (_, _, session) = fixture.open().await;
+    fixture.restart().await;
+    let (submit, submitted) = fixture.submit(&session, "after-restart").await;
+    operation(&submitted);
+    let mut dispatcher = MasterDispatch::new();
+    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    let turn = fixture.await_blocked(&session).await;
+    assert_eq!(turn.id, submit.request_id);
+    assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ConnectionChanged));
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
 }
