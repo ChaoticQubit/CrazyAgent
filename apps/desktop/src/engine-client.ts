@@ -1,5 +1,26 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
+
+/** Retries a bridge call the native side refused with "busy" because another call held
+ * the bridge; such a refusal happens before any action, so repeating it is safe.
+ * Inputs: the call and a base pause in milliseconds. Output: the call result or failure. */
+export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (failure) {
+      const busy = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "busy";
+      if (!busy || attempt >= 8) throw failure;
+      await new Promise((resolve) => setTimeout(resolve, pause * attempt));
+    }
+  }
+}
+
+/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal.
+ * Inputs: the command name and its arguments. Output: the command result or its failure. */
+function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  return retryBusy(() => native<T>(command, args));
+}
 
 export function startNativeAuth(ticket: string, method: NativeAuthMethod): Promise<NativeAuthView> {
   return invoke<NativeAuthView>("desktop_start_native_auth", { ticket, method });

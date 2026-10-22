@@ -75,8 +75,9 @@ test("turn status labels are plain language for every phase", () => {
 });
 
 test("busy bridge calls are retried and other failures are not", async () => {
+  const { retryBusy } = await import("../src/engine-client.ts");
   let calls = 0;
-  const value = await conversation.retryBusy(async () => {
+  const value = await retryBusy(async () => {
     calls += 1;
     if (calls < 3) throw { code: "busy" };
     return "read";
@@ -84,11 +85,11 @@ test("busy bridge calls are retried and other failures are not", async () => {
   assert.equal(value, "read");
   assert.equal(calls, 3);
   calls = 0;
-  await assert.rejects(conversation.retryBusy(async () => { calls += 1; throw { code: "stale_master" }; }, 1), { code: "stale_master" });
+  await assert.rejects(retryBusy(async () => { calls += 1; throw { code: "stale_master" }; }, 1), { code: "stale_master" });
   assert.equal(calls, 1);
   calls = 0;
-  await assert.rejects(conversation.retryBusy(async () => { calls += 1; throw { code: "busy" }; }, 1), { code: "busy" });
-  assert.equal(calls, 5);
+  await assert.rejects(retryBusy(async () => { calls += 1; throw { code: "busy" }; }, 1), { code: "busy" });
+  assert.equal(calls, 8);
 });
 
 test("master controls offer Close on an open master and Start again once it is closed", () => {
