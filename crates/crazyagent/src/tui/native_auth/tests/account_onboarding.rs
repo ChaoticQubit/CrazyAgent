@@ -64,7 +64,7 @@ fn assert_no_routing_form(ui: &Ui) {
 fn choose_local(ui: &mut Ui, label: &str) {
     ui.key(KeyCode::Char('a'));
     let providers = views::body(&ui.app);
-    assert!(providers.contains("Sign in to a provider"));
+    assert!(providers.contains("Sign in to a provider"), "{providers}");
     assert!(providers.contains("Codex"));
     assert!(providers.contains("Claude"));
     assert!(providers.contains("API key or compatible endpoint"));
@@ -92,6 +92,15 @@ async fn add_local(ui: &mut Ui, endpoint: &str, model: &str) {
     ui.key(KeyCode::Enter);
     ui.key(KeyCode::Enter);
     ui.drain().await;
+    let profile = views::body(&ui.app);
+    assert!(profile.contains("Press Enter to finish local endpoint setup"), "{profile}");
+    ui.key(KeyCode::Enter);
+    ui.drain().await;
+    let configured = views::body(&ui.app);
+    assert!(configured.contains("ConfiguredOnly | generation 1"), "{configured}");
+    ui.key(KeyCode::Esc);
+    let finished = views::body(&ui.app);
+    assert!(finished.contains("Private setup closed"), "{finished}");
 }
 
 fn assert_local(case: &Case, saved: &ModelAccess, endpoint: &str, model: &str) {
@@ -177,7 +186,8 @@ async fn local_account_uses_meaningful_fields_and_committed_owner_records_withou
         assert!(!body.contains("AuthenticatedObserved"));
         ui.key(KeyCode::Char('3'));
         ui.drain().await;
-        assert!(views::body(&ui.app).contains(saved.pools[0].id.as_str()));
+        let pools = views::body(&ui.app);
+        assert!(pools.contains(saved.pools[0].id.as_str()), "{pools}");
         assert_eq!(catalog(&case), saved);
         assert_no_auth(&case);
     })

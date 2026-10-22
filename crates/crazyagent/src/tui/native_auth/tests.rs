@@ -712,7 +712,11 @@ async fn real_accounts_pools_and_pinned_views_do_not_open_a_connection_panel() {
             let _ = ui.app.reduce(UiEvent::ConfigureMaster);
             assert!(ui.app.model_access_request().unwrap().is_none());
             assert_eq!(case.counts(), before);
-            assert!(!ui.render(120, 40).contains("Sign in"));
+            let screen = ui.render(120, 40);
+            assert!(
+                !screen.contains("Native authentication |") && !screen.contains("F2 Sign in"),
+                "{screen}"
+            );
         }
     })
     .await;
