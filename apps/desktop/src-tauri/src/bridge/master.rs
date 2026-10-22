@@ -172,6 +172,21 @@ impl NativeBridge {
         let action = MasterOwnerAction::Submit { project_id, session_id, text: text.into() };
         self.apply_master(ticket, action, generation).await
     }
+
+    /// Closes the selected project's open master session so a fresh one can be started.
+    /// Inputs: selection ticket, the session id read from master state and a fresh draft
+    /// generation. Output: the owner intent receipt for the close request.
+    pub async fn close_master(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        let action = MasterOwnerAction::Close { project_id, session_id };
+        self.apply_master(ticket, action, generation).await
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +470,18 @@ fallback_allowed = false
             .await
             .map_err(|error| error.code)?;
         assert!(final_state.session.ok_or("configured session missing after cancel")?.current_turn.is_none());
+        let closed = bridge
+            .close_master(&selected.ticket, session.session_id.as_str(), 4)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(closed.outcome, ActionOutcome::Applied);
+        let after_close = bridge
+            .master_state(&selected.ticket)
+            .await
+            .map_err(|error| error.code)?;
+        assert!(after_close
+            .session
+            .is_none_or(|closed| closed.phase == MasterSessionPhase::Closed));
         assert!(!declared.exists());
         assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
         Ok(())

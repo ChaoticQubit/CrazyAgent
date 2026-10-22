@@ -195,6 +195,20 @@ async fn desktop_open_master(
 }
 
 #[tauri::command]
+async fn desktop_close_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .close_master(&ticket, &session_id, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_submit_master(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -445,6 +459,7 @@ pub fn run() {
             desktop_master_turns,
             desktop_open_master,
             desktop_submit_master,
+            desktop_close_master,
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,

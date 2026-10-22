@@ -34,6 +34,7 @@ fn main() {
         "desktop_master_turns",
         "desktop_open_master",
         "desktop_submit_master",
+        "desktop_close_master",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

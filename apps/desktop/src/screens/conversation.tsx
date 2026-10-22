@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { errorMessage, masterState, masterTurns, openMaster, submitMaster } from "../engine-client";
+import { closeMaster, errorMessage, masterState, masterTurns, openMaster, submitMaster } from "../engine-client";
 import type { IntentReceipt, MasterState, MasterTurn } from "../engine-client";
 import type { useOwnerBrowser } from "../state";
 
@@ -64,6 +64,16 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
 }
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
+
+/**
+ * Chooses which master lifecycle buttons the panel shows.
+ * Input: the current session phase, or undefined when no session exists.
+ * Output: whether Start master and Close master are offered.
+ */
+export function masterControls(phase: string | undefined): { start: boolean; close: boolean } {
+  const open = phase === "configured";
+  return { start: !open, close: open };
+}
 
 /** Plain-language label for one master turn phase.
  * Input: the engine turn phase and optional reason. Output: a short status sentence. */
@@ -147,6 +157,14 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
     await refresh();
   });
 
+  const close = () => act(async () => {
+    if (!session) return;
+    const generation = state.nextGeneration();
+    const receipt = await retryBusy(() => closeMaster(ticket, session.session_id, generation));
+    confirm(receipt);
+    await refresh();
+  });
+
   const send = () => act(async () => {
     if (!session) return;
     const message = text.trim();
@@ -160,12 +178,14 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   });
 
   const blocked = working || !state.connected || !ticket;
+  const controls = masterControls(session?.phase);
   return <section aria-label="Project master" className="master-panel">
     <div className="section-heading"><h3>Master conversation</h3>
       <button type="button" disabled={blocked} onClick={() => void act(refresh)} data-testid="refresh-master">Refresh</button></div>
-    {!session && <><p role="status" data-testid="master-availability">The master has not started for this project. It uses the account pool you assigned to this project.</p>
-      <button type="button" disabled={blocked} onClick={() => void start()} data-testid="select-project-master">Start master</button></>}
-    {session && !active && <p role="status" data-testid="master-availability">This master conversation is {session.phase}.</p>}
+    {!session && <p role="status" data-testid="master-availability">The master has not started for this project. It uses the account pool you assigned to this project.</p>}
+    {session && !active && <p role="status" data-testid="master-availability">This master conversation is {session.phase}. Start master opens a new one.</p>}
+    {controls.start && <button type="button" disabled={blocked} onClick={() => void start()} data-testid="select-project-master">Start master</button>}
+    {controls.close && <button type="button" disabled={blocked} onClick={() => void close()} data-testid="close-project-master">Close master</button>}
     {turns.map((turn) => <article key={turn.id} className="check" data-testid="master-turn">
       {sent[turn.ordinal] && <p><strong>You:</strong> {displayText(sent[turn.ordinal])}</p>}
       <p className="muted">Message {turn.ordinal} · {turnStatus(turn)}</p>

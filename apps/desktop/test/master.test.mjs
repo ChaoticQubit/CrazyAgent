@@ -90,3 +90,15 @@ test("busy bridge calls are retried and other failures are not", async () => {
   await assert.rejects(conversation.retryBusy(async () => { calls += 1; throw { code: "busy" }; }, 1), { code: "busy" });
   assert.equal(calls, 5);
 });
+
+test("master controls offer Close on an open master and Start again once it is closed", () => {
+  assert.deepEqual(conversation.masterControls(undefined), { start: true, close: false });
+  assert.deepEqual(conversation.masterControls("configured"), { start: false, close: true });
+  assert.deepEqual(conversation.masterControls("closed"), { start: true, close: false });
+});
+
+test("a master opened before an engine or settings change explains how to recover", async () => {
+  const { errorMessage } = await import("../src/engine-client.ts");
+  assert.equal(errorMessage({ code: "master_source_conflict" }),
+    "This master was opened before the engine or settings changed. Close it, start it again, then send.");
+});

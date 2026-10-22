@@ -129,6 +129,7 @@ export function errorMessage(error: unknown): string {
     master_open_unavailable: "No account pool is assigned to this project as its master. Assign one in Settings > Pools, then start the master again.",
     master_outcome_pending: "The engine has not confirmed this request yet. Use Reconcile intent at the top of the window, then refresh the master.",
     stale_master: "The master conversation changed. Refresh it before sending again.",
+    master_source_conflict: "This master was opened before the engine or settings changed. Close it, start it again, then send.",
     invalid_session: "The master conversation identity is invalid. Refresh the master state.",
     conversation_text_bounds: "Text must be nonempty, contain no NUL, and fit within 8192 UTF-8 bytes. The draft was not submitted.",
     not_configured: "No engine connection was configured for this desktop session.",
@@ -395,6 +396,10 @@ export function masterTurns(ticket: string, sessionId: string): Promise<MasterTu
 
 export function openMaster(ticket: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_open_master", { ticket, generation });
+}
+
+export function closeMaster(ticket: string, sessionId: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_close_master", { ticket, sessionId, generation });
 }
 
 export function submitMaster(ticket: string, sessionId: string, text: string, generation: number): Promise<IntentReceipt> {
