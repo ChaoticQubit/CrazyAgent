@@ -1,7 +1,7 @@
 import type { ModelAccessDetail } from "./engine-client";
 import { displayText } from "./screens/conversation";
 
-export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "claude_official";
+export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official";
 export type NativeAuthCommand = NativeAuthMethod | "read" | "cancel" | "logout";
 export type NativeAuthAction = { kind: "sign_in"; method: NativeAuthMethod } | { kind: "logout" };
 export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account" |
@@ -117,7 +117,7 @@ export function nativeAuthAllowed(state: NativeAuthState, action: NativeAuthComm
   if (nativeAuthActive(state)) return false;
   if (action === "logout") return state.confirming_logout;
   return state.context.harness === "codex" ?
-    action === "codex_browser" || action === "codex_device_code" :
+    action === "codex_browser" || action === "codex_device_code" || action === "codex_existing" :
     state.context.harness === "claude" && action === "claude_official";
 }
 

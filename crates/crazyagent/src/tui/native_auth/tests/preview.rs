@@ -77,7 +77,10 @@ async fn preview_actual_auth_failure_stays_attributed_in_pool_and_out_of_convers
         assert!(pool.contains("a-codex") && pool.contains("b-claude"));
         assert!(pool.contains("Last authentication"));
         assert!(pool.contains("account-codex"));
-        assert!(pool.contains("Unavailable"));
+        assert!(pool.contains(
+            "Original action: Codex browser sign-in | Last owner phase: Native authentication unavailable"
+        ));
+        assert!(!pool.contains("SignIn {") && !pool.contains("Unavailable"));
         assert!(!pool.contains("AuthenticatedObserved") && !pool.contains("Ready"));
         for _ in 0..5 {
             ui.app.reduce(UiEvent::FocusNext).unwrap();

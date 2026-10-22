@@ -840,9 +840,8 @@ fn validate_method(
 ) -> Result<(), EngineError> {
     let valid = match command {
         Command::Start(request) => match request.method {
-            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode => {
-                connection.harness.as_str() == "codex"
-            }
+            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+            | NativeAuthMethod::CodexExisting => connection.harness.as_str() == "codex",
             NativeAuthMethod::ClaudeOfficial => connection.harness.as_str() == "claude",
         },
         Command::Logout(_) => matches!(connection.harness.as_str(), "codex" | "claude"),

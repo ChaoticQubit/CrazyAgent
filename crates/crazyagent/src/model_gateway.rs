@@ -516,7 +516,8 @@ fn validate_initial_conversation(
     }
     let method_matches = match &auth.fact.action {
         NativeAuthAction::SignIn {
-            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
+            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+                | NativeAuthMethod::CodexExisting,
         } => auth.binding.connection.harness.as_str() == "codex",
         NativeAuthAction::SignIn {
             method: NativeAuthMethod::ClaudeOfficial,

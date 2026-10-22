@@ -367,6 +367,7 @@ impl State {
                 "Read original operation",
                 "Cancel original operation",
                 "Logout",
+                "Use the existing Codex sign-in (no new code)",
                 "Back",
             ]
         }
@@ -395,6 +396,7 @@ impl State {
                 self.confirmation = Some(false);
                 Ok(())
             }
+            (false, 5) => self.begin(Some(NativeAuthMethod::CodexExisting)),
             _ => self.hide(),
         }
     }
@@ -613,13 +615,13 @@ impl State {
         let phase = retained
             .fact
             .as_ref()
-            .map(|fact| format!("{:?}", fact.phase))
-            .unwrap_or_else(|| "not observed".into());
+            .map(|fact| phase_text(fact.phase))
+            .unwrap_or("not observed");
         let action = retained
             .original
             .command
             .action()
-            .map(|action| format!("{action:?}"))
+            .map(action_text)
             .unwrap_or_default();
         let current = self.connected
             && basis.is_some_and(|basis| {
@@ -792,6 +794,20 @@ pub(super) fn public_problem(problem: &str) -> &'static str {
         "native_auth_owner_identity_changed" => "native_auth_owner_identity_changed",
         "native_auth_inspection_unavailable" => "native_auth_inspection_unavailable",
         _ => "native_auth_transport_unavailable_read_original_operation",
+    }
+}
+
+/// Names a native authentication action in owner-facing words.
+/// Input: the retained original action. Output: a short plain label.
+fn action_text(action: NativeAuthAction) -> &'static str {
+    match action {
+        NativeAuthAction::SignIn { method } => match method {
+            NativeAuthMethod::CodexBrowser => "Codex browser sign-in",
+            NativeAuthMethod::CodexDeviceCode => "Codex device-code sign-in",
+            NativeAuthMethod::CodexExisting => "Existing Codex sign-in check",
+            NativeAuthMethod::ClaudeOfficial => "Claude official sign-in",
+        },
+        NativeAuthAction::Logout => "Logout",
     }
 }
 

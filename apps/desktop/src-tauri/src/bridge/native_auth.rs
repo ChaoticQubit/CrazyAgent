@@ -79,7 +79,9 @@ impl NativeBridge {
         let (scope, connection) = self.native_auth_selection(ticket)?;
         self.allow_new_auth()?;
         let valid = match method {
-            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode => "codex",
+            NativeAuthMethod::CodexBrowser
+            | NativeAuthMethod::CodexDeviceCode
+            | NativeAuthMethod::CodexExisting => "codex",
             NativeAuthMethod::ClaudeOfficial => "claude",
         };
         if connection.harness.as_str() != valid {

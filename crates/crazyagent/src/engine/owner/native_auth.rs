@@ -27,6 +27,7 @@ pub struct NativeAuthScope {
 pub enum NativeAuthMethod {
     CodexBrowser,
     CodexDeviceCode,
+    CodexExisting,
     ClaudeOfficial,
 }
 
@@ -369,7 +370,8 @@ impl CodexAuthObservation {
                 NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode }) => true,
             (Self::LoggedOut { .. }, NativeAuthAction::Logout) => true,
             (Self::AccountRead { .. } | Self::RequestFailed { .. }, NativeAuthAction::Logout
-                | NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode }) => true,
+                | NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+                    | NativeAuthMethod::CodexExisting }) => true,
             _ => false,
         };
         if !valid { return Err(failure("native_auth_method_mismatch")); }
@@ -717,6 +719,29 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             phase,
             code: None,
         }
+    }
+
+    #[test]
+    fn an_existing_sign_in_check_accepts_only_an_account_read() {
+        let mut fact = codex_fact(NativeAuthPhase::Starting);
+        fact.action = NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting };
+        let started = CodexAuthObservation::LoginStarted {
+            id: 2, login_id: "login-1".into(), url: "https://auth.openai.com/codex/device".into(),
+            user_code: Some("ABCD-12345".into()),
+        };
+        assert_eq!(started.apply(&mut fact.clone()), Err(failure("native_auth_method_mismatch")));
+        let read = CodexAuthObservation::AccountRead {
+            id: 2,
+            account: Some(CodexObservedAccount::Chatgpt { email: None, plan_type: "plus".into() }),
+            requires_openai_auth: true,
+        };
+        read.apply(&mut fact).unwrap();
+        assert_eq!(fact.phase, NativeAuthPhase::AuthenticatedObserved);
+        let mut signed_out = codex_fact(NativeAuthPhase::Starting);
+        signed_out.action = NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting };
+        CodexAuthObservation::AccountRead { id: 2, account: None, requires_openai_auth: true }
+            .apply(&mut signed_out).unwrap();
+        assert_eq!(signed_out.phase, NativeAuthPhase::UnauthenticatedObserved);
     }
 
     #[test]

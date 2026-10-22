@@ -187,7 +187,8 @@ pub(super) async fn serve(
                             let producer = if runtime.registered_codex_executable().is_ok() { ProducerCapability::Available }
                                 else { unavailable("native_auth_host_unavailable") };
                             vec![ManagedAuthCapability { method: NativeAuthMethod::CodexBrowser, producer: producer.clone() },
-                                ManagedAuthCapability { method: NativeAuthMethod::CodexDeviceCode, producer }]
+                                ManagedAuthCapability { method: NativeAuthMethod::CodexDeviceCode, producer: producer.clone() },
+                                ManagedAuthCapability { method: NativeAuthMethod::CodexExisting, producer }]
                         }
                         "claude" => vec![ManagedAuthCapability { method: NativeAuthMethod::ClaudeOfficial,
                             producer: if runtime.registered_claude_executable().is_ok() { ProducerCapability::Available }

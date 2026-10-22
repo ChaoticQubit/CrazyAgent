@@ -128,7 +128,8 @@ function Actions({ state, onAction }: {
   </div>;
   const starts: [NativeAuthCommand, string][] = state.context.harness === "codex" ?
     [["codex_browser", "Start browser sign-in"],
-      ["codex_device_code", "Start device-code sign-in"]] :
+      ["codex_device_code", "Start device-code sign-in"],
+      ["codex_existing", "Use the existing Codex sign-in (no new code)"]] :
     state.context.harness === "claude" ? [["claude_official", "Start official sign-in"]] : [];
   return <div className="button-row">
     {starts.map(([action, label]) => <button key={action} type="button"

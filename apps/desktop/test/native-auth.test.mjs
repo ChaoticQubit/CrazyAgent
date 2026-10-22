@@ -137,6 +137,9 @@ test("synthetic typed selection opens inspectable auth without starting or editi
   assert.deepEqual(browser.in_flight, { action: "codex_browser", request: 1 });
   assert.equal(browser.operation, undefined);
   assert.equal(state.in_flight, undefined);
+  const existing = reduceNativeAuth(state, { kind: "begin", action: "codex_existing", request: 1 });
+  assert.deepEqual(existing.in_flight, { action: "codex_existing", request: 1 });
+  assert.match(markup(state), /Use the existing Codex sign-in/);
   const wrong = reduceNativeAuth(state, { kind: "begin", action: "claude_official", request: 1 });
   assert.equal(wrong.in_flight, undefined);
   const claude = structuredClone(detail);

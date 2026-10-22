@@ -127,7 +127,8 @@ fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
     }
     if let NativeAuthAction::SignIn { method } = reply.fact.action {
         let expected = match method {
-            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode => "codex",
+            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+            | NativeAuthMethod::CodexExisting => "codex",
             NativeAuthMethod::ClaudeOfficial => "claude",
         };
         if connection.harness.as_str() != expected {

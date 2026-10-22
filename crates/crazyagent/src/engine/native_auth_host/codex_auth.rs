@@ -20,6 +20,7 @@ const POLL_TIME: Duration = Duration::from_millis(20);
 const CHECK_TIME: Duration = Duration::from_millis(100);
 const SIGN_IN_TIME: Duration = Duration::from_secs(590);
 const EXPIRY_MARGIN: Duration = Duration::from_secs(40);
+const CHECK_TIME_MAX: Duration = Duration::from_secs(60);
 const LOGOUT_TIME: Duration = Duration::from_secs(5);
 const CLEANUP_TIME: Duration = Duration::from_secs(2);
 
@@ -204,6 +205,7 @@ impl Driver<'_> {
         let frame = match self.action {
             NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser } => self.protocol.start_chatgpt_login(),
             NativeAuthAction::SignIn { method: NativeAuthMethod::CodexDeviceCode } => self.protocol.start_device_code_login(),
+            NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting } => return self.read_account().await,
             NativeAuthAction::Logout => self.protocol.logout_account(),
             _ => return Err(failure("native_auth_codex_method_unsupported")),
         }.map_err(protocol_error)?;
@@ -319,6 +321,7 @@ pub(in crate::engine) async fn run(
     let action = channel.fact().action.clone();
     let run_time = match action {
         NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode } => SIGN_IN_TIME,
+        NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting } => CHECK_TIME_MAX,
         NativeAuthAction::Logout => LOGOUT_TIME,
         _ => return Err(failure("native_auth_codex_method_unsupported")),
     };
