@@ -1287,6 +1287,30 @@ fn block_unsupported_backend(
     Ok(true)
 }
 
+/// Blocks a queued turn whose master connection has no current sign-in, so
+/// the owner sees why instead of a turn that stays queued.
+/// Input: the failure from reading the sign-in. Output: true when the turn
+/// was blocked and persisted, false when the failure is not a sign-in gap.
+fn block_unauthenticated(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+    failure: &EngineError,
+) -> Result<bool, EngineError> {
+    let reason = match failure.0.as_str() {
+        "master_authentication_unknown" => MasterReason::ReadinessUnknown,
+        "master_authentication_stale" => MasterReason::ReadinessStale,
+        "native_profile_connection_missing" => MasterReason::ConnectionChanged,
+        _ => return Ok(false),
+    };
+    assert_eq!(turn.phase, MasterTurnPhase::Queued);
+    turn.phase = MasterTurnPhase::Blocked;
+    turn.reason = Some(reason);
+    persist_runtime(tx, config, session, turn)?;
+    Ok(true)
+}
+
 fn prepare_turn(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -1313,7 +1337,15 @@ fn prepare_turn(
     if !preflight_turn(tx, config, session, turn)? {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
-    let auth = authenticated(tx, config, host, session, custody)?;
+    let auth = match authenticated(tx, config, host, session, custody) {
+        Ok(auth) => auth,
+        Err(failure) => {
+            if block_unauthenticated(tx, config, session, turn, &failure)? {
+                return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+            }
+            return Err(failure);
+        }
+    };
     let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
@@ -1490,7 +1522,16 @@ fn provision_bootstrap(
         tx.commit().map_err(error)?;
         return Ok(());
     }
-    let auth = authenticated(&tx, config, host, &session, custody)?;
+    let auth = match authenticated(&tx, config, host, &session, custody) {
+        Ok(auth) => auth,
+        Err(failure) => {
+            if block_unauthenticated(&tx, config, &mut session, &mut turn, &failure)? {
+                tx.commit().map_err(error)?;
+                return Ok(());
+            }
+            return Err(failure);
+        }
+    };
     match ready_lease(&tx, &session, &auth) {
         Ok(_) => return Ok(()),
         Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
