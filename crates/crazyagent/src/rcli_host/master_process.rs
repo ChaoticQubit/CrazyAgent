@@ -188,16 +188,17 @@ impl HostProcess {
         Ok(())
     }
 
-    /// Settles a group signal refused with EPERM, which macOS returns while the group holds
-    /// only an exited, unreaped leader. Input: the retained child. Output: Ok after reaping
-    /// that leader and confirming the group is gone; any other state stays cleanup-uncertain.
+    /// Settles a group signal refused with EPERM, which macOS returns while every group
+    /// member has exited but some are not reaped yet. Input: the retained child. Output: Ok
+    /// once the leader is reaped, marking the group absent only after ESRCH; members that
+    /// are still exiting leave the group present so the cleanup deadline decides.
     fn exited_group(&mut self) -> Result<(), ProtocolError> {
         self.reap()?;
         if self.status.is_none() {
             return Err(error("rcli_master_cleanup_incomplete"));
         }
         match rustix::process::test_kill_process_group(self.group()) {
-            Ok(()) => Ok(()),
+            Ok(()) | Err(rustix::io::Errno::PERM) => Ok(()),
             Err(rustix::io::Errno::SRCH) => {
                 self.group_absent = true;
                 Ok(())
@@ -283,6 +284,30 @@ mod tests {
         process.observe_group().unwrap();
         process.signal(Signal::TERM).unwrap();
         process.cleanup().unwrap();
+        assert!(process.status.is_some());
+        assert!(process.group_absent);
+    }
+
+    #[test]
+    fn exited_group_member_reaped_by_its_own_parent_is_not_cleanup_uncertainty() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("0.3").stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(Stdio::piped()).process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let group = i32::try_from(process.child.id()).unwrap();
+        let mut member = Command::new("/bin/sh").args(["-c", "exit 0"]).process_group(group)
+            .spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(process.group()) != Err(rustix::io::Errno::PERM) {
+            assert!(Instant::now() < deadline, "group did not hold only exited members");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let reaper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            member.wait().unwrap()
+        });
+        process.cleanup().unwrap();
+        assert!(reaper.join().unwrap().success());
         assert!(process.status.is_some());
         assert!(process.group_absent);
     }

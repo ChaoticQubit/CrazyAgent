@@ -233,7 +233,12 @@ impl State {
             if self.forms.len() >= 128 {
                 return Err("Master setup draft capacity reached; existing fields retained".into());
             }
-            let budget = ResourceBudget::unit();
+            let policy = crate::routing::RoutingPolicy::default();
+            let budget = default_master_budget(&[
+                policy.global_capacity,
+                policy.project_capacity,
+                policy.task_capacity,
+            ]);
             self.forms.push(Form {
                 database: self
                     .identity
@@ -2001,12 +2006,27 @@ fn input_cursor(
 /// Inputs: a connected owner controller and the project. Output: an Open action using the
 /// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
 /// account, the first allowed sandbox and the unit allowance; or a plain-language reason.
+const MASTER_TURN_WALL_MS: u64 = 600_000;
+
+/// Default allowance for one master turn: the unit budget with ten minutes of wall time,
+/// clipped to the tightest configured capacity so a slow local model can finish a reply.
+/// Input: the global, project and task capacities. Output: a budget that fits all three.
+fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
+    let ceiling = capacities.iter().map(|capacity| capacity.wall_time_ms).min().unwrap_or(0);
+    let budget = ResourceBudget {
+        wall_time_ms: MASTER_TURN_WALL_MS.min(ceiling).max(1),
+        ..ResourceBudget::unit()
+    };
+    assert!(budget.wall_time_ms <= MASTER_TURN_WALL_MS);
+    budget
+}
+
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
 ) -> Result<MasterOwnerAction, String> {
     let catalog = read_catalog(controller).await?;
-    let budget = ResourceBudget::unit();
+    let budget = default_master_budget(&catalog.capacities);
     for backend in [MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude] {
         let mut form = Form {
             database: None,
@@ -2058,4 +2078,23 @@ pub async fn default_master_open(
         });
     }
     Err("No account pool is assigned to this project as its master".into())
+}
+
+#[cfg(test)]
+mod default_budget_tests {
+    use super::*;
+
+    #[test]
+    fn default_master_budget_allows_a_slow_local_turn_within_policy() {
+        let roomy = ResourceBudget { wall_time_ms: 86_400_000, ..ResourceBudget::unit() };
+        let budget = default_master_budget(&[roomy.clone(), roomy.clone(), roomy]);
+        assert_eq!(budget.wall_time_ms, MASTER_TURN_WALL_MS);
+        assert!(budget.wall_time_ms >= 600_000);
+        assert_eq!(budget.validate(), Ok(()));
+        let tight = ResourceBudget { wall_time_ms: 90_000, ..ResourceBudget::unit() };
+        let roomy = ResourceBudget { wall_time_ms: 86_400_000, ..ResourceBudget::unit() };
+        let clipped = default_master_budget(&[roomy.clone(), tight.clone(), roomy]);
+        assert_eq!(clipped.wall_time_ms, 90_000);
+        assert!(clipped.fits(&tight));
+    }
 }

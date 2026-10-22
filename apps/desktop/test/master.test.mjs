@@ -67,3 +67,20 @@ test("turn status labels are plain language for every phase", () => {
   assert.equal(label("uncertain"), "Outcome unclear");
   for (const phase of ["delivering", "waiting_approval", "failed", "cancelled"]) assert.ok(label(phase).length > 0);
 });
+
+test("busy bridge calls are retried and other failures are not", async () => {
+  let calls = 0;
+  const value = await conversation.retryBusy(async () => {
+    calls += 1;
+    if (calls < 3) throw { code: "busy" };
+    return "read";
+  }, 1);
+  assert.equal(value, "read");
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(conversation.retryBusy(async () => { calls += 1; throw { code: "stale_master" }; }, 1), { code: "stale_master" });
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(conversation.retryBusy(async () => { calls += 1; throw { code: "busy" }; }, 1), { code: "busy" });
+  assert.equal(calls, 5);
+});

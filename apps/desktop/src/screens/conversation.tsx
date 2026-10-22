@@ -28,7 +28,7 @@ export function Conversation({ state }: { state: ReturnType<typeof useOwnerBrows
     <ProjectList state={state} />
     <div className="inspection">
       {!state.projectId ? <><h2>Select a project</h2><p className="muted">Read its actual conversation and versioned brief.</p></> : <>
-        <div className="section-heading"><h2>{state.projectId}</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProject()} data-testid="inspect-project">Inspect current brief</button></div>
+        <div className="section-heading"><h2>{displayText(state.projectPage?.items.find((row) => row.id === state.projectId)?.name ?? state.projectId)}</h2><button disabled={state.busy || !state.connected} onClick={() => void state.refreshProject()} data-testid="inspect-project">Inspect current brief</button></div>
         <p className="muted" data-testid="conversation-freshness">{project?.fresh ? `Brief read at revision ${project.revision}` : "Brief data is stale or unavailable. Inspect again before submitting."}</p>
         <MasterPanel state={state} ticket={project?.ticket ?? ""} />
         <section><h3>Current brief {project?.brief ? `(version ${project.brief.version})` : ""}</h3><pre data-testid="current-project-brief">{project ? project.brief ? displayText(project.brief.text) : "No brief has been recorded." : "Current brief unavailable."}</pre></section>
@@ -46,6 +46,21 @@ export function Conversation({ state }: { state: ReturnType<typeof useOwnerBrows
       </>}
     </div>
   </section>;
+}
+
+/** Retries a bridge call the native side refused with "busy" because another call held
+ * the bridge; such a refusal happens before any action, so repeating it is safe.
+ * Inputs: the call and a base pause in milliseconds. Output: the call result or failure. */
+export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (failure) {
+      const busy = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "busy";
+      if (!busy || attempt >= 5) throw failure;
+      await new Promise((resolve) => setTimeout(resolve, pause * attempt));
+    }
+  }
 }
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
@@ -81,14 +96,16 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   const session = master?.ticket === ticket ? master.session : null;
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !settled.includes(turn.phase));
+  const unseen = Object.keys(sent).some((ordinal) => !turns.some((turn) => turn.ordinal === Number(ordinal)));
 
   async function refresh() {
     if (!ticket || !state.connected) return;
-    const next = await masterState(ticket);
+    const next = await retryBusy(() => masterState(ticket));
     if (current.current !== ticket) return;
     setMaster(next);
     if (next.session) {
-      const page = await masterTurns(ticket, next.session.session_id);
+      const session = next.session.session_id;
+      const page = await retryBusy(() => masterTurns(ticket, session));
       if (current.current === ticket) setTurns([...page.page.turns].sort((a, b) => a.ordinal - b.ordinal));
     } else setTurns([]);
   }
@@ -107,10 +124,10 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   }, [ticket, state.connected]);
 
   useEffect(() => {
-    if (!waiting && !(master && !session && working)) return;
+    if (!waiting && !unseen && !(master && !session && working)) return;
     const timer = window.setInterval(() => { void refresh().catch((failure) => setProblem(errorMessage(failure))); }, 2000);
     return () => window.clearInterval(timer);
-  }, [waiting, ticket, session?.session_id]);
+  }, [waiting, unseen, ticket, session?.session_id]);
 
   function confirm(receipt: IntentReceipt) {
     if (receipt.rejection) throw { code: receipt.rejection };
@@ -118,7 +135,8 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   }
 
   const start = () => act(async () => {
-    const receipt = await openMaster(ticket, state.nextGeneration());
+    const generation = state.nextGeneration();
+    const receipt = await retryBusy(() => openMaster(ticket, generation));
     confirm(receipt);
     await refresh();
   });
@@ -127,7 +145,8 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
     if (!session) return;
     const message = text.trim();
     const ordinal = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0) + 1;
-    const receipt = await submitMaster(ticket, session.session_id, message, state.nextGeneration());
+    const generation = state.nextGeneration();
+    const receipt = await retryBusy(() => submitMaster(ticket, session.session_id, message, generation));
     confirm(receipt);
     setSent((prior) => ({ ...prior, [ordinal]: message }));
     setText("");
