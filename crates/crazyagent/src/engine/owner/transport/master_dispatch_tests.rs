@@ -14,7 +14,7 @@ version = 1
 timeout_ms = 2000
 allowed_destinations = ["sandbox-profile"]
 [routing]
-approved_accounts = ["codex-account"]
+approved_accounts = ["claude-account"]
 [routing.global_capacity]
 slots = 1
 cpu_millis = 1000
@@ -40,19 +40,19 @@ output_bytes = 1048576
 wall_time_ms = 60000
 spend_microunits = 0
 [model_access]
-accounts = ["codex-account"]
+accounts = ["claude-account"]
 [[model_access.connections]]
-id = "codex-connection"
-provider = "openai"
-harness = "codex"
+id = "claude-connection"
+provider = "anthropic"
+harness = "claude-code"
 protocol = "native"
-account_ref = "codex-account"
+account_ref = "claude-account"
 endpoint = { kind = "native" }
-model = { id = "configured-codex-model", author = "openai" }
-auth = { method = "native_managed", profile_ref = "codex-profile" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile" }
 [[model_access.pools]]
 id = "master-pool"
-members = ["codex-connection"]
+members = ["claude-connection"]
 projects = ["p"]
 roles = ["project_leader"]
 fallback_allowed = false
@@ -70,14 +70,14 @@ fn request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerRequest {
 fn selection() -> MasterSelection {
     let target = CredentialRef::new("sandbox-profile").unwrap();
     MasterSelection {
-        backend: MasterBackend::Codex,
+        backend: MasterBackend::Claude,
         pool_ref: CredentialRef::new("master-pool").unwrap(),
         target_profile_ref: target.clone(),
         route: RouteRequest {
             preferred_target: Some(target.clone()),
             required_target: Some(target),
             required_capabilities: vec!["planning".into(), "engine-tools".into()],
-            account_ref: CredentialRef::new("codex-account").unwrap(),
+            account_ref: CredentialRef::new("claude-account").unwrap(),
             budget_ref: CredentialRef::new("planning-budget").unwrap(),
             resources: ResourceBudget::unit(),
         },
