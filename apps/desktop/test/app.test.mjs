@@ -61,7 +61,7 @@ test("an unconfirmed change shows the plain banner with Check again", () => {
   assert.doesNotMatch(markup, /intent|Reconcile|operation/i);
 });
 
-test("routes reach Settings tabs and the project stubs owned by the projects worker", () => {
+test("routes reach Settings tabs and the project screens", () => {
   const settings = render({}, { name: "settings", tab: "pools" });
   assert.match(settings, /<h1>Settings<\/h1>/);
   assert.match(settings, /role="tablist" aria-label="Settings sections"/);
@@ -69,7 +69,8 @@ test("routes reach Settings tabs and the project stubs owned by the projects wor
   for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`</svg>${label}</a>`));
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
-  assert.match(project, /Not ready yet/);
+  assert.match(project, /role="tablist" aria-label="Project"/);
+  assert.match(project, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true"/);
   assert.match(project, /aria-current="page"><svg[\s\S]*?<\/svg><span class="name">Harbor Notes<\/span>/);
   assert.match(render({}, { name: "new-project", step: "basics" }), /<h1>New project<\/h1>/);
 });

@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  assignPool, failureCopy, loadHarnesses, loadPools, loadProjectCatalog, loadProjects, nextGeneration, pickDocuments,
-  receiptState, setupProject,
-} from "../../api-projects";
-import type { EngineResult, HarnessEntry, Platform, PoolChoice, ProjectCatalog, ResearchKind } from "../../api-projects";
+import { harnessCatalog, nextGeneration } from "../../api";
+import type { HarnessEntry, Result } from "../../api";
+import { useContext, useEffect, useState } from "react";
+import { assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, setupProject } from "../../api-projects";
+import type { Platform, PoolChoice, ProjectCatalog, ResearchKind } from "../../api-projects";
+import { SessionContext } from "../../state";
+import { Button, ConfirmDialog, Icon, PageHeader, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
+import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
-import { RESEARCH_LABELS, TeamEditor } from "./team-editor";
+import { RESEARCH_ICONS, RESEARCH_LABELS, TeamEditor } from "./team-editor";
 import {
   RESEARCH_COPY, STEPS, addDocuments, addStack, basicsErrors, buildRequest, defaultTeam, emptyDraft, preselectPool,
   removeStack, stepComplete, summary, teamValid,
@@ -34,12 +36,8 @@ export function discardKeptDraft(): void {
   kept = null;
 }
 
-function valueOf<T>(result: EngineResult<T> | undefined): T | null {
+function valueOf<T>(result: Result<T> | undefined): T | null {
   return result?.kind === "ok" ? result.value : null;
-}
-
-function NotReady({ what }: { what: string }) {
-  return <p className="pj-note warn" role="status">Not ready yet: {what}</p>;
 }
 
 /** The five-step New Project flow: Basics, Documents, Work, Pool and Team, then Create project.
@@ -50,9 +48,9 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [draft, setDraftState] = useState<ProjectDraft>(() => kept?.draft ?? emptyDraft());
   const [step, setStepState] = useState<StepId>(initialStep);
   const [visited, setVisited] = useState<Set<StepId>>(() => new Set([initialStep]));
-  const [catalog, setCatalog] = useState<EngineResult<ProjectCatalog>>();
-  const [harnesses, setHarnesses] = useState<EngineResult<HarnessEntry[]>>();
-  const [pools, setPools] = useState<EngineResult<PoolChoice[]>>();
+  const [catalog, setCatalog] = useState<Result<ProjectCatalog>>();
+  const [harnesses, setHarnesses] = useState<Result<HarnessEntry[]>>();
+  const [pools, setPools] = useState<Result<PoolChoice[]>>();
   const [names, setNames] = useState<string[]>([]);
   const [teamEdited, setTeamEdited] = useState(Boolean(kept?.draft.team));
   const [stackQuery, setStackQuery] = useState("");
@@ -63,7 +61,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
-  const discardButton = useRef<HTMLButtonElement>(null);
+  const session = useContext(SessionContext);
 
   const setDraft = (next: ProjectDraft) => {
     setDraftState(next);
@@ -86,7 +84,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   }, [routeStep]);
 
   useEffect(() => {
-    void loadHarnesses().then(setHarnesses);
+    void harnessCatalog().then(setHarnesses);
     void loadProjects().then((result) => { if (result.kind === "ok") setNames(result.value.map((item) => item.name)); });
     void loadPools().then((result) => {
       setPools(result);
@@ -125,8 +123,6 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [discarding]);
-
-  useEffect(() => { if (discarding) discardButton.current?.focus(); }, [discarding]);
 
   const catalogValue = valueOf(catalog);
   const harnessValue = valueOf(harnesses);
@@ -168,6 +164,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       }
     }
     kept = null;
+    await session?.refreshProjects();
     flash(message);
     navigate(`/projects/${encodeURIComponent(id)}/overview`);
   }
@@ -182,7 +179,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       setPickerReady(false);
       return;
     }
-    if (result.kind === "failed") {
+    if (result.kind === "error") {
       setDocErrors([failureCopy(result.code)]);
       return;
     }
@@ -204,19 +201,16 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const platforms = catalogValue?.platforms ?? PLATFORMS;
 
   return <div className="pj pj-new">
-    <header className="pj-page-header">
-      <div><h1>New project</h1></div>
-      <button type="button" className="pj-btn quiet" onClick={() => setDiscarding(true)}>Cancel</button>
-    </header>
+    <PageHeader title="New project" actions={<Button variant="quiet" onClick={() => setDiscarding(true)}>Cancel</Button>} />
     {catalog?.kind === "not_ready" && <NotReady what="creating a project with research isn't in this build of the engine. You can fill in the steps; Create project stays off." />}
-    {catalog?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(catalog.code)}</p>}
+    {catalog?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(catalog.code)}</p>}
     <div className="pj-new-body">
       <nav className="pj-step-rail" aria-label="Steps">
         <ol>{STEPS.map((item, position) => {
           const done = visited.has(item.id) && item.id !== step && stepComplete(item.id, draft, names, harnessValue);
           return <li key={item.id}>
             <button type="button" aria-current={item.id === step ? "step" : undefined} className={item.id === step ? "current" : ""} onClick={() => setStep(item.id)}>
-              <span className={`pj-step-dot ${done ? "done" : ""}`} aria-hidden="true">{done ? "✓" : position + 1}</span>
+              <span className={`pj-step-dot ${done ? "done" : ""}`} aria-hidden="true">{done ? <Icon name="check" size={13} /> : position + 1}</span>
               <span>{item.label}</span>{done && <span className="pj-sr"> (complete)</span>}
             </button>
           </li>;
@@ -245,7 +239,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
               <label className="pj-sr" htmlFor="np-stack-search">Search or add a tech stack item</label>
               <input className="pj-input" id="np-stack-search" value={stackQuery} aria-describedby="np-stack-help" onChange={(event) => { setStackQuery(event.target.value); setStackError(""); }}
                 onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); const result = addStack(draft.stack, stackQuery); setStackError(result.error ?? ""); if (!result.error) { setDraft({ ...draft, stack: result.stack }); setStackQuery(""); } } }} />
-              <button type="button" className="pj-btn" disabled={!stackQuery.trim()} onClick={() => { const result = addStack(draft.stack, stackQuery); setStackError(result.error ?? ""); if (!result.error) { setDraft({ ...draft, stack: result.stack }); setStackQuery(""); } }}>Add custom</button>
+              <button type="button" className="btn" disabled={!stackQuery.trim()} onClick={() => { const result = addStack(draft.stack, stackQuery); setStackError(result.error ?? ""); if (!result.error) { setDraft({ ...draft, stack: result.stack }); setStackQuery(""); } }}>Add custom</button>
             </div>
             <p className="pj-help" id="np-stack-help">Pick from the list or add your own.</p>
             {stackError && <p className="pj-error" role="alert">{stackError}</p>}
@@ -278,7 +272,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         {step === "documents" && <div className="pj-stack">
           <h2 id="pj-step-title">Documents</h2>
           <div className="pj-drop">
-            <p><button type="button" className="pj-btn" onClick={() => void choose()}>Choose files</button></p>
+            <p><Button icon="upload" onClick={() => void choose()}>Choose files</Button></p>
             <p className="pj-help">PDF, Markdown, text, Word, CSV, PNG and JPG. Up to 50 MB each, 200 MB per project. Files are copied into context/documents in the project folder.</p>
             {!pickerReady && <NotReady what="the file picker isn't in this build. Add a file by its full path below." />}
           </div>
@@ -286,13 +280,13 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             <label htmlFor="np-doc-path">Full path of a file on this Mac</label>
             <div className="pj-row">
               <input className="pj-input" id="np-doc-path" value={docPath} onChange={(event) => setDocPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addPath(); } }} />
-              <button type="button" className="pj-btn" disabled={!docPath.trim() || !catalogValue} onClick={addPath}>Add file</button>
+              <button type="button" className="btn" disabled={!docPath.trim() || !catalogValue} onClick={addPath}>Add file</button>
             </div>
           </div>}
           {docErrors.map((error) => <p className="pj-error" role="alert" key={error}>{displayText(error)}</p>)}
           {draft.documents.length > 0 ? <ul className="pj-files" aria-label="Attached documents">{draft.documents.map((document) => <li key={document.path}>
             <span>{displayText(document.name)}</span><span className="pj-small pj-muted pj-mono">{displayText(document.path)}</span>
-            <button type="button" className="pj-btn quiet" aria-label={`Remove ${document.name}`} onClick={() => setDraft({ ...draft, documents: draft.documents.filter((item) => item.path !== document.path) })}>Remove</button>
+            <button type="button" className="btn quiet" aria-label={`Remove ${document.name}`} onClick={() => setDraft({ ...draft, documents: draft.documents.filter((item) => item.path !== document.path) })}>Remove</button>
           </li>)}</ul> : <p className="pj-muted">No documents yet. Documents are optional.</p>}
         </div>}
         {step === "work" && <div className="pj-stack">
@@ -300,19 +294,20 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <p className="pj-secondary">Each one starts a research agent as soon as the project is created. Results land in the project folder as Markdown with links and sources.</p>
           <div className="pj-switch-list">{research.map((item) => {
             const on = draft.research.includes(item.kind);
-            return <label className="pj-switch-item" key={item.kind}>
+            return <div className="pj-switch-item" key={item.kind}>
+              <Icon name={RESEARCH_ICONS[item.kind]} size={18} />
               <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span></span>
-              <input type="checkbox" role="switch" className="pj-switch" checked={on} onChange={() => setDraft({ ...draft, research: toggle(draft.research, item.kind) })} />
-            </label>;
+              <Switch id={`np-research-${item.kind}`} label={item.label} hideLabel checked={on} onChecked={() => setDraft({ ...draft, research: toggle(draft.research, item.kind) })} />
+            </div>;
           })}</div>
         </div>}
         {step === "pool" && <div className="pj-stack">
           <h2 id="pj-step-title">Which accounts should this project use?</h2>
           {pools === undefined && <p className="pj-muted" role="status">Loading pools...</p>}
           {pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
-          {pools?.kind === "failed" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools.code)}</p>}
+          {pools?.kind === "error" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools.code)}</p>}
           {poolValue && poolValue.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
-            <button type="button" className="pj-btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
+            <button type="button" className="btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
           {poolValue && <PoolPicker name="np-pool" pools={poolValue} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}
         </div>}
         {step === "team" && <div className="pj-stack">
@@ -321,25 +316,22 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {draft.team ? <TeamEditor prefix="np" team={draft.team} harnesses={harnessValue} pool={chosenPool} research={draft.research}
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
-          {teamEdited && catalogValue && <button type="button" className="pj-btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
+          {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
           {createError && <p className="pj-error" role="alert">{createError}</p>}
           <p className="pj-summary">{summary(draft, chosenPool?.pool.id ?? null)}</p>
         </div>}
         <footer className="pj-footer">
-          <button type="button" className="pj-btn" disabled={index === 0} onClick={() => setStep(STEPS[Math.max(0, index - 1)].id)}>Back</button>
+          <Button icon="arrow-left" disabled={index === 0} onClick={() => setStep(STEPS[Math.max(0, index - 1)].id)}>Back</Button>
           {step === "team"
-            ? <button type="submit" className="pj-btn primary" disabled={!canCreate} aria-describedby={!canCreate ? "np-create-why" : undefined}>{creating ? "Creating..." : "Create project"}</button>
-            : <button type="submit" className="pj-btn primary">Next</button>}
+            ? <Button type="submit" variant="primary" icon="folder-plus" pending={creating} pendingLabel="Creating..." disabled={!canCreate} aria-describedby={!canCreate ? "np-create-why" : undefined}>Create project</Button>
+            : <Button type="submit" variant="primary">Next</Button>}
           {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : "Fix the team above first."}</span>}
         </footer>
       </form>
     </div>
-    {discarding && <div className="pj-scrim"><div className="pj-dialog" role="alertdialog" aria-modal="true" aria-labelledby="np-discard-title">
-      <h2 id="np-discard-title">Discard this new project?</h2>
-      <div className="pj-row end">
-        <button type="button" className="pj-btn" ref={discardButton} onClick={() => setDiscarding(false)}>Keep editing</button>
-        <button type="button" className="pj-btn danger" onClick={() => { kept = null; setDiscarding(false); navigate("/home"); }}>Discard</button>
-      </div>
-    </div></div>}
+    <ConfirmDialog open={discarding} title="Discard this new project?" confirmLabel="Discard" cancelLabel="Keep editing"
+      onCancel={() => setDiscarding(false)} onConfirm={() => { kept = null; setDiscarding(false); navigate("/home"); }}>
+      Your answers on every step are thrown away.
+    </ConfirmDialog>
   </div>;
 }

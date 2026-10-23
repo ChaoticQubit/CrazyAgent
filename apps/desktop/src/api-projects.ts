@@ -1,7 +1,7 @@
-import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
+import { call, classifyFailure, plainError, type Result } from "./api";
 import {
   closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
-  openMaster, openProject, projects, retryBusy, submitMaster,
+  openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
   AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage,
@@ -112,63 +112,16 @@ export interface ContextChunk {
   next_offset: number | null;
 }
 
-export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
-export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
-export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
-
-export interface HarnessEntry {
-  id: string;
-  name: string;
-  status: HarnessStatus;
-  status_label: string;
-  executable: string | null;
-  headless: string;
-  tools: ToolControl;
-  model_selection: boolean;
-  account_kinds: AccountKind[];
-}
-
 export interface PoolChoice {
   pool: AccountPool;
   members: ModelConnection[];
 }
 
-export type EngineResult<T> =
-  | { kind: "ok"; value: T }
-  | { kind: "not_ready"; command: string }
-  | { kind: "failed"; code: string };
-
-/** Maps one bridge rejection to a typed result. Tauri rejects a command the native side
- * does not register, or does not permit, with a plain string naming it; that means the
- * engine part is not merged yet. Inputs: the command and the rejection. Output: the result. */
-export function toResult<T>(command: string, failure: unknown): EngineResult<T> {
-  if (typeof failure === "string") {
-    const missing = failure === `Command ${command} not found` ||
-      failure === `Command ${command} not allowed by ACL` ||
-      failure.startsWith(`${command} not allowed`);
-    return missing ? { kind: "not_ready", command } : { kind: "failed", code: "unknown" };
-  }
-  if (typeof failure === "object" && failure !== null && "code" in failure && typeof failure.code === "string") {
-    return { kind: "failed", code: failure.code };
-  }
-  return { kind: "failed", code: "unknown" };
-}
-
-/** Calls one engine bridge command, retrying the bridge's pre-action busy refusal.
- * Inputs: the command and its arguments. Output: the typed engine result. */
-export async function call<T>(command: string, args?: InvokeArgs): Promise<EngineResult<T>> {
-  try {
-    return { kind: "ok", value: await retryBusy(() => native<T>(command, args)) };
-  } catch (failure) {
-    return toResult<T>(command, failure);
-  }
-}
-
-async function wrap<T>(command: string, action: () => Promise<T>): Promise<EngineResult<T>> {
+async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
   try {
     return { kind: "ok", value: await action() };
   } catch (failure) {
-    return toResult<T>(command, failure);
+    return classifyFailure(failure);
   }
 }
 
@@ -230,7 +183,7 @@ const copy: Record<string, string> = {
 /** Plain sentence for one engine failure code.
  * Input: the code. Output: what happened and what to do, or the generic fallback. */
 export function failureCopy(code: string): string {
-  return copy[code] ?? "Something went wrong. Try again.";
+  return copy[code] ?? plainError(code);
 }
 
 /** Adds a project and the master role to a pool without changing anything else.
@@ -261,37 +214,23 @@ export function receiptState(receipt: IntentReceipt): ReceiptState {
   return { kind: "rejected", code: receipt.outcome };
 }
 
-let lastGeneration = 0;
-
-/** Issues a fresh draft generation for one owner intent.
- * Input: none. Output: a positive safe integer larger than every earlier one. */
-export function nextGeneration(): number {
-  lastGeneration = Math.max(lastGeneration + 1, Date.now());
-  if (!Number.isSafeInteger(lastGeneration)) throw new Error("Generation left the safe integer range.");
-  return lastGeneration;
-}
-
-export function loadProjectCatalog(pool: string | null, research: ResearchKind[]): Promise<EngineResult<ProjectCatalog>> {
+export function loadProjectCatalog(pool: string | null, research: ResearchKind[]): Promise<Result<ProjectCatalog>> {
   return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
 }
 
-export function loadHarnesses(): Promise<EngineResult<HarnessEntry[]>> {
-  return call<HarnessEntry[]>("desktop_harness_catalog");
-}
-
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<EngineResult<IntentReceipt>> {
+export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
 }
 
-export function loadSetup(id: string): Promise<EngineResult<StoredSetup | null>> {
+export function loadSetup(id: string): Promise<Result<StoredSetup | null>> {
   return call<StoredSetup | null>("desktop_project_setup", { id });
 }
 
-export function loadResearch(id: string): Promise<EngineResult<{ project_id: string; jobs: ResearchJob[] }>> {
+export function loadResearch(id: string): Promise<Result<{ project_id: string; jobs: ResearchJob[] }>> {
   return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
 }
 
-export function loadContext(id: string): Promise<EngineResult<ProjectContext>> {
+export function loadContext(id: string): Promise<Result<ProjectContext>> {
   return call<ProjectContext>("desktop_project_context", { id });
 }
 
@@ -299,7 +238,7 @@ export const CONTEXT_READ_BYTES_MAX = 1024 * 1024;
 
 /** Reads one context file whole, chunk by chunk, up to the report size limit.
  * Inputs: the project id and the item path. Output: the text, or null for a binary file. */
-export async function loadContextText(id: string, path: string): Promise<EngineResult<{ text: string | null; truncated: boolean }>> {
+export async function loadContextText(id: string, path: string): Promise<Result<{ text: string | null; truncated: boolean }>> {
   let offset = 0;
   let text = "";
   for (let chunks = 0; chunks < 256; chunks += 1) {
@@ -316,35 +255,35 @@ export async function loadContextText(id: string, path: string): Promise<EngineR
   return { kind: "ok", value: { text, truncated: true } };
 }
 
-export function saveResearchToMemory(id: string, research: ResearchKind, section: string | null, generation: number): Promise<EngineResult<IntentReceipt>> {
+export function saveResearchToMemory(id: string, research: ResearchKind, section: string | null, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
-export function pickDocuments(): Promise<EngineResult<string[]>> {
+export function pickDocuments(): Promise<Result<string[]>> {
   return call<string[]>("desktop_pick_documents");
 }
 
-export function revealProjectFolder(id: string): Promise<EngineResult<void>> {
+export function revealProjectFolder(id: string): Promise<Result<void>> {
   return call<void>("desktop_reveal_project_folder", { id });
 }
 
-export function openLink(url: string): Promise<EngineResult<void>> {
+export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
-export function loadProjectSkills(id: string): Promise<EngineResult<unknown>> {
+export function loadProjectSkills(id: string): Promise<Result<unknown>> {
   return call<unknown>("desktop_project_skills", { id });
 }
 
-export function loadProjectMcpServers(id: string): Promise<EngineResult<unknown>> {
+export function loadProjectMcpServers(id: string): Promise<Result<unknown>> {
   return call<unknown>("desktop_project_mcp_servers", { id });
 }
 
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number): Promise<EngineResult<IntentReceipt>> {
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, generation });
 }
 
-export function removeProject(id: string, generation: number): Promise<EngineResult<IntentReceipt>> {
+export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_remove_project", { id, generation });
 }
 
@@ -363,8 +302,8 @@ async function allRecords(collection: "pools" | "connections"): Promise<ModelAcc
 
 /** Reads every pool with its member connections.
  * Input: none. Output: pools in engine order, each with the connections it holds. */
-export function loadPools(): Promise<EngineResult<PoolChoice[]>> {
-  return wrap("desktop_model_access_page", async () => {
+export function loadPools(): Promise<Result<PoolChoice[]>> {
+  return wrap(async () => {
     const pools = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
     const connections = (await allRecords("connections")).flatMap((record) => record.kind === "connection" ? [record.connection] : []);
     return pools.map((pool) => ({ pool, members: connections.filter((connection) => pool.members.includes(connection.id)) }));
@@ -373,8 +312,8 @@ export function loadPools(): Promise<EngineResult<PoolChoice[]>> {
 
 /** Reads every project name the engine holds.
  * Input: none. Output: the projects, across every page. */
-export function loadProjects(): Promise<EngineResult<ProjectPage["items"]>> {
-  return wrap("desktop_projects", async () => {
+export function loadProjects(): Promise<Result<ProjectPage["items"]>> {
+  return wrap(async () => {
     let page = await projects(false);
     const items = [...page.items];
     for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
@@ -388,8 +327,8 @@ export function loadProjects(): Promise<EngineResult<ProjectPage["items"]>> {
 /** Assigns a saved pool to a project as its master pool, or removes that assignment,
  * then reads the saved record back. Inputs: the project id, the pool id, a generation and
  * whether to remove. Output: applied, or why not. */
-export async function assignPool(projectId: string, poolId: string, generation: number, remove = false): Promise<EngineResult<ReceiptState>> {
-  return wrap("desktop_edit_model_access", async () => {
+export async function assignPool(projectId: string, poolId: string, generation: number, remove = false): Promise<Result<ReceiptState>> {
+  return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
     const basis = await inspectModelAccess("pools", poolId);
@@ -404,26 +343,26 @@ export async function assignPool(projectId: string, poolId: string, generation: 
   });
 }
 
-export function openMasterProject(id: string): Promise<EngineResult<ProjectDetail>> {
-  return wrap("desktop_open_project", () => openProject(id));
+export function openMasterProject(id: string): Promise<Result<ProjectDetail>> {
+  return wrap(() => openProject(id));
 }
 
-export function readMaster(ticket: string): Promise<EngineResult<MasterState>> {
-  return wrap("desktop_master_state", () => masterState(ticket));
+export function readMaster(ticket: string): Promise<Result<MasterState>> {
+  return wrap(() => masterState(ticket));
 }
 
-export function readMasterTurns(ticket: string, session: string): Promise<EngineResult<MasterTurns>> {
-  return wrap("desktop_master_turns", () => masterTurns(ticket, session));
+export function readMasterTurns(ticket: string, session: string): Promise<Result<MasterTurns>> {
+  return wrap(() => masterTurns(ticket, session));
 }
 
-export function startMaster(ticket: string, generation: number): Promise<EngineResult<IntentReceipt>> {
-  return wrap("desktop_open_master", () => openMaster(ticket, generation));
+export function startMaster(ticket: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => openMaster(ticket, generation));
 }
 
-export function endMaster(ticket: string, session: string, generation: number): Promise<EngineResult<IntentReceipt>> {
-  return wrap("desktop_close_master", () => closeMaster(ticket, session, generation));
+export function endMaster(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => closeMaster(ticket, session, generation));
 }
 
-export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<EngineResult<IntentReceipt>> {
-  return wrap("desktop_submit_master", () => submitMaster(ticket, session, text, generation));
+export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => submitMaster(ticket, session, text, generation));
 }

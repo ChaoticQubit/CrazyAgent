@@ -1,4 +1,6 @@
-import type { HarnessEntry, PoolChoice, ResearchKind, TeamPlan } from "../../api-projects";
+import type { HarnessEntry } from "../../api";
+import { Switch as ToggleSwitch, type IconName } from "../../ui";
+import type { PoolChoice, ResearchKind, TeamPlan } from "../../api-projects";
 import {
   HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits,
   removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes, totalAgents,
@@ -10,6 +12,14 @@ export const RESEARCH_LABELS: Record<ResearchKind, string> = {
   design_research: "Design research",
   front_end_design: "Front-end design",
   tech_stack_research: "Tech stack research",
+};
+
+export const RESEARCH_ICONS: Record<ResearchKind, IconName> = {
+  market_research: "trending-up",
+  competitor_research: "swords",
+  design_research: "palette",
+  front_end_design: "layout-template",
+  tech_stack_research: "layers",
 };
 
 const KNOWN: Record<string, string> = { codex: "Codex", claude: "Claude Code" };
@@ -34,12 +44,8 @@ function HarnessSelect({ id, value, harnesses, onChange, label }: {
   </select>;
 }
 
-function Switch({ checked, fixed, label, onChange, describedBy }: { checked: boolean; fixed: boolean; label: string; onChange: (value: boolean) => void; describedBy?: string }) {
-  return <label className="pj-switch-row">
-    <input type="checkbox" role="switch" className="pj-switch" checked={checked} aria-label={label} aria-disabled={fixed || undefined}
-      aria-describedby={describedBy} onChange={(event) => { if (!fixed) onChange(event.target.checked); }} />
-    <span className="pj-small">{fixed ? "Always on" : checked ? "On" : "Off"}</span>
-  </label>;
+function Switch({ id, checked, fixed, label, onChange }: { id: string; checked: boolean; fixed: boolean; label: string; onChange: (value: boolean) => void }) {
+  return <ToggleSwitch id={id} label={label} hideLabel checked={fixed || checked} onChecked={onChange} disabledReason={fixed ? "Always on" : undefined} />;
 }
 
 /** Edits a team: master harness, agent rows with counts and tools, and the agent range.
@@ -70,7 +76,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         </div>
         <div className="pj-field">
           <span className="pj-label">Tools</span>
-          <Switch checked={team.master_tools} fixed={fixed(team.master)} label="Tools for the master"
+          <Switch id={`${prefix}-master-tools`} checked={team.master_tools} fixed={fixed(team.master)} label="Tools for the master"
             onChange={(value) => onChange(setTools(team, "master", value, harnesses))} />
         </div>
       </div>
@@ -93,14 +99,14 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
               <output aria-live="polite">{slot.agents}</output>
               <button type="button" aria-label={`More ${name} agents`} disabled={slot.agents >= HARNESS_AGENTS_MAX} onClick={() => onChange(setAgents(team, index, slot.agents + 1))}>+</button>
             </span>
-            <span role="cell"><Switch checked={slot.tools} fixed={fixed(slot.harness)} label={`Tools for ${name}`} onChange={(value) => onChange(setTools(team, index, value, harnesses))} /></span>
-            <span role="cell"><button type="button" className="pj-btn quiet danger-text" onClick={() => onChange(removeHarnessRow(team, index))}>Remove</button></span>
+            <span role="cell"><Switch id={`${prefix}-tools-${index}`} checked={slot.tools} fixed={fixed(slot.harness)} label={`Tools for ${name}`} onChange={(value) => onChange(setTools(team, index, value, harnesses))} /></span>
+            <span role="cell"><button type="button" className="btn quiet danger-text" onClick={() => onChange(removeHarnessRow(team, index))}>Remove</button></span>
             {errors.rows[index] && <p className="pj-error" role="alert">{errors.rows[index]}</p>}
           </div>;
         })}
       </div>}
       {team.sub_harnesses.length === 0 && <p className="pj-help">Only the master. Add a harness to run agents beside it.</p>}
-      <div><button type="button" className="pj-btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
+      <div><button type="button" className="btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
     </section>
     <section className="pj-stack-s" aria-labelledby={`${prefix}-range`}>
       <h3 id={`${prefix}-range`}>How many at once</h3>

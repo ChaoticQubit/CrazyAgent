@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import "./source-hooks.mjs";
+import "./load-source.mjs";
 
 const research = await import("../src/screens/project/research.ts");
 const api = await import("../src/api-projects.ts");
@@ -102,7 +102,9 @@ test("a project page for an unknown engine renders its loading shell without bri
   const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
   assert.match(markup, /role="tablist"/);
   for (const tab of ["Overview", "Conversation", "Agents", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
-  assert.match(markup, /aria-selected="true"[^>]*>Overview</);
+  assert.match(markup, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true" tabindex="0"><svg[\s\S]*?<\/svg>Overview</);
+  assert.match(markup, /role="tabpanel" aria-labelledby="tab-overview"/);
+  assert.doesNotMatch(markup, /<h1><div/);
   assert.doesNotMatch(markup, /Harbor Notes|Market research suggests/);
 });
 
@@ -141,4 +143,14 @@ test("project folders under the home folder show a tilde", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
   assert.equal(overview.folderLabel("/Users/mira/Library/CrazyAgent/projects/p-1"), "~/Library/CrazyAgent/projects/p-1");
   assert.equal(overview.folderLabel("/private/var/p-1"), "/private/var/p-1");
+});
+
+test("context files get an icon for their type, and unknown types a plain file", () => {
+  assert.equal(research.fileIcon("context/brief.md"), "file-text");
+  assert.equal(research.fileIcon("context/documents/notes.TXT"), "file-text");
+  assert.equal(research.fileIcon("context/documents/hours.csv"), "file-spreadsheet");
+  assert.equal(research.fileIcon("context/documents/deck.png"), "file-image");
+  assert.equal(research.fileIcon("context/documents/photo.jpeg"), "file-image");
+  assert.equal(research.fileIcon("context/documents/spec.pdf"), "file");
+  assert.equal(research.fileIcon("context/documents/README"), "file");
 });

@@ -1,16 +1,18 @@
+import { call, nextGeneration } from "../../api";
 import { useState } from "react";
-import { call, failureCopy, nextGeneration } from "../../api-projects";
+import { failureCopy } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
-import { harnessName } from "../new-project/team-editor";
+import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { researchRow } from "./research";
 import type { ResearchRow } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
+import { ConfirmDialog, Icon, type Tone } from "../../ui";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
  * Input: the research row. Output: the agent status word and tone. */
-export function agentStatus(row: ResearchRow): { word: string; tone: string } {
+export function agentStatus(row: ResearchRow): { word: string; tone: Tone } {
   switch (row.status) {
     case "Queued": return { word: "Starting", tone: "info" };
     case "Needs a pool": return { word: "Needs a pool", tone: "warn" };
@@ -51,29 +53,26 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         : "No pool. Agents wait until you choose one."}</span>
     </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
-    {data.research?.kind === "failed" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
+    {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Agents">{list.map((job) => {
       const row = researchRow(job, data.now);
       const status = agentStatus(row);
       return <li className="pj-agent-row" key={job.id}>
-        <strong>{displayText(row.title)}</strong>
+        <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
         <span className="pj-secondary pj-small">{harnessName(harnesses, job.harness)}</span>
         <span><Badge word={status.word} tone={status.tone} /> <span className="pj-small pj-secondary">{displayText(row.progress)}</span></span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
-        <span>{job.status === "running" && !job.cancel_requested && <button type="button" className="pj-btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
+        <span>{job.status === "running" && !job.cancel_requested && <button type="button" className="btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
       </li>;
     })}</ul> : data.research?.kind === "ok" && <div className="pj-empty">
       <h3>{filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}</h3>
       <p className="pj-secondary">Research agents start from the Work step, and the master starts agents when you ask it to build something.</p>
     </div>}
-    {stopping && <div className="pj-scrim"><div className="pj-dialog" role="alertdialog" aria-modal="true" aria-labelledby="pj-stop-title">
-      <h2 id="pj-stop-title">Stop {displayText(stopping.kind_label)}? Work so far stays in its working copy.</h2>
-      <div className="pj-row end">
-        <button type="button" className="pj-btn" autoFocus onClick={() => setStopping(null)}>Keep running</button>
-        <button type="button" className="pj-btn danger" onClick={() => void stop(stopping)}>Stop agent</button>
-      </div>
-    </div></div>}
+    <ConfirmDialog open={stopping !== null} title={`Stop ${displayText(stopping?.kind_label ?? "this agent")}?`} confirmLabel="Stop agent" cancelLabel="Keep running"
+      onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
+      Work so far stays in its working copy.
+    </ConfirmDialog>
   </div>;
 }

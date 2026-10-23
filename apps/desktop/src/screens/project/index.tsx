@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { loadContext, loadHarnesses, loadPools, loadProjects, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
+import { harnessCatalog } from "../../api";
+import { useContext, useEffect, useRef, useState } from "react";
+import { loadContext, loadPools, loadProjects, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
+import { SessionContext } from "../../state";
+import { Menu, PageHeader, Tabs, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
@@ -14,12 +16,12 @@ import { SettingsTab } from "./settings";
 import "./projects.css";
 
 export const TABS = [
-  { id: "overview", label: "Overview" },
-  { id: "conversation", label: "Conversation" },
-  { id: "agents", label: "Agents" },
-  { id: "context", label: "Context" },
-  { id: "settings", label: "Settings" },
-] as const;
+  { id: "overview", label: "Overview", icon: "house" },
+  { id: "conversation", label: "Conversation", icon: "message-square" },
+  { id: "agents", label: "Agents", icon: "bot" },
+  { id: "context", label: "Context", icon: "folder-open" },
+  { id: "settings", label: "Settings", icon: "settings" },
+] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
 export type TabId = typeof TABS[number]["id"];
 
@@ -32,6 +34,8 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   const [harnesses, setHarnesses] = useState<ProjectData["harnesses"]>();
   const [now, setNow] = useState(() => Date.now());
   const [toast, setToast] = useState<string | null>(null);
+  const session = useContext(SessionContext);
+  const notify = (message: string) => { if (session) session.showToast(message); else setToast(message); };
   const [round, setRound] = useState(0);
   const [poolRound, setPoolRound] = useState(0);
   const current = useRef(id);
@@ -39,7 +43,7 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
 
   useEffect(() => {
     const message = takeFlash();
-    if (message) setToast(message);
+    if (message) notify(message);
   }, [id]);
 
   useEffect(() => {
@@ -65,7 +69,7 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   }, [id, round]);
 
   useEffect(() => {
-    void loadHarnesses().then(setHarnesses);
+    void harnessCatalog().then(setHarnesses);
   }, []);
 
   useEffect(() => {
@@ -88,29 +92,27 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   const assigned = valueOf(pools)?.find((choice) => choice.pool.projects.includes(id)) ?? null;
   const data: ProjectData = {
     id, name, setup, research, context, pools, harnesses, assigned, now, navigate,
-    notify: (message) => setToast(message),
+    notify,
     reload: () => { setNow(Date.now()); setRound((value) => value + 1); },
     reloadPools: () => setPoolRound((value) => value + 1),
   };
-  return { data, toast };
+  return { data, toast, session };
 }
 
 function ProjectMenu({ data }: { data: ProjectData }) {
-  const [open, setOpen] = useState(false);
-  const [note, setNote] = useState("");
   async function reveal() {
-    setOpen(false);
     const result = await revealProjectFolder(data.id);
-    setNote(result.kind === "ok" ? "" : result.kind === "not_ready" ? "Not ready yet: Show folder in Finder isn't in this build." : "Couldn't open the folder.");
+    if (result.kind !== "ok") data.notify(result.kind === "not_ready" ? "Not ready yet: Show folder in Finder isn't in this build." : "Couldn't open the folder.");
   }
-  return <div className="pj-menu">
-    <button type="button" className="pj-btn" aria-haspopup="menu" aria-expanded={open} aria-label="Project actions" onClick={() => setOpen(!open)}>...</button>
-    {open && <div className="pj-menu-list" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}>
-      <button type="button" role="menuitem" onClick={() => void reveal()}>Show folder in Finder</button>
-      <button type="button" role="menuitem" onClick={() => { setOpen(false); data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`); }}>Remove from CrazyAgent</button>
-    </div>}
-    {note && <p className="pj-small pj-muted" role="status">{note}</p>}
-  </div>;
+  return <Menu label="Project actions" items={[
+    { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
+    { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
+  ]} />;
+}
+
+function hashSection(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  return new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("section") ?? undefined;
 }
 
 /** The project page: header, tabs and the selected tab, read from the engine.
@@ -124,10 +126,10 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   section?: string;
   navigate?: (path: string) => void;
 }) {
-  const { data, toast } = useProject(projectId, navigate, name);
+  const { data, toast, session } = useProject(projectId, navigate, name);
   const active: TabId = TABS.some((item) => item.id === tab) ? tab as TabId : "overview";
-  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const setup = valueOf(data.setup);
+  const settingsSection = section ?? hashSection();
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
   useEffect(() => {
@@ -143,37 +145,20 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     return () => window.removeEventListener("keydown", onKey);
   }, [projectId]);
 
-  function arrows(event: ReactKeyboardEvent<HTMLDivElement>) {
-    const position = TABS.findIndex((item) => item.id === active);
-    const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-    if (!delta) return;
-    event.preventDefault();
-    const next = (position + delta + TABS.length) % TABS.length;
-    select(TABS[next].id);
-    tabs.current[next]?.focus();
-  }
-
   return <div className="pj pj-project">
-    <header className="pj-page-header">
-      <div className="pj-title">
-        <h1>{data.name ? displayText(data.name) : <span className="pj-skeleton" aria-label="Loading project name" />}</h1>
-        {setup?.about && <p className="pj-secondary pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</p>}
-      </div>
-      <ProjectMenu data={data} />
-    </header>
-    <div className="pj-tabs" role="tablist" aria-label="Project" onKeyDown={arrows}>
-      {TABS.map((item, index) => <button type="button" role="tab" key={item.id} id={`pj-tab-${item.id}`} aria-controls="pj-tab-panel"
-        aria-selected={item.id === active} tabIndex={item.id === active ? 0 : -1} ref={(element) => { tabs.current[index] = element; }}
-        onClick={() => select(item.id)}>{item.label}</button>)}
-    </div>
-    <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`pj-tab-${active}`}>
+    <PageHeader title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
+      description={setup?.about ? <span className="pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</span> : undefined}
+      actions={<ProjectMenu data={data} />} />
+    <Tabs label="Project" current={active}
+      tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
+    <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <ConversationTab data={data} />}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
-      {active === "settings" && <SettingsTab data={data} section={section} />}
+      {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
-    <div className="pj-toast-region" aria-live="polite">{toast && <p className="pj-toast" role="status">{displayText(toast)}</p>}</div>
+    {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
   </div>;
 }
 

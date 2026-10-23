@@ -1,8 +1,8 @@
+import type { IconName, Tone } from "../../ui";
 import type { ResearchJob } from "../../api-projects";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
-export type Tone = "ok" | "warn" | "danger" | "info" | "neutral";
 
 /** Formats a duration the way the design writes elapsed time.
  * Input: milliseconds. Output: for example "45 s", "18 min" or "2 h 5 min". */
@@ -116,4 +116,16 @@ export function turnLine(turn: MasterTurn): string {
     case "cancelled": return "Stopped";
     case "failed": case "blocked": case "uncertain": return `The master stopped${reason ? `: ${reason}` : ""}.`;
   }
+}
+
+const FILE_ICONS: Record<string, IconName> = {
+  md: "file-text", txt: "file-text", csv: "file-spreadsheet", png: "file-image", jpg: "file-image", jpeg: "file-image",
+};
+
+/** Picks the icon for a project folder file from its extension.
+ * Input: the file path. Output: a text, spreadsheet or image icon, or the plain file icon. */
+export function fileIcon(path: string): IconName {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? FILE_ICONS[name.slice(dot + 1).toLowerCase()] ?? "file" : "file";
 }

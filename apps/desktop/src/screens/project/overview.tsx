@@ -1,6 +1,7 @@
+import { Icon } from "../../ui";
 import { failureCopy } from "../../api-projects";
 import { displayText } from "../conversation";
-import { harnessName } from "../new-project/team-editor";
+import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -31,19 +32,19 @@ export function OverviewTab({ data }: { data: ProjectData }) {
     <div className="pj-stack">
       {waiting && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
         <div className="pj-need"><span>Research is waiting for a pool.</span>
-          <button type="button" className="pj-btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>
+          <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>
       </section>}
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
-        {data.research?.kind === "failed" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research.code)}</p>}
+        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research.code)}</p>}
         {data.research?.kind === "ok" && jobs.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
         {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
-          <strong>{displayText(row.title)}</strong>
+          <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
           <Badge word={row.status} tone={row.tone} />
           <span className="pj-secondary">{displayText(row.progress)}</span>
           <span className="pj-small pj-muted">{row.elapsed}</span>
-          <span>{row.report && <button type="button" className="pj-btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}</span>
+          <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}</span>
         </li>)}</ul>}
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>

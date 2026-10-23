@@ -1,11 +1,15 @@
+import { call, nextGeneration } from "../../api";
+import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { call, failureCopy, loadContextText, nextGeneration, receiptState, saveResearchToMemory } from "../../api-projects";
-import type { ContextItem, EngineResult, ResearchKind } from "../../api-projects";
+import { failureCopy, loadContextText, receiptState, saveResearchToMemory } from "../../api-projects";
+import type { ContextItem, ResearchKind } from "../../api-projects";
+import { Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
 import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
+import { fileIcon } from "./research";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -47,9 +51,9 @@ const extension = (path: string) => path.slice(path.lastIndexOf(".") + 1).toLowe
 function Group({ title, items, selected, onSelect, running }: {
   title: string; items: ContextItem[]; selected: string | null; onSelect: (path: string) => void; running: Set<string>;
 }) {
-  return <li><span className="pj-folder">{title}</span><ul>{items.length
+  return <li><span className="pj-folder"><Icon name="folder" size={13} />{title}</span><ul>{items.length
     ? items.map((item) => <li key={item.path}><button type="button" className="pj-titem" aria-current={selected === item.path || undefined} onClick={() => onSelect(item.path)}>
-      {displayText(item.path.slice(item.path.lastIndexOf("/") + 1))}{running.has(item.path) && <span className="pj-badge t-info">Writing</span>}</button></li>)
+      <Icon name={fileIcon(item.path)} size={14} />{displayText(item.path.slice(item.path.lastIndexOf("/") + 1))}{running.has(item.path) && <StatusBadge word="Writing" tone="info" />}</button></li>)
     : <li><span className="pj-folder pj-muted">(empty)</span></li>}</ul></li>;
 }
 
@@ -60,7 +64,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const jobs = valueOf(data.research)?.jobs ?? [];
   const items = context?.items ?? [];
   const [selected, setSelected] = useState<string | null>(() => hashParam("file"));
-  const [file, setFile] = useState<EngineResult<{ text: string | null; truncated: boolean }>>();
+  const [file, setFile] = useState<Result<{ text: string | null; truncated: boolean }>>();
   const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
   const [saveState, setSaveState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   const [actionNote, setActionNote] = useState("");
@@ -126,14 +130,14 @@ export function ContextTab({ data }: { data: ProjectData }) {
     <nav className="pj-tree" aria-label="Project folder">
       {data.context === undefined && <p className="pj-muted" role="status">Loading the project folder...</p>}
       {data.context?.kind === "not_ready" && <NotReady what="the project folder view isn't in this build." />}
-      {data.context?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(data.context.code)}</p>}
+      {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context.code)}</p>}
       {context && <>
         <div className="pj-stack-s pj-tree-root"><span className="pj-mono">{displayText(folderLabel(context.folder))}</span>
-          <div><button type="button" className="pj-btn" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</button></div></div>
+          <div><button type="button" className="btn" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</button></div></div>
         <ul>
-          <li><button type="button" className="pj-titem pin" aria-current={chosen === "@memory" || undefined} onClick={() => setSelected("@memory")}>Project memory</button></li>
-          <li><span className="pj-folder">context/</span><ul>
-            {items.filter((entry) => entry.kind === "brief").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}>brief.md</button></li>)}
+          <li><button type="button" className="pj-titem pin" aria-current={chosen === "@memory" || undefined} onClick={() => setSelected("@memory")}><Icon name="brain" size={14} />Project memory</button></li>
+          <li><span className="pj-folder"><Icon name="folder" size={13} />context/</span><ul>
+            {items.filter((entry) => entry.kind === "brief").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="file-text" size={14} />brief.md</button></li>)}
             <Group title="documents/" items={items.filter((entry) => entry.kind === "document")} selected={chosen} onSelect={select} running={running} />
             <Group title="research/" items={items.filter((entry) => entry.kind === "research")} selected={chosen} onSelect={select} running={running} />
           </ul></li>
@@ -149,9 +153,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
         <div className="pj-reader-tb">
           <h2 className="pj-mono">{displayText(item.path)}</h2>
           <span className="pj-row">
-            {kind && <button type="button" className="pj-btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
-            <button type="button" className="pj-btn" onClick={() => void fileAction("desktop_open_context_item", "Open in default app")}>Open in default app</button>
-            {item.kind !== "brief" && <button type="button" className="pj-btn danger-text" onClick={() => void fileAction("desktop_delete_context_item", "Delete")}>Delete</button>}
+            {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
+            <button type="button" className="btn" onClick={() => void fileAction("desktop_open_context_item", "Open in default app")}>Open in default app</button>
+            {item.kind !== "brief" && <button type="button" className="btn danger-text" onClick={() => void fileAction("desktop_delete_context_item", "Delete")}>Delete</button>}
           </span>
         </div>
         {actionNote && <p className="pj-note warn" role="status">{actionNote}</p>}
@@ -168,16 +172,16 @@ export function ContextTab({ data }: { data: ProjectData }) {
           {previewBytes > MEMORY_TEXT_BYTES_MAX && <p className="pj-note warn">This is {formatBytes(previewBytes)}. Memories can be up to 4 KB. Pick one section instead.</p>}
           {saveState.error && <p className="pj-error" role="alert">{saveState.error}</p>}
           <div className="pj-row end">
-            <button type="button" className="pj-btn" onClick={() => setSaving(null)}>Cancel</button>
-            <button type="button" className="pj-btn primary" disabled={saveState.busy || previewBytes === 0 || previewBytes > MEMORY_TEXT_BYTES_MAX} onClick={() => void save()}>{saveState.busy ? "Saving..." : "Save to memory"}</button>
+            <button type="button" className="btn" onClick={() => setSaving(null)}>Cancel</button>
+            <button type="button" className="btn primary" disabled={saveState.busy || previewBytes === 0 || previewBytes > MEMORY_TEXT_BYTES_MAX} onClick={() => void save()}>{saveState.busy ? "Saving..." : "Save to memory"}</button>
           </div>
         </div>}
         {file === undefined && <p className="pj-muted" role="status">Opening {displayText(item.path)}...</p>}
         {file?.kind === "not_ready" && <NotReady what="reading project files isn't in this build." />}
-        {file?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(file.code)}</p>}
+        {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file.code)}</p>}
         {file?.kind === "ok" && text === null && <p className="pj-secondary">{formatBytes(item.bytes)}. A preview isn't shown for this kind of file. Use Open in default app.</p>}
         {text !== null && markdown && <article className="pj-md">
-          <MarkdownView source={text} onOpenLink={open} headingAction={kind ? (heading) => <button type="button" className="pj-btn quiet pj-small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
+          <MarkdownView source={text} onOpenLink={open} headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
           {sources.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
             <ol>{sources.map((source) => <li key={source.href}><a href={source.href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); open(source.href); }}>{displayText(source.text)}</a>
               {source.text !== source.href && <span className="pj-small pj-muted pj-mono"> {displayText(source.href)}</span>}</li>)}</ol></section>}

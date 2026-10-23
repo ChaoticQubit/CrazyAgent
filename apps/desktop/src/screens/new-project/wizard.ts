@@ -1,4 +1,5 @@
-import type { HarnessEntry, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, TeamPlan } from "../../api-projects";
+import type { HarnessEntry } from "../../api";
+import type { Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, TeamPlan } from "../../api-projects";
 import type { ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";

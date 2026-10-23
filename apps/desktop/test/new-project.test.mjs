@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import "./source-hooks.mjs";
+import "./load-source.mjs";
 
 const wizard = await import("../src/screens/new-project/wizard.ts");
 

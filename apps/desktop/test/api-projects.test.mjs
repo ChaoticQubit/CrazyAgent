@@ -1,24 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import "./source-hooks.mjs";
+import "./load-source.mjs";
 
 const api = await import("../src/api-projects.ts");
 
-test("a missing Tauri command maps to a typed not ready result", () => {
-  assert.deepEqual(api.toResult("desktop_harness_catalog", "Command desktop_harness_catalog not found"),
-    { kind: "not_ready", command: "desktop_harness_catalog" });
-  assert.deepEqual(api.toResult("desktop_research_jobs", "Command desktop_research_jobs not allowed by ACL"),
-    { kind: "not_ready", command: "desktop_research_jobs" });
-  assert.deepEqual(api.toResult("desktop_research_jobs",
-    "desktop_research_jobs not allowed on window \"main\", webview \"main\", URL: local\n\ncommand not allowed on any window/webview/URL context"),
-  { kind: "not_ready", command: "desktop_research_jobs" });
-});
-
-test("engine refusals stay failures with their plain code and never become not ready", () => {
-  assert.deepEqual(api.toResult("desktop_research_jobs", { code: "owner_read_failed" }), { kind: "failed", code: "owner_read_failed" });
-  assert.deepEqual(api.toResult("desktop_research_jobs", "Command desktop_project_context not found"), { kind: "failed", code: "unknown" });
-  assert.deepEqual(api.toResult("desktop_research_jobs", new Error("boom")), { kind: "failed", code: "unknown" });
-  assert.deepEqual(api.toResult("desktop_research_jobs", null), { kind: "failed", code: "unknown" });
+test("project failures use project copy first, then the app's shared copy", () => {
+  assert.equal(api.failureCopy("stale_config"), "This changed since you opened it. Review and save again.");
+  assert.equal(api.failureCopy("settings_read_only"), "Settings can't be changed in this engine. Start it with writable settings.");
+  assert.equal(api.failureCopy("engine_unreachable"), "CrazyAgent's engine isn't running.");
+  assert.equal(api.failureCopy("project_documents_too_large"), "This project's documents would be over 200 MB. Remove some files first.");
 });
 
 test("failure copy is plain language and falls back for unknown codes", () => {
@@ -45,10 +35,4 @@ test("a receipt is applied only when the engine recorded it without rejection", 
   assert.deepEqual(api.receiptState({ ...base, outcome: "rejected", pending: false, rejection: "project_setup_bounds" }), { kind: "rejected", code: "project_setup_bounds" });
   assert.deepEqual(api.receiptState({ ...base, outcome: "uncertain", pending: true, rejection: null }), { kind: "unconfirmed" });
   assert.deepEqual(api.receiptState({ ...base, outcome: "unavailable", pending: false, rejection: null }), { kind: "rejected", code: "unavailable" });
-});
-
-test("generations are positive, increasing and within the bridge bound", () => {
-  const first = api.nextGeneration();
-  const second = api.nextGeneration();
-  assert.ok(first > 0 && second > first && second <= Number.MAX_SAFE_INTEGER);
 });

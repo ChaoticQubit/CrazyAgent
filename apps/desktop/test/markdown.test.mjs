@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import "./source-hooks.mjs";
+import "./load-source.mjs";
 
 const md = await import("../src/screens/project/markdown.tsx");
 

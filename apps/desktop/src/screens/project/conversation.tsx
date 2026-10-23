@@ -1,8 +1,7 @@
+import { nextGeneration } from "../../api";
+import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import {
-  endMaster, failureCopy, nextGeneration, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster,
-} from "../../api-projects";
-import type { EngineResult } from "../../api-projects";
+import { endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
@@ -10,14 +9,15 @@ import { MarkdownView } from "./markdown";
 import { masterStatus, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
+import type { Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
 const sentByProject = new Map<string, Record<number, string>>();
 const MESSAGE_BYTES_MAX = 8192;
 
-const tones: Record<string, string> = { Ready: "neutral", "Thinking...": "info", Replied: "ok", "Not signed in": "warn", Stopped: "neutral", "Needs a pool": "warn" };
+const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", Replied: "ok", "Not signed in": "warn", Stopped: "neutral", "Needs a pool": "warn" };
 
-function unwrap<T>(result: EngineResult<T>): T {
+function unwrap<T>(result: Result<T>): T {
   if (result.kind === "ok") return result.value;
   throw result.kind === "not_ready" ? { code: "not_ready" } : { code: result.code };
 }
@@ -146,8 +146,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
-        {active && <button type="button" className="pj-btn" disabled={working} onClick={() => void end()}>End conversation</button>}
-        <button type="button" className="pj-btn quiet" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></span>
+        {active && <button type="button" className="btn" disabled={working} onClick={() => void end()}>End conversation</button>}
+        <button type="button" className="btn quiet" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></span>
     </div>
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     <div className="pj-thread" ref={thread} aria-live="polite">
@@ -163,9 +163,9 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">Thinking...</p></div>)}
     </div>
     {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
-      <button type="button" className="pj-btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
+      <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${data.assigned.pool.id}` : ""} aren't signed in.</p>
-      <button type="button" className="pj-btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
+      <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
       <label htmlFor="pj-composer" className="pj-sr">Message the master</label>
@@ -174,7 +174,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void send(); } }} />
       <div className="pj-row between">
         <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : "Cmd+Enter to send"}</span>
-        <button type="submit" className="pj-btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button>
+        <button type="submit" className="btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button>
       </div>
     </form>
   </div>;

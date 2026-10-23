@@ -1,9 +1,10 @@
+import { nextGeneration } from "../../api";
+import type { Result } from "../../api";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import {
-  assignPool, failureCopy, loadProjectMcpServers, loadProjectSkills, nextGeneration, receiptState, removeProject, updateProjectSetup,
-} from "../../api-projects";
-import type { EngineResult, StoredSetup, TeamPlan } from "../../api-projects";
+import { assignPool, failureCopy, loadProjectMcpServers, loadProjectSkills, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
+import type { StoredSetup, TeamPlan } from "../../api-projects";
+import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
@@ -44,7 +45,7 @@ function PoolSection({ data }: { data: ProjectData }) {
     setState({ busy: true, error: "" });
     const previous = data.assigned?.pool.id;
     const added = await assignPool(data.id, choice, nextGeneration());
-    let error = added.kind !== "ok" ? failureCopy(added.kind === "failed" ? added.code : "unknown")
+    let error = added.kind !== "ok" ? failureCopy(added.kind === "error" ? added.code : "unknown")
       : added.value.kind === "rejected" ? failureCopy(added.value.code)
         : added.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
     if (!error && previous && previous !== choice) {
@@ -61,12 +62,12 @@ function PoolSection({ data }: { data: ProjectData }) {
     <h2>Pool</h2>
     {data.pools === undefined && <p className="pj-muted" role="status">Loading pools...</p>}
     {data.pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
-    {data.pools?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
+    {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
-      <button type="button" className="pj-btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
+      <button type="button" className="btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
     {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} value={choice} later={false} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
-    <div><button type="button" className="pj-btn primary" disabled={!choice || choice === data.assigned?.pool.id || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
+    <div><button type="button" className="btn primary" disabled={!choice || choice === data.assigned?.pool.id || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
   </div>;
 }
 
@@ -77,7 +78,7 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
   async function save() {
     const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration());
     if (result.kind === "not_ready") return setNote("Not ready yet: changing a project's team isn't in this build.");
-    if (result.kind === "failed") return setNote(failureCopy(result.code));
+    if (result.kind === "error") return setNote(failureCopy(result.code));
     const state = receiptState(result.value);
     setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check it and save again.");
     if (state.kind === "applied") { data.notify("Team saved."); data.reload(); }
@@ -87,19 +88,19 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
     <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={setup.research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save.</span>
-      <button type="button" className="pj-btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(team) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
+      <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(team) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
   </div>;
 }
 
-function ListSection({ title, load, what, body }: { title: string; load: () => Promise<EngineResult<unknown>>; what: string; body: string }) {
-  const [result, setResult] = useState<EngineResult<unknown>>();
+function ListSection({ title, load, what, body }: { title: string; load: () => Promise<Result<unknown>>; what: string; body: string }) {
+  const [result, setResult] = useState<Result<unknown>>();
   useEffect(() => { void load().then(setResult); }, []);
   return <div className="pj-stack">
     <h2>{title}</h2>
     <p className="pj-secondary">{body}</p>
     {result === undefined && <p className="pj-muted" role="status">Loading...</p>}
     {result?.kind === "not_ready" && <NotReady what={what} />}
-    {result?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(result.code)}</p>}
+    {result?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(result.code)}</p>}
     {result?.kind === "ok" && <p className="pj-muted">The engine answered, but this build can't show the list yet.</p>}
   </div>;
 }
@@ -111,7 +112,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     setConfirming(false);
     const result = await removeProject(data.id, nextGeneration());
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
-    if (result.kind === "failed") return setNote(failureCopy(result.code));
+    if (result.kind === "error") return setNote(failureCopy(result.code));
     const state = receiptState(result.value);
     if (state.kind === "applied") { data.navigate("/home"); return; }
     setNote(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check it and try again.");
@@ -121,15 +122,11 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <h2>Remove project</h2>
     <p>Remove {displayText(data.name)} from CrazyAgent? Agents stop. The project folder stays at {displayText(folder)}.</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div><button type="button" className="pj-btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
-    {confirming && <div className="pj-scrim"><div className="pj-dialog" role="alertdialog" aria-modal="true" aria-labelledby="pj-remove-title">
-      <h2 id="pj-remove-title">Remove {displayText(data.name)} from CrazyAgent?</h2>
-      <p>Agents stop. The project folder stays at {displayText(folder)}.</p>
-      <div className="pj-row end">
-        <button type="button" className="pj-btn" autoFocus onClick={() => setConfirming(false)}>Cancel</button>
-        <button type="button" className="pj-btn danger" onClick={() => void remove()}>Remove project</button>
-      </div>
-    </div></div>}
+    <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
+    <ConfirmDialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} confirmLabel="Remove project"
+      onCancel={() => setConfirming(false)} onConfirm={() => void remove()}>
+      Agents stop. The project folder stays at {displayText(folder)}.
+    </ConfirmDialog>
   </div>;
 }
 
