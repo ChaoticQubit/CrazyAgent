@@ -76,7 +76,7 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let resolver = {
         let pools = pools.clone();
         let project = project.clone();
-        move |id: &str| {
+        move |id: &str, _harness: &str| {
             let pick = pools.lock().unwrap().get(id).cloned()?;
             Some((project.clone(), pick))
         }
@@ -166,7 +166,7 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
     let unknown = jobs
         .enqueue("project-unknown", "market_research", "codex", true)
         .unwrap();
-    let resolver = move |id: &str| {
+    let resolver = move |id: &str, _harness: &str| {
         (id == "project-b").then(|| {
             (
                 project.clone(),
@@ -198,4 +198,52 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
         jobs.get(unknown).unwrap().unwrap().status,
         ResearchStatus::Queued
     );
+}
+
+#[test]
+fn each_job_waits_on_the_account_for_its_own_harness_and_unsupported_harnesses_fail_plainly() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    let state = root.join("state");
+    fs::create_dir_all(project.join("context")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let database = state.join("research.sqlite3");
+    let jobs = ResearchJobs::open(&database).unwrap();
+    let claude = jobs
+        .enqueue("project-c", "design_research", "claude", true)
+        .unwrap();
+    let rcli = jobs
+        .enqueue("project-c", "market_research", "rcli", true)
+        .unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let resolver = {
+        let asked = asked.clone();
+        move |id: &str, harness: &str| {
+            asked.lock().unwrap().push(harness.to_owned());
+            (id == "project-c").then(|| (project.clone(), AccountPick::NoUsableAccount))
+        }
+    };
+    let runner = Arc::new(
+        ResearchRunner::new(&database, &state, &codex(), ResearchLimits::default()).unwrap(),
+    );
+    let service = ResearchService::start(runner, resolver, Duration::from_millis(100));
+    wait_for(Duration::from_secs(10), || {
+        jobs.get(rcli).unwrap().unwrap().status == ResearchStatus::Failed
+            && jobs.get(claude).unwrap().unwrap().status == ResearchStatus::NeedsPool
+    });
+    service.stop();
+    assert_eq!(
+        jobs.get(rcli).unwrap().unwrap().error.as_deref(),
+        Some("This harness cannot run research yet")
+    );
+    let rows = progress(&jobs, "project-c").unwrap();
+    assert_eq!(rows[0].status, "Needs a pool");
+    assert_eq!(
+        rows[0].detail.as_deref(),
+        Some("No account in this project's pool can run this research")
+    );
+    let asked = asked.lock().unwrap();
+    assert!(asked.iter().any(|harness| harness == "claude"));
+    assert!(asked.iter().any(|harness| harness == "rcli"));
 }

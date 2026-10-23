@@ -303,6 +303,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         Path::new(&args[2]),
                         Path::new(&args[3]),
                         executable,
+                        claude.as_deref(),
                     )
                     .map(Some),
                 })

@@ -154,7 +154,7 @@ fn jobs_without_a_pool_wait_and_resume_when_one_is_assigned() {
     assert_eq!(waiting.status.label(), "Needs a pool");
     assert_eq!(waiting.attempts, 0);
     assert!(jobs.claim("project-a", "runner", 1).unwrap().is_none());
-    assert_eq!(jobs.resume_waiting("project-a").unwrap(), 1);
+    assert_eq!(jobs.resume_waiting("project-a", "codex").unwrap(), 1);
     assert_eq!(
         jobs.claim("project-a", "runner", 1).unwrap().unwrap().id,
         id
@@ -198,13 +198,16 @@ fn parked_jobs_carry_a_plain_reason_and_resume_clears_it() {
     let id = jobs.enqueue("project-a", "market", "codex", true).unwrap();
     jobs.enqueue("project-b", "market", "codex", true).unwrap();
     assert_eq!(
-        jobs.projects_with_work().unwrap(),
-        ["project-a", "project-b"]
+        jobs.work().unwrap(),
+        [
+            ("project-a".to_owned(), "codex".to_owned()),
+            ("project-b".to_owned(), "codex".to_owned())
+        ]
     );
-    assert_eq!(jobs.park_waiting("project-a", None).unwrap(), 1);
-    assert_eq!(jobs.park_waiting("project-a", None).unwrap(), 0);
+    assert_eq!(jobs.park_waiting("project-a", "codex", None).unwrap(), 1);
+    assert_eq!(jobs.park_waiting("project-a", "codex", None).unwrap(), 0);
     assert_eq!(
-        jobs.park_waiting("project-a", Some("No usable account"))
+        jobs.park_waiting("project-a", "codex", Some("No usable account"))
             .unwrap(),
         1
     );
@@ -212,10 +215,13 @@ fn parked_jobs_carry_a_plain_reason_and_resume_clears_it() {
     assert_eq!(parked.status, ResearchStatus::NeedsPool);
     assert_eq!(parked.error.as_deref(), Some("No usable account"));
     assert_eq!(
-        jobs.projects_with_work().unwrap(),
-        ["project-a", "project-b"]
+        jobs.work().unwrap(),
+        [
+            ("project-a".to_owned(), "codex".to_owned()),
+            ("project-b".to_owned(), "codex".to_owned())
+        ]
     );
-    assert_eq!(jobs.resume_waiting("project-a").unwrap(), 1);
+    assert_eq!(jobs.resume_waiting("project-a", "codex").unwrap(), 1);
     let resumed = jobs.get(id).unwrap().unwrap();
     assert_eq!(resumed.status, ResearchStatus::Queued);
     assert_eq!(resumed.error, None);
@@ -239,7 +245,7 @@ fn an_interrupted_job_returns_to_the_queue_without_spending_an_attempt() {
             .attempts,
         1
     );
-    assert!(jobs.projects_with_work().unwrap().is_empty());
+    assert!(jobs.work().unwrap().is_empty());
 }
 
 #[test]
@@ -273,4 +279,65 @@ fn jobs_queued_with_the_engine_report_path_keep_it_until_done() {
         Some("context/research/tech_stack_research.md")
     );
     assert_eq!(job.status, ResearchStatus::Running);
+}
+
+#[test]
+fn work_claims_and_parking_are_scoped_to_one_harness() {
+    let (_temp, path) = store();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let codex = jobs.enqueue("project-a", "market", "codex", true).unwrap();
+    let claude = jobs.enqueue("project-a", "design", "claude", true).unwrap();
+    assert_eq!(
+        jobs.work().unwrap(),
+        [
+            ("project-a".to_owned(), "claude".to_owned()),
+            ("project-a".to_owned(), "codex".to_owned())
+        ]
+    );
+    assert_eq!(
+        jobs.park_waiting("project-a", "codex", Some("No usable account"))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        jobs.get(claude).unwrap().unwrap().status,
+        ResearchStatus::Queued
+    );
+    assert!(
+        jobs.claim_harness("project-a", "codex", "runner", 3)
+            .unwrap()
+            .is_none()
+    );
+    let held = jobs
+        .claim_harness("project-a", "claude", "runner", 3)
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.id, claude);
+    assert!(
+        jobs.claim_harness("project-a", "claude", "runner", 3)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(jobs.resume_waiting("project-a", "claude").unwrap(), 0);
+    assert_eq!(jobs.resume_waiting("project-a", "codex").unwrap(), 1);
+    assert_eq!(
+        jobs.claim_harness("project-a", "codex", "runner", 3)
+            .unwrap()
+            .unwrap()
+            .id,
+        codex
+    );
+    let third = jobs.enqueue("project-a", "tech", "codex", true).unwrap();
+    assert!(
+        jobs.claim_harness("project-a", "codex", "runner", 2)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        jobs.claim_harness("project-a", "codex", "runner", 3)
+            .unwrap()
+            .unwrap()
+            .id,
+        third
+    );
 }

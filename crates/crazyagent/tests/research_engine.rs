@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 fn codex() -> PathBuf {
     let path = std::env::var_os("CRAZYAGENT_CODEX")
@@ -137,7 +137,7 @@ fn runtime() -> PathBuf {
 }
 
 #[test]
-fn the_engine_runs_research_that_project_creation_queued_in_the_engine_database() {
+fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
     let runtime = runtime();
     let engine = Engine::start(&runtime);
     let projects = runtime.join("projects");
@@ -153,47 +153,81 @@ fn the_engine_runs_research_that_project_creation_queued_in_the_engine_database(
     .unwrap();
     let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
     database.busy_timeout(Duration::from_secs(5)).unwrap();
-    let queue = |project: &str, kind: &str| -> i64 {
+    let queue = |project: &str, kind: &str, harness: &str, tools: bool| -> i64 {
         database
             .query_row(
                 "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
-                VALUES (?1,?2,'codex',1,'queued',?3,1) RETURNING id",
-                rusqlite::params![project, kind, format!("context/research/{kind}.md")],
+                VALUES (?1,?2,?3,?4,'queued',?5,1) RETURNING id",
+                rusqlite::params![
+                    project,
+                    kind,
+                    harness,
+                    tools,
+                    format!("context/research/{kind}.md")
+                ],
                 |row| row.get(0),
             )
             .unwrap()
     };
-    let id = queue("project-cafe", "front_end_design");
-    let waiting = queue("project-unassigned", "design_research");
+    let codex_job = queue("project-cafe", "front_end_design", "codex", true);
+    let claude_job = queue("project-cafe", "competitor_research", "claude", false);
+    let rcli_job = queue("project-cafe", "market_research", "rcli", true);
+    let waiting = queue("project-unassigned", "design_research", "codex", true);
     drop(database);
     let jobs = ResearchJobs::open(&runtime.join("engine.db")).unwrap();
     fs::create_dir_all(projects.join("project-unassigned")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(600);
-    loop {
-        let job = jobs.get(id).unwrap().unwrap();
-        if matches!(job.status, ResearchStatus::Done | ResearchStatus::Failed) {
-            assert_eq!(job.status, ResearchStatus::Done, "{:?}", job.error);
-            break;
+    let deadline = Instant::now() + Duration::from_secs(900);
+    for id in [codex_job, claude_job, rcli_job] {
+        loop {
+            let job = jobs.get(id).unwrap().unwrap();
+            if matches!(job.status, ResearchStatus::Done | ResearchStatus::Failed) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "research did not finish");
+            std::thread::sleep(Duration::from_millis(500));
         }
-        assert!(Instant::now() < deadline, "research did not finish");
-        std::thread::sleep(Duration::from_millis(500));
     }
+    let codex = jobs.get(codex_job).unwrap().unwrap();
+    assert_eq!(codex.status, ResearchStatus::Done, "{:?}", codex.error);
+    let claude = jobs.get(claude_job).unwrap().unwrap();
+    assert_eq!(claude.status, ResearchStatus::Failed);
+    assert_eq!(
+        claude.error.as_deref(),
+        Some("This harness is not installed on this computer")
+    );
+    let rcli = jobs.get(rcli_job).unwrap().unwrap();
+    assert_eq!(rcli.status, ResearchStatus::Failed);
+    assert_eq!(
+        rcli.error.as_deref(),
+        Some("This harness cannot run research yet")
+    );
     assert_eq!(
         jobs.get(waiting).unwrap().unwrap().status.label(),
         "Needs a pool"
     );
     let stderr = engine.stop();
     assert!(!stderr.contains("panicked"), "{stderr}");
-    let report = fs::read_to_string(
-        project
+    let report = |kind: &str| {
+        fs::read_to_string(
+            project
+                .join("context")
+                .join("research")
+                .join(format!("{kind}.md")),
+        )
+        .unwrap()
+    };
+    let front_end = report("front_end_design");
+    assert!(front_end.starts_with("# Front-end design\n"), "{front_end}");
+    assert!(front_end.contains("Researched by Codex"), "{front_end}");
+    assert!(
+        !project
             .join("context")
             .join("research")
-            .join("front_end_design.md"),
-    )
-    .unwrap();
-    assert!(report.starts_with("# Front-end design\n"), "{report}");
+            .join("competitor_research.md")
+            .exists()
+    );
     assert_eq!(
-        jobs.get(id).unwrap().unwrap().report_path.as_deref(),
+        jobs.get(codex_job).unwrap().unwrap().report_path.as_deref(),
         Some("context/research/front_end_design.md")
     );
     assert!(project.join("worktrees").is_dir());

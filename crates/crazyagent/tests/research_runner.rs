@@ -10,7 +10,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const OLLAMA: &str = "http://127.0.0.1:11434/v1";
+const OLLAMA_ANTHROPIC: &str = "http://127.0.0.1:11434";
 const OLLAMA_MODEL: &str = "qwen2.5:0.5b";
+
+static LOCAL_MODEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn local_model() -> std::sync::MutexGuard<'static, ()> {
+    LOCAL_MODEL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct Case {
     _temp: tempfile::TempDir,
@@ -31,6 +40,14 @@ fn codex() -> PathBuf {
         path.display()
     );
     path
+}
+
+fn claude() -> PathBuf {
+    std::env::var_os("CRAZYAGENT_CLAUDE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/claude"))
+        .canonicalize()
+        .expect("real claude binary required")
 }
 
 fn case(brief: &str) -> Case {
@@ -121,6 +138,7 @@ fn files_containing(root: &Path, needle: &str) -> usize {
 
 #[test]
 fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_report() {
+    let _model = local_model();
     let marker = format!("BRIEF-MARKER-{}", std::process::id());
     let case = case(&format!(
         "# Pet clinic booking app\n\nA web app for small vet clinics to take bookings. {marker}\n"
@@ -332,6 +350,7 @@ fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
     let runner = Arc::new(runner(&case, limits(Duration::from_secs(120))));
     let handles = runner.spawn_ready(
         "project-a".into(),
+        "codex",
         case.project.clone(),
         Some(endpoint(port)),
     );
@@ -405,6 +424,7 @@ fn process_group_alive(group: u32) -> bool {
 
 #[test]
 fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
+    let _model = local_model();
     let case = case("# Recipe box\n\nA mobile app that stores family recipes.\n");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
@@ -434,4 +454,212 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     )
     .unwrap();
     assert!(report.starts_with("# Design research\n"), "{report}");
+}
+
+#[test]
+fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpoint() {
+    let _model = local_model();
+    let marker = format!("CLAUDE-BRIEF-{}", std::process::id());
+    let case = case(&format!(
+        "# Dog walking app\n\nA mobile app that matches dog owners with local walkers. {marker}\n"
+    ));
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "competitor_research", "claude", false)
+        .unwrap();
+    let runner = runner(&case, limits(Duration::from_secs(600)))
+        .with_claude(&claude())
+        .unwrap();
+    let account = ResearchAccount::AnthropicEndpoint {
+        base_url: OLLAMA_ANTHROPIC.into(),
+        model: OLLAMA_MODEL.into(),
+    };
+    let started = Instant::now();
+    let run = runner
+        .run_once(&project(&case, Some(account)))
+        .unwrap()
+        .unwrap();
+    eprintln!("claude research run took {:?}", started.elapsed());
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        job.status,
+        ResearchStatus::Done,
+        "{:?} {}",
+        job.error,
+        fs::read_to_string(
+            case.state
+                .join("agents")
+                .join(format!("job-{id}-1/stderr.log"))
+        )
+        .unwrap_or_default()
+    );
+    assert_eq!(run.status, ResearchStatus::Done);
+    let report = fs::read_to_string(
+        case.project
+            .join("context")
+            .join("research")
+            .join("competitor_research.md"),
+    )
+    .unwrap();
+    assert!(report.starts_with("# Competitor research\n"), "{report}");
+    assert!(report.contains("Researched by Claude Code"), "{report}");
+    assert!(report.contains("## Links and references"), "{report}");
+    assert!(
+        case.project
+            .join("worktrees")
+            .join(format!("research-competitor_research-{id}-1"))
+            .join(".git")
+            .is_file()
+    );
+    assert!(
+        files_containing(&case.state.join("agents"), &marker) > 0,
+        "the prompt sent to the agent must carry the project brief"
+    );
+    assert!(!process_group_alive(run.process_group.unwrap()));
+}
+
+#[test]
+fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
+    let case = case("# Brief\n");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let claude_job = jobs
+        .enqueue("project-a", "design_research", "claude-code", true)
+        .unwrap();
+    let runner = runner(&case, limits(Duration::from_secs(5)))
+        .with_claude(&claude())
+        .unwrap();
+    let run = runner
+        .run_once(&project(&case, Some(endpoint(9))))
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.job, claude_job);
+    assert_eq!(run.status, ResearchStatus::NeedsPool);
+    let codex_job = jobs
+        .enqueue("project-b", "design_research", "codex", true)
+        .unwrap();
+    let anthropic = ResearchAccount::AnthropicEndpoint {
+        base_url: "http://127.0.0.1:9".into(),
+        model: "m".into(),
+    };
+    let run = runner
+        .run_once(&ResearchProject {
+            id: "project-b",
+            root: &case.project,
+            account: Some(anthropic),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.job, codex_job);
+    assert_eq!(run.status, ResearchStatus::NeedsPool);
+    assert_eq!(jobs.get(codex_job).unwrap().unwrap().attempts, 0);
+    assert!(!case.project.join("worktrees").exists());
+}
+
+#[test]
+fn a_claude_job_without_claude_installed_fails_plainly() {
+    let case = case("# Brief\n");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "design_research", "claude", true)
+        .unwrap();
+    let account = ResearchAccount::AnthropicEndpoint {
+        base_url: "http://127.0.0.1:9".into(),
+        model: "m".into(),
+    };
+    let run = runner(&case, limits(Duration::from_secs(5)))
+        .run_once(&project(&case, Some(account)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, ResearchStatus::Failed);
+    assert_eq!(
+        jobs.get(id).unwrap().unwrap().error.as_deref(),
+        Some("This harness is not installed on this computer")
+    );
+}
+
+#[test]
+#[ignore = "BLOCKED: needs a signed-in managed Claude subscription profile; set CRAZYAGENT_MANAGED_CLAUDE_HOME"]
+fn research_runs_on_a_signed_in_managed_claude_account() {
+    let home = PathBuf::from(
+        std::env::var_os("CRAZYAGENT_MANAGED_CLAUDE_HOME")
+            .expect("CRAZYAGENT_MANAGED_CLAUDE_HOME must name a managed profile directory"),
+    )
+    .canonicalize()
+    .unwrap();
+    let case = case("# Habit tracker\n\nA mobile app that tracks daily habits.\n");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "competitor_research", "claude", true)
+        .unwrap();
+    let run = runner(&case, limits(Duration::from_secs(900)))
+        .with_claude(&claude())
+        .unwrap()
+        .run_once(&project(
+            &case,
+            Some(ResearchAccount::ManagedClaude { home, model: None }),
+        ))
+        .unwrap()
+        .unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(run.status, ResearchStatus::Done, "{:?}", job.error);
+    let report = fs::read_to_string(
+        case.project
+            .join("context")
+            .join("research")
+            .join("competitor_research.md"),
+    )
+    .unwrap();
+    assert!(report.contains("Researched by Claude Code"));
+    assert!(report.contains("https://"));
+}
+
+#[test]
+fn a_job_interrupted_by_an_engine_stop_runs_again_after_a_restart() {
+    let case = case("# Brief\n");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let first = Arc::new(runner(&case, limits(Duration::from_secs(120))));
+    let handle = {
+        let first = first.clone();
+        let root = case.project.clone();
+        std::thread::spawn(move || {
+            first
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    first.shutdown();
+    let interrupted = handle.join().unwrap();
+    assert_eq!(interrupted.status, ResearchStatus::Queued);
+    assert!(!process_group_alive(interrupted.process_group.unwrap()));
+    assert_eq!(jobs.get(id).unwrap().unwrap().attempts, 0);
+    let restarted = runner(&case, limits(Duration::from_secs(3)));
+    let rerun = restarted
+        .run_once(&project(&case, Some(endpoint(port))))
+        .unwrap()
+        .unwrap();
+    assert_eq!(rerun.job, id);
+    assert_eq!(rerun.status, ResearchStatus::Failed);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.attempts, 1);
+    assert_eq!(job.error.as_deref(), Some("Agent ran out of time"));
+    assert!(!process_group_alive(rerun.process_group.unwrap()));
+    let worktrees = fs::read_dir(case.project.join("worktrees"))
+        .unwrap()
+        .count();
+    assert_eq!(worktrees, 2);
 }
