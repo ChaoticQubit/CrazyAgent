@@ -966,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn quit_on_welcome_asks_once_something_is_typed() {
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an empty welcome form quits at once");
+
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Char('M'));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => {
+                assert_eq!(ask.loss, Some("Your profile will not be saved."))
+            }
+            _ => panic!("typed profile asks first"),
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        assert!(shell.quitting(), "Quit still quits");
+    }
+
+    #[test]
     fn quit_asks_before_unsaved_profile_changes_are_lost() {
         let loaded = || {
             let mut ctx = ctx();
