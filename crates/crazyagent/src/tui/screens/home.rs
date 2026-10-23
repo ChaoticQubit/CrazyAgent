@@ -1,3 +1,4 @@
+use super::new_project_page::kept_draft;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::pools::{MemberStatus, PoolSummary};
 use crate::tui::clock;
@@ -21,6 +22,14 @@ const FILTER_CHARS_MAX: usize = 100;
 enum Panel {
     Projects,
     Setup,
+}
+
+/// One row of the project list: the New project draft kept after leaving the
+/// wizard, or a project. Input: the kept draft and the store. Output: drawn as a
+/// four-row card; Enter continues the draft or opens the project.
+enum Entry {
+    Draft(String),
+    Project(ProjectCard),
 }
 
 /// Setup progress shown in the "Get set up" panel.
@@ -105,7 +114,7 @@ impl Home {
         Self::setup(ctx).is_some_and(|setup| !setup.done())
     }
 
-    fn visible(&self, ctx: &Ctx) -> Vec<ProjectCard> {
+    fn entries(&self, ctx: &Ctx) -> Vec<Entry> {
         let Some(projects) = ctx.store.projects.ready() else {
             return Vec::new();
         };
@@ -120,26 +129,38 @@ impl Home {
                     .collect()
             })
             .unwrap_or_default();
-        projects
+        let matches = |text: &str| {
+            let text = text.to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        };
+        let draft = kept_draft()
+            .filter(|name| matches(name.as_str()))
+            .map(Entry::Draft);
+        let projects = projects
             .iter()
             .filter(|card| {
-                let text = format!(
-                    "{} {} {}",
-                    card.name,
-                    card.about,
-                    card.pool.clone().unwrap_or_default()
+                matches(
+                    format!(
+                        "{} {} {}",
+                        card.name,
+                        card.about,
+                        card.pool.clone().unwrap_or_default()
+                    )
+                    .as_str(),
                 )
-                .to_lowercase();
-                words.iter().all(|word| text.contains(word))
             })
             .cloned()
-            .collect()
+            .map(Entry::Project);
+        draft.into_iter().chain(projects).collect()
     }
 
     fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 3] {
         let setup = Self::setup(ctx).unwrap_or_default();
         let harness = match &ctx.store.harnesses {
-            Load::Ready((ready, all)) => vec![format!("{ready} of {all} harnesses ready"), "on this Mac.".into()],
+            Load::Ready((ready, all)) => vec![
+                format!("{ready} of {all} harnesses ready"),
+                "on this Mac.".into(),
+            ],
             _ => vec!["Harness checks are not".into(), "ready yet.".into()],
         };
         [
@@ -194,6 +215,54 @@ impl Home {
         })
     }
 
+    fn gutter(selected: bool, ctx: &Ctx) -> Line<'static> {
+        if selected {
+            Line::from(vec![
+                Span::styled(ctx.glyphs.bar, ctx.theme.accent),
+                Span::raw(" "),
+            ])
+        } else {
+            Line::raw("  ")
+        }
+    }
+
+    fn draft_card(name: &str, limit: usize, selected: bool, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let name_role = if selected {
+            Role::Accent
+        } else {
+            Role::Heading
+        };
+        vec![
+            join([
+                Self::gutter(selected, ctx),
+                row(
+                    limit - 2,
+                    styled(name.to_owned(), name_role, theme),
+                    styled("Draft", Role::Muted, theme),
+                    ctx.glyphs,
+                ),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(
+                    styled("Not created yet.", Role::Muted, theme),
+                    limit - 2,
+                    ctx.glyphs,
+                ),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(
+                    Line::raw("Enter continues the draft."),
+                    limit - 2,
+                    ctx.glyphs,
+                ),
+            ]),
+            Line::default(),
+        ]
+    }
+
     fn card(
         &self,
         card: &ProjectCard,
@@ -202,16 +271,7 @@ impl Home {
         ctx: &Ctx,
     ) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
-        let gutter = || {
-            if selected {
-                Line::from(vec![
-                    Span::styled(ctx.glyphs.bar, theme.accent),
-                    Span::raw(" "),
-                ])
-            } else {
-                Line::raw("  ")
-            }
-        };
+        let gutter = || Self::gutter(selected, ctx);
         let state = if card.research.running > 0 {
             let count = card.research.running;
             styled(
@@ -308,14 +368,14 @@ impl Home {
                     theme.heading
                 },
             )];
-            if let Some(count) = count {
+            if let Some(count) = count.filter(|count| *count > 0) {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(count.to_string(), theme.muted));
             }
             Line::from(spans)
         };
         match &ctx.store.projects {
-            Load::Ready(projects) if projects.is_empty() => {
+            Load::Ready(projects) if projects.is_empty() && kept_draft().is_none() => {
                 let mut lines = vec![title(None), Line::default(), Line::raw("No projects yet.")];
                 lines.extend(
                     wrap(
@@ -328,7 +388,7 @@ impl Home {
                 (lines, None)
             }
             Load::Ready(projects) => {
-                let visible = self.visible(ctx);
+                let entries = self.entries(ctx);
                 let right = if ctx.link == Link::Reconnecting {
                     styled(
                         ctx.store
@@ -361,24 +421,23 @@ impl Home {
                     }
                     None => lines.push(Line::default()),
                 }
-                if visible.is_empty() {
+                if entries.is_empty() {
                     lines.push(Line::raw(format!(
                         "No project matches. Showing 0 of {}.",
                         projects.len()
                     )));
                 }
-                for (index, card) in visible
+                for (index, entry) in entries
                     .iter()
                     .enumerate()
                     .skip(self.offset)
                     .take(Self::page(ctx))
                 {
-                    lines.extend(self.card(
-                        card,
-                        limit,
-                        focused && index == self.selected && !self.filtering,
-                        ctx,
-                    ));
+                    let selected = focused && index == self.selected && !self.filtering;
+                    lines.extend(match entry {
+                        Entry::Draft(name) => Self::draft_card(name, limit, selected, ctx),
+                        Entry::Project(card) => self.card(card, limit, selected, ctx),
+                    });
                 }
                 if ctx.link == Link::Reconnecting {
                     lines = lines
@@ -463,10 +522,11 @@ impl Home {
         if self.panel == Panel::Setup && Self::panel_visible(ctx) {
             return Flow::Open(Self::items(ctx)[self.setup_selected].3.clone());
         }
-        match self.visible(ctx).get(self.selected) {
-            Some(card) => Flow::Open(Place::Project {
-                id: card.id.clone(),
-                name: card.name.clone(),
+        match self.entries(ctx).into_iter().nth(self.selected) {
+            Some(Entry::Draft(_)) => Flow::Open(Place::NewProject),
+            Some(Entry::Project(card)) => Flow::Open(Place::Project {
+                id: card.id,
+                name: card.name,
                 tab: ProjectTab::Overview,
             }),
             None => Flow::Handled,
@@ -595,7 +655,7 @@ impl Screen for Home {
                 Flow::Handled
             }
             Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
-                let count = self.visible(ctx).len();
+                let count = self.entries(ctx).len();
                 if count == 0 {
                     return Flow::Handled;
                 }
@@ -640,9 +700,10 @@ impl Screen for Home {
                 self.was_done = Some(setup.done());
                 Flow::Handled
             }
-            Arrival::Projects(Ok(projects)) => {
-                if self.selected >= projects.len() {
-                    self.selected = projects.len().saturating_sub(1);
+            Arrival::Projects(Ok(_)) => {
+                let count = self.entries(ctx).len();
+                if self.selected >= count {
+                    self.selected = count.saturating_sub(1);
                 }
                 self.follow(ctx);
                 Flow::Handled
