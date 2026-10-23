@@ -9,7 +9,8 @@ import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
 import { poolName, teamValid } from "../new-project/wizard";
 import { folderLabel } from "./overview";
-import { ProjectServers, ProjectSkills, useList } from "./plugins";
+import { useLoad } from "../../state";
+import { PluginsAndSkills } from "../settings/plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -17,8 +18,7 @@ const SECTIONS = [
   { id: "general", label: "General" },
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
-  { id: "skills", label: "Skills" },
-  { id: "mcp", label: "MCP servers" },
+  { id: "plugins", label: "Plugins and skills" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -36,7 +36,7 @@ function setupOf(setup: StoredSetup, team: TeamPlan) {
 
 function PoolSection({ data }: { data: ProjectData }) {
   const pools = valueOf(data.pools);
-  const [summaries] = useList(poolSummaries, data.id);
+  const [summaries] = useLoad(poolSummaries, [data.id]);
   const [choice, setChoice] = useState<string | null>(data.assigned?.pool.id ?? null);
   const [state, setState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   useEffect(() => { setChoice(data.assigned?.pool.id ?? null); }, [data.assigned?.pool.id]);
@@ -67,7 +67,7 @@ function PoolSection({ data }: { data: ProjectData }) {
     {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
-    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries?.kind === "ok" ? summaries.value : []} value={choice} later={false} onChange={setChoice} />}
+    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries.kind === "ok" ? summaries.value : []} value={choice} later={false} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
     <div><button type="button" className="btn primary" disabled={!choice || choice === data.assigned?.pool.id || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
   </div>;
@@ -133,11 +133,17 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
   </div>;
 }
 
-/** Project Settings tab: General, Pool, Team, Skills, MCP servers and Remove project.
+/** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
+ * one section still open it. Input: the route's section, if any. Output: a known section. */
+export function settingsSection(wanted: string | null | undefined): SectionId {
+  if (wanted === "skills" || wanted === "mcp") return "plugins";
+  return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
+}
+
+/** Project Settings tab: General, Pool, Team, Plugins and skills, and Remove project.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
-  const wanted = section ?? hashSection();
-  const [active, setActive] = useState<SectionId>(SECTIONS.some((item) => item.id === wanted) ? wanted as SectionId : "general");
+  const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
   const setup = valueOf(data.setup);
   const needsSetup = (body: () => ReactNode) => setup ? body()
     : data.setup?.kind === "not_ready" ? <NotReady what="project details aren't in this build." />
@@ -151,8 +157,11 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "general" && needsSetup(() => <GeneralSection data={data} setup={setup!} />)}
       {active === "pool" && <PoolSection data={data} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
-      {active === "skills" && <ProjectSkills data={data} />}
-      {active === "mcp" && <ProjectServers data={data} />}
+      {active === "plugins" && <div className="pj-stack">
+        <h2>Plugins and skills</h2>
+        <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
+        <PluginsAndSkills projectId={data.id} />
+      </div>}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

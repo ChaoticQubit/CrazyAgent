@@ -4,6 +4,7 @@ import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
 import type { HarnessEntry, PoolSummary } from "../../api";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
+import type { Loaded } from "../../state";
 
 
 /** Formats a duration the way the design writes elapsed time.
@@ -39,6 +40,15 @@ export function tildePath(path: string, home: string): string {
  * where a file is without their account name. Input: an absolute path. Output: the shortened path. */
 export function homePath(path: string): string {
   return tildePath(path, /^\/Users\/[^/]+/u.exec(path)?.[0] ?? "");
+}
+
+/** The Overview fact for skills or MCP servers: how many are on in this project. An item is on
+ * when it is on where it was added and this project has not switched it off.
+ * Inputs: the engine list and the singular and plural words. Output: the line, or null until it loads. */
+export function onFact(list: Loaded<{ on_here: boolean | null; enabled: boolean }[]>, one: string, many: string): string | null {
+  if (list.kind !== "ok") return null;
+  const count = list.value.filter((item) => item.enabled && item.on_here !== false).length;
+  return count === 0 ? "None on" : `${count} ${count === 1 ? one : many} on`;
 }
 
 export interface ResearchRow {

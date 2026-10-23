@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { nextGeneration, poolSummaries } from "../../api";
-import { failureCopy, loadProjectMcpServers, loadProjectMemories, loadProjectSkills, receiptState, retryResearch } from "../../api-projects";
+import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
+import { failureCopy, loadProjectMemories, receiptState, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolName, poolReadiness, poolSummary } from "../new-project/wizard";
-import { onFact, useList } from "./plugins";
+import { useLoad } from "../../state";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, signInLine, suggestedLine, homePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, homePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -41,10 +41,10 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
   const [allActivity, setAllActivity] = useState(false);
-  const [skills] = useList(() => loadProjectSkills(data.id), data.id);
-  const [servers] = useList(() => loadProjectMcpServers(data.id), data.id);
-  const [summaries] = useList(poolSummaries, data.id);
-  const assignedSummary = summaries?.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
+  const [skills] = useLoad(() => listSkills(data.id), [data.id]);
+  const [servers] = useLoad(() => listMcpServers(data.id), [data.id]);
+  const [summaries] = useLoad(poolSummaries, [data.id]);
+  const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
@@ -101,8 +101,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {setup && <div><dt>Team</dt><dd>Master: {harnessName(harnesses, setup.team.master)}</dd>
           <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : "No agents beside the master"}</dd></div>}
         {setup && setup.documents.length > 0 && <div><dt>Documents</dt><dd>{setup.documents.length} attached</dd></div>}
-        <div><dt>Skills</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=skills`)}>{onFact(skills, "skill", "skills") ?? "Project settings"}</button></dd></div>
-        <div><dt>MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=mcp`)}>{onFact(servers, "server", "servers") ?? "Project settings"}</button></dd></div>
+        <div><dt>Skills</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(skills, "skill", "skills") ?? "Project settings"}</button></dd></div>
+        <div><dt>MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(servers, "server", "servers") ?? "Project settings"}</button></dd></div>
       </dl>
     </aside>
   </div>;

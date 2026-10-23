@@ -303,3 +303,22 @@ test("Needs you names the project's pool accounts that aren't signed in", () => 
   assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "set_up")])), null);
   assert.equal(research.signInLine(undefined), null);
 });
+
+test("the Overview plugin fact counts what is on in this project, with the global switch winning", () => {
+  const on = (on_here, enabled = true) => ({ on_here, enabled });
+  assert.equal(research.onFact({ kind: "ok", value: [on(true), on(false), on(null), on(null, false), on(true, false)] }, "skill", "skills"), "2 skills on");
+  assert.equal(research.onFact({ kind: "ok", value: [on(true)] }, "skill", "skills"), "1 skill on");
+  assert.equal(research.onFact({ kind: "ok", value: [] }, "server", "servers"), "None on");
+  assert.equal(research.onFact({ kind: "loading" }, "skill", "skills"), null);
+  assert.equal(research.onFact({ kind: "not_ready" }, "skill", "skills"), null);
+});
+
+test("project Settings opens Plugins and skills for the old Skills and MCP servers links", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  assert.equal(settings.settingsSection("plugins"), "plugins");
+  assert.equal(settings.settingsSection("skills"), "plugins");
+  assert.equal(settings.settingsSection("mcp"), "plugins");
+  assert.equal(settings.settingsSection("team"), "team");
+  assert.equal(settings.settingsSection("nope"), "general");
+  assert.equal(settings.settingsSection(null), "general");
+});
