@@ -406,10 +406,11 @@ impl TeamRuntime {
         let Some(launch) = launch_harness(harness) else {
             return Err(format!("{harness} cannot run team agents yet"));
         };
-        if !self.executables.contains_key(launch) {
+        let accounts = eligible_accounts(access, project, launch);
+        if accounts != Accounts::NoPool && !self.executables.contains_key(launch) {
             return Err(format!("{harness} is not installed"));
         }
-        match eligible_accounts(access, project, launch) {
+        match accounts {
             Accounts::NoPool => Err("Needs a pool".into()),
             Accounts::Usable(accounts) if accounts.is_empty() => Err(format!(
                 "No account in this project's pool can run {harness}"

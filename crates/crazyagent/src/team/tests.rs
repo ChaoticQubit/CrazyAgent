@@ -563,3 +563,97 @@ fn team_plan_harness_names_map_to_launch_adapters_and_delegation_paths() {
     assert_eq!(delegation_path("claude"), DelegationPath::Reply);
     assert_eq!(delegation_path("gemini"), DelegationPath::Unavailable);
 }
+
+#[test]
+fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-parked",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &ModelAccess::default(), &action).unwrap(),
+            Outcome::Applied
+        );
+    }
+    tx.commit().unwrap();
+    let live = std::sync::Arc::new(std::sync::Mutex::new(None::<ModelAccess>));
+    let source = live.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(move || source.lock().unwrap().clone()),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    team.tick().unwrap();
+    let parked = status(&connection, &setup).unwrap();
+    assert_eq!(
+        parked
+            .messages
+            .iter()
+            .map(|m| (m.author, m.state, m.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+            (
+                MessageAuthor::Engine,
+                MessageState::Note,
+                "The master could not start: Needs a pool."
+            ),
+        ]
+    );
+    assert_eq!(parked.tasks[0].status, TaskStatus::NeedsPool);
+    assert!(parked.agents.is_empty());
+
+    *live.lock().unwrap() = Some(access("team-parked", &["local-a"]));
+    team.tick().unwrap();
+    let waiting = status(&connection, &setup).unwrap();
+    assert_eq!(
+        waiting.tasks[0].status,
+        TaskStatus::Queued,
+        "a usable pool member releases the task"
+    );
+    assert!(
+        waiting.agents.is_empty(),
+        "codex has no registered executable, so nothing starts"
+    );
+    assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
