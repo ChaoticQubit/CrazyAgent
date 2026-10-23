@@ -1,7 +1,7 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
-import type { HarnessEntry } from "../../api";
+import type { HarnessEntry, PoolSummary } from "../../api";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
@@ -157,6 +157,14 @@ export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
 export function masterMissingLine(harnesses: HarnessEntry[] | null, master: string): string | null {
   const entry = harnesses?.find((harness) => harness.id === master);
   return entry?.status.kind === "not_installed" ? `${entry.name} isn't installed on this Mac.` : null;
+}
+
+/** The Needs you line when accounts in the project's pool need to sign in again.
+ * Input: the pool's summary, if known. Output: the line, or null when none needs it. */
+export function signInLine(pool: PoolSummary | undefined): string | null {
+  const count = pool?.members.filter((member) => member.status === "not_signed_in").length ?? 0;
+  if (!pool || count === 0) return null;
+  return count === 1 ? `1 account in ${pool.name} isn't signed in.` : `${count} accounts in ${pool.name} aren't signed in.`;
 }
 
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);

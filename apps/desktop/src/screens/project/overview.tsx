@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { nextGeneration } from "../../api";
+import { nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadProjectMcpServers, loadProjectMemories, loadProjectSkills, receiptState, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
@@ -9,7 +9,7 @@ import { poolSummary } from "../new-project/wizard";
 import { onFact, useList } from "./plugins";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, suggestedLine, tildePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, signInLine, suggestedLine, tildePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -43,6 +43,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [allActivity, setAllActivity] = useState(false);
   const [skills] = useList(() => loadProjectSkills(data.id), data.id);
   const [servers] = useList(() => loadProjectMcpServers(data.id), data.id);
+  const [summaries] = useList(poolSummaries, data.id);
+  const signIn = signInLine(summaries?.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined);
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
     const result = await retryResearch(data.id, job.id, nextGeneration());
@@ -55,9 +57,11 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }
   return <div className="pj-overview">
     <div className="pj-stack">
-      {(waiting || suggested > 0) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
+      {(waiting || suggested > 0 || signIn) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
         {waiting && <div className="pj-need"><span>{displayText(waitingLine(jobs))}</span>
           <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>}
+        {signIn && <div className="pj-need"><span>{displayText(signIn)}</span>
+          <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Sign in again</button></div>}
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}

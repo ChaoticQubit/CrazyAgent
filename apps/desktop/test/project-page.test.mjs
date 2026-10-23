@@ -291,3 +291,12 @@ test("only the brief offers Edit, which opens the project details it is written 
   const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: documentOnly } }));
   assert.doesNotMatch(markup, />Edit</);
 });
+
+test("Needs you names the project's pool accounts that aren't signed in", () => {
+  const member = (id, status) => ({ id, kind: "chatgpt", provider: "openai", status, status_label: "" });
+  const pool = (members) => ({ id: "pool-1", name: "Main pool", summary: "", members, project_count: 1 });
+  assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "not_signed_in")])), "1 account in Main pool isn't signed in.");
+  assert.equal(research.signInLine(pool([member("a", "not_signed_in"), member("b", "not_signed_in"), member("c", "set_up")])), "2 accounts in Main pool aren't signed in.");
+  assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "set_up")])), null);
+  assert.equal(research.signInLine(undefined), null);
+});
