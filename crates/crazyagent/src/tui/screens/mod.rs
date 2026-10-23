@@ -126,6 +126,10 @@ impl ProjectTab {
     }
 }
 
+/// The sentence Quit shows when a New project draft would be lost, whether the
+/// wizard is open or its draft was kept after leaving it.
+pub const DRAFT_LOSS: &str = "Your new project draft will be lost.";
+
 /// A place the owner can go to; the registry builds its screen.
 /// Input: from Go to, Home and Settings. Output: `open` returns its screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -251,7 +255,7 @@ pub trait Screen {
     /// The sentence Quit shows for this screen's unsaved work.
     /// Input: none. Output: a plain sentence; read only while `draft` is true.
     fn loss(&self) -> &'static str {
-        "Your new project draft will be lost."
+        DRAFT_LOSS
     }
 
     /// The place this screen stands for, used by Go to to avoid duplicates.

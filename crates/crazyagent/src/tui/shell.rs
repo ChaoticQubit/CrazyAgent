@@ -5,8 +5,9 @@ use super::frame::{
     too_small,
 };
 use super::keys::{Global, Key, global};
+use super::screens::new_project_page::kept_draft;
 use super::screens::startup::Startup;
-use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
+use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::Arrival;
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::Role;
@@ -255,6 +256,7 @@ impl Shell {
             .rev()
             .find(|screen| screen.draft())
             .map(|screen| screen.loss())
+            .or_else(|| kept_draft().map(|_| DRAFT_LOSS))
     }
 
     fn ask_quit(&mut self) {
@@ -485,7 +487,9 @@ impl Shell {
                 }
                 Err(_) => {}
             },
-            Arrival::Owner(_) => super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx),
+            Arrival::Owner(_) => {
+                super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx)
+            }
             _ => {}
         }
         let count = self.stack.len();
@@ -1005,6 +1009,34 @@ mod tests {
         shell.key(Key::Right);
         shell.key(Key::Enter);
         assert!(shell.quitting(), "Quit still quits");
+    }
+
+    #[test]
+    fn quit_asks_while_a_new_project_draft_is_kept_after_leaving_the_wizard() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        assert_eq!(shell.place(), Some(Place::NewProject));
+        shell.key(Key::Esc);
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an empty wizard keeps no draft");
+
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        for character in "Fieldnotes".chars() {
+            shell.key(Key::Char(character));
+        }
+        shell.key(Key::Esc);
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+        assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(ask.loss, Some(DRAFT_LOSS)),
+            _ => panic!("a kept draft asks first"),
+        }
+        assert!(!shell.quitting());
     }
 
     #[test]
