@@ -20,6 +20,7 @@ mod account_setup;
 mod accounts;
 mod harnesses;
 pub mod master;
+pub mod memory;
 mod model_access;
 mod native_auth;
 pub mod project_setup;
@@ -457,6 +458,27 @@ impl NativeBridge {
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },
             } => ("memory_review", None, None),
+            OwnerMutation::Memory { action } => match action {
+                crazyagent::memory::library::LibraryAction::Add { scope, .. } => (
+                    "memory_add",
+                    match scope {
+                        crazyagent::memory::library::MemoryScope::Global => None,
+                        crazyagent::memory::library::MemoryScope::Project { project_id } => {
+                            Some(project_id.as_str().to_owned())
+                        }
+                    },
+                    None,
+                ),
+                crazyagent::memory::library::LibraryAction::Promote { project_id, .. } => {
+                    ("memory_promote", Some(project_id.as_str().to_owned()), None)
+                }
+                crazyagent::memory::library::LibraryAction::Delete { .. } => {
+                    ("memory_delete", None, None)
+                }
+                crazyagent::memory::library::LibraryAction::Forget { project_id, .. } => {
+                    ("memory_forget", Some(project_id.as_str().to_owned()), None)
+                }
+            },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
@@ -890,7 +912,7 @@ fn rejection_code(code: &str) -> &'static str {
         "context_item_missing" => "context_item_missing",
         "knowledge_entry_missing" => "knowledge_entry_missing",
         "knowledge_version_conflict" => "knowledge_version_conflict",
-        _ => "owner_rejected",
+        _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),
     }
 }
 

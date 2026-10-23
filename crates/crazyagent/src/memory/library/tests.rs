@@ -610,6 +610,62 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     let rendered = approved.render();
     assert!(rendered.contains(project_note) && rendered.contains(global_note));
 
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(other.clone(), entry.id.clone(), next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_missing"),
+        "a memory is deleted only from its own project"
+    );
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(owner.project_memories(meals.clone(), None).await.unwrap().is_empty());
+    assert_eq!(
+        tables_holding(&engine.database(), "households plan meals"),
+        ["memory_library"],
+        "only the global copy the owner promoted keeps the research text"
+    );
+    let forgotten = approved_direct(&engine, &meals);
+    assert!(
+        forgotten
+            .items
+            .iter()
+            .all(|item| item.kind != ApprovedKind::Research)
+    );
+    assert!(forgotten.items.iter().any(|item| item.text == entry.text
+        && item.scope == ApprovedScope::Global
+        && item.kind == ApprovedKind::Promoted));
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_missing")
+    );
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "research deleted for good can be saved again"
+    );
+    let approved = owner.approved_memories(meals.clone()).await.unwrap();
+
     let secret = globals.items[0].clone();
     assert_eq!(secret.text, secret_note);
     drop(owner);

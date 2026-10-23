@@ -95,6 +95,22 @@ impl OwnerController {
             .await
     }
 
+    /// Deletes one project memory for good, with the saved source text only it used.
+    /// Takes the project and entry id and the client generation. A copy already
+    /// promoted to global memory stays until it is deleted there.
+    pub async fn forget_memory(
+        &mut self,
+        project_id: ProjectId,
+        entry_id: RequestId,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        let action = LibraryAction::Forget {
+            project_id,
+            entry_id,
+        };
+        self.change_memory(action, generation).await
+    }
+
     /// Sends one validated saved-memory change as a retained owner mutation.
     /// Takes the action and the client generation. Returns the owner response.
     pub async fn change_memory(

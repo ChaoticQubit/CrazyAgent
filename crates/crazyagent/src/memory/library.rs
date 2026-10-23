@@ -18,6 +18,7 @@ const TEXT_BYTES_MAX: usize = 4096;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 8192;
 const RENDER_HEADER_BYTES_MAX: usize = 1024;
 const RESEARCH_ROWS_MAX: i64 = 4096;
+const FORGET_ROWS_MAX: i64 = 16384;
 
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_library (
     ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +95,10 @@ pub enum LibraryAction {
     Delete {
         memory_id: RequestId,
     },
+    Forget {
+        project_id: ProjectId,
+        entry_id: RequestId,
+    },
 }
 
 impl LibraryAction {
@@ -103,7 +108,7 @@ impl LibraryAction {
         match self {
             Self::Add { text, .. } => validate_note(text),
             Self::Promote { version: 0, .. } => Err(error("memory_changed")),
-            Self::Promote { .. } | Self::Delete { .. } => Ok(()),
+            Self::Promote { .. } | Self::Delete { .. } | Self::Forget { .. } => Ok(()),
         }
     }
 }
@@ -309,6 +314,10 @@ pub(crate) fn execute(
             version,
         } => promote(tx, config, project_id, entry_id, *version, revision),
         LibraryAction::Delete { memory_id } => delete(tx, memory_id),
+        LibraryAction::Forget {
+            project_id,
+            entry_id,
+        } => forget(tx, project_id, entry_id),
     }
 }
 
@@ -473,6 +482,114 @@ fn delete(tx: &Transaction<'_>, id: &RequestId) -> Result<Outcome, EngineError> 
     }
     assert_eq!(count, 1);
     assert!(get(tx, id)?.is_none());
+    Ok(Outcome::Applied)
+}
+
+fn bodies<T: serde::de::DeserializeOwned>(
+    tx: &Transaction<'_>,
+    sql: &str,
+    project: &ProjectId,
+) -> Result<Vec<T>, EngineError> {
+    let mut statement = tx.prepare(sql).map_err(error)?;
+    let rows = statement
+        .query_map(params![project.as_str(), FORGET_ROWS_MAX], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(error)?;
+    let mut values = Vec::new();
+    for body in rows {
+        values.push(serde_json::from_str(&body.map_err(error)?).map_err(error)?);
+    }
+    if values.len() as i64 >= FORGET_ROWS_MAX {
+        return Err(error("memory_forget_bounds"));
+    }
+    Ok(values)
+}
+
+fn forget(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    entry_id: &RequestId,
+) -> Result<Outcome, EngineError> {
+    let Some(entry) = load_entry(tx, entry_id)? else {
+        return rejected("memory_missing");
+    };
+    if &entry.project_id != project {
+        return rejected("memory_missing");
+    }
+    let versions = tx
+        .execute("DELETE FROM knowledge_entries WHERE id=?1", [entry_id.as_str()])
+        .map_err(error)?;
+    tx.execute("DELETE FROM knowledge_heads WHERE id=?1", [entry_id.as_str()])
+        .map_err(error)?;
+    tx.execute("DELETE FROM knowledge_globals WHERE entry=?1", [entry_id.as_str()])
+        .map_err(error)?;
+    let remaining: Vec<KnowledgeEntry> = bodies(
+        tx,
+        "SELECT body FROM knowledge_entries WHERE project=?1 LIMIT ?2",
+        project,
+    )?;
+    if !remaining
+        .iter()
+        .any(|other| other.nomination_id == entry.nomination_id)
+    {
+        tx.execute(
+            "DELETE FROM knowledge_nominations WHERE id=?1 AND project=?2",
+            params![entry.nomination_id.as_str(), project.as_str()],
+        )
+        .map_err(error)?;
+    }
+    let nominations: Vec<super::Nomination> = bodies(
+        tx,
+        "SELECT body FROM knowledge_nominations WHERE project=?1 LIMIT ?2",
+        project,
+    )?;
+    let mut dropped = BTreeSet::new();
+    for activity in &entry.activity_ids {
+        if nominations
+            .iter()
+            .any(|n| n.input.activity_ids.contains(activity))
+        {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM knowledge_activity WHERE id=?1 AND project=?2",
+            params![activity.as_str(), project.as_str()],
+        )
+        .map_err(error)?;
+        dropped.insert(activity.clone());
+    }
+    let jobs: Vec<super::ExtractionJob> = bodies(
+        tx,
+        "SELECT body FROM knowledge_jobs WHERE project=?1 LIMIT ?2",
+        project,
+    )?;
+    for job in jobs
+        .iter()
+        .filter(|job| job.activity_ids.iter().any(|id| dropped.contains(id)))
+    {
+        tx.execute("DELETE FROM knowledge_jobs WHERE id=?1", [job.id.as_str()])
+            .map_err(error)?;
+    }
+    for source in &entry.source_ids {
+        let captured: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_activity WHERE project=?1 AND source=?2)",
+                params![project.as_str(), source.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if !captured && !remaining.iter().any(|other| other.source_ids.contains(source)) {
+            tx.execute(
+                "DELETE FROM knowledge_sources WHERE project=?1 AND id=?2 AND revoked=0",
+                params![project.as_str(), source.as_str()],
+            )
+            .map_err(error)?;
+        }
+    }
+    assert!(versions >= 1);
+    assert!(load_entry(tx, entry_id)?.is_none());
+    assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
 
