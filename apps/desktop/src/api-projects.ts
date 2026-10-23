@@ -4,7 +4,7 @@ import {
   openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage,
+  AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -264,32 +264,7 @@ export function saveResearchToMemory(id: string, research: ResearchKind, section
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
-export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
-export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
-
-export interface TeamAgent {
-  id: number;
-  role: "master" | "sub";
-  harness: string;
-  status: TeamAgentStatus;
-  task: number | null;
-  turns: number;
-  problem: string | null;
-}
-
-export interface TeamTask {
-  id: number;
-  harness: string;
-  prompt: string;
-  status: TeamTaskStatus;
-  agent: number | null;
-  problem: string | null;
-}
-
-export interface TeamStatus {
-  agents: TeamAgent[];
-  tasks: TeamTask[];
-}
+export type { TeamAgent, TeamAgentStatus, TeamStatus, TeamTask, TeamTaskStatus } from "./engine-client";
 
 /** Reads the project's live team: its agents and the tasks the master or owner handed out.
  * Input: the project id. Output: the team status. */
