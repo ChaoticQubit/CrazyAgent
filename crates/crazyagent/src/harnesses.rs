@@ -223,11 +223,18 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
     entries
 }
 
-/// Finds a harness spec by its catalog id.
+/// Finds a harness spec by its catalog id or by the harness name stored on a
+/// model connection or team plan ("claude" for Claude Code).
 /// Input: id such as "codex". Output: the spec, or None for an unknown id.
 pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
+    let id = CONNECTION_NAMES
+        .iter()
+        .find(|(name, _)| *name == id)
+        .map_or(id, |(_, catalog)| catalog);
     specs().iter().find(|spec| spec.id == id)
 }
+
+const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
 
 const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";
 const ALL_ACCOUNTS: &[AccountKind] = &[

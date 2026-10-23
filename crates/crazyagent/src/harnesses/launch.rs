@@ -197,7 +197,7 @@ fn failure(code: &str) -> LaunchError {
 pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     validate(request)?;
     let home = request.account.home();
-    let (arguments, environment) = match request.harness.as_str() {
+    let (arguments, environment) = match harness_id(request) {
         "codex" => codex_invocation(request)?,
         "claude-code" => claude_invocation(request),
         _ => return Err(failure("launch_harness_unsupported")),
@@ -337,6 +337,10 @@ fn claude_invocation(request: &LaunchRequest) -> Invocation {
     (arguments, environment)
 }
 
+fn harness_id(request: &LaunchRequest) -> &'static str {
+    super::spec(&request.harness).map_or("", |spec| spec.id)
+}
+
 fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
@@ -440,7 +444,7 @@ enum Driver {
 
 impl Driver {
     fn new(request: &LaunchRequest) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
-        match request.harness.as_str() {
+        match harness_id(request) {
             "codex" => {
                 let mut protocol = CodexProtocol::new();
                 let start = protocol
