@@ -40,8 +40,8 @@ pub(super) struct Capture {
 }
 
 enum MasterHost {
-    Codex(CodexHost),
-    Claude(ClaudeHost),
+    Codex(Box<CodexHost>),
+    Claude(Box<ClaudeHost>),
 }
 
 struct ActiveMaster {
@@ -370,13 +370,13 @@ impl OwnerRuntimeHandle {
         let account_ref = prepared.profile.binding().connection.account_ref.clone();
         let resources = prepared.attempt.request.route.resources.clone();
         let host = if harness == NativeHarness::Claude {
-            MasterHost::Claude(
+            MasterHost::Claude(Box::new(
                 ClaudeHost::spawn(launch.command, profile, action, account_ref, resources).await?,
-            )
+            ))
         } else {
-            MasterHost::Codex(
+            MasterHost::Codex(Box::new(
                 CodexHost::spawn(launch.command, profile, action, account_ref, resources).await?,
-            )
+            ))
         };
         let mut active = ActiveMaster {
             host,
