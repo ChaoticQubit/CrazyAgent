@@ -314,6 +314,10 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {poolValue && poolValue.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
             <button type="button" className="btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
           {poolValue && <PoolPicker name="np-pool" pools={poolValue} summaries={summaries} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}
+          {poolValue && poolValue.length > 0 && <div className="pj-stack-s">
+            <Button variant="quiet" icon="plus" onClick={() => navigate("/settings/pools?action=new")}>New pool</Button>
+            <span className="pj-help">Your answers here are kept. Come back with New project in the sidebar.</span>
+          </div>}
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>
