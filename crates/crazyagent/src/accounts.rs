@@ -193,10 +193,10 @@ fn spec(provider: Provider, method: SignInMethod) -> Option<Spec> {
         (Provider::Claude | Provider::AnthropicApi, _) => {
             keyed("anthropic-messages", "anthropic", ANTHROPIC_URL)
         }
-        (Provider::Openrouter, _) => keyed("openai-compatible", "openrouter", OPENROUTER_URL),
+        (Provider::Openrouter, _) => keyed("openai-chat", "openrouter", OPENROUTER_URL),
         (Provider::OpenaiCompatible, _) => Spec {
             harness: "rcli",
-            protocol: "openai-compatible",
+            protocol: "openai-chat",
             author: "openai-compatible",
             url: Field::Required,
             url_preset: None,

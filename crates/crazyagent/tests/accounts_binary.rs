@@ -1,12 +1,22 @@
 use crazyagent::accounts::{AccountDraft, AccountView, Provider, SignInMethod};
-use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerClientKind};
+use crazyagent::client_controller::OwnerController;
+use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
+use crazyagent::engine::owner::{
+    AccountProfileOutcome, AccountProfileRequest, AccountSecret, ModelAccessCollection,
+    ModelAccessRecord, NativeAuthScope, OwnerClient, OwnerClientKind, OwnerData, OwnerMutation,
+    OwnerRead, OwnerResponse, OwnerResult,
+};
+use crazyagent::master_session::{MasterOwnerAction, MasterTurnPhase, MasterTurnView};
+use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 struct Engine {
     child: Child,
@@ -15,6 +25,10 @@ struct Engine {
 
 impl Engine {
     fn start(root: &Path, run: &str) -> Self {
+        Self::start_with(root, run, &[])
+    }
+
+    fn start_with(root: &Path, run: &str, extra: &[&OsStr]) -> Self {
         let stdout = root.join(format!("{run}.stdout"));
         let child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg("engine")
@@ -23,6 +37,7 @@ impl Engine {
             .arg(root.join("project.toml"))
             .arg("engine.sock")
             .arg("--writable-settings")
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(File::create(&stdout).unwrap())
             .stderr(File::create(root.join(format!("{run}.stderr"))).unwrap())
@@ -238,4 +253,362 @@ async fn real_engine_binary_keeps_accounts_and_keys_across_restart() {
         "only the private key file may hold the key, not config, database, stdout or stderr: {held:?}"
     );
     assert!(held[0].parent().unwrap().ends_with("account-keys"));
+}
+
+struct Retained(Option<tempfile::TempDir>);
+
+impl Drop for Retained {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(root) = self.0.take()
+        {
+            eprintln!(
+                "master accounts fixture retained at {}",
+                root.keep().display()
+            );
+        }
+    }
+}
+
+fn rcli_bundle() -> PathBuf {
+    let bundle = std::env::var_os("CRAZYAGENT_RCLI")
+        .map(PathBuf::from)
+        .expect("UNAVAILABLE: set CRAZYAGENT_RCLI to the verified crazyagent-rcli bundle");
+    assert!(
+        bundle.is_absolute() && bundle.is_file(),
+        "UNAVAILABLE: {bundle:?}"
+    );
+    bundle
+}
+
+fn git_repository(path: &Path) -> String {
+    std::fs::create_dir(path).unwrap();
+    std::fs::write(path.join("README.md"), "# hello\n").unwrap();
+    for arguments in [
+        &["init", "-q", "-b", "main"][..],
+        &["add", "README.md"],
+        &[
+            "-c",
+            "user.name=owner",
+            "-c",
+            "user.email=owner@example.invalid",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+    path.to_str().unwrap().to_owned()
+}
+
+async fn key_gate(listener: TcpListener, key: String, seen: Arc<Mutex<Vec<bool>>>) {
+    loop {
+        let Ok((mut client, _)) = listener.accept().await else {
+            return;
+        };
+        let key = key.clone();
+        let seen = seen.clone();
+        tokio::spawn(async move {
+            let mut head = Vec::new();
+            let mut buffer = [0; 4096];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let Ok(size) = client.read(&mut buffer).await else {
+                    return;
+                };
+                if size == 0 || head.len() > 65536 {
+                    return;
+                }
+                head.extend_from_slice(&buffer[..size]);
+            }
+            let expected = format!("Bearer {key}");
+            let allowed = String::from_utf8_lossy(&head).split("\r\n").any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && value.trim() == expected
+                })
+            });
+            seen.lock().unwrap().push(allowed);
+            if !allowed {
+                let body = r#"{"error":{"message":"missing or wrong key"}}"#;
+                let reply = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = client.write_all(reply.as_bytes()).await;
+                return;
+            }
+            let Ok(mut upstream) = TcpStream::connect("127.0.0.1:11434").await else {
+                return;
+            };
+            if upstream.write_all(&head).await.is_ok() {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            }
+        });
+    }
+}
+
+async fn apply(controller: &mut OwnerController, generation: &mut u64, mutation: OwnerMutation) {
+    controller.read(OwnerRead::Capabilities).await.unwrap();
+    *generation += 1;
+    controller.begin_mutation(mutation, *generation).unwrap();
+    let response = controller.send_pending().await.unwrap();
+    assert!(
+        matches!(&response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{response:?}"
+    );
+}
+
+async fn source(controller: &mut OwnerController) -> (crazyagent::protocol::ConfigId, String) {
+    let state = controller
+        .read(OwnerRead::ModelAccessPage {
+            collection: ModelAccessCollection::Accounts,
+            cursor: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
+        panic!("model access source required")
+    };
+    (state.config_id, source_hash)
+}
+
+async fn finished_turn(
+    controller: &mut OwnerController,
+    project_id: &ProjectId,
+    session_id: &crazyagent::protocol::SessionId,
+) -> MasterTurnView {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    loop {
+        let state = controller
+            .read(OwnerRead::ProjectMasterTurns {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                cursor: None,
+                limit: 16,
+            })
+            .await
+            .unwrap();
+        let OwnerData::ProjectMasterTurns { page } = state.data else {
+            panic!("master turns required")
+        };
+        if let Some(turn) = page.turns.into_iter().find(|turn| {
+            matches!(
+                turn.phase,
+                MasterTurnPhase::Succeeded
+                    | MasterTurnPhase::Failed
+                    | MasterTurnPhase::Cancelled
+                    | MasterTurnPhase::Uncertain
+                    | MasterTurnPhase::Blocked
+            )
+        }) {
+            return turn;
+        }
+        assert!(Instant::now() < deadline, "master turn deadline");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through_rcli() {
+    let bundle = rcli_bundle();
+    let root = tempfile::Builder::new()
+        .prefix("ca-macct-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::fs::canonicalize(root.path()).unwrap();
+    let (_guard, root) = (Retained(Some(root)), path);
+    let global = root.join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let secret = format!("sk-gate-{}", std::process::id());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gate_url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gate = tokio::spawn(key_gate(listener, secret.clone(), seen.clone()));
+
+    let mut engine = Engine::start_with(
+        &root,
+        "master",
+        &[OsStr::new("--rcli-executable"), bundle.as_os_str()],
+    );
+    let (owner, identity) =
+        OwnerClient::discover(&root, OwnerClientKind::Desktop, Duration::from_secs(20))
+            .await
+            .unwrap();
+    let keyed = owner
+        .add_account(
+            AccountDraft {
+                provider: Provider::OpenaiCompatible,
+                method: SignInMethod::Url,
+                name: "Key gate".into(),
+                url: Some(gate_url),
+                model: Some("qwen2.5:0.5b".into()),
+            },
+            Some(AccountSecret::new(secret.as_bytes().to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    let local = owner
+        .add_account(
+            AccountDraft {
+                provider: Provider::Local,
+                method: SignInMethod::Url,
+                name: "Laptop".into(),
+                url: None,
+                model: Some("qwen2.5:0.5b".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let mut controller =
+        OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(20))
+            .await
+            .unwrap();
+    let mut generation = 0;
+    for (account, name) in [(&keyed, "gate"), (&local, "local")] {
+        let project_id = ProjectId::new(format!("{name}-project")).unwrap();
+        let repository = git_repository(&root.join(format!("{name}-repository")));
+        apply(
+            &mut controller,
+            &mut generation,
+            OwnerMutation::CreateProject {
+                project_id: project_id.clone(),
+                spec: ProjectSpec {
+                    name: format!("{name} project"),
+                    repositories: vec![repository],
+                },
+            },
+        )
+        .await;
+        let (config_id, source_hash) = source(&mut controller).await;
+        apply(
+            &mut controller,
+            &mut generation,
+            OwnerMutation::ModelAccess {
+                expected_config_id: config_id,
+                expected_source_hash: source_hash,
+                edit: ModelAccessEdit::CreatePool {
+                    pool: AccountPool {
+                        id: CredentialRef::new(format!("{name}-pool")).unwrap(),
+                        members: vec![account.id.clone()],
+                        projects: vec![CredentialRef::new(project_id.as_str()).unwrap()],
+                        roles: vec![CredentialRef::new("project_leader").unwrap()],
+                        fallback_allowed: false,
+                        provider_quota_policy: ProviderQuotaPolicy::BoundedAttempt,
+                    },
+                },
+            },
+        )
+        .await;
+        let record = controller
+            .read(OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Connections,
+                id: account.id.clone(),
+            })
+            .await
+            .unwrap();
+        let OwnerData::ModelAccessRecord {
+            source_hash,
+            record: ModelAccessRecord::Connection { .. },
+            ..
+        } = record.data
+        else {
+            panic!("the pooled account must be a config connection")
+        };
+        let configured = owner
+            .configure_account_profile(
+                AccountProfileRequest {
+                    request_id: RequestId::new(format!("configure-{name}")).unwrap(),
+                    scope: NativeAuthScope {
+                        expected_database_instance: identity.database_instance().to_owned(),
+                        connection: account.id.clone(),
+                        expected_config_id: record.config_id,
+                        expected_source_hash: source_hash,
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                configured.outcome,
+                AccountProfileOutcome::ConfiguredOnly { .. }
+            ),
+            "{configured:?}"
+        );
+        let open = crazyagent::tui::default_master_open(&mut controller, &project_id)
+            .await
+            .unwrap();
+        apply(
+            &mut controller,
+            &mut generation,
+            OwnerMutation::ProjectMaster { action: open },
+        )
+        .await;
+        let state = controller
+            .read(OwnerRead::ProjectMaster {
+                project_id: project_id.clone(),
+            })
+            .await
+            .unwrap();
+        let OwnerData::ProjectMaster {
+            session: Some(session),
+        } = state.data
+        else {
+            panic!("open master session required")
+        };
+        apply(
+            &mut controller,
+            &mut generation,
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: project_id.clone(),
+                    session_id: session.session_id.clone(),
+                    text: "Say hi in five words.".into(),
+                },
+            },
+        )
+        .await;
+        let turn = finished_turn(&mut controller, &project_id, &session.session_id).await;
+        let gated = seen.lock().unwrap().clone();
+        assert_eq!(
+            turn.phase,
+            MasterTurnPhase::Succeeded,
+            "{name}: key gate saw {gated:?} (true = saved key present); turn {:?} reason {:?}",
+            turn.phase,
+            turn.reason
+        );
+        let reply = turn.reply.expect("a real model reply");
+        assert!(!reply.text.trim().is_empty(), "{name}: empty reply");
+    }
+    let gated = seen.lock().unwrap().clone();
+    assert!(
+        !gated.is_empty() && gated.iter().all(|allowed| *allowed),
+        "every request through the key gate must carry the saved key: {gated:?}"
+    );
+    drop(controller);
+    drop(owner);
+    engine.stop();
+    gate.abort();
+
+    for held in holders(&root, secret.as_bytes()) {
+        let relative = held.strip_prefix(&root).unwrap();
+        assert!(
+            held.parent().unwrap().ends_with("account-keys")
+                || relative.ends_with(".backboard/keys.json"),
+            "the key may live only in its key file and the harness's private key store: {relative:?}"
+        );
+    }
 }
