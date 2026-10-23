@@ -287,6 +287,10 @@ fn local_checks_and_short_lines() {
         server_word(ServerStatus::WaitingForApproval),
         "Needs approval"
     );
+    assert_eq!(
+        plugin_plain("server_changed"),
+        "This server changed. Review it again before approving."
+    );
 }
 
 #[test]

@@ -123,7 +123,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         | "plugin_store_unavailable"
         | "plugin_store_unsafe"
         | "skill_store_unavailable" => "The engine cannot save plugins right now.",
-        other => plain(other),
+        other => crate::plugins::plain_problem(other).unwrap_or_else(|| plain(other)),
     }
 }
 
