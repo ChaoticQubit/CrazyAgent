@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
 import { nextGeneration } from "../../api";
-import { failureCopy, loadProjectMemories, receiptState, retryResearch } from "../../api-projects";
+import { failureCopy, loadProjectMcpServers, loadProjectMemories, loadProjectSkills, receiptState, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
+import { onFact, useList } from "./plugins";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, suggestedLine, tildePath, waitingLine } from "./research";
@@ -40,6 +41,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
   const [allActivity, setAllActivity] = useState(false);
+  const [skills] = useList(() => loadProjectSkills(data.id), data.id);
+  const [servers] = useList(() => loadProjectMcpServers(data.id), data.id);
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
     const result = await retryResearch(data.id, job.id, nextGeneration());
@@ -93,7 +96,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {setup && <div><dt>Team</dt><dd>Master: {harnessName(harnesses, setup.team.master)}</dd>
           <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : "No agents beside the master"}</dd></div>}
         {setup && setup.documents.length > 0 && <div><dt>Documents</dt><dd>{setup.documents.length} attached</dd></div>}
-        <div><dt>Skills and MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=skills`)}>Project settings</button></dd></div>
+        <div><dt>Skills</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=skills`)}>{onFact(skills, "skill", "skills") ?? "Project settings"}</button></dd></div>
+        <div><dt>MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=mcp`)}>{onFact(servers, "server", "servers") ?? "Project settings"}</button></dd></div>
       </dl>
     </aside>
   </div>;

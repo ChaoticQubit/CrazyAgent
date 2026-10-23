@@ -46,3 +46,12 @@ test("both sections render their loading state without bridge effects", () => {
   assert.match(renderToStaticMarkup(createElement(plugins.ProjectSkills, { data })), /<h2>Skills<\/h2>[\s\S]*Loading skills/);
   assert.match(renderToStaticMarkup(createElement(plugins.ProjectServers, { data })), /<h2>MCP servers<\/h2>[\s\S]*Loading MCP servers/);
 });
+
+test("the Overview fact counts what is on in this project, or falls back to a plain link", () => {
+  const on = (on_here, enabled = true) => ({ on_here, enabled });
+  assert.equal(plugins.onFact({ kind: "ok", value: [on(true), on(false), on(null), on(null, false)] }, "skill", "skills"), "2 skills on");
+  assert.equal(plugins.onFact({ kind: "ok", value: [on(true)] }, "skill", "skills"), "1 skill on");
+  assert.equal(plugins.onFact({ kind: "ok", value: [] }, "skill", "skills"), "None on");
+  assert.equal(plugins.onFact({ kind: "not_ready" }, "skill", "skills"), null);
+  assert.equal(plugins.onFact(undefined, "skill", "skills"), null);
+});

@@ -21,6 +21,15 @@ export function onHere(item: { on_here: boolean | null; enabled: boolean }): boo
   return item.on_here ?? item.enabled;
 }
 
+/** The Overview fact for skills or MCP servers: how many are on in this project.
+ * Inputs: the engine list, and the singular and plural words. Output: the line, or null
+ * while it is loading or not in this build. */
+export function onFact(list: Result<{ on_here: boolean | null; enabled: boolean }[]> | undefined, one: string, many: string): string | null {
+  if (list?.kind !== "ok") return null;
+  const count = list.value.filter(onHere).length;
+  return count === 0 ? "None on" : `${count} ${count === 1 ? one : many} on`;
+}
+
 /** Maps an MCP server status to the design tone for its status word.
  * Input: the engine status. Output: the tone. */
 export function serverTone(status: McpServerStatus): Tone {
@@ -41,7 +50,9 @@ export function skillFolderError(folder: string): string | null {
   return null;
 }
 
-function useList<T>(load: () => Promise<Result<T[]>>, id: string): [Result<T[]> | undefined, () => void] {
+/** Loads one engine list and reloads it on request. Inputs: the loader and the project id.
+ * Output: the latest result and a reload function. */
+export function useList<T>(load: () => Promise<Result<T[]>>, id: string): [Result<T[]> | undefined, () => void] {
   const [list, setList] = useState<Result<T[]>>();
   const [round, setRound] = useState(0);
   useEffect(() => {
