@@ -331,14 +331,14 @@ export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: P
   };
 }
 
-/** Writes the line above the footer that says what Create project will do.
- * Inputs: the draft and the chosen pool's name, or null. Output: one sentence. */
 /** The name the owner gave a pool, which the engine stores beside its id; older pools have
  * only an id. Input: the pool record. Output: the name to show. */
 export function poolName(pool: AccountPool & { name?: string }): string {
   return pool.name?.trim() || pool.id;
 }
 
+/** Writes the line above the footer that says what Create project will do.
+ * Inputs: the draft and the chosen pool's name, or null. Output: one sentence. */
 export function summary(draft: ProjectDraft, pool: string | null): string {
   const name = draft.name.trim() || "this project";
   if (!pool) return `Creating ${name} saves it. Research starts when you choose a pool.`;
