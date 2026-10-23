@@ -41,6 +41,9 @@ const CODEX_TOOLS_ON: [&str; 5] = [
     "features.plugins=false",
     "mcp_servers={}",
 ];
+
+type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
+
 const CLAUDE_COMMON: [&str; 14] = [
     "--print",
     "--verbose",
@@ -213,7 +216,7 @@ fn failure(code: &str) -> LaunchError {
 pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     validate(request)?;
     let home = request.account.home();
-    let (arguments, environment) = match request.harness.as_str() {
+    let (arguments, environment) = match harness_id(request) {
         "codex" => codex_invocation(request)?,
         "claude-code" => claude_invocation(request),
         _ => return Err(failure("launch_harness_unsupported")),
@@ -261,9 +264,7 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     Ok(command)
 }
 
-fn codex_invocation(
-    request: &LaunchRequest,
-) -> Result<(Vec<OsString>, Vec<(&'static str, OsString)>), LaunchError> {
+fn codex_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let mut configuration = vec!["cli_auth_credentials_store=\"file\"".to_owned()];
     let mut environment = vec![("CODEX_HOME", home.clone()), ("TMPDIR", home)];
@@ -306,7 +307,7 @@ fn codex_invocation(
     Ok((arguments, environment))
 }
 
-fn claude_invocation(request: &LaunchRequest) -> (Vec<OsString>, Vec<(&'static str, OsString)>) {
+fn claude_invocation(request: &LaunchRequest) -> Invocation {
     let home = request.account.home().as_os_str().to_owned();
     let mut arguments: Vec<OsString> = CLAUDE_COMMON.iter().map(OsString::from).collect();
     if let Some(model) = &request.model {
@@ -353,6 +354,10 @@ fn claude_invocation(request: &LaunchRequest) -> (Vec<OsString>, Vec<(&'static s
         }
     }
     (arguments, environment)
+}
+
+fn harness_id(request: &LaunchRequest) -> &'static str {
+    super::spec(&request.harness).map_or("", |spec| spec.id)
 }
 
 fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
@@ -458,7 +463,7 @@ enum Driver {
 
 impl Driver {
     fn new(request: &LaunchRequest) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
-        match request.harness.as_str() {
+        match harness_id(request) {
             "codex" => {
                 let mut protocol = CodexProtocol::new();
                 let start = protocol

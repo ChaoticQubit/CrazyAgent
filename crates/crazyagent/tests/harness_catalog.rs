@@ -1,4 +1,6 @@
-use crazyagent::harnesses::{AccountKind, HarnessStatus, Search, ToolControl, catalog, specs};
+use crazyagent::harnesses::{
+    AccountKind, HarnessStatus, Search, ToolControl, catalog, spec, specs,
+};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -188,4 +190,16 @@ fn entries_serialize_with_plain_wire_names() {
     assert_eq!(value["tools"]["kind"], "limited");
     assert!(value["tools"]["reason"].as_str().unwrap().len() > 10);
     assert_eq!(value["account_kinds"][0], "subscription");
+}
+
+#[test]
+fn connection_harness_names_resolve_to_their_catalog_entry() {
+    assert_eq!(spec("claude").unwrap().id, "claude-code");
+    assert_eq!(spec("claude-code").unwrap().id, "claude-code");
+    assert_eq!(spec("codex").unwrap().id, "codex");
+    assert!(spec("claude-codex").is_none());
+    assert!(spec("").is_none());
+    for listed in specs() {
+        assert_eq!(spec(listed.id).unwrap().id, listed.id);
+    }
 }

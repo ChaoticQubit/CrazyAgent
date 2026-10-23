@@ -153,6 +153,30 @@ fn api_key_reaches_only_the_child_environment_never_the_arguments() {
 }
 
 #[test]
+fn team_plan_claude_name_launches_claude_code() {
+    let home = private_dir("ca-launch-home-");
+    let work = private_dir("ca-launch-work-");
+    let subscription = || AccountBinding::Subscription {
+        home: home.path().to_path_buf(),
+    };
+    let canonical = command(&request(
+        "claude-code",
+        home.path(),
+        work.path(),
+        subscription(),
+    ))
+    .unwrap();
+    let mut named = request("claude-code", home.path(), work.path(), subscription());
+    named.harness = "claude".into();
+    let alias = command(&named).unwrap();
+    assert_eq!(alias.get_program(), canonical.get_program());
+    assert_eq!(arguments(&alias), arguments(&canonical));
+    assert_eq!(environment(&alias), environment(&canonical));
+    named.harness = "claude-codex".into();
+    assert_eq!(command(&named).unwrap_err().0, "launch_harness_unsupported");
+}
+
+#[test]
 fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let home = private_dir("ca-launch-home-");
     let work = private_dir("ca-launch-work-");
