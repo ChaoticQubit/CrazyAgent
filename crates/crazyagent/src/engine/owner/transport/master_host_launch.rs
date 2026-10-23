@@ -5,18 +5,24 @@ use crate::engine::io_error;
 use crate::engine::owner::{is_hex_id, random_id};
 use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
+use crate::sandbox::{
+    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
+const MASTER_TMP: &str = "tmp";
+const MASTER_PROFILE: &str = "sandbox.sb";
+const HTTPS_PORT: u16 = 443;
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const MASTER_CONFIG: [&str; 14] = [
     "model_provider=\"openai\"",
@@ -90,10 +96,19 @@ impl OwnerRuntimeHandle {
         } else {
             master_command(executable.verified_path()?, &home, &prepared.cwd, model)?
         };
+        let sandbox = master_sandbox(
+            &self.authority.root,
+            &runtime_ref,
+            &prepared.repository,
+            &prepared.cwd,
+            &home,
+            executable.verified_path()?,
+        )?;
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
         Ok(MasterHostLaunch {
             command,
+            sandbox,
             artifact_sha256,
             runtime_ref,
             capture_ref,
@@ -205,6 +220,57 @@ fn master_command(
     assert_eq!(command.get_program(), executable.as_os_str());
     assert_eq!(command.get_current_dir(), Some(cwd));
     Ok(command)
+}
+
+/// Builds and installs the Seatbelt boundary for one master turn. The master writes only
+/// in the project repository, its leased worktree, the account's managed home and the
+/// turn's own temp folder; it reads the harness install folder and the turn directory,
+/// and reaches only HTTPS model endpoints because its tools are off. Output: the
+/// installed sandbox, or `master_sandbox_unavailable` when any part is refused.
+fn master_sandbox(
+    root: &Root,
+    runtime_ref: &RequestId,
+    repository: &Path,
+    worktree: &Path,
+    home: &Path,
+    executable: &Path,
+) -> Result<InstalledSandbox, EngineError> {
+    let refused = |_: SandboxError| failure("master_sandbox_unavailable");
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let tmp = runtime.path.join(MASTER_TMP);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&tmp)
+        .map_err(io_error)?;
+    let home = std::fs::canonicalize(home).map_err(io_error)?;
+    let install = std::fs::canonicalize(executable)
+        .map_err(io_error)?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+    let sandbox = ProjectSandbox::new(
+        repository,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(HTTPS_PORT)]),
+    )
+    .and_then(|sandbox| sandbox.allow_worktree(worktree))
+    .and_then(|sandbox| sandbox.allow_read(&install))
+    .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+    .map_err(refused)?;
+    let installed =
+        InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    verify_master_runtime(root, &runtime, &name)?;
+    assert!(installed.profile().starts_with(&runtime.path));
+    assert!(
+        !installed
+            .sandbox()
+            .writable_roots()
+            .any(|writable| installed.profile().starts_with(writable))
+    );
+    Ok(installed)
 }
 
 pub(super) fn allocate_master_capture(root: &Root) -> Result<(RequestId, RequestId, File), EngineError> {
@@ -321,7 +387,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn private_root() -> tempfile::TempDir {
         let root = tempfile::Builder::new()
@@ -480,6 +546,177 @@ mod tests {
                 .join("instructions.md")
                 .exists()
         );
+    }
+
+    fn private_directory(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, capture_ref, capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+        )
+        .unwrap();
+        let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
+        let tmp = turn.join(MASTER_TMP);
+        assert_eq!(sandbox.profile(), turn.join(MASTER_PROFILE));
+        assert_eq!(
+            std::fs::read_to_string(sandbox.profile()).unwrap(),
+            sandbox.sandbox().profile()
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&tmp).unwrap().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            sandbox
+                .sandbox()
+                .writable_roots()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+            [
+                repository.as_path(),
+                home.as_path(),
+                tmp.as_path(),
+                worktree.as_path()
+            ]
+        );
+        assert!(
+            sandbox
+                .sandbox()
+                .profile()
+                .contains("(allow network-outbound (remote ip \"*:443\"))")
+        );
+        assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
+
+        let master = master_command(&executable, &home, &worktree, "admitted-model").unwrap();
+        let wrapped = sandbox.wrap(&master).unwrap();
+        assert_eq!(wrapped.get_program(), crate::sandbox::SANDBOX_EXEC);
+        let args = wrapped
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args[..3],
+            [
+                "-f",
+                sandbox.profile().to_str().unwrap(),
+                executable.to_str().unwrap()
+            ]
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
+        );
+        assert!(args.ends_with(&["app-server", "--listen", "stdio://"]));
+        assert_eq!(wrapped.get_current_dir(), Some(worktree.as_path()));
+        let environment = wrapped
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            environment,
+            BTreeMap::from([
+                ("CODEX_HOME", home.to_str().unwrap()),
+                ("HOME", home.to_str().unwrap()),
+                ("LANG", "C"),
+                ("LC_ALL", "C"),
+                ("PATH", "/usr/bin:/bin"),
+                ("TMPDIR", tmp.to_str().unwrap()),
+            ])
+        );
+
+        let run = |target: &Path| {
+            let mut harness = Command::new("/bin/sh");
+            harness
+                .arg("-c")
+                .arg("echo agent >> \"$0\"")
+                .arg(target)
+                .current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            child.status().unwrap().success()
+        };
+        for allowed in [
+            worktree.join("work.txt"),
+            repository.join("shared.txt"),
+            home.join("account.txt"),
+            tmp.join("scratch.txt"),
+        ] {
+            assert!(run(&allowed), "{}", allowed.display());
+            assert_eq!(std::fs::read_to_string(&allowed).unwrap(), "agent\n");
+        }
+        let profile_text = std::fs::read(sandbox.profile()).unwrap();
+        for refused in [
+            base.join("escape.txt"),
+            turn.join("escape.txt"),
+            turn.join(format!("capture-{}.jsonl", capture_ref.as_str())),
+            turn.join(MASTER_PROFILE),
+            install.join("codex"),
+        ] {
+            assert!(!run(&refused), "{}", refused.display());
+        }
+        assert!(!base.join("escape.txt").exists());
+        assert!(!turn.join("escape.txt").exists());
+        assert_eq!(capture.metadata().unwrap().len(), 0);
+        assert_eq!(std::fs::read(sandbox.profile()).unwrap(), profile_text);
+        assert_eq!(std::fs::read_to_string(&executable).unwrap(), "#!/bin/sh\n");
+
+        assert!(
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable
+            )
+            .is_err()
+        );
+        for (repository, worktree) in [
+            (base.join("missing"), worktree.clone()),
+            (repository.clone(), base.join("missing")),
+            (repository.clone(), base.join("..").join("worktrees")),
+        ] {
+            let (fresh, _, _) = allocate_master_capture(&root).unwrap();
+            assert_eq!(
+                master_sandbox(&root, &fresh, &repository, &worktree, &home, &executable)
+                    .unwrap_err()
+                    .0,
+                "master_sandbox_unavailable"
+            );
+            assert!(
+                !base
+                    .join(format!("master-runtime-{}", fresh.as_str()))
+                    .join(MASTER_PROFILE)
+                    .exists()
+            );
+        }
     }
 
     #[test]
