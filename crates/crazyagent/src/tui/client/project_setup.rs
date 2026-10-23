@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory::library::{LibraryQuery, LibraryView};
 use crate::project_setup::SetupAction;
 pub(in crate::tui) use crate::project_setup::{SetupQuery, SetupView};
 
@@ -91,6 +92,33 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )?,
+            SetupQuery::Library(query) => SetupView::Library(match query {
+                LibraryQuery::Page {
+                    scope,
+                    search,
+                    before,
+                } => LibraryView::Page(
+                    controller
+                        .memories(scope, search, before)
+                        .await
+                        .map_err(problem)?,
+                ),
+                LibraryQuery::View { memory_id } => {
+                    LibraryView::View(controller.memory(memory_id).await.map_err(problem)?)
+                }
+                LibraryQuery::Approved { project } => LibraryView::Approved(
+                    controller
+                        .approved_memories(project)
+                        .await
+                        .map_err(problem)?,
+                ),
+                LibraryQuery::Change { action, generation } => LibraryView::Changed(owner_result(
+                    controller
+                        .change_memory(action, generation)
+                        .await
+                        .map_err(problem)?,
+                )?),
+            }),
             SetupQuery::Change { action, generation } => {
                 let response = match action {
                     SetupAction::Create { .. } => {
@@ -127,14 +155,21 @@ impl NativeOwner {
 }
 
 fn changed(response: OwnerResponse) -> Result<SetupView, String> {
+    owner_result(response).map(SetupView::Changed)
+}
+
+fn owner_result(response: OwnerResponse) -> Result<crate::engine::owner::OwnerResult, String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
-            Ok(SetupView::Changed(operation.result))
+            Ok(operation.result)
         }
         OwnerResponse::Rejected { code } => Err(bounded_problem(&code)),
         _ => Err("setup_change_outcome_unknown".into()),
     }
 }
+
+#[cfg(test)]
+mod memory_tests;
 
 #[cfg(test)]
 mod tests {

@@ -193,6 +193,7 @@ pub struct App {
     declaration_pending: Option<CreationPending>,
     creation_job: Option<CreationJob>,
     snapshot_revision: Option<Cursor>,
+    pub(super) accounts: Option<super::client::accounts::AccountsEvent>,
     pub(super) model_access: model_access::State,
     pub(super) dispatch: dispatch::State,
     pub(super) master: master_session::State,
@@ -254,6 +255,7 @@ impl App {
             declaration_pending: None,
             creation_job: None,
             snapshot_revision: None,
+            accounts: None,
             model_access: model_access::State::default(),
             dispatch: dispatch::State::default(),
             master: master_session::State::default(),
@@ -860,6 +862,7 @@ impl App {
                     ));
                 }
             }
+            OwnerEvent::Accounts(event) => self.accounts = Some(*event),
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
@@ -1724,6 +1727,41 @@ impl App {
             action,
             generation: self.declaration.generation,
         })
+    }
+
+    /// Queues one saved-memory read: a page of global or project memory, one memory,
+    /// or the approved set a project's agents start with.
+    /// Returns an error for a change, which goes through request_library_change.
+    pub fn request_library(
+        &mut self,
+        query: crate::memory::library::LibraryQuery,
+    ) -> Result<(), String> {
+        if matches!(query, crate::memory::library::LibraryQuery::Change { .. }) {
+            return Err("Use request_library_change to change memory".into());
+        }
+        self.request_project_setup(SetupQuery::Library(query))
+    }
+
+    /// Queues one owner change to saved memory: add a note, promote a project memory
+    /// to global memory with one click, or delete a memory for good.
+    /// Returns a plain error in limited mode, for an invalid note or while a request waits.
+    pub fn request_library_change(
+        &mut self,
+        action: crate::memory::library::LibraryAction,
+    ) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Memory changes disabled in limited mode".into());
+        }
+        action.validate().map_err(|problem| {
+            crate::memory::library::plain_problem(&problem.0)
+                .map_or(problem.0, str::to_owned)
+        })?;
+        self.request_project_setup(SetupQuery::Library(
+            crate::memory::library::LibraryQuery::Change {
+                action,
+                generation: self.declaration.generation,
+            },
+        ))
     }
 
     pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {

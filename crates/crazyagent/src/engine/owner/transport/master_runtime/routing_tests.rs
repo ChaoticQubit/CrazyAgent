@@ -877,3 +877,49 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     case.cancel().await;
     case.finish().await;
 }
+
+#[tokio::test]
+async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    case.cancel().await;
+    let revision = Fixture::read_owner(&case.owner, OwnerRead::Capabilities)
+        .await
+        .revision
+        .value();
+    let second = request(
+        "routing-second-turn",
+        revision,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: case.session.project_id.clone(),
+                    session_id: case.session.session_id.clone(),
+                    text: "Describe this project again without using tools.".into(),
+                },
+            },
+        },
+    );
+    applied(&Fixture::commit_owner(&case.service, &case.owner, &second).await);
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: second.request_id.clone(),
+        })
+        .await
+        .unwrap();
+    match result {
+        MasterRuntimeResult::Prepared(prepared) => {
+            assert_eq!(prepared.session.current_turn.as_ref(), Some(&second.request_id));
+            assert!(prepared.attempt.request.previous_attempt.is_none());
+            assert_eq!(prepared.attempt.connection.account_ref, reference("local-account"));
+        }
+        MasterRuntimeResult::Turn(turn) => {
+            panic!("second RCLI turn was not admitted: {:?} {:?}", turn.phase, turn.reason)
+        }
+        _ => panic!("actual RCLI preparation returned an unexpected result"),
+    }
+    case.finish().await;
+}

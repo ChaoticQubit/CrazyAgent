@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod master_bootstrap;
 pub(crate) mod account_profile;
+pub(crate) mod accounts;
 mod master_session;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
@@ -21,6 +22,7 @@ pub(crate) use master_session::{
 mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
+pub(crate) mod plugins;
 #[cfg(test)]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
@@ -29,7 +31,17 @@ mod native_auth_host_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
+/// Upper bound on waiting for a master runtime job. Preparing a master turn provisions
+/// a Git worktree inside the storage actor, which can outlast the owner request timeout
+/// on a busy machine.
+pub(crate) const MASTER_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub(crate) enum Job {
+    Accounts(
+        Admission,
+        accounts::Command,
+        oneshot::Sender<Result<accounts::ResultValue, EngineError>>,
+    ),
     AccountProfile(
         Admission,
         account_profile::Command,
@@ -119,12 +131,30 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    Plugins(
+        plugins::Command,
+        oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
+    ),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
 }
 
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
+}
+
+impl Job {
+    /// Chooses how long a caller waits for this job's reply.
+    /// Input: the owner request timeout from settings. Output: that timeout, or at
+    /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
+    pub(crate) fn reply_deadline(&self, owner_timeout: std::time::Duration) -> std::time::Duration {
+        let deadline = match self {
+            Self::MasterRuntime(..) => owner_timeout.max(MASTER_RUNTIME_TIMEOUT),
+            _ => owner_timeout,
+        };
+        assert!(deadline >= owner_timeout);
+        deadline
+    }
 }
 
 impl Storage {
@@ -187,6 +217,14 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::Accounts(admission, command, reply) => {
+                            let result = if readonly {
+                                Err(error("accounts_readonly"))
+                            } else {
+                                accounts::execute(&mut connection, &mut config, sources.as_ref(), &admission, command)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::AccountProfile(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("account_profile_readonly"))
@@ -524,6 +562,17 @@ impl Storage {
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
+                        Job::Plugins(command, reply) => {
+                            let result = if readonly {
+                                Err(error("plugins_readonly"))
+                            } else {
+                                match path.parent() {
+                                    Some(root) => plugins::execute(&mut connection, root, command),
+                                    None => Err(error("plugin_store_unavailable")),
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Config(next, reply) => {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 if sources.is_some() {
@@ -647,6 +696,7 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
     crate::team::initialize(connection)?;
+    plugins::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
@@ -861,8 +911,20 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS configs (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL CHECK(length(body)<=262144));")
+            CREATE TABLE IF NOT EXISTS settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL);")
         .map_err(error)?;
+    let journal: Option<String> = connection
+        .query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='settings_publication'", [], |row| row.get(0))
+        .optional()
+        .map_err(error)?;
+    let empty: i64 = connection
+        .query_row("SELECT count(*) FROM settings_publication", [], |row| row.get(0))
+        .map_err(error)?;
+    if journal.is_some_and(|sql| sql.contains("262144")) && empty == 0 {
+        connection
+            .execute_batch("DROP TABLE settings_publication; CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL);")
+            .map_err(error)?;
+    }
     assert!(connection.is_autocommit());
     Ok(())
 }
@@ -881,6 +943,7 @@ fn apply(
         Command::OwnerConversation { .. }
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
+            | Command::OwnerMemory { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1046,6 +1109,9 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
+        Command::OwnerMemory { action } => {
+            crate::memory::library::execute(tx, config, action, revision)
+        }
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
             crate::verification::execute(tx, config, command)
         }
@@ -1938,6 +2004,18 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::Memories {
+            scope,
+            search,
+            before,
+            limit,
+        } => crate::memory::library::page(&tx, scope, search.as_deref(), *before, *limit)?,
+        OwnerRead::Memory { memory_id } => OwnerData::Memory {
+            memory: crate::memory::library::get(&tx, memory_id)?,
+        },
+        OwnerRead::ApprovedMemories { project_id } => OwnerData::ApprovedMemories {
+            memories: crate::memory::library::approved_for_project(&tx, project_id)?,
+        },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
         OwnerRead::Page {
             view,

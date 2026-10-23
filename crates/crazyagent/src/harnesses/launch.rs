@@ -2,6 +2,7 @@ use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
+use crate::launch_context::{AgentContext, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -44,7 +45,8 @@ const CODEX_TOOLS_ON: [&str; 5] = [
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
-const CLAUDE_COMMON: [&str; 14] = [
+const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
+const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
     "--input-format",
@@ -52,8 +54,6 @@ const CLAUDE_COMMON: [&str; 14] = [
     "--output-format",
     "stream-json",
     "--strict-mcp-config",
-    "--mcp-config",
-    "{\"mcpServers\":{}}",
     "--setting-sources",
     "",
     "--settings",
@@ -214,11 +214,39 @@ fn failure(code: &str) -> LaunchError {
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
 pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
+    build(request, None)
+}
+
+/// Builds the command for an agent of one project: writes the project's approved skills,
+/// MCP servers, brief, context index and approved memories into the agent home, then
+/// points the harness at them. Input: the launch request and the project's context from
+/// `launch_context::for_project`. Output: the command and the guard that removes the
+/// generated files when dropped; no MCP secret is ever in an argument or the environment.
+pub fn command_with_context(
+    request: &LaunchRequest,
+    context: &AgentContext,
+) -> Result<(Command, Installed), LaunchError> {
+    validate(request)?;
+    let installed = context.install(&request.harness, request.account.home(), request.tools)?;
+    let command = build(request, Some(&installed))?;
+    assert!(
+        command
+            .get_args()
+            .all(|argument| !context.exposes_secret(argument.as_encoded_bytes()))
+    );
+    assert!(command.get_envs().all(|(name, value)| {
+        !context.exposes_secret(name.as_encoded_bytes())
+            && value.is_none_or(|value| !context.exposes_secret(value.as_encoded_bytes()))
+    }));
+    Ok((command, installed))
+}
+
+fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Command, LaunchError> {
     validate(request)?;
     let home = request.account.home();
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request)?,
-        "claude-code" => claude_invocation(request),
+        "codex" => codex_invocation(request, installed.is_some())?,
+        "claude-code" => claude_invocation(request, installed),
         _ => return Err(failure("launch_harness_unsupported")),
     };
     let mut command = match &request.sandbox_profile {
@@ -264,7 +292,7 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let mut configuration = vec!["cli_auth_credentials_store=\"file\"".to_owned()];
     let mut environment = vec![("CODEX_HOME", home.clone()), ("TMPDIR", home)];
@@ -297,7 +325,12 @@ fn codex_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> 
     } else {
         &CODEX_TOOLS_OFF
     };
-    configuration.extend(tools.iter().map(|setting| (*setting).to_owned()));
+    configuration.extend(
+        tools
+            .iter()
+            .filter(|setting| !(context && request.tools && **setting == "mcp_servers={}"))
+            .map(|setting| (*setting).to_owned()),
+    );
     let mut arguments = Vec::new();
     for setting in configuration {
         arguments.push(OsString::from("-c"));
@@ -307,9 +340,13 @@ fn codex_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> 
     Ok((arguments, environment))
 }
 
-fn claude_invocation(request: &LaunchRequest) -> Invocation {
+fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> Invocation {
     let home = request.account.home().as_os_str().to_owned();
     let mut arguments: Vec<OsString> = CLAUDE_COMMON.iter().map(OsString::from).collect();
+    match installed {
+        Some(installed) => arguments.extend(installed.arguments().iter().cloned()),
+        None => arguments.extend(CLAUDE_NO_MCP.iter().map(OsString::from)),
+    }
     if let Some(model) = &request.model {
         arguments.extend([OsString::from("--model"), OsString::from(model)]);
     }
@@ -415,7 +452,10 @@ fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     Ok(())
 }
 
-fn validate_home(home: &Path) -> Result<(), LaunchError> {
+/// Checks that an account home is safe to launch in: an absolute 0700 directory owned by
+/// this user that is neither the owner's HOME nor their real `~/.codex` or `~/.claude`.
+/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let metadata =
         std::fs::symlink_metadata(home).map_err(|_| failure("launch_account_home_unavailable"))?;
     if !home.is_absolute()
@@ -759,13 +799,35 @@ pub struct Session {
     events: usize,
     exited: bool,
     stopped: bool,
+    _context: Option<Installed>,
 }
 
 impl Session {
     /// Spawns the harness for a request and begins its handshake.
     /// Input: the launch request. Output: a running session, or a plain refusal code.
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
-        let mut command = command(&request)?;
+        let command = command(&request)?;
+        Self::spawn(request, command, None)
+    }
+
+    /// Spawns the harness for an agent of one project with the project's approved skills,
+    /// MCP servers, brief, context index and approved memories, the way every engine launch
+    /// for a project should. Input: the launch request and `launch_context::for_project`.
+    /// Output: a running session; its generated files are removed when it stops.
+    pub fn start_with_context(
+        request: LaunchRequest,
+        context: AgentContext,
+    ) -> Result<Self, LaunchError> {
+        let (command, installed) = command_with_context(&request, &context)?;
+        drop(context);
+        Self::spawn(request, command, Some(installed))
+    }
+
+    fn spawn(
+        request: LaunchRequest,
+        mut command: Command,
+        context: Option<Installed>,
+    ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
         let mut child = command
             .spawn()
@@ -829,6 +891,7 @@ impl Session {
             events: 0,
             exited: false,
             stopped: false,
+            _context: context,
         };
         for bytes in startup {
             session.write(&bytes)?;

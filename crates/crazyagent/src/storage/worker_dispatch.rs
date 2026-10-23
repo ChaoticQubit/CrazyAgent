@@ -110,7 +110,7 @@ fn limited_body(
             "SELECT CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM projects WHERE id=?1"
         }
         ("configs", "id") => {
-            "SELECT CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM configs WHERE id=?1"
+            "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1"
         }
         _ => return Err(error("dispatch_internal_table")),
     };
