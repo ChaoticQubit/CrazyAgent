@@ -22,6 +22,7 @@ pub(crate) use master_session::{
 mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
+pub(crate) mod plugins;
 #[cfg(test)]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
@@ -125,6 +126,10 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    Plugins(
+        plugins::Command,
+        oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
+    ),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
 }
@@ -538,6 +543,17 @@ impl Storage {
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
+                        Job::Plugins(command, reply) => {
+                            let result = if readonly {
+                                Err(error("plugins_readonly"))
+                            } else {
+                                match path.parent() {
+                                    Some(root) => plugins::execute(&mut connection, root, command),
+                                    None => Err(error("plugin_store_unavailable")),
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Config(next, reply) => {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 if sources.is_some() {
@@ -660,6 +676,7 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
+    plugins::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;

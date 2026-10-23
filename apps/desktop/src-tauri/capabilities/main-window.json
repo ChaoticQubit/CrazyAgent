@@ -61,6 +61,21 @@
     "allow-desktop-rename-account",
     "allow-desktop-remove-account",
     "allow-desktop-check-account",
-    "allow-desktop-local-models"
+    "allow-desktop-local-models",
+    "allow-desktop-plugin-skills",
+    "allow-desktop-plugin-servers",
+    "allow-desktop-add-skill",
+    "allow-desktop-set-skill-enabled",
+    "allow-desktop-remove-skill",
+    "allow-desktop-add-mcp-server",
+    "allow-desktop-update-mcp-server",
+    "allow-desktop-approve-mcp-server",
+    "allow-desktop-set-mcp-server-enabled",
+    "allow-desktop-remove-mcp-server",
+    "allow-desktop-switch-plugin",
+    "allow-desktop-set-mcp-secret",
+    "allow-desktop-remove-mcp-secret",
+    "allow-desktop-check-mcp-server",
+    "allow-desktop-project-plugins"
   ]
 }

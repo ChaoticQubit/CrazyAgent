@@ -15,6 +15,7 @@ pub mod memory;
 pub mod model_gateway;
 pub mod project_setup;
 pub mod owner_profile;
+pub mod plugins;
 pub mod pools;
 pub mod protocol;
 pub mod qualification;
