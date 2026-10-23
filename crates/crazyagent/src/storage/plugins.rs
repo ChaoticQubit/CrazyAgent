@@ -95,8 +95,14 @@ pub(crate) enum Command {
     },
 }
 
+pub(crate) struct SkillChange {
+    pub(crate) view: SkillView,
+    pub(crate) added: bool,
+}
+
 pub(crate) enum ResultValue {
-    Skill(Box<SkillView>),
+    Skill(Box<SkillChange>),
+    SkillRemoved(PathBuf),
     Server(Box<ServerView>),
     Removed(Vec<String>),
     Skills(Vec<SkillView>, Option<u16>),
@@ -755,15 +761,29 @@ pub(crate) fn execute(
 ) -> Result<ResultValue, EngineError> {
     let tx = connection.transaction().map_err(error)?;
     let value = run(&tx, root, command)?;
-    tx.commit().map_err(error)?;
-    Ok(value)
+    let committed = tx.commit().map_err(error);
+    match (&value, committed) {
+        (ResultValue::Skill(skill), Err(problem)) if skill.added => {
+            remove_folder(Path::new(&skill.view.folder));
+            Err(problem)
+        }
+        (_, Err(problem)) => Err(problem),
+        (ResultValue::SkillRemoved(folder), Ok(())) => {
+            remove_folder(folder);
+            Ok(value)
+        }
+        (_, Ok(())) => Ok(value),
+    }
 }
 
 fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValue, EngineError> {
     Ok(match command {
         Command::AddSkill { scope, source } => {
             let record = add_skill(tx, root, scope, source)?;
-            ResultValue::Skill(Box::new(skill_view(&record, root, None)))
+            ResultValue::Skill(Box::new(SkillChange {
+                view: skill_view(&record, root, None),
+                added: true,
+            }))
         }
         Command::SetSkill { id, enabled } => {
             let mut record: SkillRecord = load(tx, "skill", &id)?;
@@ -776,7 +796,10 @@ fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValu
                 &record.name,
                 &record,
             )?;
-            ResultValue::Skill(Box::new(skill_view(&record, root, None)))
+            ResultValue::Skill(Box::new(SkillChange {
+                view: skill_view(&record, root, None),
+                added: false,
+            }))
         }
         Command::RemoveSkill { id } => {
             let record: SkillRecord = load(tx, "skill", &id)?;
@@ -784,8 +807,7 @@ fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValu
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
-            remove_folder(&root.join(&record.folder));
-            ResultValue::Removed(Vec::new())
+            ResultValue::SkillRemoved(root.join(&record.folder))
         }
         Command::AddServer { scope, name, spec } => {
             let record = add_server(tx, scope, name, spec)?;

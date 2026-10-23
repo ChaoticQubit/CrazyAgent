@@ -543,7 +543,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            Reply::Skill { skill: *skill }
+            Reply::Skill { skill: skill.view }
         }
         Action::SetSkill { id, enabled } => {
             let ResultValue::Skill(skill) =
@@ -551,7 +551,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            Reply::Skill { skill: *skill }
+            Reply::Skill { skill: skill.view }
         }
         Action::RemoveSkill { id } => {
             actor(engine, Command::RemoveSkill { id }).await?;
