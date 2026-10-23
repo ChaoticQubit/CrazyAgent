@@ -187,3 +187,11 @@ test("pools are summarised by provider and the biggest pool is preselected", () 
   assert.equal(wizard.poolFits(catalog[0], members), true);
   assert.equal(wizard.poolFits(harness("opencode", "OpenCode", ready, undefined, ["api_key"]), [member("a", "codex", managed)]), false);
 });
+
+test("a pool shows its name from the engine and falls back to its id", () => {
+  const pool = (extra) => ({ id: "pool-0a1b2c", members: [], projects: [], roles: [], fallback_allowed: false, ...extra });
+  assert.equal(wizard.poolName(pool({ name: "Main pool" })), "Main pool");
+  assert.equal(wizard.poolName(pool({ name: "  Main pool  " })), "Main pool");
+  assert.equal(wizard.poolName(pool({ name: "   " })), "pool-0a1b2c");
+  assert.equal(wizard.poolName(pool({})), "pool-0a1b2c");
+});

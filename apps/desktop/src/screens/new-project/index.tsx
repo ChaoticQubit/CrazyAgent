@@ -11,7 +11,7 @@ import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
 import { RESEARCH_ICONS, RESEARCH_LABELS, TeamEditor } from "./team-editor";
 import {
-  RESEARCH_COPY, STEPS, addDocuments, addStack, basicsErrors, buildRequest, defaultTeam, emptyDraft, preselectPool,
+  RESEARCH_COPY, STEPS, addDocuments, addStack, basicsErrors, buildRequest, defaultTeam, emptyDraft, poolName, preselectPool,
   removeStack, stepComplete, summary, teamValid,
 } from "./wizard";
 import type { ProjectDraft, StepId } from "./wizard";
@@ -160,7 +160,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     if (draft.pool) {
       const assigned = await assignPool(id, draft.pool, nextGeneration());
       if (assigned.kind !== "ok" || assigned.value.kind !== "applied") {
-        message = `${name} created. Couldn't assign ${draft.pool}. Choose it again in the project's Settings, Pool.`;
+        message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
       }
     }
     kept = null;
@@ -319,7 +319,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
-          <p className="pj-summary">{summary(draft, chosenPool?.pool.id ?? null)}</p>
+          <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
         </div>}
         <footer className="pj-footer">
           <Button icon="arrow-left" disabled={index === 0} onClick={() => setStep(STEPS[Math.max(0, index - 1)].id)}>Back</Button>

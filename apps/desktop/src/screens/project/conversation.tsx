@@ -5,6 +5,7 @@ import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
+import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
 import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
@@ -190,7 +191,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
     {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
-    {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${data.assigned.pool.id}` : ""} aren't signed in.</p>
+    {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>

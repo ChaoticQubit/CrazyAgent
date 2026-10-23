@@ -1,8 +1,9 @@
 import type { HarnessEntry } from "../../api";
+import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind, TeamPlan } from "../../api-projects";
 import {
-  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits,
+  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits, poolName,
   removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes, totalAgents,
 } from "./wizard";
 
@@ -82,8 +83,8 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
       </div>
       {errors.master && <p className="pj-error" role="alert">{errors.master}</p>}
       {pool && master && !poolFits(master, pool.members) &&
-        <p className="pj-note warn">{pool.pool.id} has no account {master.name} can use. Add an account it can use to the pool, or pick another harness.</p>}
-      <p className="pj-help">{pool ? `Uses an account from ${pool.pool.id}.` : "Uses an account from the pool you choose."}</p>
+        <p className="pj-note warn">{displayText(poolName(pool.pool))} has no account {master.name} can use. Add an account it can use to the pool, or pick another harness.</p>}
+      <p className="pj-help">{pool ? `Uses an account from ${displayText(poolName(pool.pool))}.` : "Uses an account from the pool you choose."}</p>
     </section>
     <section className="pj-stack-s" aria-labelledby={`${prefix}-agents`}>
       <h3 id={`${prefix}-agents`}>Agents</h3>
@@ -122,7 +123,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
       </div>
       {errors.range && <p className="pj-error" id={`${prefix}-range-error`} role="alert">{errors.range}</p>}
       {pool && accounts > 0 && team.max_agents > accounts &&
-        <p className="pj-note">{pool.pool.id} has {accounts} {accounts === 1 ? "account" : "accounts"}. Agents beyond {accounts} wait for a free account.</p>}
+        <p className="pj-note">{displayText(poolName(pool.pool))} has {accounts} {accounts === 1 ? "account" : "accounts"}. Agents beyond {accounts} wait for a free account.</p>}
       <p className="pj-help">This team has {totalAgents(team)} {totalAgents(team) === 1 ? "agent" : "agents"}.</p>
     </section>
     {research.length > 0 && <section className="pj-stack-s"><h3>Research</h3>

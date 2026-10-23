@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { failureCopy, loadResearchLog } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
+import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { nearBottom, researchRow } from "./research";
 import type { ResearchRow } from "./research";
@@ -80,7 +81,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
       <Segmented label="Show" value={filter} onValue={setFilter}
         options={[{ value: "running", label: `Running (${running.length})` }, { value: "all", label: `All (${jobs.length})` }]} />
       <span className="pj-secondary">{data.assigned
-        ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${data.assigned.pool.id}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
+        ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
         : "No pool. Agents wait until you choose one."}</span>
     </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}

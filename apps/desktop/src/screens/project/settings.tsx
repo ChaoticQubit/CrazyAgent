@@ -7,7 +7,7 @@ import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
-import { teamValid } from "../new-project/wizard";
+import { poolName, teamValid } from "../new-project/wizard";
 import { folderLabel } from "./overview";
 import { ProjectServers, ProjectSkills } from "./plugins";
 import { NotReady, valueOf } from "./shared";
@@ -50,7 +50,8 @@ function PoolSection({ data }: { data: ProjectData }) {
         : added.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
     if (!error && previous && previous !== choice) {
       const removed = await assignPool(data.id, previous, nextGeneration(), true);
-      if (removed.kind !== "ok" || removed.value.kind !== "applied") error = `${choice} is assigned, but ${previous} still lists this project. Try again.`;
+      const label = (id: string) => { const found = valueOf(data.pools)?.find((item) => item.pool.id === id); return found ? poolName(found.pool) : id; };
+      if (removed.kind !== "ok" || removed.value.kind !== "applied") error = `${label(choice)} is assigned, but ${label(previous)} still lists this project. Try again.`;
     }
     setState({ busy: false, error });
     data.reloadPools();
