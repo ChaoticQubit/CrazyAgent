@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Pools  /  New pool                                 
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────━━━━━━━───────────────────────────────────────────────────────────
+  New pool                                                   15 of 15 selected  
+  Pool name                                                                     
+  [ Build team                                                   ]              
+                                                                                
+  Accounts  / Filter                                     v  Show selected only  
+        Account                     Provider           Status                   
+    [x] ChatGPT Team - seat 02      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [x] ChatGPT Team - seat 03      ⬡ ChatGPT / Codex  ✓ Signed in           █  
+    [x] Claude Max - work           ✻ Claude           ✓ Signed in           █  
+    [x] Claude Max - work 2         ✻ Claude           ✓ Signed in           │  
+    [x] Claude Pro - personal       ✻ Claude           ! Not signed in       │  
+    [x] Claude Team - seat 01       ✻ Claude           ✓ Signed in           │  
+    [x] Claude Team - seat 02       ✻ Claude           ✓ Signed in           │  
+    [x] Claude Team - seat 03       ✻ Claude           ✓ Signed in           │  
+  > [ ] Claude Team - seat 04       ✻ Claude           ✓ Signed in           │  
+  Showing 8-16 of 240                                                           
+                                                                                
+  [ Save pool ]   [ Cancel ]                                                    
+ ! A pool holds at most 15 accounts. Unselect one to add another.               
+ Space Select  / Filter  v Selected only  Tab Next  Esc Cancel           ? Help 

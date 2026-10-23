@@ -23,6 +23,7 @@ const MASTER_READ_ATTEMPTS: u32 = 4;
 mod account_profile;
 mod claude_code;
 mod project_setup;
+mod shell;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {
@@ -43,6 +44,7 @@ enum Job {
     ModelAccess(Box<model_access::Job>),
     Dispatch(Box<dispatch::Query>),
     Setup(Box<SetupQuery>),
+    Shell(Box<crate::tui::seam::ShellRequest>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -150,6 +152,7 @@ pub(super) enum OwnerEvent {
     ModelAccess(Box<model_access::Event>),
     Dispatch(Box<dispatch::Event>),
     Setup(Box<SetupEvent>),
+    Shell(Box<crate::tui::seam::ShellEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -428,6 +431,41 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Setup(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Shell(request) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.shell(*request));
+                                    if was_ready && !native.ready {
+                                        client = native.ordinary();
+                                        if owner_replies
+                                            .send(OwnerReply {
+                                                finished: false,
+                                                event: OwnerEvent::Access {
+                                                    ready: false,
+                                                    problem: "trusted_connection_lost".into(),
+                                                    identity: None,
+                                                },
+                                            })
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    event
+                                }
+                                None => crate::tui::seam::ShellEvent::unavailable(&request),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Shell(Box::new(event)),
                                 })
                                 .is_err()
                             {

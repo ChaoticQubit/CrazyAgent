@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  Tidepool                              3 agents running 
+────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents 3   ⧉ Context   ☰ Settings             
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Tidepool                                      ~/CrazyAgent/Projects/tidepool  
+  Live dash┌─ Go to ────────────────────────────────────────────────┐           
+           │ > tide█                                                │           
+  Needs you│                                                        │           
+  ▌ Save to│ > Tidepool                          Project            │           
+  ▌ "Most l│   Tidepool / Conversation           Project tab        │           
+  ▌ From Co│   Tidepool / Agents                 Project tab        │           
+    Done ch│   Tidepool / Context                Project tab        │           
+           │   Tidepool / Settings               Project tab        │           
+  Work     │                                                        │           
+    ◔ Marke│ Projects, tabs, settings, actions. Enter goes there.   │           
+    ≷ Compe└────────────────────────────────────────────────────────┘           
+    ▭ Front-end design      ◌ Queued                                            
+                                                                                
+  Team  Codex leads. Claude Code x2, Codex x1. Tools on.                        
+  Pool  Main  6 ready, 1 not signed in                                          
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  Enter Go  Esc Close                                            ? Help 

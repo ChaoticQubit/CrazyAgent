@@ -1,0 +1,24 @@
+ CrazyAgent  /  …  /  Claude  /  Sign in with your Claude subscription          
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Sign in with your Claude subscription                                         
+                                                                                
+  Your browser opened the Claude sign-in page.                                  
+  Approve access there, then come back here.                                    
+                                                                                
+  Browser didn't open? Press o to open it again.                                
+                                                                                
+  If Claude shows a code, paste it here                                         
+  [ ••••••••••••••••••••••••█                                ]                  
+  Paste with Cmd-V. The code stays hidden.                                      
+                                                                                
+  ⠼ Waiting for you to finish signing in...                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter Submit code  o Open page  Ctrl-U Clear  Esc Cancel sign-in        ? Help 

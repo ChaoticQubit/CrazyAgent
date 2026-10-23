@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Done                  
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  ✓ Signed in                                                                   
+                                                                                
+  Signed in as mira@studio-kiln.dev (ChatGPT Pro).                              
+                                                                                
+  Account name                                                                  
+  [ ChatGPT Pro - mira                                           ]              
+                                                                                
+  Add to pools                                                                  
+  > [x] Main              8 of 15                                               
+    [ ] Research          4 of 15                                               
+                                                                                
+  [ Done ]   a  Add another account                                             
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ✓ Account added.                                                               
+ Space Select pool  Enter Done  a Add another  Esc Accounts              ? Help 

@@ -1,11 +1,23 @@
 pub mod app;
 mod client;
+mod clock;
+mod ctx;
 mod dispatch;
+mod frame;
+mod glyphs;
+mod keys;
+mod prefs;
+mod run;
+mod screens;
+mod seam;
+mod shell;
+mod text;
+mod theme;
+mod widgets;
 mod master_session;
 pub use master_session::default_master_open;
 mod model_access;
 mod native_auth;
-mod screens;
 pub mod views;
 
 #[cfg(test)]
@@ -13,6 +25,9 @@ mod key_tests;
 
 #[cfg(test)]
 mod project_creation_tests;
+
+#[cfg(test)]
+mod render_tests;
 
 use crate::engine::Client;
 use app::{App, Focus, UiEvent};
@@ -95,6 +110,9 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
         });
     });
     let result = (|| {
+        if std::env::var("CRAZYAGENT_TUI").is_ok_and(|value| value == "v1") {
+            return run::run(client, &stopped);
+        }
         let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
         let _guard = TerminalGuard::enter()?;
         let _ = event::poll(Duration::ZERO).map_err(|e| TuiError(e.to_string()))?;

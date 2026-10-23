@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  Tidepool                                                                      3 agents running 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents 3   ⧉ Context   ☰ Settings                                                     
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Tidepool                                                                      │ Team                                  
+  Live dashboard for marine res┌─ Go to ────────────────────────────────────────────────┐     Codex  idle               
+  Folder  ~/CrazyAgent/Projects│ > tide█                                                │nts  Claude Code  2 running    
+                               │                                                        │     Codex  1 running          
+  Needs you  2                 │ > Tidepool                          Project            │     On, inside the folder     
+  ▌ Save to memory?            │   Tidepool / Conversation           Project tab        │                               
+  ▌ "Most labs already use ERDD│   Tidepool / Agents                 Project tab        │ain                            
+  ▌ From Competitor research   │   Tidepool / Context                Project tab        │, 1 not signed in              
+                               │   Tidepool / Settings               Project tab        │                               
+    Done check                 │                                                        │                               
+    Front-end design asks you t│ Projects, tabs, settings, actions. Enter goes there.   │Charts component started       
+    Enter Review               └────────────────────────────────────────────────────────┘Market research finished       
+                                                                                │ 10:36  competitors.md updated         
+  Work                                                                          │ 10:31  Competitor research started    
+    ◔ Market research       ✓ Done 10:38                research/market.md      │ 10:24  Market research started        
+    ≷ Competitor research   ▸ Running  ━━━━━━──── 3 of 5research/competitors.md │ 10:22  Project created                
+    ▭ Front-end design      ◌ Queued                                            │                                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ Move   Enter Go   Esc Close                                                                                  ? Help 

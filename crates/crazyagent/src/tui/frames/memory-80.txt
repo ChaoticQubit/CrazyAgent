@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Memory                                             
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────────────────────────────────────────────────━━━━━━━━──────────────
+  Memory                                                              41 saved  
+  Long-term memory every project can use. Nothing is saved without your click.  
+  /  Filter                                                                     
+                                                                                
+    Memory                                        From            Saved         
+    Mira prefers Postgres for new services.       Profile         Oct 20        
+  > Buoy firmware sends readings every 90 s in …  Tidepool        Oct 21        
+    Most labs already use ERDDAP for ocean data…  Tidepool        Oct 22        
+    Studios bill monthly, and most want PDF inv…  Ledgerline      Oct 18        
+    Field teams work offline for up to five day…  Fieldnotes Mo…  Oct 17        
+    Keep agent replies short unless asked for d…  Profile         Oct 16        
+    Use Tauri, not Electron, for desktop apps.    Ledgerline      Oct 15        
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter View  d Delete  / Filter  Shift-←→ Sections  Esc Home             ? Help 
