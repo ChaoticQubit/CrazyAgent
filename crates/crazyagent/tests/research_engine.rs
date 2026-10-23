@@ -1,4 +1,9 @@
+mod research_support;
+
+use crazyagent::client_controller::OwnerController;
+use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
+use research_support::{claude, codex};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
@@ -9,18 +14,35 @@ use std::time::{Duration, Instant};
 
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
-fn codex() -> PathBuf {
-    let path = std::env::var_os("CRAZYAGENT_CODEX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
-        .canonicalize()
-        .expect("real codex binary required");
-    assert!(
-        path.is_file(),
-        "real codex binary required: {}",
-        path.display()
-    );
-    path
+/// Creates `project-cafe` through the owner client of the running engine
+/// binary, retrying the attach until the owner endpoint answers.
+fn create_cafe(runtime: &Path) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut owner = loop {
+                match OwnerController::attach(runtime, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                {
+                    Ok(owner) => break owner,
+                    Err(error) => {
+                        assert!(Instant::now() < deadline, "owner attach: {error:?}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            };
+            research_support::setup_projects(
+                &mut owner,
+                &[(
+                    "project-cafe",
+                    "A website for a corner cafe with a menu and table booking.",
+                )],
+            )
+            .await;
+        });
 }
 
 struct Engine {
@@ -39,6 +61,8 @@ impl Engine {
             .arg("--writable-settings")
             .arg("--codex-executable")
             .arg(codex())
+            .arg("--claude-executable")
+            .arg(claude())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -144,13 +168,9 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     let research = runtime.join("research");
     assert!(projects.is_dir());
     assert!(research.is_dir());
+    create_cafe(&runtime);
     let project = projects.join("project-cafe");
-    fs::create_dir_all(project.join("context")).unwrap();
-    fs::write(
-        project.join("context").join("brief.md"),
-        "# Corner cafe\n\nA website for a corner cafe with a menu and table booking.\n",
-    )
-    .unwrap();
+    assert!(project.join("context").join("brief.md").is_file());
     let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
     database.busy_timeout(Duration::from_secs(5)).unwrap();
     let queue = |project: &str, kind: &str, harness: &str, tools: bool| -> i64 {
@@ -190,11 +210,7 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     let codex = jobs.get(codex_job).unwrap().unwrap();
     assert_eq!(codex.status, ResearchStatus::Done, "{:?}", codex.error);
     let claude = jobs.get(claude_job).unwrap().unwrap();
-    assert_eq!(claude.status, ResearchStatus::Failed);
-    assert_eq!(
-        claude.error.as_deref(),
-        Some("This harness is not installed on this computer")
-    );
+    assert_eq!(claude.status, ResearchStatus::Done, "{:?}", claude.error);
     let rcli = jobs.get(rcli_job).unwrap().unwrap();
     assert_eq!(rcli.status, ResearchStatus::Failed);
     assert_eq!(
@@ -219,12 +235,18 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     let front_end = report("front_end_design");
     assert!(front_end.starts_with("# Front-end design\n"), "{front_end}");
     assert!(front_end.contains("Researched by Codex"), "{front_end}");
+    let competitors = report("competitor_research");
     assert!(
-        !project
-            .join("context")
-            .join("research")
-            .join("competitor_research.md")
-            .exists()
+        competitors.starts_with("# Competitor research\n"),
+        "{competitors}"
+    );
+    assert!(
+        competitors.contains("Researched by Claude Code"),
+        "{competitors}"
+    );
+    assert!(
+        competitors.contains("## Links and references"),
+        "{competitors}"
     );
     assert_eq!(
         jobs.get(codex_job).unwrap().unwrap().report_path.as_deref(),
