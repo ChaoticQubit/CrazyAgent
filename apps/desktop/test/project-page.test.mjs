@@ -99,7 +99,7 @@ test("unassigning a pool removes only this project", () => {
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
-  const markup = renderToStaticMarkup(createElement(page.ProjectPage, { projectId: "p-1", tab: "overview" }));
+  const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
   assert.match(markup, /role="tablist"/);
   for (const tab of ["Overview", "Conversation", "Agents", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
   assert.match(markup, /aria-selected="true"[^>]*>Overview</);

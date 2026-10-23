@@ -73,7 +73,17 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     setStepState(next);
     setVisited((prior) => new Set(prior).add(next));
     kept = { draft, step: next };
+    if (next !== routeStep) navigate(`/projects/new?step=${next}`);
   };
+
+  useEffect(() => {
+    if (routeStep && routeStep !== step && STEPS.some((item) => item.id === routeStep)) {
+      const next = routeStep as StepId;
+      setStepState(next);
+      setVisited((prior) => new Set(prior).add(next));
+      kept = { draft, step: next };
+    }
+  }, [routeStep]);
 
   useEffect(() => {
     void loadHarnesses().then(setHarnesses);
@@ -298,7 +308,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
           {pools?.kind === "failed" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools.code)}</p>}
           {poolValue && poolValue.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
-            <button type="button" className="pj-btn" onClick={() => navigate("/settings/pools")}>Create pool</button></div>}
+            <button type="button" className="pj-btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
           {poolValue && <PoolPicker name="np-pool" pools={poolValue} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}
         </div>}
         {step === "team" && <div className="pj-stack">

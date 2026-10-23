@@ -63,7 +63,7 @@ function PoolSection({ data }: { data: ProjectData }) {
     {data.pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
     {data.pools?.kind === "failed" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
-      <button type="button" className="pj-btn" onClick={() => data.navigate("/settings/pools")}>Create pool</button></div>}
+      <button type="button" className="pj-btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
     {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} value={choice} later={false} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
     <div><button type="button" className="pj-btn primary" disabled={!choice || choice === data.assigned?.pool.id || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>

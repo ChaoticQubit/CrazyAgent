@@ -23,8 +23,8 @@ export const TABS = [
 
 export type TabId = typeof TABS[number]["id"];
 
-function useProject(id: string, navigate: (path: string) => void) {
-  const [name, setName] = useState("");
+function useProject(id: string, navigate: (path: string) => void, known = "") {
+  const [name, setName] = useState(known);
   const [setup, setSetup] = useState<ProjectData["setup"]>();
   const [research, setResearch] = useState<ProjectData["research"]>();
   const [context, setContext] = useState<ProjectData["context"]>();
@@ -114,15 +114,17 @@ function ProjectMenu({ data }: { data: ProjectData }) {
 }
 
 /** The project page: header, tabs and the selected tab, read from the engine.
- * Inputs: the project id, the tab from the route, an optional settings section and a navigate handler.
+ * Inputs: the project id, the tab from the route, the name when the shell knows it, an
+ * optional settings section and a navigate handler.
  * Output: the page; research progress polls while agents are queued or running. */
-export function ProjectPage({ projectId, tab = "overview", section, navigate = go }: {
-  projectId: string;
+export function ProjectPage({ id: projectId, tab = "overview", name, section, navigate = go }: {
+  id: string;
   tab?: string;
+  name?: string;
   section?: string;
   navigate?: (path: string) => void;
 }) {
-  const { data, toast } = useProject(projectId, navigate);
+  const { data, toast } = useProject(projectId, navigate, name);
   const active: TabId = TABS.some((item) => item.id === tab) ? tab as TabId : "overview";
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const setup = valueOf(data.setup);
