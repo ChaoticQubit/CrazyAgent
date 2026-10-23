@@ -243,6 +243,12 @@ pub trait Screen {
         false
     }
 
+    /// The sentence Quit shows for this screen's unsaved work.
+    /// Input: none. Output: a plain sentence; read only while `draft` is true.
+    fn loss(&self) -> &'static str {
+        "Your new project draft will be lost."
+    }
+
     /// The place this screen stands for, used by Go to to avoid duplicates.
     fn place(&self) -> Option<Place> {
         None

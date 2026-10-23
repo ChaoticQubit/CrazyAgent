@@ -7,18 +7,24 @@ use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
 use crate::tui::seam::{Arrival, PoolChange, Request};
-use crate::tui::text::{cells, join, list_row, restyle, row, styled, wrap};
+use crate::tui::text::{cells, join, list_row, restyle, row, styled, thumb, with_bar, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
+const ROWS_START: usize = 10;
+const TABS_HEIGHT: usize = 2;
+const HEAD_HEIGHT: usize = 4;
+
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
 /// Input: keys and pool arrivals. Output: the pool table or the empty state.
 pub struct Pools {
     selected: usize,
+    offset: usize,
+    rows: usize,
     confirm: Option<Confirm>,
     deleting: bool,
 }
@@ -41,9 +47,29 @@ impl Pools {
     pub fn new() -> Self {
         Self {
             selected: 0,
+            offset: 0,
+            rows: ROWS_START,
             confirm: None,
             deleting: false,
         }
+    }
+
+    fn page(&self) -> usize {
+        self.rows.saturating_sub(1).max(1)
+    }
+
+    fn follow(&mut self, count: usize) {
+        self.selected = self.selected.min(count.saturating_sub(1));
+        if self.selected < self.offset {
+            self.offset = self.selected;
+        }
+        if self.selected >= self.offset + self.rows {
+            self.offset = self.selected + 1 - self.rows;
+        }
+        self.offset = self.offset.min(count.saturating_sub(self.rows));
+        assert!(
+            count == 0 || (self.offset <= self.selected && self.selected < self.offset + self.rows)
+        );
     }
 
     fn confirm_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -199,18 +225,32 @@ impl Screen for Pools {
             }
             Key::Up => {
                 self.selected = self.selected.saturating_sub(1);
+                self.follow(count);
                 Flow::Handled
             }
             Key::Down if count > 0 => {
                 self.selected = (self.selected + 1).min(count - 1);
+                self.follow(count);
+                Flow::Handled
+            }
+            Key::PageUp => {
+                self.selected = self.selected.saturating_sub(self.page());
+                self.follow(count);
+                Flow::Handled
+            }
+            Key::PageDown if count > 0 => {
+                self.selected = (self.selected + self.page()).min(count - 1);
+                self.follow(count);
                 Flow::Handled
             }
             Key::Home => {
                 self.selected = 0;
+                self.follow(count);
                 Flow::Handled
             }
             Key::End if count > 0 => {
                 self.selected = count - 1;
+                self.follow(count);
                 Flow::Handled
             }
             _ => Flow::Ignored,
@@ -223,9 +263,7 @@ impl Screen for Pools {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
-            Arrival::Pools(Ok(pools)) => {
-                self.selected = self.selected.min(pools.len().saturating_sub(1));
-            }
+            Arrival::Pools(Ok(pools)) => self.follow(pools.len()),
             Arrival::PoolEdited(result) if self.deleting => {
                 self.deleting = false;
                 match result {
@@ -300,6 +338,12 @@ impl Screen for Pools {
             Load::Ready(pools) => {
                 let wide = ctx.wide();
                 let widths = Self::widths(wide);
+                self.rows = (area.height as usize)
+                    .saturating_sub(TABS_HEIGHT + HEAD_HEIGHT)
+                    .max(1);
+                self.follow(pools.len());
+                let windowed = pools.len() > self.rows;
+                let width = if windowed { limit - 1 } else { limit };
                 let mut content = vec![
                     row(
                         limit,
@@ -332,8 +376,9 @@ impl Screen for Pools {
                         ),
                     ]),
                 ];
-                for (index, pool) in pools.iter().enumerate() {
-                    content.push(list_row(
+                let mut shown = Vec::new();
+                for (index, pool) in pools.iter().enumerate().skip(self.offset).take(self.rows) {
+                    shown.push(list_row(
                         cells(
                             &widths,
                             vec![
@@ -345,13 +390,20 @@ impl Screen for Pools {
                             2,
                             ctx.glyphs,
                         ),
-                        limit,
+                        width,
                         index == self.selected,
                         true,
                         theme,
                         ctx.glyphs,
                     ));
                 }
+                assert!(shown.len() <= self.rows);
+                if windowed {
+                    let (top, size) = thumb(shown.len(), self.offset, pools.len());
+                    shown = with_bar(shown, limit, top, size, theme, ctx.glyphs);
+                }
+                assert_eq!(content.len(), HEAD_HEIGHT);
+                content.extend(shown);
                 content
             }
             Load::Failed(_) => vec![
@@ -363,10 +415,7 @@ impl Screen for Pools {
             _ => vec![
                 styled("Pools", Role::Accent, theme),
                 Line::default(),
-                Line::from(vec![
-                    Span::styled(ctx.spinner(), theme.running),
-                    Span::raw(" Loading pools"),
-                ]),
+                ctx.loading("Loading pools"),
             ],
         };
         draw_page(frame, area, SettingsSection::Pools, content, None, ctx)

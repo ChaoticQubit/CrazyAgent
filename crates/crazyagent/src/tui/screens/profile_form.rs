@@ -35,11 +35,15 @@ pub enum FormKey {
     Submit,
 }
 
+/// The raw values of the form, compared to tell edited from saved.
+type Snapshot = ([String; 4], AnswerDetail, Initiative, Option<Colors>);
+
 /// The profile form shared by the first-run Welcome page and Settings, Profile.
 /// Input: an optional saved profile and, in Settings, the Colors choice.
 /// Output: drawn lines with the cursor, and a validated profile on submit.
 #[derive(Debug)]
 pub struct ProfileForm {
+    baseline: Snapshot,
     name: TextField,
     role: TextField,
     bio: TextField,
@@ -57,6 +61,7 @@ impl ProfileForm {
     /// with Name focused.
     pub fn new(profile: Option<&OwnerProfile>, colors: Option<Colors>) -> Self {
         let mut form = Self {
+            baseline: Default::default(),
             name: TextField::new("Name", NAME_BYTES_MAX).right("Required"),
             role: TextField::new("Role", ROLE_BYTES_MAX)
                 .placeholder("For example: Founder and full-stack developer"),
@@ -79,7 +84,31 @@ impl ProfileForm {
             form.detail = profile.working_style.detail;
             form.initiative = profile.working_style.initiative;
         }
+        form.baseline = form.snapshot();
         form
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        (
+            [&self.name, &self.role, &self.bio, &self.stack].map(|field| field.value().to_owned()),
+            self.detail,
+            self.initiative,
+            self.colors,
+        )
+    }
+
+    /// True when any value differs from the one the form was built or last
+    /// saved with.
+    /// Input: none. Output: whether leaving would lose edits.
+    pub fn edited(&self) -> bool {
+        self.snapshot() != self.baseline
+    }
+
+    /// Takes the current values as saved, after the engine kept them.
+    /// Input: none. Output: none; `edited` is false until the next change.
+    pub fn settle(&mut self) {
+        self.baseline = self.snapshot();
+        assert!(!self.edited());
     }
 
     /// The Tab order of this form.
@@ -394,10 +423,7 @@ impl ProfileForm {
             out.push(Line::default());
         }
         if self.saving {
-            out.push(Line::from(vec![
-                Span::styled(ctx.spinner(), ctx.theme.running),
-                Span::raw(" Saving your profile"),
-            ]));
+            out.push(ctx.loading("Saving your profile"));
         } else {
             out.push(buttons(
                 &[button],

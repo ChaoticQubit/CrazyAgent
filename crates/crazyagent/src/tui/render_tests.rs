@@ -885,3 +885,64 @@ fn every_cell_uses_only_theme_colors_at_every_depth() {
         }
     }
 }
+
+fn pool_rows(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .filter(|row| row.contains("Pool "))
+        .cloned()
+        .collect()
+}
+
+fn bar(rows: &[String]) -> String {
+    pool_rows(rows)
+        .iter()
+        .map(|row| row.chars().nth(77).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_long_pool_list_scrolls_with_the_selection_and_shows_a_bar() {
+    let many: Vec<PoolSummary> = (0..30)
+        .map(|index| pool(&format!("Pool {index:02}"), 1, 0, 0))
+        .collect();
+    let mut ctx = ready(80, 24);
+    ctx.store.pools = Load::Ready(many);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let mut shell = shell_at(ctx, Place::Settings(SettingsSection::Pools));
+
+    let rows = render(&mut shell, 80, 24);
+    let shown = pool_rows(&rows);
+    assert_eq!(shown.len(), 14, "the body holds 14 rows under the heading");
+    assert!(shown[0].contains("> Pool 00"));
+    assert!(shown[13].contains("Pool 13"));
+    assert_eq!(bar(&rows), format!("{}{}", "█".repeat(7), "│".repeat(7)));
+
+    shell.key(Key::PageDown);
+    let rows = render(&mut shell, 80, 24);
+    let shown = pool_rows(&rows);
+    assert!(shown[13].contains("> Pool 13"), "a page is 13 rows");
+    assert!(shown[0].contains("Pool 00"));
+
+    shell.key(Key::Down);
+    let rows = render(&mut shell, 80, 24);
+    let shown = pool_rows(&rows);
+    assert!(shown[0].contains("Pool 01"), "the window follows down");
+    assert!(shown[13].contains("> Pool 14"));
+
+    shell.key(Key::End);
+    let rows = render(&mut shell, 80, 24);
+    let shown = pool_rows(&rows);
+    assert_eq!(shown.len(), 14);
+    assert!(shown[0].contains("Pool 16"));
+    assert!(shown[13].contains("> Pool 29"));
+    assert_eq!(bar(&rows), format!("{}{}", "│".repeat(7), "█".repeat(7)));
+
+    shell.key(Key::PageUp);
+    let rows = render(&mut shell, 80, 24);
+    let shown = pool_rows(&rows);
+    assert!(shown[0].contains("> Pool 16"), "PgUp moves 13 rows up");
+
+    shell.key(Key::Home);
+    let rows = render(&mut shell, 80, 24);
+    assert!(pool_rows(&rows)[0].contains("> Pool 00"));
+}

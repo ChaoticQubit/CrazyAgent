@@ -8,10 +8,12 @@ use super::shell::Shell;
 use super::theme::{self, Appearance, Colors};
 use super::{TerminalGuard, TuiError, bounded_area};
 use crate::engine::Client;
+use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
 };
 use crossterm::execute;
+use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +39,31 @@ impl Drop for Extras {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
     }
+}
+
+/// Writes the sequences that hand the terminal back: stop focus and paste
+/// events, show the cursor, leave the alternate screen.
+/// Input: the terminal writer. Output: the write result.
+fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    execute!(
+        out,
+        DisableFocusChange,
+        DisableBracketedPaste,
+        Show,
+        LeaveAlternateScreen
+    )
+}
+
+/// Installs a panic hook that restores the terminal before the panic message
+/// prints, so it lands on the normal screen, then runs the previous hook.
+/// Input: none. Output: none; the hook stays for the rest of the process.
+fn restore_on_panic() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = restore(&mut std::io::stdout());
+        previous(info);
+    }));
 }
 
 /// Builds the shell's context from this process's environment.
@@ -73,6 +100,7 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     )?;
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
+    restore_on_panic();
     let _guard = TerminalGuard::enter()?;
     let _extras = Extras::enter()?;
     let (width, height) =
@@ -134,6 +162,9 @@ fn drive(
         let message = shell.ctx.message().is_some();
         if message != showing_message {
             showing_message = message;
+            dirty = true;
+        }
+        if shell.pace(now) {
             dirty = true;
         }
         if shell.busy() && now.duration_since(tick) >= TICK {
@@ -241,4 +272,23 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_hands_the_terminal_back_in_full() {
+        let mut out = Vec::new();
+        restore(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for sequence in ["\x1b[?1004l", "\x1b[?2004l", "\x1b[?25h", "\x1b[?1049l"] {
+            assert!(text.contains(sequence), "missing {sequence:?} in {text:?}");
+        }
+        assert!(
+            text.ends_with("\x1b[?1049l"),
+            "the alternate screen is left last"
+        );
+    }
 }

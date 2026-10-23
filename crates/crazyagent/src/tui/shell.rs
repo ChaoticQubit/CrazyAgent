@@ -15,6 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Position;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
+use std::time::{Duration, Instant};
 
 const STACK_MAX: usize = 32;
 const GO_TO_ROWS_MAX: usize = 8;
@@ -23,6 +24,7 @@ const HELP_WIDTH: u16 = 74;
 const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
 const QUIT_WIDTH: u16 = 46;
+const QUIET: Duration = Duration::from_millis(150);
 
 /// One Go to destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,7 +132,7 @@ impl GoTo {
 struct QuitAsk {
     quit_focused: bool,
     running: usize,
-    draft: bool,
+    loss: Option<&'static str>,
 }
 
 enum Overlay {
@@ -148,6 +150,7 @@ pub struct Shell {
     stack: Vec<Box<dyn Screen>>,
     overlay: Option<Overlay>,
     quit: bool,
+    busy_since: Option<Instant>,
 }
 
 impl Shell {
@@ -165,6 +168,7 @@ impl Shell {
             stack: vec![screen],
             overlay: None,
             quit: false,
+            busy_since: None,
         };
         shell.refresh();
         shell
@@ -210,6 +214,25 @@ impl Shell {
         self.top().busy(&self.ctx)
     }
 
+    /// Tracks how long the top screen has been busy, so loading lines stay
+    /// empty for the first 150 ms and quick replies never flash a spinner.
+    /// Input: the current time. Output: true when the quiet state changed and
+    /// the frame needs drawing.
+    pub fn pace(&mut self, now: Instant) -> bool {
+        self.busy_since = match (self.busy(), self.busy_since) {
+            (true, Some(since)) => Some(since),
+            (true, None) => Some(now),
+            (false, _) => None,
+        };
+        let quiet = self
+            .busy_since
+            .is_some_and(|since| now.saturating_duration_since(since) < QUIET);
+        let changed = quiet != self.ctx.quiet;
+        self.ctx.quiet = quiet;
+        assert!(!quiet || self.busy());
+        changed
+    }
+
     /// Asks the top screen to refresh its data.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn refresh(&mut self) {
@@ -226,21 +249,25 @@ impl Shell {
         })
     }
 
-    fn draft(&self) -> bool {
-        self.stack.iter().any(|screen| screen.draft())
+    fn loss(&self) -> Option<&'static str> {
+        self.stack
+            .iter()
+            .rev()
+            .find(|screen| screen.draft())
+            .map(|screen| screen.loss())
     }
 
     fn ask_quit(&mut self) {
         let running = self.running();
-        let draft = self.draft();
-        if running == 0 && !draft {
+        let loss = self.loss();
+        if running == 0 && loss.is_none() {
             self.quit = true;
             return;
         }
         self.overlay = Some(Overlay::Quit(QuitAsk {
             quit_focused: false,
             running,
-            draft,
+            loss,
         }));
     }
 
@@ -619,8 +646,8 @@ impl Shell {
                 if ask.running == 1 { "s" } else { "" },
             )));
         }
-        if ask.draft {
-            body.push(Line::raw("Your new project draft will be lost."));
+        if let Some(loss) = ask.loss {
+            body.push(Line::raw(loss));
         }
         body.push(Line::default());
         body.push(buttons(
@@ -900,6 +927,95 @@ mod tests {
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a second Ctrl-Q quits");
+    }
+
+    #[test]
+    fn loading_lines_stay_empty_for_the_first_150_ms_of_a_busy_spell() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        assert!(shell.busy(), "the profile is still loading");
+        assert!(!shell.ctx.quiet);
+        let start = Instant::now();
+        assert!(shell.pace(start), "becoming busy starts the quiet spell");
+        assert!(shell.ctx.quiet);
+        assert_eq!(shell.ctx.loading("Loading your profile"), Line::default());
+        assert!(!shell.pace(start + Duration::from_millis(149)));
+        assert!(shell.ctx.quiet);
+        assert!(shell.pace(start + Duration::from_millis(150)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            crate::tui::text::plain(&shell.ctx.loading("Loading your profile")),
+            format!("{} Loading your profile", shell.ctx.spinner())
+        );
+        assert!(!shell.pace(start + Duration::from_millis(400)));
+        assert!(!shell.ctx.quiet, "a long load keeps its spinner");
+
+        shell.arrive(Arrival::Profile(Ok(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }))));
+        assert!(!shell.busy());
+        assert!(!shell.pace(start + Duration::from_millis(500)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            shell.busy_since, None,
+            "the next busy spell starts quiet again"
+        );
+    }
+
+    #[test]
+    fn quit_asks_before_unsaved_profile_changes_are_lost() {
+        let loaded = || {
+            let mut ctx = ctx();
+            ctx.store.profile = Load::Ready(Some(OwnerProfile {
+                name: "Mira".into(),
+                role: String::new(),
+                bio: String::new(),
+                preferred_stack: Vec::new(),
+                working_style: Default::default(),
+            }));
+            at(Place::Settings(SettingsSection::Profile), ctx)
+        };
+        let mut shell = loaded();
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an untouched profile quits at once");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(
+                (ask.running, ask.loss),
+                (0, Some("Your profile changes will be lost."))
+            ),
+            _ => panic!("edited profile asks first"),
+        }
+        shell.key(Key::Esc);
+        assert!(!shell.quitting());
+        shell.key(Key::Backspace);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "undoing the edit leaves nothing to lose");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        for _ in 0..7 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        shell.key(Key::Ctrl('q'));
+        assert!(
+            matches!(&shell.overlay, Some(Overlay::Quit(ask)) if ask.loss.is_some()),
+            "a save still in flight can be lost"
+        );
+        shell.key(Key::Esc);
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "a saved profile has nothing to lose");
     }
 
     #[test]
