@@ -236,7 +236,7 @@ pub struct App {
     edit_requested: Option<(OwnerConnectionIdentity, ProjectId)>,
     brief_completion: Option<(String, ProjectId)>,
     setup_query: Option<SetupQuery>,
-    pub(super) setup_view: Option<SetupView>,
+    pub(super) setup_view: Option<(SetupQuery, SetupView)>,
     pub(super) setup_problem: Option<String>,
 }
 
@@ -863,7 +863,7 @@ impl App {
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
-                    self.setup_view = Some(view);
+                    self.setup_view = Some((event.query, view));
                     self.setup_problem = None;
                 }
                 Err(problem) => {
@@ -1646,7 +1646,7 @@ impl App {
     /// Queues a New Project creation with its folder, documents, team plan and research toggles.
     /// Takes the name spec and the full setup collected by the client.
     /// Returns an error while another owner intent is unresolved.
-    pub(super) fn queue_project_setup(
+    pub fn queue_project_setup(
         &mut self,
         spec: ProjectSpec,
         setup: crate::project_setup::ProjectSetup,
@@ -1661,7 +1661,7 @@ impl App {
     /// Queues one New Project read for the owner worker.
     /// Takes the catalog, setup, jobs, context or context item query.
     /// Returns an error while another read is waiting.
-    pub(super) fn request_project_setup(&mut self, query: SetupQuery) -> Result<(), String> {
+    pub fn request_project_setup(&mut self, query: SetupQuery) -> Result<(), String> {
         if self.setup_query.is_some() {
             return Err("A project setup read is already waiting".into());
         }
@@ -1671,6 +1671,13 @@ impl App {
 
     pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {
         self.setup_query.take()
+    }
+
+    /// Gives the latest New Project read with the query that produced it.
+    /// Takes the app state.
+    /// Returns the query and view, or none before the first read.
+    pub fn setup_view(&self) -> Option<&(SetupQuery, SetupView)> {
+        self.setup_view.as_ref()
     }
 
     fn submit_creation(

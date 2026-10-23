@@ -1,39 +1,5 @@
 use super::*;
-use crate::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ResearchJob, ResearchKind, StoredSetup,
-};
-use crate::protocol::CredentialRef;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::tui) enum SetupQuery {
-    Catalog {
-        pool: Option<CredentialRef>,
-        research: Vec<ResearchKind>,
-    },
-    Setup {
-        project: ProjectId,
-    },
-    Jobs {
-        project: ProjectId,
-    },
-    Context {
-        project: ProjectId,
-    },
-    Item {
-        project: ProjectId,
-        path: String,
-        offset: u64,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::tui) enum SetupView {
-    Catalog(Box<ProjectCatalog>),
-    Setup(Option<Box<StoredSetup>>),
-    Jobs(Vec<ResearchJob>),
-    Context(ProjectContext),
-    Item(ContextChunk),
-}
+pub(in crate::tui) use crate::project_setup::{SetupQuery, SetupView};
 
 pub(in crate::tui) struct SetupEvent {
     pub query: SetupQuery,
@@ -105,7 +71,7 @@ impl NativeOwner {
 mod tests {
     use super::*;
     use crate::engine::bootstrap::EngineService;
-    use crate::project_setup::{Platform, ProjectSetup, ResearchStatus};
+    use crate::project_setup::{Platform, ProjectSetup, ResearchKind, ResearchStatus};
     use crate::tui::app::App;
     use std::os::unix::fs::PermissionsExt;
 
@@ -193,9 +159,11 @@ mod tests {
         let query = app.take_setup_query().unwrap();
         let event = native.project_setup(query).await;
         app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
-        let Some(SetupView::Jobs(jobs)) = &app.setup_view else {
+        let Some((SetupQuery::Jobs { project: shown }, SetupView::Jobs(jobs))) = &app.setup_view
+        else {
             panic!("jobs view required");
         };
+        assert_eq!(shown, &project);
         assert_eq!(
             jobs.iter()
                 .map(|job| (job.kind, job.status))
@@ -217,6 +185,17 @@ mod tests {
             panic!("context item required");
         };
         assert_eq!(chunk.text.as_deref(), Some("item,size\nlogin,small\n"));
+        let catalog = native
+            .project_setup(SetupQuery::Catalog {
+                pool: None,
+                research: vec![ResearchKind::MarketResearch],
+            })
+            .await;
+        let Ok(SetupView::Catalog(catalog)) = catalog.result else {
+            panic!("catalog required");
+        };
+        assert_eq!(catalog.default_team.master, "codex");
+        assert_eq!(catalog.research.len(), ResearchKind::ALL.len());
         let missing = native
             .project_setup(SetupQuery::Context {
                 project: ProjectId::new("project-absent").unwrap(),

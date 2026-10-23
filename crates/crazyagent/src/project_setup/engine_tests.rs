@@ -128,7 +128,10 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         )
         .await
         .unwrap();
-    assert_eq!(catalog.default_team.master, "codex");
+    assert_eq!(
+        catalog.default_team.master, "rcli",
+        "codex has no sign-in in this engine, so the configured endpoint leads"
+    );
     assert_eq!(catalog.default_team.sub_harnesses[0].agents, 2);
     assert_eq!(
         owner
@@ -189,7 +192,7 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
 
     let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
     assert_eq!(stored.folder, folder.to_str().unwrap());
-    assert_eq!(stored.team.master, "codex");
+    assert_eq!(stored.team.master, "rcli");
     assert!(stored.team.master_tools);
     assert_eq!(stored.documents.len(), 2);
 
@@ -203,8 +206,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
             ))
             .collect::<Vec<_>>(),
         [
-            ("Market research", "Queued", "codex"),
-            ("Competitor research", "Queued", "codex")
+            ("Market research", "Queued", "rcli"),
+            ("Competitor research", "Queued", "rcli")
         ]
     );
 

@@ -438,6 +438,37 @@ pub struct ContextChunk {
     pub next_offset: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupQuery {
+    Catalog {
+        pool: Option<CredentialRef>,
+        research: Vec<ResearchKind>,
+    },
+    Setup {
+        project: ProjectId,
+    },
+    Jobs {
+        project: ProjectId,
+    },
+    Context {
+        project: ProjectId,
+    },
+    Item {
+        project: ProjectId,
+        path: String,
+        offset: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupView {
+    Catalog(Box<ProjectCatalog>),
+    Setup(Option<Box<StoredSetup>>),
+    Jobs(Vec<ResearchJob>),
+    Context(ProjectContext),
+    Item(ContextChunk),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SetupAction {
@@ -532,12 +563,13 @@ const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
 ];
 
 /// Serves the curated New Project choices and the smart team defaults.
-/// Takes the effective configuration, the chosen pool and the chosen research toggles.
+/// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
 /// Returns the catalog, or `pool_missing` for a pool that does not exist.
 pub fn catalog(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
+    signed_in: &BTreeSet<CredentialRef>,
 ) -> Result<ProjectCatalog, &'static str> {
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
@@ -572,7 +604,7 @@ pub fn catalog(
         documents_max: DOCUMENTS_MAX,
         document_bytes_max: DOCUMENT_BYTES_MAX,
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
-        default_team: default_team(config, pool, research),
+        default_team: default_team(config, pool, research, signed_in),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -584,6 +616,47 @@ fn pool_exists(config: &EffectiveConfig, pool: &CredentialRef) -> bool {
         .model_access
         .as_ref()
         .is_some_and(|access| access.pools.iter().any(|p| &p.id == pool))
+}
+
+/// Finds the pool's natively managed connections whose latest sign-in observed an account.
+/// Takes a transaction over the engine database, the configuration and the pool.
+/// Returns the signed-in connection ids; an absent pool or sign-in table gives none.
+pub fn signed_in_connections(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    pool: Option<&CredentialRef>,
+) -> Result<BTreeSet<CredentialRef>, EngineError> {
+    let mut signed = BTreeSet::new();
+    let Some((access, pool)) = pool.and_then(|pool| {
+        let access = config.settings.model_access.as_ref()?;
+        Some((access, access.pools.iter().find(|p| &p.id == pool)?))
+    }) else {
+        return Ok(signed);
+    };
+    for connection in access
+        .connections
+        .iter()
+        .filter(|c| pool.members.contains(&c.id))
+    {
+        let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+            continue;
+        };
+        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+        let phase: Option<String> = tx
+            .query_row(
+                "SELECT phase FROM native_auth_operations WHERE profile_key=?1
+                ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if phase.as_deref() == Some("authenticated_observed") {
+            signed.insert(connection.id.clone());
+        }
+    }
+    assert!(signed.len() <= pool.members.len());
+    Ok(signed)
 }
 
 /// Reports whether a pool with members is explicitly assigned to the project.
@@ -598,14 +671,15 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 }
 
 /// Builds the smart team defaults for the New Project Team step.
-/// Takes the configuration, the chosen pool and the chosen research toggles.
-/// Returns the best signed-in harness as master and one research agent per toggle, tools on.
+/// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
+/// Returns the best ready harness as master and one research agent per toggle, tools on.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
+    signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
-    let members: Vec<(bool, &str)> = pool
+    let members: Vec<(u8, &str)> = pool
         .and_then(|pool| {
             let access = config.settings.model_access.as_ref()?;
             let pool = access.pools.iter().find(|p| &p.id == pool)?;
@@ -615,10 +689,16 @@ pub fn default_team(
                     .iter()
                     .filter(|c| pool.members.contains(&c.id))
                     .map(|c| {
-                        (
-                            matches!(c.auth, ModelAuthentication::NativeManaged { .. }),
-                            c.harness.as_str(),
-                        )
+                        let tier = match c.auth {
+                            ModelAuthentication::NativeManaged { .. }
+                                if signed_in.contains(&c.id) =>
+                            {
+                                0
+                            }
+                            ModelAuthentication::NativeManaged { .. } => 2,
+                            _ => 1,
+                        };
+                        (tier, c.harness.as_str())
                     })
                     .collect(),
             )
@@ -632,7 +712,7 @@ pub fn default_team(
     let master = members
         .iter()
         .filter(|(_, harness)| harness_valid(harness))
-        .min_by_key(|(signed_in, harness)| (!signed_in, rank(harness), *harness))
+        .min_by_key(|(tier, harness)| (*tier, rank(harness), *harness))
         .map_or("codex", |(_, harness)| harness)
         .to_owned();
     let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
@@ -1237,10 +1317,13 @@ fn create(
     if exists {
         return Ok(rejected("project_exists"));
     }
-    let team = setup
-        .team
-        .clone()
-        .unwrap_or_else(|| default_team(config, setup.pool.as_ref(), &setup.research));
+    let team = match setup.team.clone() {
+        Some(team) => team,
+        None => {
+            let signed = signed_in_connections(tx, config, setup.pool.as_ref())?;
+            default_team(config, setup.pool.as_ref(), &setup.research, &signed)
+        }
+    };
     team.validate()?;
     let root = projects_root(database)?;
     let folder = root.join(project_id.as_str());

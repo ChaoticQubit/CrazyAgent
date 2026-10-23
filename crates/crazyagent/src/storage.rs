@@ -1893,7 +1893,13 @@ fn owner_read(
         }
         OwnerRead::ProjectCatalog { pool, research } => OwnerData::ProjectCatalog {
             catalog: Box::new(
-                crate::project_setup::catalog(config, pool.as_ref(), research).map_err(error)?,
+                crate::project_setup::catalog(
+                    config,
+                    pool.as_ref(),
+                    research,
+                    &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                )
+                .map_err(error)?,
             ),
         },
         OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {

@@ -159,10 +159,17 @@ fn setup_bounds_reject_every_oversized_or_malformed_field() {
 #[test]
 fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
     let config = config();
+    let mixed = CredentialRef::new("pool-mixed").unwrap();
+    let signed = |ids: &[&str]| -> BTreeSet<CredentialRef> {
+        ids.iter()
+            .map(|id| CredentialRef::new(*id).unwrap())
+            .collect()
+    };
     let catalog = catalog(
         &config,
-        Some(&CredentialRef::new("pool-mixed").unwrap()),
+        Some(&mixed),
         &[ResearchKind::MarketResearch, ResearchKind::DesignResearch],
+        &signed(&["c-codex", "b-claude"]),
     )
     .unwrap();
     assert!(
@@ -222,24 +229,39 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
     assert_eq!((team.min_agents, team.max_agents), (1, 3));
     assert!(team.validate().is_ok());
 
+    let only_claude = default_team(&config, Some(&mixed), &[], &signed(&["b-claude"]));
+    assert_eq!(
+        only_claude.master, "claude",
+        "a signed-in harness beats an unsigned one"
+    );
+    let nobody = default_team(&config, Some(&mixed), &[], &signed(&[]));
+    assert_eq!(
+        nobody.master, "rcli",
+        "a configured endpoint beats a harness that is not signed in"
+    );
     let local = default_team(
         &config,
         Some(&CredentialRef::new("pool-local").unwrap()),
         &[],
+        &signed(&[]),
     );
     assert_eq!(local.master, "rcli");
     assert!(local.sub_harnesses.is_empty());
     assert_eq!((local.min_agents, local.max_agents), (1, 1));
-    assert_eq!(default_team(&config, None, &[]).master, "codex");
+    assert_eq!(
+        default_team(&config, None, &[], &signed(&[])).master,
+        "codex"
+    );
     assert!(catalog_ok_without_pool(&config));
 }
 
 fn catalog_ok_without_pool(config: &EffectiveConfig) -> bool {
-    catalog(config, None, &ResearchKind::ALL).is_ok()
+    catalog(config, None, &ResearchKind::ALL, &BTreeSet::new()).is_ok()
         && catalog(
             config,
             Some(&CredentialRef::new("pool-absent").unwrap()),
             &[],
+            &BTreeSet::new(),
         )
         .is_err()
 }
