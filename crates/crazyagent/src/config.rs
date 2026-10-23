@@ -925,6 +925,7 @@ pools = [{ id = "pool", members = ["key-connection", "local-connection"], projec
         let edit = ModelAccessEdit::ReplacePool {
             pool: AccountPool {
                 id: CredentialRef::new("pool").unwrap(),
+                name: None,
                 members: vec![
                     CredentialRef::new("key-connection").unwrap(),
                     CredentialRef::new("local-connection").unwrap(),
