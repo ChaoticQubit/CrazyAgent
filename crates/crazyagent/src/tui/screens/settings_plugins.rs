@@ -156,6 +156,7 @@ enum Action {
     NotNow,
     Toggle,
     Check,
+    Secrets,
     Remove,
     Close,
 }
@@ -261,7 +262,7 @@ impl Plugins {
                 if matches!(server.spec, ServerSpec::Stdio { .. }) {
                     actions.push(Action::Check);
                 }
-                actions.extend([Action::Toggle, Action::Remove, Action::Close]);
+                actions.extend([Action::Secrets, Action::Toggle, Action::Remove]);
                 actions
             }
             None => Vec::new(),
@@ -280,6 +281,7 @@ impl Plugins {
             Action::Toggle if on => "Turn off",
             Action::Toggle => "Turn on",
             Action::Check => "Check again",
+            Action::Secrets => "Secrets",
             Action::Remove => "Remove",
             Action::Close => "Close",
         }
@@ -731,6 +733,12 @@ impl Plugins {
                 }
                 Key::Enter => {
                     let action = self.actions().get(focus).copied().unwrap_or(Action::Close);
+                    if let (Action::Secrets, Some(Picked::Server(index))) = (action, self.picked())
+                    {
+                        self.open = Open::None;
+                        let server = self.servers[index].clone();
+                        return Flow::Replace(Box::new(ServerSecrets::new(server)));
+                    }
                     self.run(action, ctx);
                 }
                 _ => {}
@@ -1318,6 +1326,362 @@ impl Screen for AddPlugin {
             || !self.target.is_empty()
             || !self.folder.is_empty()
             || !self.secrets.is_empty()
+    }
+
+    fn place(&self) -> Option<Place> {
+        Some(Place::Settings(SettingsSection::Plugins))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SecretFocus {
+    List,
+    Name,
+    Value,
+}
+
+/// The secrets of one MCP server: which ones are saved, saving a new or
+/// replacement value, and removing one. Values are never shown.
+/// Input: the server and keys. Output: one secret change at a time.
+pub struct ServerSecrets {
+    server: ServerView,
+    focus: SecretFocus,
+    selected: usize,
+    name: TextField,
+    value: TextField,
+    confirm: Option<bool>,
+    changing: Option<String>,
+}
+
+impl ServerSecrets {
+    /// The secrets page of one server.
+    /// Input: the server as last read. Output: the screen, on the list when the
+    /// server has secrets and on the name field otherwise.
+    pub fn new(server: ServerView) -> Self {
+        let focus = if server.secrets.is_empty() {
+            SecretFocus::Name
+        } else {
+            SecretFocus::List
+        };
+        Self {
+            server,
+            focus,
+            selected: 0,
+            name: TextField::new("", SECRET_NAME_BYTES_MAX),
+            value: TextField::secret("", SECRET_VALUE_CHARS_MAX),
+            confirm: None,
+            changing: None,
+        }
+    }
+
+    fn order(&self) -> Vec<SecretFocus> {
+        let mut order = Vec::new();
+        if !self.server.secrets.is_empty() {
+            order.push(SecretFocus::List);
+        }
+        order.extend([SecretFocus::Name, SecretFocus::Value]);
+        order
+    }
+
+    fn move_focus(&mut self, forward: bool) {
+        let order = self.order();
+        let at = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % order.len()
+        } else {
+            (at + order.len() - 1) % order.len()
+        };
+        self.focus = order[next];
+    }
+
+    fn save(&mut self, ctx: &mut Ctx) {
+        if self.changing.is_some() {
+            return;
+        }
+        let name = self.name.value().trim().to_owned();
+        if validate_secret_name(&name).is_err() {
+            self.name.error = Some(plugin_plain("server_secret_name_invalid").into());
+            self.focus = SecretFocus::Name;
+            return;
+        }
+        let known = self.server.secrets.iter().any(|secret| secret.name == name);
+        if !known && self.server.secrets.len() >= SECRETS_PER_SERVER_MAX {
+            self.name.error = Some(plugin_plain("server_secret_limit").into());
+            return;
+        }
+        if self.value.is_empty() {
+            self.focus = SecretFocus::Value;
+            return;
+        }
+        match AccountSecret::new(self.value.take_secret()) {
+            Ok(value) => {
+                self.changing = Some(format!("Saved {name}."));
+                self.name.clear();
+                self.name.error = None;
+                self.focus = SecretFocus::Name;
+                let id = self.server.id.clone();
+                send(
+                    ctx,
+                    SettingsJob::Plugin(PluginChange::SetSecret { id, name, value }),
+                );
+            }
+            Err(error) => self.name.error = Some(plugin_plain(&error.0).into()),
+        }
+        assert!(self.value.is_empty());
+    }
+
+    /// The body lines of the page and the cursor.
+    /// Inputs: the content width and context. Output: the lines and the cursor
+    /// relative to them.
+    pub fn body(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
+        let theme = &ctx.theme;
+        let glyphs = ctx.glyphs;
+        let width = limit.min(FIELD_WIDTH);
+        let mut lines = vec![
+            row(
+                width,
+                styled(format!("{} secrets", self.server.name), Role::Accent, theme),
+                status(server_word(self.server.status), theme, glyphs),
+                glyphs,
+            ),
+            styled(
+                "Values stay hidden. The server gets them when it starts.",
+                Role::Muted,
+                theme,
+            ),
+            Line::default(),
+        ];
+        if self.server.secrets.is_empty() {
+            lines.push(styled("No secrets yet.", Role::Muted, theme));
+        }
+        let listing = self.focus == SecretFocus::List && self.confirm.is_none();
+        for (index, secret) in self.server.secrets.iter().enumerate() {
+            let state = if secret.saved {
+                status("Key saved", theme, glyphs)
+            } else {
+                Line::raw("Not saved")
+            };
+            let content = join([
+                pad(
+                    Line::raw(cut(&secret.name, 16, glyphs.ellipsis)),
+                    18,
+                    glyphs,
+                ),
+                state,
+            ]);
+            lines.push(list_row(
+                content,
+                width,
+                index == self.selected,
+                listing,
+                theme,
+                glyphs,
+            ));
+        }
+        lines.push(Line::default());
+        lines.push(row(
+            width,
+            styled("Save a secret", Role::Heading, theme),
+            styled("Same name replaces it", Role::Muted, theme),
+            glyphs,
+        ));
+        let top = lines.len() as u16;
+        let value_width = width.saturating_sub(SECRET_NAME_BOX + 2).max(6);
+        let (name_lines, name_at) = self.name.lines(
+            SECRET_NAME_BOX,
+            self.focus == SecretFocus::Name,
+            theme,
+            glyphs,
+        );
+        let (value_lines, value_at) =
+            self.value
+                .lines(value_width, self.focus == SecretFocus::Value, theme, glyphs);
+        let boxed = |field: &[Line<'static>]| field.get(1).cloned().unwrap_or_default();
+        lines.push(join([
+            boxed(&name_lines),
+            Line::raw("  "),
+            boxed(&value_lines),
+        ]));
+        let mut cursor = None;
+        if let Some(at) = name_at {
+            cursor = Some(Position::new(at.x, top + at.y - 1));
+        }
+        if let Some(at) = value_at {
+            cursor = Some(Position::new(
+                at.x + (SECRET_NAME_BOX + 2) as u16,
+                top + at.y - 1,
+            ));
+        }
+        match &self.name.error {
+            Some(error) => lines.push(styled(error.clone(), Role::Error, theme)),
+            None => lines.push(styled(
+                "Type the name, then the value, then press Enter.",
+                Role::Muted,
+                theme,
+            )),
+        }
+        (lines, cursor)
+    }
+}
+
+impl Screen for ServerSecrets {
+    fn crumbs(&self) -> Vec<String> {
+        vec![
+            "Settings".into(),
+            "Plugins and skills".into(),
+            format!("{} secrets", self.server.name),
+        ]
+    }
+
+    fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.focus == SecretFocus::List {
+            let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+            return vec![
+                hint(&arrows, "Move"),
+                hint("Enter", "Replace"),
+                hint("d", "Remove"),
+                hint("Tab", "Next field"),
+                hint("Esc", "Back"),
+            ];
+        }
+        vec![
+            hint("Tab", "Next field"),
+            hint("Enter", "Save secret"),
+            hint("Ctrl-U", "Clear"),
+            hint("Esc", "Back"),
+        ]
+    }
+
+    fn typing(&self) -> bool {
+        self.focus != SecretFocus::List && self.confirm.is_none()
+    }
+
+    fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if let Some(remove_focused) = self.confirm {
+            match key {
+                Key::Esc => self.confirm = None,
+                Key::Left | Key::Right | Key::Tab | Key::BackTab => {
+                    self.confirm = Some(!remove_focused)
+                }
+                Key::Enter => {
+                    self.confirm = None;
+                    let secret = self.server.secrets.get(self.selected);
+                    let idle = self.changing.is_none();
+                    if let (true, Some(secret), true) = (remove_focused, secret, idle) {
+                        let change = PluginChange::RemoveSecret {
+                            id: self.server.id.clone(),
+                            name: secret.name.clone(),
+                        };
+                        self.changing = Some(format!("Removed {}.", secret.name));
+                        send(ctx, SettingsJob::Plugin(change));
+                    }
+                }
+                _ => {}
+            }
+            return Flow::Handled;
+        }
+        let count = self.server.secrets.len();
+        match (self.focus, key) {
+            (_, Key::Esc) => return Flow::Replace(Box::new(Plugins::new())),
+            (_, Key::Tab) => self.move_focus(true),
+            (_, Key::BackTab) => self.move_focus(false),
+            (SecretFocus::List, Key::Up) => self.selected = self.selected.saturating_sub(1),
+            (SecretFocus::List, Key::Down) => {
+                self.selected = (self.selected + 1).min(count.saturating_sub(1))
+            }
+            (SecretFocus::List, Key::Char('d')) if count > 0 && self.changing.is_none() => {
+                self.confirm = Some(false)
+            }
+            (SecretFocus::List, Key::Enter) => {
+                if let Some(secret) = self.server.secrets.get(self.selected) {
+                    self.name.set(&secret.name);
+                    self.name.error = None;
+                    self.focus = SecretFocus::Value;
+                }
+            }
+            (SecretFocus::List, _) => return Flow::Ignored,
+            (_, Key::Enter) => self.save(ctx),
+            (SecretFocus::Name, other) => {
+                self.name.error = None;
+                self.name.key(other);
+            }
+            (SecretFocus::Value, other) => {
+                self.value.key(other);
+            }
+        }
+        Flow::Handled
+    }
+
+    fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        let Some(SettingsEvent::PluginChanged(result)) = settings_event(arrival) else {
+            return Flow::Handled;
+        };
+        let Some(done) = self.changing.take() else {
+            return Flow::Handled;
+        };
+        match result {
+            Ok(Some(server)) => {
+                self.server = server.clone();
+                self.selected = self
+                    .selected
+                    .min(self.server.secrets.len().saturating_sub(1));
+                if self.server.secrets.is_empty() && self.focus == SecretFocus::List {
+                    self.focus = SecretFocus::Name;
+                }
+                ctx.say(Message::success(&done, ""));
+            }
+            Ok(None) => {}
+            Err(code) => ctx.say(Message::error(plugin_plain(code), "")),
+        }
+        Flow::Handled
+    }
+
+    fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        let remove_focused = self.confirm?;
+        let secret = self.server.secrets.get(self.selected)?;
+        let room = usize::from(MODAL_WIDTH) - 4;
+        let mut body = vec![
+            Line::raw(format!("Remove {} from {}?", secret.name, self.server.name)),
+            Line::default(),
+        ];
+        body.extend(
+            wrap("The server may stop working until you save it again.", room)
+                .into_iter()
+                .map(Line::raw),
+        );
+        body.push(Line::default());
+        body.push(buttons(
+            &["Cancel", "Remove"],
+            Some(usize::from(remove_focused)),
+            &ctx.theme,
+        ));
+        let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+        Some((
+            Modal {
+                width: MODAL_WIDTH,
+                title: "Remove secret".into(),
+                body,
+                top: None,
+            },
+            vec![
+                hint(&arrows, "Choose"),
+                hint("Enter", "Confirm"),
+                hint("Esc", "Cancel"),
+            ],
+        ))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
+        let limit = (area.width as usize).saturating_sub(4).max(8);
+        let (content, cursor) = self.body(limit, ctx);
+        draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx)
+    }
+
+    fn busy(&self, _ctx: &Ctx) -> bool {
+        self.changing.is_some()
     }
 
     fn place(&self) -> Option<Place> {

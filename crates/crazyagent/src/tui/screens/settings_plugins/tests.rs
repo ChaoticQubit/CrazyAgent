@@ -307,3 +307,169 @@ fn a_skill_folder_under_home_is_sent_as_a_full_path() {
     }
     assert!(form.busy(&ctx));
 }
+
+fn github_with_token() -> ServerView {
+    let (_, servers) = lists();
+    let mut github = servers[0].clone();
+    github.secrets = vec![SecretView {
+        name: "GITHUB_TOKEN".into(),
+        saved: true,
+    }];
+    github
+}
+
+fn changed(server: Option<ServerView>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::PluginChanged(Ok(server)),
+    ))))
+}
+
+#[test]
+fn details_of_an_approved_server_open_its_secrets() {
+    let (skills, servers) = lists();
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = Plugins::with(skills, servers);
+    for _ in 0..4 {
+        screen.key(&Key::Down, &mut ctx);
+    }
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Right, &mut ctx);
+    let flow = screen.key(&Key::Enter, &mut ctx);
+    let Flow::Replace(next) = flow else {
+        panic!("the secrets page replaces the list");
+    };
+    assert_eq!(
+        next.crumbs(),
+        ["Settings", "Plugins and skills", "github secrets"]
+    );
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(ctx.queued(), 0);
+}
+
+#[test]
+fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
+    let mut shell = Shell::with(
+        plugin_ctx(80, 24),
+        Box::new(ServerSecrets::new(github_with_token())),
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("GITHUB_TOKEN") && row.contains("Key saved")),
+        "{rows:?}"
+    );
+    shell.key(Key::Tab);
+    for character in "SENTRY_DSN".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Tab);
+    shell.key(Key::Paste("https://k9:tidewater42@sentry.io/7".into()));
+    let rows = render(&mut shell, 80, 24);
+    assert!(rows.iter().all(|row| !row.contains("tidewater42")));
+    shell.key(Key::Enter);
+    match shell.ctx.next_request() {
+        Some(Request::Settings(job)) => {
+            assert!(!format!("{job:?}").contains("tidewater42"));
+            match *job {
+                SettingsJob::Plugin(PluginChange::SetSecret { id, name, .. }) => {
+                    assert_eq!(id, "server-github");
+                    assert_eq!(name, "SENTRY_DSN");
+                }
+                other => panic!("save expected, got {other:?}"),
+            }
+        }
+        other => panic!("settings request expected, got {other:?}"),
+    }
+    let rows = render(&mut shell, 80, 24);
+    assert!(rows.iter().all(|row| !row.contains("tidewater42")));
+    shell.key(Key::Enter);
+    assert_eq!(shell.ctx.queued(), 0, "one change at a time");
+}
+
+#[test]
+fn a_saved_reply_updates_the_list_and_says_what_changed() {
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = ServerSecrets::new(github_with_token());
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.typing(), "Enter on a secret starts replacing it");
+    screen.key(&Key::Paste("ghp_rotated".into()), &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => {
+            assert!(
+                matches!(*job, SettingsJob::Plugin(PluginChange::SetSecret { ref name, .. }) if name == "GITHUB_TOKEN")
+            );
+        }
+        other => panic!("save expected, got {other:?}"),
+    }
+    assert!(screen.busy(&ctx));
+    let mut updated = github_with_token();
+    updated.secrets.push(SecretView {
+        name: "SENTRY_DSN".into(),
+        saved: true,
+    });
+    screen.arrive(&changed(Some(updated)), &mut ctx);
+    assert!(!screen.busy(&ctx));
+    assert_eq!(ctx.message().unwrap().lead, "Saved GITHUB_TOKEN.");
+    let (lines, _) = screen.body(76, &ctx);
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("SENTRY_DSN")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn removing_a_secret_asks_first() {
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = ServerSecrets::new(github_with_token());
+    screen.key(&Key::Char('d'), &mut ctx);
+    assert_eq!(screen.modal(&ctx).unwrap().0.title, "Remove secret");
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "Cancel is focused first");
+    assert_eq!(ctx.queued(), 0);
+    screen.key(&Key::Char('d'), &mut ctx);
+    screen.key(&Key::Right, &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => {
+            assert!(
+                matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSecret { ref id, ref name }) if id == "server-github" && name == "GITHUB_TOKEN")
+            );
+        }
+        other => panic!("remove expected, got {other:?}"),
+    }
+    let (_, servers) = lists();
+    screen.arrive(&changed(Some(servers[0].clone())), &mut ctx);
+    assert_eq!(ctx.message().unwrap().lead, "Removed GITHUB_TOKEN.");
+    assert!(
+        screen.typing(),
+        "with no secrets left the name field has focus"
+    );
+}
+
+#[test]
+fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = ServerSecrets::new(github_with_token());
+    screen.key(&Key::Tab, &mut ctx);
+    for character in "9 bad".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    screen.key(&Key::Tab, &mut ctx);
+    screen.key(&Key::Paste("value".into()), &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0);
+    assert_eq!(
+        screen.name.error.as_deref(),
+        Some("Secret names use letters, digits, _ or -, and start with a letter or _.")
+    );
+}

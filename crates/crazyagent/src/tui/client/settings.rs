@@ -77,6 +77,15 @@ pub(in crate::tui) enum PluginChange {
     CheckServer {
         id: String,
     },
+    SetSecret {
+        id: String,
+        name: String,
+        value: AccountSecret,
+    },
+    RemoveSecret {
+        id: String,
+        name: String,
+    },
 }
 
 impl std::fmt::Debug for SettingsJob {
@@ -371,6 +380,12 @@ impl NativeOwner {
                 controller.remove_mcp_server(id).await.map(|()| None)
             }
             PluginChange::CheckServer { id } => controller.check_mcp_server(id).await.map(Some),
+            PluginChange::SetSecret { id, name, value } => {
+                controller.set_mcp_secret(id, name, value).await.map(Some)
+            }
+            PluginChange::RemoveSecret { id, name } => {
+                controller.remove_mcp_secret(id, name).await.map(Some)
+            }
         };
         done.map_err(|error| problem(&error, lost))
     }
