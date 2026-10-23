@@ -716,3 +716,37 @@ fn a_fresh_master_reads_the_recent_conversation_within_bounds() {
         "the newest messages are kept when the bound is tight"
     );
 }
+
+#[test]
+fn concurrent_agent_setups_create_one_project_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("project");
+    std::fs::create_dir(&root).unwrap();
+    let starts = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let setups: Vec<_> = (0..8)
+        .map(|index| {
+            let (root, starts) = (root.clone(), starts.clone());
+            let tmp = base.join(format!("tmp-{index}"));
+            std::fs::create_dir(&tmp).unwrap();
+            std::thread::spawn(move || {
+                starts.wait();
+                crate::research::runner::ensure_repository(&root, &tmp).map_err(|e| e.to_string())
+            })
+        })
+        .collect();
+    for setup in setups {
+        setup.join().unwrap().unwrap();
+    }
+    let commits = std::process::Command::new("/usr/bin/git")
+        .args(["-C", root.to_str().unwrap(), "rev-list", "--count", "HEAD"])
+        .env_clear()
+        .env("HOME", &base)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(commits.status.success());
+    assert_eq!(String::from_utf8_lossy(&commits.stdout).trim(), "1");
+    let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.matches("/worktrees/").count(), 1, "{exclude}");
+}

@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
+static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -794,7 +795,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Makes the project folder a git repository with one empty start commit and
+/// worktrees/ and context/ excluded, once per process at a time.
+/// Takes the project folder and a private temporary home for git.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if root.join(".git").is_dir() {
         return Ok(());
     }
@@ -850,6 +857,9 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let worktrees = sandbox.project_root().join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
