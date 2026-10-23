@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agents;
 pub mod assets;
 pub mod client_controller;
 pub mod config;
