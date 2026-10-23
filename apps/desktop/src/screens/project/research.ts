@@ -71,6 +71,7 @@ export interface TeamAgentRow {
   account: string;
   word: string;
   task: string;
+  folder: string;
 }
 
 export interface TeamTaskRow {
@@ -97,7 +98,8 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
-/** Builds the Team panel: each agent with its role, plain name, harness, account and current task,
+/** Builds the Team panel: each agent with its role, plain name, harness, account, current task and
+ * the folder it works in (the master in the project folder, a sub-agent in its own worktree),
  * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
  * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
@@ -123,6 +125,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
       account: account(agent.account),
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
+      folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({

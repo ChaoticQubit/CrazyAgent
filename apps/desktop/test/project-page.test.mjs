@@ -397,7 +397,7 @@ test("the Team panel names each agent, its account and current task, and lists t
   const status = {
     agents: [
       teamAgent(1, "working", { role: "master", harness: "claude", account: "acct-a" }),
-      teamAgent(2, "working", { task: 10, turns: 3, account: "acct-b" }),
+      teamAgent(2, "working", { task: 10, turns: 3, account: "acct-b", worktree: "worktrees/agent-2" }),
       teamAgent(3, "idle", { account: "acct-gone" }),
       teamAgent(4, "failed", { problem: "Codex stopped answering." }),
     ],
@@ -412,16 +412,16 @@ test("the Team panel names each agent, its account and current task, and lists t
   const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
-    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "" },
-    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen" },
-    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work" },
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder" },
+    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
+    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work", folder: "" },
   ]);
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Codex 1", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering." });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "" });
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Codex 1", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
