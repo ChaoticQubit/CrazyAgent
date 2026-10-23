@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import * as api from "./api";
+import type { OwnerProfile, Result } from "./api";
+import type { EngineState } from "./ui/shell";
 import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
@@ -958,4 +961,148 @@ export function useOwnerBrowser() {
       await finishIntent(await (kind === "brief" ? replaceBrief : sendMessage)(ticket, draft.text, draft.generation));
     }, true),
   };
+}
+
+export type Loaded<T> = { kind: "loading" } | Result<T>;
+export type ThemeChoice = "system" | "light" | "dark";
+export type ProjectRow = ProjectPage["items"][number];
+
+const THEME_KEY = "crazyagent.theme";
+
+/** Reads the owner's appearance choice kept in this app (not in the engine profile).
+ * Output: system, light or dark; system when storage is unavailable. */
+export function readTheme(): ThemeChoice {
+  try {
+    const value = window.localStorage.getItem(THEME_KEY);
+    return value === "light" || value === "dark" ? value : "system";
+  } catch {
+    return "system";
+  }
+}
+
+/** Applies and remembers the appearance choice; system follows the macOS setting.
+ * Input: the choice. Output: none. */
+export function applyTheme(choice: ThemeChoice): void {
+  if (typeof document === "undefined") return;
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  try {
+    if (choice === "system") window.localStorage.removeItem(THEME_KEY);
+    else window.localStorage.setItem(THEME_KEY, choice);
+  } catch {
+    return;
+  }
+}
+
+/** Reads the engine state from a connect or status reply.
+ * Input: the reply. Output: running when connected, otherwise down. */
+export function engineState(result: Result<api.ConnectionStatus>): EngineState {
+  return result.kind === "ok" && result.value.connected ? "running" : "down";
+}
+
+export interface Session {
+  engine: EngineState;
+  unconfirmed: boolean;
+  profile: Loaded<OwnerProfile | null>;
+  projects: Loaded<ProjectRow[]>;
+  toast: string;
+  revision: number;
+  retry: () => void;
+  checkUnconfirmed: () => Promise<void>;
+  refreshProfile: () => Promise<void>;
+  refreshProjects: () => Promise<void>;
+  showToast: (message: string) => void;
+  noteResult: <T>(result: Result<T>) => Result<T>;
+}
+
+/** The app session: connects to the engine on launch, reads the profile and projects, keeps
+ * the unconfirmed-change banner, the toast and a revision counter screens reload on.
+ * Output: the session. */
+export function useSession(): Session {
+  const [engine, setEngine] = useState<EngineState>("connecting");
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
+  const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
+  const [toast, setToast] = useState("");
+  const [revision, setRevision] = useState(0);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  function noteResult<T>(result: Result<T>): Result<T> {
+    if (result.kind === "error" && result.code === "engine_unreachable") setEngine("down");
+    if (result.kind === "error" && result.code === "uncertain") setUnconfirmed(true);
+    return result;
+  }
+
+  async function refreshProfile() {
+    setProfile(noteResult(await api.getProfile()));
+  }
+
+  async function refreshProjects() {
+    setProjects(noteResult(await api.listProjects()));
+  }
+
+  async function start() {
+    setEngine("connecting");
+    setProfile({ kind: "loading" });
+    setProjects({ kind: "loading" });
+    const result = await api.connect();
+    const state = engineState(result);
+    setEngine(state);
+    if (state !== "running") return;
+    setUnconfirmed(result.kind === "ok" && result.value.pending);
+    await Promise.all([refreshProfile(), refreshProjects()]);
+    setRevision((value) => value + 1);
+  }
+
+  useEffect(() => { void start(); }, []);
+
+  return {
+    engine, unconfirmed, profile, projects, toast, revision,
+    retry: () => { void start(); },
+    checkUnconfirmed: async () => {
+      const result = noteResult(await api.checkUnconfirmed());
+      if (result.kind === "ok" || (result.kind === "error" && result.code !== "uncertain")) {
+        const current = noteResult(await api.status());
+        setUnconfirmed(current.kind === "ok" && current.value.pending);
+      }
+      await Promise.all([refreshProfile(), refreshProjects()]);
+      setRevision((value) => value + 1);
+    },
+    refreshProfile,
+    refreshProjects,
+    showToast: (message: string) => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      setToast(message);
+      toastTimer.current = setTimeout(() => setToast(""), 4000);
+    },
+    noteResult,
+  };
+}
+
+export const SessionContext = createContext<Session | null>(null);
+
+/** Reads the app session from context; screens call this instead of taking it as a prop.
+ * Output: the session. Throws when used outside the app shell. */
+export function useAppSession(): Session {
+  const session = useContext(SessionContext);
+  if (!session) throw new Error("useAppSession outside SessionContext");
+  return session;
+}
+
+/** Loads one engine read for a screen and reloads it when the session revision or the given
+ * keys change. Inputs: the read and its keys. Output: the loaded value and a reload action. */
+export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = []): [Loaded<T>, () => void] {
+  const session = useContext(SessionContext);
+  const [value, setValue] = useState<Loaded<T>>({ kind: "loading" });
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setValue((old) => old.kind === "ok" ? old : { kind: "loading" });
+    void read().then((result) => {
+      if (!live) return;
+      setValue(session ? session.noteResult(result) : result);
+    });
+    return () => { live = false; };
+  }, [session?.revision, tick, ...keys]);
+  return [value, () => setTick((old) => old + 1)];
 }
