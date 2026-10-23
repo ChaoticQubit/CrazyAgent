@@ -361,24 +361,7 @@ impl ResearchRunner {
         let worktree = root
             .join("worktrees")
             .join(format!("research-{}-{}-{}", job.kind, job.id, job.attempts));
-        fs::create_dir_all(root.join("worktrees"))?;
-        let mut git = sandbox.command(&profile, Path::new(GIT));
-        git.args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-        ])
-        .arg(&worktree)
-        .arg("HEAD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
-            return Err(RunError::Invalid("git worktree add failed".into()));
-        }
+        add_worktree(&sandbox, &profile, &worktree)?;
         let prompt = research_prompt(&root, &job.kind)?;
         let output = tmp.join("report.md");
         let mut codex = sandbox.command(&profile, &self.codex);
@@ -498,7 +481,7 @@ impl ResearchRunner {
     }
 }
 
-fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
+pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } => Ok(SandboxRemote::AnyHost(443)),
         ResearchAccount::Endpoint { base_url, .. } => {
@@ -583,7 +566,7 @@ fn account_arguments(command: &mut Command, account: &ResearchAccount) -> Result
     Ok(())
 }
 
-fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
     if root.join(".git").is_dir() {
         return Ok(());
     }
@@ -628,6 +611,40 @@ fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(info.join("exclude"))?;
     exclude.write_all(b"/worktrees/\n/context/\n")?;
+    Ok(())
+}
+
+/// Adds a detached git worktree at `worktree` inside the sandbox's project
+/// folder, running git under the installed profile with hooks disabled.
+/// Takes the sandbox, its installed profile and the new worktree path.
+pub(crate) fn add_worktree(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+) -> Result<(), RunError> {
+    let worktrees = sandbox.project_root().join("worktrees");
+    if worktree.parent() != Some(worktrees.as_path()) {
+        return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
+    }
+    fs::create_dir_all(&worktrees)?;
+    let mut git = sandbox.command(profile, Path::new(GIT));
+    git.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+    ])
+    .arg(worktree)
+    .arg("HEAD")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
+        return Err(RunError::Invalid("git worktree add failed".into()));
+    }
+    assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
 }
 
