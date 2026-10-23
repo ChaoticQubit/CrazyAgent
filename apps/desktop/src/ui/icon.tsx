@@ -64,6 +64,10 @@ import iconSun from "../assets/icons/sun.svg?raw";
 import iconSwords from "../assets/icons/swords.svg?raw";
 import iconTerminal from "../assets/icons/terminal.svg?raw";
 import iconTrash from "../assets/icons/trash.svg?raw";
+import iconHourglass from "../assets/icons/hourglass.svg?raw";
+import iconCircleStop from "../assets/icons/circle-stop.svg?raw";
+import iconPowerOff from "../assets/icons/power-off.svg?raw";
+import iconLightbulb from "../assets/icons/lightbulb.svg?raw";
 import iconTrendingUp from "../assets/icons/trending-up.svg?raw";
 import iconTriangleAlert from "../assets/icons/triangle-alert.svg?raw";
 import iconUpload from "../assets/icons/upload.svg?raw";
@@ -150,6 +154,10 @@ const ICON_SOURCES = {
   "swords": iconSwords,
   "terminal": iconTerminal,
   "trash": iconTrash,
+  "hourglass": iconHourglass,
+  "circle-stop": iconCircleStop,
+  "power-off": iconPowerOff,
+  "lightbulb": iconLightbulb,
   "trending-up": iconTrendingUp,
   "triangle-alert": iconTriangleAlert,
   "upload": iconUpload,

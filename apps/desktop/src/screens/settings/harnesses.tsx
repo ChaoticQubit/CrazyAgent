@@ -76,5 +76,5 @@ export function Harnesses() {
   const [catalog, reload] = useLoad(harnessCatalog);
   const [checkedAt, setCheckedAt] = useState<string>();
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)}
-    onCheck={() => { reload(); setCheckedAt(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/^/, "at ")); }} />;
+    onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }

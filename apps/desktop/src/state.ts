@@ -24,7 +24,7 @@ import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens
 import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
 import { nativeAuthFailureCode, reduceNativeAuth, nativeClaudeInputAllowed, validateClaudeAuthCode } from "./native-auth";
 import type { NativeAuthCommand, NativeAuthState } from "./native-auth";
-import type { PanelAction } from "./screens/native-auth";
+type PanelAction = NativeAuthCommand | "confirm_logout" | "back" | "refresh";
 
 export interface Draft {
   text: string;

@@ -3,32 +3,38 @@ import { Icon, type IconName } from "./icon";
 
 export type Tone = "ok" | "warn" | "danger" | "info" | "neutral";
 
-const TONES: [RegExp, Tone][] = [
-  [/^(Signed in|Key saved|Connected|Ready|Done|Approved|Saved|Replied)$/, "ok"],
-  [/^(Signing in\.\.\.|Running|Thinking\.\.\.|Starting|Queued)$/, "info"],
-  [/^(Failed|Can't reach this URL|Can't start.*)$/, "danger"],
-  [/^(Not signed in|Needs a pool|Needs approval|Needs you|Limited control.*|Waiting for a free account|Starts after .+|Suggested)$/, "warn"],
+const STATUSES: [RegExp, IconName, Tone][] = [
+  [/^(Signed in|Connected|Ready|Done|Approved|Saved|Research done|Replied)$/, "circle-check", "ok"],
+  [/^Key saved$/, "key-round", "ok"],
+  [/^(Not signed in|Needs a pool|Needs approval|Needs you)$/, "circle-alert", "warn"],
+  [/^Limited control/, "triangle-alert", "warn"],
+  [/^(Can't reach this URL|Failed|Can't start.*)$/, "circle-x", "danger"],
+  [/^(Running|Signing in\.\.\.|Starting|Thinking\.\.\.|Writing)$/, "loader-circle", "info"],
+  [/^(Queued|Starts after .+)$/, "clock", "neutral"],
+  [/^Waiting for a free account$/, "hourglass", "neutral"],
+  [/^Stopped$/, "circle-stop", "neutral"],
+  [/^(Turned off|Not installed)$/, "power-off", "neutral"],
+  [/^Suggested$/, "lightbulb", "neutral"],
 ];
 
 /** Maps one fixed status word from the design vocabulary to its tone; unknown words are
  * neutral. Input: the status word. Output: ok, warn, danger, info or neutral. */
 export function statusTone(word: string): Tone {
-  return TONES.find(([pattern]) => pattern.test(word))?.[1] ?? "neutral";
+  return STATUSES.find(([pattern]) => pattern.test(word))?.[2] ?? "neutral";
 }
 
-const TONE_ICON: Record<Tone, IconName> = {
-  ok: "circle-check",
-  warn: "circle-alert",
-  danger: "circle-x",
-  info: "loader-circle",
-  neutral: "circle-dashed",
-};
+/** Maps one fixed status word to its icon from the design icon table. Input: the status
+ * word. Output: the icon name, or undefined for a word the table does not list. */
+export function statusIcon(word: string): IconName | undefined {
+  return STATUSES.find(([pattern]) => pattern.test(word))?.[1];
+}
 
-/** A status badge: always the word, with a matching icon and tone color.
- * Inputs: the status word and an optional tone override. Output: a badge. */
+/** A status badge: always the word, with the design icon and tone color when the word is in
+ * the table, text only otherwise. Inputs: the status word and an optional tone override. */
 export function StatusBadge({ word, tone = statusTone(word) }: { word: string; tone?: Tone }) {
+  const icon = statusIcon(word);
   return <span className={`badge${tone === "neutral" ? "" : ` tone-${tone}`}`}>
-    <Icon name={TONE_ICON[tone]} size={12} spin={tone === "info" && /\.\.\.$|^Running$|^Starting$/.test(word)} />{word}
+    {icon && <Icon name={icon} size={12} spin={icon === "loader-circle"} />}{word}
   </span>;
 }
 

@@ -45,7 +45,7 @@ Theme: system by default; `applyTheme("light" | "dark" | "system")` in `state.ts
 - `RadioCard { name; value; checked; onChecked(value); title; details?: ReactNode[] }`.
 
 ### Feedback (`feedback.tsx`)
-- `StatusBadge { word; tone? }`. Always shows the word. `statusTone(word)` maps the fixed status words from DESIGN.md section 2 to `ok | warn | danger | info | neutral`.
+- `StatusBadge { word; tone? }`. Always shows the word. `statusIcon(word)` and `statusTone(word)` follow the status table in `docs/design/desktop/brand/icons.md` section 5; a word not in the table renders as text only. The spinner turns only when the system allows motion.
 - `Notice { tone? = "warn"; icon?; alert?; id? }`. Inline note; with `id` it can take focus.
 - `Banner { action? }`. Warning under the page header.
 - `Toast { message }`. One at a time; the session clears it after 4 s (`session.showToast`).
