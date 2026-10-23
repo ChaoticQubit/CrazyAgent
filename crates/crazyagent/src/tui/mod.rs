@@ -5,6 +5,7 @@ mod master_session;
 pub use master_session::default_master_open;
 mod model_access;
 mod native_auth;
+mod screens;
 pub mod views;
 
 #[cfg(test)]
