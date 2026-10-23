@@ -197,6 +197,8 @@ export function ContextTab({ data }: { data: ProjectData }) {
           <h2 className="pj-mono">{displayText(item.path)}</h2>
           <span className="pj-row">
             {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
+            {item.kind === "brief" && <button type="button" className="btn" title="The brief is written from the project details"
+              onClick={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=general`)}>Edit</button>}
             <button type="button" className="btn" onClick={() => void fileAction("desktop_open_context_item", "Open in default app")}>Open in default app</button>
             {deletable(item) && <button type="button" className="btn danger-text" onClick={() => setDeleting({ path: item.path, busy: false })}>Delete</button>}
           </span>

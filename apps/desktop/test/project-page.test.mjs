@@ -277,3 +277,17 @@ test("the master's harness that is not installed gets the design's line", () => 
   assert.equal(research.masterMissingLine(catalog, "unknown"), null);
   assert.equal(research.masterMissingLine(null, "codex"), null);
 });
+
+test("only the brief offers Edit, which opens the project details it is written from", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const folder = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1", items: [
+    { path: "context/brief.md", kind: "brief", bytes: 120 },
+    { path: "context/documents/notes.md", kind: "document", bytes: 40 },
+  ] } };
+  const brief = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: folder } }));
+  assert.match(brief, /<h2 class="pj-mono">context\/brief\.md<\/h2>/);
+  assert.match(brief, />Edit</);
+  const documentOnly = { kind: "ok", value: { ...folder.value, items: [folder.value.items[1]] } };
+  const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: documentOnly } }));
+  assert.doesNotMatch(markup, />Edit</);
+});
