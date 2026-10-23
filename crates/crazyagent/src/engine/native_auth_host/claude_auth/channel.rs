@@ -114,18 +114,15 @@ impl Session {
                     .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch))
             })
             .ok_or_else(|| failure("native_auth_recovery_required"))?;
-        if let ClaudeAuthObservation::Challenge { challenge } = event {
-            if let Some(previous) = slot
+        if let ClaudeAuthObservation::Challenge { challenge } = event
+            && let Some(previous) = slot
                 .claude_progress
                 .as_ref()
                 .and_then(|progress| progress.challenge.as_ref())
-            {
-                if previous.url() != challenge.url()
-                    || (previous.accepts_code() && !challenge.accepts_code())
-                {
-                    return Err(failure("native_auth_observation_order"));
-                }
-            }
+            && (previous.url() != challenge.url()
+                || (previous.accepts_code() && !challenge.accepts_code()))
+        {
+            return Err(failure("native_auth_observation_order"));
         }
         let mut fact = slot
             .claude_progress
@@ -316,15 +313,14 @@ impl NativeAuthCustodyChannel {
             return Err(failure("native_auth_recovery_required"));
         }
         self.guard_or_close(guard)?;
-        if let Some(account) = event.account()? {
-            if account.config_directory.as_str()
+        if let Some(account) = event.account()?
+            && account.config_directory.as_str()
                 != guard
                     .profile_path()?
                     .to_str()
                     .ok_or_else(|| failure("native_auth_claude_profile_invalid"))?
-            {
-                return Err(failure("native_auth_claude_profile_mismatch"));
-            }
+        {
+            return Err(failure("native_auth_claude_profile_mismatch"));
         }
         let mut request = self.next_request(RequestKind::ObserveClaude, None)?;
         request.claude_observation = Some(event);

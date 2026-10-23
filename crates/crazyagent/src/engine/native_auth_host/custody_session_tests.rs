@@ -97,19 +97,19 @@ impl InertChild {
 
 impl Drop for InertChild {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if let Err(error) = fallback_cleanup(child) {
-                if thread::panicking() {
-                    eprintln!(
-                        "fixture fallback failed for direct child {}: {error}",
-                        child.id()
-                    );
-                } else {
-                    panic!(
-                        "fixture fallback failed for direct child {}: {error}",
-                        child.id()
-                    );
-                }
+        if let Some(child) = self.child.as_mut()
+            && let Err(error) = fallback_cleanup(child)
+        {
+            if thread::panicking() {
+                eprintln!(
+                    "fixture fallback failed for direct child {}: {error}",
+                    child.id()
+                );
+            } else {
+                panic!(
+                    "fixture fallback failed for direct child {}: {error}",
+                    child.id()
+                );
             }
         }
     }
