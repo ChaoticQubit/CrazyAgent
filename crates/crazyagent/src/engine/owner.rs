@@ -210,7 +210,7 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::Create {
                     project_id: project_id.clone(),
                     spec: spec.clone(),
-                    setup: setup.clone(),
+                    setup: Box::new(setup.clone()),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
