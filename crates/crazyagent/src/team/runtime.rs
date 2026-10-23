@@ -1,7 +1,8 @@
 use super::{
-    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, MessageAuthor, MessageState, TaskSource,
-    TaskStatus, TeamAccount, TeamReach, admit, agent_row, append_message, bound_text,
-    eligible_accounts, launch_harness, now_ms, parse_delegations, pick_account,
+    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
+    MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row,
+    append_message, bound_text, eligible_accounts, launch_harness, now_ms, parse_delegations,
+    pick_account, tool,
 };
 use crate::config::ModelAccess;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
@@ -175,6 +176,7 @@ struct Worker {
     warm: bool,
     worked: bool,
     managed: bool,
+    team_tool: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
 }
@@ -193,6 +195,7 @@ pub struct TeamRuntime {
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
+    delegation_tool: Option<PathBuf>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -280,7 +283,21 @@ impl TeamRuntime {
             limits,
             workers: BTreeMap::new(),
             custody,
+            delegation_tool: None,
         })
+    }
+
+    /// Gives every team master with tools on the engine's `delegate` tool, served by `executable`.
+    /// Takes the engine executable; its canonical path is used so the project sandbox can admit its folder.
+    /// Returns the runtime, or a plain code when the executable is not a file.
+    pub fn with_delegation_tool(mut self, executable: &Path) -> Result<Self, EngineError> {
+        let canonical = executable
+            .canonicalize()
+            .ok()
+            .filter(|path| path.is_file())
+            .ok_or_else(|| EngineError("team_executable_invalid".into()))?;
+        self.delegation_tool = Some(canonical);
+        Ok(self)
     }
 
     /// Runs one step for every project with team work: applies agent reports, sends
@@ -622,8 +639,7 @@ impl TeamRuntime {
             Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
             Err(problem) => return Err(problem.0),
         };
-        let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+        let context = self.context(project, id, self.workers[&id].team_tool)?;
         self.workers.get_mut(&id).expect("worker exists").grants = generation;
         Ok(Some(Box::new(Grant { profile, context })))
     }
@@ -730,8 +746,9 @@ impl TeamRuntime {
             "Message from the engine"
         };
         let mut prompt = String::new();
+        let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&self.framing(stored));
+            prompt.push_str(&self.framing(stored, team_tool));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -741,6 +758,9 @@ impl TeamRuntime {
             }
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if team_tool {
+            tool::clear(&self.tool_record(id));
+        }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
             return Ok(());
@@ -755,7 +775,7 @@ impl TeamRuntime {
         self.mark_agent(id, AgentStatus::Working, None)
     }
 
-    fn framing(&self, stored: &StoredSetup) -> String {
+    fn framing(&self, stored: &StoredSetup, team_tool: bool) -> String {
         let brief = std::fs::read_to_string(Path::new(&stored.folder).join("context/brief.md"))
             .map(|brief| bound_text(&brief, BRIEF_BYTES_MAX))
             .unwrap_or_default();
@@ -773,8 +793,17 @@ impl TeamRuntime {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let how = if team_tool {
+            format!(
+                "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
+                tool::TOOL_NAME,
+                tool::SERVER_NAME
+            )
+        } else {
+            "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+        };
         format!(
-            "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\nTo hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\nEach task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
+            "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
             stored.name, team, brief
         )
     }
@@ -1155,6 +1184,7 @@ impl TeamRuntime {
                 warm: false,
                 worked: false,
                 managed,
+                team_tool: role == AgentRole::Master && tools && self.delegation_tool.is_some(),
                 grants: 0,
                 thread: Some(thread),
             },
@@ -1186,7 +1216,7 @@ impl TeamRuntime {
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
         }
-        let agent = self.state.join("agents").join(format!("agent-{id}"));
+        let agent = self.agent_folder(id);
         let own_home = agent.join("home");
         let tmp = agent.join("tmp");
         for directory in [&agent, &own_home, &tmp] {
@@ -1210,8 +1240,7 @@ impl TeamRuntime {
                 )
             }
         };
-        let context = crate::launch_context::for_project(&self.connection, &stored.project_id)
-            .map_err(|e| e.0)?;
+        let context = self.context(&stored.project_id, id, role == AgentRole::Master && tools)?;
         let network = if tools {
             SandboxNetwork::Open
         } else {
@@ -1271,6 +1300,30 @@ impl TeamRuntime {
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
         Ok((root, plan, mode))
+    }
+
+    fn agent_folder(&self, id: i64) -> PathBuf {
+        self.state.join("agents").join(format!("agent-{id}"))
+    }
+
+    fn tool_record(&self, id: i64) -> PathBuf {
+        self.agent_folder(id).join("tmp").join(tool::DROP_FILE)
+    }
+
+    fn context(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        team_tool: bool,
+    ) -> Result<AgentContext, String> {
+        let context =
+            crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+        match &self.delegation_tool {
+            Some(engine) if team_tool => context
+                .with_team_tool(engine, &self.tool_record(id))
+                .map_err(|e| e.0),
+            _ => Ok(context),
+        }
     }
 
     fn collect(&mut self) -> Result<(), EngineError> {
@@ -1337,6 +1390,7 @@ impl TeamRuntime {
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
+                let team_tool = worker.team_tool;
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                 }
@@ -1347,7 +1401,12 @@ impl TeamRuntime {
                     Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
                     Some(Busy::Task(task)) => self.finish_task(task, &text, end)?,
                     Some(Busy::Message(message)) => {
-                        self.finish_message(&project, message, &text, end)?
+                        let proposed = if team_tool {
+                            tool::take(&self.tool_record(id))
+                        } else {
+                            Vec::new()
+                        };
+                        self.finish_message(&project, message, &text, end, proposed)?
                     }
                     None => {}
                 }
@@ -1371,9 +1430,13 @@ impl TeamRuntime {
                 match worker.busy {
                     Some(busy) if worker.held => self.release(busy)?,
                     Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed)?,
-                    Some(Busy::Message(message)) => {
-                        self.finish_message(&worker.project, message, "", TurnEnd::Closed)?
-                    }
+                    Some(Busy::Message(message)) => self.finish_message(
+                        &worker.project,
+                        message,
+                        "",
+                        TurnEnd::Closed,
+                        Vec::new(),
+                    )?,
                     None => {}
                 }
                 let status = if problem.is_some() && !worker.stopping {
@@ -1493,6 +1556,7 @@ impl TeamRuntime {
         message: i64,
         text: &str,
         end: TurnEnd,
+        proposed: Vec<Delegation>,
     ) -> Result<(), EngineError> {
         if end != TurnEnd::Success {
             let state = if end == TurnEnd::RateLimited {
@@ -1544,7 +1608,7 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)?;
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && proposed.is_empty() {
             let _ = append_message(
                 &tx,
                 project,
@@ -1555,7 +1619,13 @@ impl TeamRuntime {
             )?;
             return tx.commit().map_err(error);
         }
-        let delegations = parse_delegations(text);
+        let mut delegations = proposed;
+        for line in parse_delegations(text) {
+            if !delegations.contains(&line) {
+                delegations.push(line);
+            }
+        }
+        delegations.truncate(DELEGATIONS_PER_REPLY_MAX);
         let mut refused = Vec::new();
         if !delegations.is_empty() && rounds >= DELEGATION_ROUNDS_MAX {
             let _ = append_message(
@@ -1882,13 +1952,14 @@ impl Drop for TeamService {
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
 /// pool assignment read live from the engine's settings files on every tick.
-/// Takes the runtime folder, both settings files and the launch executables by harness.
-/// Returns the service, or a plain reason it could not start.
+/// Takes the runtime folder, both settings files, the launch executables by harness and the
+/// engine executable that serves masters their `delegate` tool. Returns the service, or a plain reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
     executables: BTreeMap<&'static str, PathBuf>,
+    engine: Option<&Path>,
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
@@ -1910,6 +1981,10 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?;
+    let runtime = match engine {
+        Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
+        None => runtime,
+    };
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

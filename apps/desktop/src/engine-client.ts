@@ -567,7 +567,7 @@ export interface TeamHarness {
   agents_max: number;
   tools: boolean;
   live: number;
-  delegation: "reply" | "unavailable" | null;
+  delegation: "reply" | "tool" | "unavailable" | null;
   delegation_label: string | null;
   runnable: boolean;
 }

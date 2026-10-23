@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod runtime;
+pub mod tool;
 
 pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
@@ -255,6 +256,7 @@ impl MessageState {
 #[serde(rename_all = "snake_case")]
 pub enum DelegationPath {
     Reply,
+    Tool,
     Unavailable,
 }
 
@@ -266,6 +268,9 @@ impl DelegationPath {
         match self {
             Self::Reply => {
                 "Asks for sub-agents in its reply; the engine checks the team plan and creates the tasks"
+            }
+            Self::Tool => {
+                "Calls the engine's delegate tool or asks in its reply; the engine checks the team plan and creates the tasks"
             }
             Self::Unavailable => {
                 "Cannot lead sub-agents yet; you can still hand tasks to sub-agents yourself"
@@ -284,10 +289,11 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
 }
 
 /// Records how a master on this harness asks for sub-agents.
-/// Takes the team plan harness identifier.
-/// Returns the reply path for launchable harnesses, otherwise unavailable.
-pub fn delegation_path(harness: &str) -> DelegationPath {
+/// Takes the team plan harness identifier and the master's tools switch.
+/// Returns the tool path with tools on, the reply path with tools off, unavailable when it cannot launch.
+pub fn delegation_path(harness: &str, tools: bool) -> DelegationPath {
     match launch_harness(harness) {
+        Some(_) if tools => DelegationPath::Tool,
         Some(_) => DelegationPath::Reply,
         None => DelegationPath::Unavailable,
     }
@@ -550,21 +556,27 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         let Some((target, task)) = line[DELEGATE_MARKER.len()..].split_once(':') else {
             continue;
         };
-        let target = target.trim().to_ascii_lowercase();
-        let task = task.trim().trim_matches('`').trim();
-        if !(target.is_empty() || (target.len() <= 64 && harness_name(&target))) {
-            continue;
+        if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
+            found.push(delegation);
         }
-        if !text_valid(task, TASK_PROMPT_BYTES_MAX) {
-            continue;
-        }
-        found.push(Delegation {
-            harness: (!target.is_empty()).then_some(target),
-            prompt: task.to_owned(),
-        });
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
     found
+}
+
+fn delegation(target: &str, task: &str) -> Option<Delegation> {
+    let target = target.trim().to_ascii_lowercase();
+    let task = task.trim();
+    if !(target.is_empty() || (target.len() <= 64 && harness_name(&target))) {
+        return None;
+    }
+    if !text_valid(task, TASK_PROMPT_BYTES_MAX) {
+        return None;
+    }
+    Some(Delegation {
+        harness: (!target.is_empty()).then_some(target),
+        prompt: task.to_owned(),
+    })
 }
 
 /// Creates the team runtime tables when the engine database opens.
@@ -1204,14 +1216,15 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .count() as i64
     };
     let plan = &stored.team;
+    let master_path = delegation_path(&plan.master, plan.master_tools);
     let mut harnesses = vec![TeamHarness {
         harness: plan.master.clone(),
         role: AgentRole::Master,
         agents_max: 1,
         tools: plan.master_tools,
         live: live(AgentRole::Master, &plan.master),
-        delegation: Some(delegation_path(&plan.master)),
-        delegation_label: Some(delegation_path(&plan.master).label().into()),
+        delegation: Some(master_path),
+        delegation_label: Some(master_path.label().into()),
         runnable: launch_harness(&plan.master).is_some(),
     }];
     harnesses.extend(plan.sub_harnesses.iter().map(|slot| TeamHarness {

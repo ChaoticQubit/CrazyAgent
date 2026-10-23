@@ -775,8 +775,9 @@ fn team_plan_harness_names_map_to_launch_adapters_and_delegation_paths() {
     assert_eq!(launch_harness("claude-code"), Some("claude-code"));
     assert_eq!(launch_harness("gemini"), None);
     assert_eq!(launch_harness("no-such-harness"), None);
-    assert_eq!(delegation_path("claude"), DelegationPath::Reply);
-    assert_eq!(delegation_path("gemini"), DelegationPath::Unavailable);
+    assert_eq!(delegation_path("claude", false), DelegationPath::Reply);
+    assert_eq!(delegation_path("codex", true), DelegationPath::Tool);
+    assert_eq!(delegation_path("gemini", true), DelegationPath::Unavailable);
 }
 
 #[test]
@@ -1098,6 +1099,146 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
         "{cold:#?}"
     );
     assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
+
+#[test]
+fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-tool",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.team.master_tools = true;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-tool", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Message {
+                project_id: setup.project_id.clone(),
+                text: "Split the work.".into(),
+            }
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let seen = folder.join("seen-config.toml");
+    let executable = base.join("codex");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > \"{}\"\nexit 1\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let engine_folder = base.join("engine-bin");
+    std::fs::create_dir(&engine_folder).unwrap();
+    let engine = engine_folder.join("crazyagent");
+    std::fs::write(&engine, b"").unwrap();
+    let source = pool.clone();
+    assert_eq!(
+        runtime::TeamRuntime::open(
+            &database,
+            &base.join("team"),
+            std::collections::BTreeMap::new(),
+            Box::new(|| None),
+            runtime::TeamLimits::default(),
+        )
+        .unwrap()
+        .with_delegation_tool(&base.join("absent"))
+        .err()
+        .map(|e| e.0),
+        Some("team_executable_invalid".into())
+    );
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap()
+    .with_delegation_tool(&engine)
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        team.tick().unwrap();
+        let now = status(&connection, &setup).unwrap();
+        if now.messages[0].state == MessageState::Failed {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{now:#?}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let team_now = status(&connection, &setup).unwrap();
+    assert_eq!(team_now.harnesses[0].delegation, Some(DelegationPath::Tool));
+    let master = team_now
+        .agents
+        .iter()
+        .find(|a| a.role == AgentRole::Master)
+        .unwrap();
+    let config: toml::Table = std::fs::read_to_string(&seen)
+        .unwrap_or_else(|e| panic!("the probe harness saw no config ({e}): {team_now:#?}"))
+        .parse()
+        .unwrap();
+    let server = config["mcp_servers"][tool::SERVER_NAME].as_table().unwrap();
+    assert_eq!(server["command"].as_str(), engine.to_str());
+    let record = base
+        .join("team")
+        .join("agents")
+        .join(format!("agent-{}", master.id))
+        .join("tmp")
+        .join(tool::DROP_FILE);
+    assert_eq!(
+        server["args"],
+        toml::Value::Array(vec![
+            tool::SERVER_COMMAND.into(),
+            record.to_str().unwrap().into()
+        ]),
+        "the master records its calls in its own private temporary folder"
+    );
     team.shutdown().unwrap();
 }
 

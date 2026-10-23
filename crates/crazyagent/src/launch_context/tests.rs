@@ -159,3 +159,93 @@ fn the_team_index_stays_within_its_bound_with_many_plugins() {
     assert!(!text.contains("- MCP server server-099"));
     assert!(text.ends_with(" more\n"));
 }
+
+#[test]
+fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let fresh = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+    };
+    let context = fresh().with_team_tool(engine, &record).unwrap();
+    assert_eq!(
+        context.read_paths(),
+        [engine.to_path_buf()],
+        "the project sandbox lets the agent run the engine executable"
+    );
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+    let codex = home("codex");
+    let installed = context.install("codex", &codex, true).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let server = config["mcp_servers"][crate::team::tool::SERVER_NAME]
+        .as_table()
+        .unwrap();
+    assert_eq!(
+        server["command"].as_str(),
+        Some("/usr/local/bin/crazyagent")
+    );
+    assert_eq!(
+        server["args"],
+        toml::Value::Array(vec!["team-mcp".into(), record.to_str().unwrap().into()])
+    );
+    assert!(
+        !server.contains_key("env"),
+        "the tool server holds no secret"
+    );
+    drop(installed);
+    let installed = context.install("codex", &codex, false).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        !config.contains_key("mcp_servers"),
+        "with tools off the master gets no tool"
+    );
+    drop(installed);
+
+    let claude = home("claude");
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    let mcp: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(claude.join(STATE).join("mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        mcp["mcpServers"][crate::team::tool::SERVER_NAME],
+        serde_json::json!({
+            "type": "stdio",
+            "command": "/usr/local/bin/crazyagent",
+            "args": ["team-mcp", record.to_str().unwrap()],
+            "env": {},
+        })
+    );
+    drop(installed);
+
+    assert_eq!(
+        fresh()
+            .with_team_tool(Path::new("crazyagent"), &record)
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    assert_eq!(
+        fresh()
+            .with_team_tool(engine, Path::new("tmp/record.jsonl"))
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    assert_eq!(
+        context.with_team_tool(engine, &record).unwrap_err().0,
+        "launch_context_team_tool_taken"
+    );
+}
