@@ -423,10 +423,7 @@ impl ProfileForm {
             out.push(Line::default());
         }
         if self.saving {
-            out.push(Line::from(vec![
-                Span::styled(ctx.spinner(), ctx.theme.running),
-                Span::raw(" Saving your profile"),
-            ]));
+            out.push(ctx.loading("Saving your profile"));
         } else {
             out.push(buttons(
                 &[button],

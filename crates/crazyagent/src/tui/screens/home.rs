@@ -408,10 +408,7 @@ impl Home {
                 vec![
                     title(None),
                     Line::default(),
-                    Line::from(vec![
-                        Span::styled(ctx.spinner(), theme.running),
-                        Span::raw(" Loading projects"),
-                    ]),
+                    ctx.loading("Loading projects"),
                 ],
                 None,
             ),

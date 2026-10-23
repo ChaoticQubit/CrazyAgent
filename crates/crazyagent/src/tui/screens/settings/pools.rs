@@ -415,10 +415,7 @@ impl Screen for Pools {
             _ => vec![
                 styled("Pools", Role::Accent, theme),
                 Line::default(),
-                Line::from(vec![
-                    Span::styled(ctx.spinner(), theme.running),
-                    Span::raw(" Loading pools"),
-                ]),
+                ctx.loading("Loading pools"),
             ],
         };
         draw_page(frame, area, SettingsSection::Pools, content, None, ctx)

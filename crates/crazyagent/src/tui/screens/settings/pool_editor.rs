@@ -286,13 +286,7 @@ impl PoolEditor {
                 );
             }
             Load::Idle | Load::Loading => {
-                return (
-                    vec![Line::from(vec![
-                        Span::styled(ctx.spinner(), theme.running),
-                        Span::raw(" Loading accounts"),
-                    ])],
-                    String::new(),
-                );
+                return (vec![ctx.loading("Loading accounts")], String::new());
             }
         };
         let view = self.view(ctx);
@@ -549,10 +543,7 @@ impl Screen for PoolEditor {
         content.push(styled(showing, Role::Muted, theme));
         content.push(Line::default());
         if self.saving {
-            content.push(Line::from(vec![
-                Span::styled(ctx.spinner(), theme.running),
-                Span::raw(" Saving the pool"),
-            ]));
+            content.push(ctx.loading("Saving the pool"));
         } else {
             let focused = match self.focus {
                 Focus::Save => Some(0),

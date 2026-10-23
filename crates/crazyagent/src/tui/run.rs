@@ -136,6 +136,9 @@ fn drive(
             showing_message = message;
             dirty = true;
         }
+        if shell.pace(now) {
+            dirty = true;
+        }
         if shell.busy() && now.duration_since(tick) >= TICK {
             shell.ctx.tick = shell.ctx.tick.wrapping_add(1);
             tick = now;

@@ -15,6 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Position;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
+use std::time::{Duration, Instant};
 
 const STACK_MAX: usize = 32;
 const GO_TO_ROWS_MAX: usize = 8;
@@ -23,6 +24,7 @@ const HELP_WIDTH: u16 = 74;
 const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
 const QUIT_WIDTH: u16 = 46;
+const QUIET: Duration = Duration::from_millis(150);
 
 /// One Go to destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +150,7 @@ pub struct Shell {
     stack: Vec<Box<dyn Screen>>,
     overlay: Option<Overlay>,
     quit: bool,
+    busy_since: Option<Instant>,
 }
 
 impl Shell {
@@ -165,6 +168,7 @@ impl Shell {
             stack: vec![screen],
             overlay: None,
             quit: false,
+            busy_since: None,
         };
         shell.refresh();
         shell
@@ -208,6 +212,25 @@ impl Shell {
     /// Input: none. Output: whether a spinner shows.
     pub fn busy(&self) -> bool {
         self.top().busy(&self.ctx)
+    }
+
+    /// Tracks how long the top screen has been busy, so loading lines stay
+    /// empty for the first 150 ms and quick replies never flash a spinner.
+    /// Input: the current time. Output: true when the quiet state changed and
+    /// the frame needs drawing.
+    pub fn pace(&mut self, now: Instant) -> bool {
+        self.busy_since = match (self.busy(), self.busy_since) {
+            (true, Some(since)) => Some(since),
+            (true, None) => Some(now),
+            (false, _) => None,
+        };
+        let quiet = self
+            .busy_since
+            .is_some_and(|since| now.saturating_duration_since(since) < QUIET);
+        let changed = quiet != self.ctx.quiet;
+        self.ctx.quiet = quiet;
+        assert!(!quiet || self.busy());
+        changed
     }
 
     /// Asks the top screen to refresh its data.
@@ -904,6 +927,42 @@ mod tests {
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a second Ctrl-Q quits");
+    }
+
+    #[test]
+    fn loading_lines_stay_empty_for_the_first_150_ms_of_a_busy_spell() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        assert!(shell.busy(), "the profile is still loading");
+        assert!(!shell.ctx.quiet);
+        let start = Instant::now();
+        assert!(shell.pace(start), "becoming busy starts the quiet spell");
+        assert!(shell.ctx.quiet);
+        assert_eq!(shell.ctx.loading("Loading your profile"), Line::default());
+        assert!(!shell.pace(start + Duration::from_millis(149)));
+        assert!(shell.ctx.quiet);
+        assert!(shell.pace(start + Duration::from_millis(150)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            crate::tui::text::plain(&shell.ctx.loading("Loading your profile")),
+            format!("{} Loading your profile", shell.ctx.spinner())
+        );
+        assert!(!shell.pace(start + Duration::from_millis(400)));
+        assert!(!shell.ctx.quiet, "a long load keeps its spinner");
+
+        shell.arrive(Arrival::Profile(Ok(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }))));
+        assert!(!shell.busy());
+        assert!(!shell.pace(start + Duration::from_millis(500)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            shell.busy_since, None,
+            "the next busy spell starts quiet again"
+        );
     }
 
     #[test]

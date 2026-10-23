@@ -10,7 +10,7 @@ use crate::tui::text::styled;
 use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 const FORM_WIDTH: usize = 72;
 
@@ -181,10 +181,7 @@ impl Screen for ProfilePage {
                 vec![
                     styled("Profile", Role::Accent, &ctx.theme),
                     Line::default(),
-                    Line::from(vec![
-                        Span::styled(ctx.spinner(), ctx.theme.running),
-                        Span::raw(" Loading your profile"),
-                    ]),
+                    ctx.loading("Loading your profile"),
                 ],
                 None,
             ),

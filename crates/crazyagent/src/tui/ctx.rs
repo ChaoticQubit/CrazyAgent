@@ -5,6 +5,7 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
 const QUEUE_MAX: usize = 32;
@@ -74,8 +75,9 @@ impl Default for Store {
 }
 
 /// Everything a screen needs besides its own state: look, size, engine data,
-/// the owner identity of the current trusted connection, and the queues for
-/// requests and messages.
+/// the owner identity of the current trusted connection, whether loading lines
+/// are still in their quiet first 150 ms, and the queues for requests and
+/// messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -87,6 +89,7 @@ pub struct Ctx {
     pub width: u16,
     pub height: u16,
     pub tick: u64,
+    pub quiet: bool,
     pub store: Store,
     pub link: Link,
     pub identity: Option<OwnerConnectionIdentity>,
@@ -119,6 +122,7 @@ impl Ctx {
             width: 120,
             height: 36,
             tick: 0,
+            quiet: false,
             store: Store::default(),
             link: Link::Connecting,
             identity: None,
@@ -230,6 +234,19 @@ impl Ctx {
     /// Input: none. Output: one glyph.
     pub fn spinner(&self) -> &'static str {
         self.glyphs.spin(self.tick)
+    }
+
+    /// One loading line: the spinner and what is loading, or an empty line
+    /// during the quiet first 150 ms of a busy spell.
+    /// Input: what is loading, such as "Loading projects". Output: the line.
+    pub fn loading(&self, text: &str) -> Line<'static> {
+        if self.quiet {
+            return Line::default();
+        }
+        Line::from(vec![
+            Span::styled(self.spinner(), self.theme.running),
+            Span::raw(format!(" {text}")),
+        ])
     }
 
     /// Says whether the window uses the wide layouts.
