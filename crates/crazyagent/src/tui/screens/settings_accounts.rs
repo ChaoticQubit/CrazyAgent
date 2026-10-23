@@ -1026,3 +1026,6 @@ impl Screen for AccountDetails {
         matches!(self.mode, DetailMode::Rename(_))
     }
 }
+
+#[cfg(test)]
+mod tests;
