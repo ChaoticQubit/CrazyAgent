@@ -99,9 +99,6 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-activity-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; }
 .pj-agent-row { display: grid; grid-template-columns: minmax(140px, 1fr) 120px minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
 .pj-agent-row .pj-wt { grid-column: 1 / -1; }
-.pj-seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--radius-control); background: var(--surface-2); }
-.pj-seg button { padding: 4px 12px; border: 0; border-radius: 4px; background: none; color: var(--text-2); font: inherit; cursor: pointer; }
-.pj-seg button[aria-checked="true"] { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--elev-1); }
 .pj-empty { display: grid; gap: 4px; justify-items: start; padding: 24px 0; }
 
 .pj-convo { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; }

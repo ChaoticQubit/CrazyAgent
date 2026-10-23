@@ -8,7 +8,7 @@ import { researchRow } from "./research";
 import type { ResearchRow } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ConfirmDialog, Icon, type Tone } from "../../ui";
+import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
  * Input: the research row. Output: the agent status word and tone. */
@@ -44,10 +44,8 @@ export function AgentsTab({ data }: { data: ProjectData }) {
 
   return <div className="pj-stack">
     <div className="pj-row between">
-      <div className="pj-seg" role="radiogroup" aria-label="Show">
-        <button type="button" role="radio" aria-checked={filter === "running"} onClick={() => setFilter("running")}>Running ({running.length})</button>
-        <button type="button" role="radio" aria-checked={filter === "all"} onClick={() => setFilter("all")}>All ({jobs.length})</button>
-      </div>
+      <Segmented label="Show" value={filter} onValue={setFilter}
+        options={[{ value: "running", label: `Running (${running.length})` }, { value: "all", label: `All (${jobs.length})` }]} />
       <span className="pj-secondary">{data.assigned
         ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${data.assigned.pool.id}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
         : "No pool. Agents wait until you choose one."}</span>
