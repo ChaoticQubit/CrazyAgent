@@ -147,7 +147,9 @@ impl Fixture {
     }
 
     fn persisted(&self) -> Attempt {
-        read_attempt(&self.database, &self.request.id).unwrap().unwrap()
+        read_attempt(&self.database, &self.request.id)
+            .unwrap()
+            .unwrap()
     }
 }
 
@@ -176,14 +178,8 @@ fn local_completion_unknown_persists_attempt_without_changing_provider_observati
     assert_eq!(state.health, Health::Ready);
     assert_eq!(state.quota, Quota::Unknown);
     let tx = fixture.database.transaction().unwrap();
-    let replay = begin_attempt(
-        &tx,
-        &fixture.config,
-        &fixture.config,
-        &fixture.request,
-        201,
-    )
-    .unwrap();
+    let replay =
+        begin_attempt(&tx, &fixture.config, &fixture.config, &fixture.request, 201).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.attempt, expected);
     assert_eq!(attempt_rows(&tx).len(), 1);
@@ -221,7 +217,9 @@ fn local_completion_ordinary_finish_still_records_provider_failure_observation()
     assert_eq!(observed.kind, ObservationKind::Unknown);
     assert_eq!(fixture.persisted().completion, Some(finished));
     assert_eq!(
-        connection_state(&fixture.database, &fixture.original.connection, 200).unwrap().health,
+        connection_state(&fixture.database, &fixture.original.connection, 200)
+            .unwrap()
+            .health,
         Health::Unknown
     );
 }
@@ -334,7 +332,10 @@ fn local_completion_bounds_match_ordinary_finish_and_preserve_active_attempt() {
             if name == "local" {
                 assert_eq!(observation_rows(&boundary.database), observations);
             } else {
-                assert_eq!(observation_rows(&boundary.database).len(), observations.len() + 1);
+                assert_eq!(
+                    observation_rows(&boundary.database).len(),
+                    observations.len() + 1
+                );
             }
         }
     }
@@ -382,11 +383,7 @@ fn local_completion_caller_rollback_preserves_attempt_and_observation_rows() {
             observations,
             "finisher {name}"
         );
-        assert_eq!(
-            attempt_rows(&fixture.database),
-            attempts,
-            "finisher {name}"
-        );
+        assert_eq!(attempt_rows(&fixture.database), attempts, "finisher {name}");
         assert_eq!(fixture.persisted(), fixture.begun);
     }
 }
@@ -401,7 +398,9 @@ fn ordinary_success_records_ready_observation_that_admits_the_next_attempt() {
         retry_at_ms: None,
     };
     assert_eq!(
-        connection_state(&fixture.database, &fixture.original.connection, 20_001).unwrap().health,
+        connection_state(&fixture.database, &fixture.original.connection, 20_001)
+            .unwrap()
+            .health,
         Health::Unknown
     );
     let tx = fixture.database.transaction().unwrap();

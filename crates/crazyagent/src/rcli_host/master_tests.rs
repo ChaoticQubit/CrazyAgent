@@ -133,7 +133,11 @@ fn exact_selection_builds_only_supported_host_argv_without_execution() {
     assert_eq!(command.get_program(), case.launch.executable.as_os_str());
     let args: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
     let expected: Vec<_> = [
-        "--session-id", "session-a", "--instance-id", "instance-a", "--home-dir",
+        "--session-id",
+        "session-a",
+        "--instance-id",
+        "instance-a",
+        "--home-dir",
     ]
     .into_iter()
     .map(std::ffi::OsString::from)
@@ -149,8 +153,14 @@ fn exact_selection_builds_only_supported_host_argv_without_execution() {
     assert_eq!(environment.len(), 1);
     assert_eq!(environment[0].0, "HOME");
     assert_eq!(environment[0].1, Some(case.launch.home_dir.as_os_str()));
-    assert_eq!(case.launch.binding.connection.account_ref, credential("account-a"));
-    assert_eq!(case.launch.binding.target_profile_ref, credential("profile-a"));
+    assert_eq!(
+        case.launch.binding.connection.account_ref,
+        credential("account-a")
+    );
+    assert_eq!(
+        case.launch.binding.target_profile_ref,
+        credential("profile-a")
+    );
     assert_eq!(case.launch.binding.project_id.as_str(), "project-a");
 }
 
@@ -160,9 +170,11 @@ fn selected_model_endpoint_protocol_and_provider_must_match_existing_profile() {
         let mut case = Case::new();
         match field {
             "model" => case.launch.binding.connection.model.id = "other-model".into(),
-            "endpoint" => case.launch.binding.connection.endpoint = ModelEndpoint::Http {
-                url: "http://127.0.0.1:11435/v1".into(),
-            },
+            "endpoint" => {
+                case.launch.binding.connection.endpoint = ModelEndpoint::Http {
+                    url: "http://127.0.0.1:11435/v1".into(),
+                }
+            }
             "protocol" => case.launch.binding.connection.protocol = credential("openai-responses"),
             "provider" => case.launch.binding.connection.provider = credential("other-provider"),
             _ => unreachable!(),
@@ -177,11 +189,16 @@ fn defaults_disabled_models_expert_mode_and_subscription_conversion_are_rejected
         let mut case = Case::new();
         let mut value = config();
         match field {
-            "default" => { value.as_object_mut().unwrap().remove("model"); }
+            "default" => {
+                value.as_object_mut().unwrap().remove("model");
+            }
             "disabled" => value["providers"][0]["models"][0]["enabled"] = json!(false),
             "expert" => value["expert"] = json!({"enabled": true}),
-            "subscription" => case.launch.binding.connection.auth =
-                ModelAuthentication::NativeManaged { profile_ref: credential("codex-profile") },
+            "subscription" => {
+                case.launch.binding.connection.auth = ModelAuthentication::NativeManaged {
+                    profile_ref: credential("codex-profile"),
+                }
+            }
             _ => unreachable!(),
         }
         case.config(value);
@@ -192,14 +209,18 @@ fn defaults_disabled_models_expert_mode_and_subscription_conversion_are_rejected
 #[test]
 fn inherited_remote_insecure_or_credential_bearing_endpoint_is_not_a_valid_plan() {
     for endpoint in [
-        "http://remote.invalid/v1", "https://user:secret@example.invalid/v1",
-        "file:///private/model", "https://example.invalid/v1?api_key=secret",
+        "http://remote.invalid/v1",
+        "https://user:secret@example.invalid/v1",
+        "file:///private/model",
+        "https://example.invalid/v1?api_key=secret",
     ] {
         let mut case = Case::new();
         let mut value = config();
         value["providers"][0]["baseUrl"] = json!(endpoint);
         case.config(value);
-        case.launch.binding.connection.endpoint = ModelEndpoint::Http { url: endpoint.into() };
+        case.launch.binding.connection.endpoint = ModelEndpoint::Http {
+            url: endpoint.into(),
+        };
         assert!(case.launch.command().is_err());
     }
 }
@@ -252,14 +273,22 @@ fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child
     assert_eq!(refused.0, "rcli_master_sandbox_refused");
     let boundary = sandbox(&case, &case.launch.cwd);
     let mut host = RcliMasterHost::launch(case.launch, &boundary).unwrap();
-    assert_eq!(host.binding().connection.account_ref, credential("account-a"));
+    assert_eq!(
+        host.binding().connection.account_ref,
+        credential("account-a")
+    );
     let turn = RequestId::new("turn-before-ready").unwrap();
-    let error = host.prompt(turn, "A prompt cannot run before actual Ready").unwrap_err();
+    let error = host
+        .prompt(turn, "A prompt cannot run before actual Ready")
+        .unwrap_err();
     assert_eq!(error.0, "rcli_master_not_ready");
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         match host.poll() {
-            Ok(None) => assert!(Instant::now() < deadline, "real process exit was not observed"),
+            Ok(None) => assert!(
+                Instant::now() < deadline,
+                "real process exit was not observed"
+            ),
             Ok(Some(_)) => panic!("/usr/bin/false produced no host observation"),
             Err(error) => {
                 assert_eq!(error.0, "rcli_master_process_exited");

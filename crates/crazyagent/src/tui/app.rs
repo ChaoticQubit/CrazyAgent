@@ -430,7 +430,8 @@ impl App {
             self.advance_navigation()?;
         }
         if self.focus == Focus::Settings {
-            let project = self.selected_project()
+            let project = self
+                .selected_project()
                 .map(|project| (project.project_id.clone(), project.spec.name.clone()));
             self.model_access.select_assignment_project(project);
             if matches!(event, UiEvent::Submit) && self.conversation_pending.is_some() {
@@ -1757,8 +1758,7 @@ impl App {
             return Err("Memory changes disabled in limited mode".into());
         }
         action.validate().map_err(|problem| {
-            crate::memory::library::plain_problem(&problem.0)
-                .map_or(problem.0, str::to_owned)
+            crate::memory::library::plain_problem(&problem.0).map_or(problem.0, str::to_owned)
         })?;
         self.request_project_setup(SetupQuery::Library(
             crate::memory::library::LibraryQuery::Change {

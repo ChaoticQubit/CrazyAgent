@@ -6,8 +6,8 @@ use crate::engine::owner::{
     OwnerOperation, OwnerRead, OwnerRequest, OwnerResponse,
 };
 use crate::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, RequestId};
-use rustix::fs::OFlags;
 use rusqlite::{Connection, OpenFlags};
+use rustix::fs::OFlags;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::future::Future;
@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TOKEN: [u8; 32] = [
-    0, 255, 10, 13, 32, 9, 128, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-    18, 19, 20, 21, 22, 23, 24, 25,
+    0, 255, 10, 13, 32, 9, 128, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25,
 ];
 const SHORT_BOUND: Duration = Duration::from_millis(100);
 const CATALOG: &str = r#"
@@ -80,7 +80,9 @@ async fn native_auth_custodian_entry_exact_raw_bytes_and_eof() {
     let mut pipe = BootstrapPipe::new();
     pipe.write(&TOKEN);
     pipe.eof();
-    let decoded = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND).await.unwrap();
+    let decoded = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
+        .await
+        .unwrap();
     assert_eq!(decoded, TOKEN);
     let mut trailing = [0; 1];
     assert_eq!(rustix::io::read(&pipe.reader, &mut trailing).unwrap(), 0);
@@ -116,7 +118,9 @@ async fn native_auth_custodian_entry_fragmented_input_waits_for_eof() {
 async fn native_auth_custodian_entry_empty_eof_is_truncated() {
     let mut pipe = BootstrapPipe::new();
     pipe.eof();
-    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND).await.unwrap_err();
+    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
+        .await
+        .unwrap_err();
     assert_eq!(error.0, "native_auth_bootstrap_truncated");
 }
 
@@ -127,8 +131,12 @@ async fn native_auth_custodian_entry_every_partial_length_is_truncated() {
         pipe.write(&TOKEN[..length]);
         pipe.eof();
         let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
-            .await.unwrap_err();
-        assert_eq!(error.0, "native_auth_bootstrap_truncated", "length={length}");
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.0, "native_auth_bootstrap_truncated",
+            "length={length}"
+        );
     }
 }
 
@@ -139,7 +147,9 @@ async fn native_auth_custodian_entry_byte_33_with_eof_is_excess() {
     bytes.push(0);
     pipe.write(&bytes);
     pipe.eof();
-    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND).await.unwrap_err();
+    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
+        .await
+        .unwrap_err();
     assert_eq!(error.0, "native_auth_bootstrap_excess");
 }
 
@@ -149,7 +159,9 @@ async fn native_auth_custodian_entry_byte_33_rejects_without_eof() {
     let mut bytes = TOKEN.to_vec();
     bytes.push(b'\n');
     pipe.write(&bytes);
-    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND).await.unwrap_err();
+    let error = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
+        .await
+        .unwrap_err();
     assert!(pipe.writer.is_some());
     assert_eq!(error.0, "native_auth_bootstrap_excess");
 }
@@ -158,13 +170,11 @@ async fn assert_missing_eof(bytes: &[u8]) {
     let mut pipe = BootstrapPipe::new();
     pipe.write(bytes);
     let started = Instant::now();
-    let (result, heartbeat) = tokio::join!(
-        read_bootstrap(&pipe.reader, started + SHORT_BOUND),
-        async {
+    let (result, heartbeat) =
+        tokio::join!(read_bootstrap(&pipe.reader, started + SHORT_BOUND), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Instant::now()
-        }
-    );
+        });
     assert_eq!(result.unwrap_err().0, "native_auth_bootstrap_timeout");
     assert!(pipe.writer.is_some());
     assert!(heartbeat.duration_since(started) < SHORT_BOUND);
@@ -192,7 +202,9 @@ async fn native_auth_custodian_entry_expired_deadline_preserves_unread_bytes() {
     let mut pipe = BootstrapPipe::new();
     pipe.write(&TOKEN);
     pipe.eof();
-    let error = read_bootstrap(&pipe.reader, Instant::now()).await.unwrap_err();
+    let error = read_bootstrap(&pipe.reader, Instant::now())
+        .await
+        .unwrap_err();
     assert_eq!(error.0, "native_auth_bootstrap_timeout");
     let mut unread = [0; 32];
     assert_eq!(rustix::io::read(&pipe.reader, &mut unread).unwrap(), 32);
@@ -205,14 +217,22 @@ async fn start_service(root: &Path) -> EngineService {
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     EngineService::start_with_settings_sources(
-        root, "e.sock", &global, &root.join("p.toml"), &stopped,
-    ).await.unwrap()
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
 async fn native_auth_engine_service_registers_distinct_codex_before_ready() {
-    let root = tempfile::Builder::new().prefix("ca-ep-")
-        .tempdir_in("/private/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("ca-ep-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut service = start_service(root.path()).await;
     let executable = root.path().join("crazyagent-pin-only");
@@ -223,39 +243,61 @@ async fn native_auth_engine_service_registers_distinct_codex_before_ready() {
     }
     service.register_native_auth_host(&executable).unwrap();
     service.register_codex_executable(&codex).unwrap();
-    let registered = service.owner_runtime().unwrap().registered_codex_executable().unwrap();
+    let registered = service
+        .owner_runtime()
+        .unwrap()
+        .registered_codex_executable()
+        .unwrap();
     assert_eq!(registered.verified_path().unwrap(), codex);
-    assert_eq!(registered.verified_sha256().unwrap(), format!("{:x}", Sha256::digest(std::fs::read(&codex).unwrap())));
+    assert_eq!(
+        registered.verified_sha256().unwrap(),
+        format!("{:x}", Sha256::digest(std::fs::read(&codex).unwrap()))
+    );
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     service.ensure_ready(&stopped).unwrap();
     service.shutdown().await.unwrap();
 }
 
 async fn prepare_profile(root: &Path, service: &EngineService) -> NativeProfileBinding {
-    let config = crate::config::resolve_config(&root.join("g.toml"), &root.join("p.toml"))
+    let config = crate::config::resolve_config(&root.join("g.toml"), &root.join("p.toml")).unwrap();
+    let (client, identity) =
+        OwnerClient::discover(root, OwnerClientKind::Tui, Duration::from_secs(2))
+            .await
+            .unwrap();
+    let reply = client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("entry-source").unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Read {
+                query: OwnerRead::ModelAccessRecord {
+                    collection: ModelAccessCollection::Connections,
+                    id: CredentialRef::new("connection-a").unwrap(),
+                },
+            },
+        })
+        .await
         .unwrap();
-    let (client, identity) = OwnerClient::discover(
-        root, OwnerClientKind::Tui, Duration::from_secs(2),
-    ).await.unwrap();
-    let reply = client.request(OwnerRequest {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: RequestId::new("entry-source").unwrap(),
-        expected_revision: Cursor::new(0),
-        operation: OwnerOperation::Read { query: OwnerRead::ModelAccessRecord {
-            collection: ModelAccessCollection::Connections,
-            id: CredentialRef::new("connection-a").unwrap(),
-        } },
-    }).await.unwrap();
     let OwnerResponse::Read { state } = reply.response else {
         panic!("actual owner did not return source record")
     };
     let OwnerData::ModelAccessRecord { source_hash, .. } = state.data else {
         panic!("actual owner did not return source hash")
     };
-    let prepared = service.owner_runtime().unwrap().prepare_native_profile(
-        &CredentialRef::new("connection-a").unwrap(), &config.id, &source_hash,
-    ).await.unwrap();
-    assert_eq!(prepared.binding().database_instance, identity.database_instance());
+    let prepared = service
+        .owner_runtime()
+        .unwrap()
+        .prepare_native_profile(
+            &CredentialRef::new("connection-a").unwrap(),
+            &config.id,
+            &source_hash,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.binding().database_instance,
+        identity.database_instance()
+    );
     assert_eq!(prepared.binding().engine_epoch, identity.engine_epoch());
     assert_eq!(prepared.binding().source_hash, source_hash);
     assert_eq!(prepared.binding().config_id, config.id);
@@ -267,8 +309,10 @@ where
     F: FnOnce(PathBuf, NativeProfileBinding) -> T + Send + 'static,
     T: Future<Output = ()> + Send + 'static,
 {
-    let root = tempfile::Builder::new().prefix("ca-ee-")
-        .tempdir_in("/private/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("ca-ee-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let service = Arc::new(tokio::sync::Mutex::new(start_service(root.path()).await));
     let task_service = service.clone();
@@ -287,15 +331,23 @@ where
             let _ = task.await;
             let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
                 service.lock().await.shutdown().await
-            }).await;
-            eprintln!("entry timeout evidence retained at {}", root.keep().display());
-            assert!(matches!(cleanup, Ok(Ok(()))), "entry timeout cleanup: {cleanup:?}");
+            })
+            .await;
+            eprintln!(
+                "entry timeout evidence retained at {}",
+                root.keep().display()
+            );
+            assert!(
+                matches!(cleanup, Ok(Ok(()))),
+                "entry timeout cleanup: {cleanup:?}"
+            );
             panic!("entry engine case exceeded 20 seconds");
         }
     };
     let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
         service.lock().await.shutdown().await
-    }).await;
+    })
+    .await;
     if outcome.is_err() || !matches!(&cleanup, Ok(Ok(()))) {
         eprintln!("entry evidence retained at {}", root.keep().display());
     }
@@ -309,14 +361,19 @@ where
 }
 
 fn auth_counts(root: &Path) -> (i64, i64) {
-    let db = Connection::open_with_flags(root.join("engine.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW).unwrap();
+    let db = Connection::open_with_flags(
+        root.join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
     db.busy_timeout(Duration::from_secs(1)).unwrap();
     db.query_row(
         "SELECT (SELECT count(*) FROM native_auth_operations),
-         (SELECT count(*) FROM native_auth_fences)", [],
+         (SELECT count(*) FROM native_auth_fences)",
+        [],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -324,24 +381,40 @@ async fn native_auth_custodian_entry_decoded_bytes_do_not_grant_profile_authorit
     engine_case(|root, prepared| async move {
         let before = auth_counts(&root);
         assert_eq!(before, (0, 0));
-        let manifest = root.join("native-profiles")
-            .join(format!("{:x}", Sha256::digest(b"profile-a"))).join("identity.json");
+        let manifest = root
+            .join("native-profiles")
+            .join(format!("{:x}", Sha256::digest(b"profile-a")))
+            .join("identity.json");
         let original = std::fs::read(&manifest).unwrap();
-        assert_eq!(format!("{:x}", Sha256::digest(&original)), prepared.custody_id);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&original)),
+            prepared.custody_id
+        );
         let mut pipe = BootstrapPipe::new();
         pipe.write(&TOKEN);
         pipe.eof();
-        let token = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND).await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(2),
-            NativeAuthCustodyChannel::connect(&root, token)).await.unwrap();
-        assert!(result.is_err(), "unreserved bytes authenticated a custodian");
+        let token = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            NativeAuthCustodyChannel::connect(&root, token),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.is_err(),
+            "unreserved bytes authenticated a custodian"
+        );
         assert_eq!(auth_counts(&root), before);
         assert_eq!(std::fs::read(&manifest).unwrap(), original);
-        let (client, _) = OwnerClient::discover(
-            &root, OwnerClientKind::Tui, Duration::from_secs(2),
-        ).await.unwrap();
+        let (client, _) =
+            OwnerClient::discover(&root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .unwrap();
         drop(client);
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -357,8 +430,10 @@ async fn native_auth_custodian_entry_retained_profile_capture_detects_manifest_r
         assert_eq!(custody_id, prepared.custody_id);
         let before = auth_counts(&root);
         assert_eq!(before, (0, 0));
-        let manifest = root.join("native-profiles")
-            .join(format!("{:x}", Sha256::digest(b"profile-a"))).join("identity.json");
+        let manifest = root
+            .join("native-profiles")
+            .join(format!("{:x}", Sha256::digest(b"profile-a")))
+            .join("identity.json");
         let bytes = std::fs::read(&manifest).unwrap();
         let replacement = manifest.with_file_name("replacement");
         std::fs::write(&replacement, &bytes).unwrap();
@@ -367,5 +442,6 @@ async fn native_auth_custodian_entry_retained_profile_capture_detects_manifest_r
         assert!(custody.prepare(&host, &prepared.connection).is_err());
         assert_eq!(auth_counts(&root), before);
         assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
-    }).await;
+    })
+    .await;
 }

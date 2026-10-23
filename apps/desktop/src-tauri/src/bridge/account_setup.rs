@@ -56,8 +56,10 @@ impl NativeBridge {
         };
         let connection = ModelConnection {
             id: reference("connection")?,
-            provider: CredentialRef::new(author).map_err(|_| failure("invalid_account_provider"))?,
-            harness: CredentialRef::new(provider).map_err(|_| failure("invalid_account_provider"))?,
+            provider: CredentialRef::new(author)
+                .map_err(|_| failure("invalid_account_provider"))?,
+            harness: CredentialRef::new(provider)
+                .map_err(|_| failure("invalid_account_provider"))?,
             protocol: CredentialRef::new("native")
                 .map_err(|_| failure("invalid_account_provider"))?,
             account_ref: reference("account")?,

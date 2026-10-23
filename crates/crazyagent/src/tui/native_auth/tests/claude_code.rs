@@ -1,5 +1,5 @@
-use super::*;
 use super::super::claude_code::Input;
+use super::*;
 use crate::engine::owner::{ClaudeAuthChallenge, ClaudeAuthInput};
 
 const UNIT_URL: &str =
@@ -67,7 +67,11 @@ fn unit_claude_browser_url_does_not_enable_an_unobserved_code_prompt() {
     let _ = input.reduce(&UiEvent::Submit);
     assert!(input.request().is_none());
     let mut invalid = Input::default();
-    assert!(invalid.observe(unit_query(), 0, unit_challenge(true)).is_err());
+    assert!(
+        invalid
+            .observe(unit_query(), 0, unit_challenge(true))
+            .is_err()
+    );
     assert!(invalid.request().is_none());
     assert!(ClaudeAuthChallenge::new("https://console.anthropic.com/oauth".into(), true).is_err());
 }
@@ -196,8 +200,7 @@ async fn real_unobserved_claude_panel_preserves_the_draft_and_codex_device_route
         assert!(!rendered.contains("Claude fallback code"));
         codex.key(KeyCode::Down);
         codex.key(KeyCode::Enter);
-        let model_access::Job::NativeAuth(job) =
-            codex.app.model_access_request().unwrap().unwrap()
+        let model_access::Job::NativeAuth(job) = codex.app.model_access_request().unwrap().unwrap()
         else {
             panic!("existing Codex route must retain its native-auth job");
         };

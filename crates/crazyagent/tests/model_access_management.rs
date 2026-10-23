@@ -1506,7 +1506,10 @@ async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
         provider_quota_policy: ProviderQuotaPolicy::Strict,
     };
     let receipt = fixture
-        .edit("unassigned-pool", ModelAccessEdit::CreatePool { pool: pool.clone() })
+        .edit(
+            "unassigned-pool",
+            ModelAccessEdit::CreatePool { pool: pool.clone() },
+        )
         .await;
     let record = read(
         &fixture.client,
@@ -1537,7 +1540,10 @@ async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
     let global = root.path().join("global.toml");
     let project = root.path().join("project.toml");
     let config = resolve_config(&global, &project).unwrap();
-    assert_eq!(config.settings.model_access.as_ref().unwrap().pools, vec![pool.clone()]);
+    assert_eq!(
+        config.settings.model_access.as_ref().unwrap().pools,
+        vec![pool.clone()]
+    );
     let engine = Arc::new(
         Engine::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
             .await

@@ -18,8 +18,11 @@ fn action() -> NativeAction {
 }
 
 fn protocol() -> CodexHostProtocol {
-    CodexHostProtocol::new(action(), CredentialRef::new("unit-selected-account").unwrap())
-        .unwrap()
+    CodexHostProtocol::new(
+        action(),
+        CredentialRef::new("unit-selected-account").unwrap(),
+    )
+    .unwrap()
 }
 
 fn wire(value: Value) -> Vec<u8> {
@@ -35,7 +38,9 @@ fn message(bytes: &[u8]) -> Value {
 }
 
 fn reply(protocol: &mut CodexHostProtocol, id: i64, result: Value) -> CodexHostBatch {
-    protocol.receive(&wire(json!({"id":id,"result":result}))).unwrap()
+    protocol
+        .receive(&wire(json!({"id":id,"result":result})))
+        .unwrap()
 }
 
 fn initialized() -> CodexHostProtocol {
@@ -52,7 +57,10 @@ fn initialized() -> CodexHostProtocol {
     assert_eq!(observed.events.len(), 1);
     assert_eq!(observed.events[0].kind, EventKind::ProtocolInitialized);
     assert_eq!(observed.outbound.len(), 1);
-    assert_eq!(message(&observed.outbound[0]), json!({"method":"initialized"}));
+    assert_eq!(
+        message(&observed.outbound[0]),
+        json!({"method":"initialized"})
+    );
     assert!(observed.auth.is_empty());
     assert_eq!(host.state(), State::Ready);
     host
@@ -128,14 +136,21 @@ fn codex_host_initialization_waits_for_complete_frame_before_initialized_notific
     assert_eq!(complete.events[0].kind, EventKind::ProtocolInitialized);
     assert!(complete.events[0].request_id.is_none());
     assert!(complete.events[0].native_session_id.is_none());
-    assert_eq!(message(&complete.outbound[0]), json!({"method":"initialized"}));
+    assert_eq!(
+        message(&complete.outbound[0]),
+        json!({"method":"initialized"})
+    );
     assert_eq!(host.state(), State::Ready);
 }
 
 #[test]
 fn codex_host_thread_start_preserves_read_only_sandbox_and_exact_project_cwd() {
     let mut host = initialized();
-    let outgoing = message(&host.start_thread(Path::new("/unit/declared-project")).unwrap());
+    let outgoing = message(
+        &host
+            .start_thread(Path::new("/unit/declared-project"))
+            .unwrap(),
+    );
     assert_eq!(outgoing["method"], "thread/start");
     assert_eq!(outgoing["params"]["cwd"], "/unit/declared-project");
     assert_eq!(outgoing["params"]["approvalPolicy"], "on-request");
@@ -207,9 +222,14 @@ fn codex_host_missing_account_and_false_auth_requirement_do_not_become_readiness
         outgoing["id"].as_i64().unwrap(),
         json!({"account":null,"requiresOpenaiAuth":false}),
     );
-    assert!(matches!(&batch.auth[..], [AuthControl::AccountRead {
-        account: None, requires_openai_auth: false, ..
-    }]));
+    assert!(matches!(
+        &batch.auth[..],
+        [AuthControl::AccountRead {
+            account: None,
+            requires_openai_auth: false,
+            ..
+        }]
+    ));
     assert!(batch.events.is_empty());
     assert!(batch.outbound.is_empty());
 }
@@ -218,14 +238,21 @@ fn codex_host_missing_account_and_false_auth_requirement_do_not_become_readiness
 fn codex_host_sensitive_account_failure_stays_out_of_normalized_event_and_debug_output() {
     let mut host = initialized();
     let outgoing = message(&host.read_account().unwrap());
-    let batch = host.receive(&wire(json!({
-        "id":outgoing["id"], "error":{"code":-32000,
-            "message":"unit-private-email@example.invalid unit-private-token"}
-    }))).unwrap();
+    let batch = host
+        .receive(&wire(json!({
+            "id":outgoing["id"], "error":{"code":-32000,
+                "message":"unit-private-email@example.invalid unit-private-token"}
+        })))
+        .unwrap();
     assert!(batch.events.is_empty());
-    assert!(matches!(&batch.auth[..], [AuthControl::RequestFailed {
-        method: "account/read", code: -32000, ..
-    }]));
+    assert!(matches!(
+        &batch.auth[..],
+        [AuthControl::RequestFailed {
+            method: "account/read",
+            code: -32000,
+            ..
+        }]
+    ));
     let debug = format!("{:?}", batch.auth);
     assert!(!debug.contains("unit-private-email"));
     assert!(!debug.contains("unit-private-token"));
@@ -243,16 +270,27 @@ fn codex_host_coalesced_delta_and_completion_keep_exact_dispatch_and_native_prov
     assert_eq!(batch.events.len(), 2);
     for event in &batch.events {
         assert_eq!(event.request_id, Some(request.clone()));
-        assert_eq!(event.provenance.account_ref.as_str(), "unit-selected-account");
-        assert_eq!(event.provenance.profile_ref.as_str(), "unit-selected-profile");
+        assert_eq!(
+            event.provenance.account_ref.as_str(),
+            "unit-selected-account"
+        );
+        assert_eq!(
+            event.provenance.profile_ref.as_str(),
+            "unit-selected-profile"
+        );
         assert_eq!(event.provenance.worktree_lease.as_str(), "unit-owned-lease");
-        assert_eq!(event.native_thread_id.as_deref(), Some("unit-native-thread"));
+        assert_eq!(
+            event.native_thread_id.as_deref(),
+            Some("unit-native-thread")
+        );
         assert_eq!(event.native_turn_id.as_deref(), Some("unit-native-turn"));
         assert!(event.native_session_id.is_none());
         assert!(event.native_event_id.is_none());
     }
-    assert!(matches!(&batch.events[0].kind, EventKind::AssistantDelta { text, .. }
-        if text == "unit answer"));
+    assert!(
+        matches!(&batch.events[0].kind, EventKind::AssistantDelta { text, .. }
+        if text == "unit answer")
+    );
     assert!(matches!(&batch.events[1].kind, EventKind::TurnFinished {
         outcome: TurnOutcome::Success, result: None, usage, estimated_cost_usd: None, ..
     } if usage == &TokenUsage::default()));
@@ -264,21 +302,33 @@ fn codex_host_finished_correlation_clears_before_unsolicited_notice_and_next_dis
     let (mut host, request) = active();
     let terminal = host.receive(&completed("completed")).unwrap();
     assert_eq!(terminal.events[0].request_id, Some(request));
-    let notice = host.receive(&wire(json!({"method":"unit/unknown","params":{}}))).unwrap();
+    let notice = host
+        .receive(&wire(json!({"method":"unit/unknown","params":{}})))
+        .unwrap();
     assert!(notice.events[0].request_id.is_none());
     let next = RequestId::new("unit-second-local-turn").unwrap();
     let outgoing = message(&host.start_turn(next.clone(), "unit second prompt").unwrap());
-    let batch = reply(&mut host, outgoing["id"].as_i64().unwrap(), json!({
-        "turn":{"id":"unit-second-native-turn","items":[],"status":"inProgress"}
-    }));
+    let batch = reply(
+        &mut host,
+        outgoing["id"].as_i64().unwrap(),
+        json!({
+            "turn":{"id":"unit-second-native-turn","items":[],"status":"inProgress"}
+        }),
+    );
     assert_eq!(batch.events[0].request_id, Some(next));
-    assert_eq!(batch.events[0].native_turn_id.as_deref(), Some("unit-second-native-turn"));
+    assert_eq!(
+        batch.events[0].native_turn_id.as_deref(),
+        Some("unit-second-native-turn")
+    );
 }
 
 #[test]
 fn codex_host_rejected_busy_dispatch_cannot_replace_current_turn_correlation() {
     let (mut host, request) = active();
-    assert!(host.start_turn(RequestId::new("unit-rejected-turn").unwrap(), "other").is_err());
+    assert!(
+        host.start_turn(RequestId::new("unit-rejected-turn").unwrap(), "other")
+            .is_err()
+    );
     let batch = host.receive(&completed("completed")).unwrap();
     assert_eq!(batch.events[0].request_id, Some(request));
     assert_eq!(host.state(), State::Idle);
@@ -287,12 +337,23 @@ fn codex_host_rejected_busy_dispatch_cannot_replace_current_turn_correlation() {
 #[test]
 fn codex_host_invalid_prompt_does_not_reserve_a_request_or_poison_next_valid_dispatch() {
     let mut host = idle();
-    assert!(host.start_turn(RequestId::new("unit-empty-turn").unwrap(), " ").is_err());
+    assert!(
+        host.start_turn(RequestId::new("unit-empty-turn").unwrap(), " ")
+            .is_err()
+    );
     let request = RequestId::new("unit-valid-after-empty").unwrap();
-    let outgoing = message(&host.start_turn(request.clone(), "unit valid prompt").unwrap());
-    let batch = reply(&mut host, outgoing["id"].as_i64().unwrap(), json!({
-        "turn":{"id":"unit-native-turn","items":[],"status":"inProgress"}
-    }));
+    let outgoing = message(
+        &host
+            .start_turn(request.clone(), "unit valid prompt")
+            .unwrap(),
+    );
+    let batch = reply(
+        &mut host,
+        outgoing["id"].as_i64().unwrap(),
+        json!({
+            "turn":{"id":"unit-native-turn","items":[],"status":"inProgress"}
+        }),
+    );
     assert_eq!(batch.events[0].request_id, Some(request));
 }
 
@@ -319,61 +380,88 @@ fn codex_host_turn_start_rpc_error_is_correlated_without_invented_terminal_succe
     let mut host = idle();
     let request = RequestId::new("unit-failed-start").unwrap();
     let outgoing = message(&host.start_turn(request.clone(), "unit prompt").unwrap());
-    let batch = host.receive(&wire(json!({"id":outgoing["id"],"error":{
-        "code":-32000,"message":"unit model unavailable"
-    }}))).unwrap();
+    let batch = host
+        .receive(&wire(json!({"id":outgoing["id"],"error":{
+            "code":-32000,"message":"unit model unavailable"
+        }})))
+        .unwrap();
     assert_eq!(batch.events.len(), 1);
     assert_eq!(batch.events[0].request_id, Some(request));
     assert!(matches!(&batch.events[0].kind, EventKind::RequestFailed {
         method, code: -32000, ..
     } if method == "turn/start"));
     assert_eq!(host.state(), State::Idle);
-    let notice = host.receive(&wire(json!({"method":"unit/after-error","params":{}}))).unwrap();
+    let notice = host
+        .receive(&wire(json!({"method":"unit/after-error","params":{}})))
+        .unwrap();
     assert!(notice.events[0].request_id.is_none());
 }
 
 #[test]
 fn codex_host_retryable_turn_error_remains_nonterminal_until_native_failed_completion() {
     let (mut host, request) = active();
-    let batch = host.receive(&wire(json!({"method":"error","params":{
-        "threadId":"unit-native-thread","turnId":"unit-native-turn",
-        "error":{"message":"unit transient failure"},"willRetry":true
-    }}))).unwrap();
+    let batch = host
+        .receive(&wire(json!({"method":"error","params":{
+            "threadId":"unit-native-thread","turnId":"unit-native-turn",
+            "error":{"message":"unit transient failure"},"willRetry":true
+        }})))
+        .unwrap();
     assert_eq!(batch.events[0].request_id, Some(request.clone()));
-    assert!(matches!(&batch.events[0].kind, EventKind::TurnError { will_retry: true, .. }));
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::TurnError {
+            will_retry: true,
+            ..
+        }
+    ));
     assert_eq!(host.state(), State::Active);
     let terminal = host.receive(&completed("failed")).unwrap();
     assert_eq!(terminal.events[0].request_id, Some(request));
-    assert!(matches!(&terminal.events[0].kind, EventKind::TurnFinished {
-        outcome: TurnOutcome::Failed, ..
-    }));
+    assert!(matches!(
+        &terminal.events[0].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Failed,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn codex_host_approval_request_is_observed_and_declined_through_supported_rpc() {
     let (mut host, request) = active();
-    let batch = host.receive(&wire(json!({
-        "id":"unit-approval","method":"item/commandExecution/requestApproval","params":{
-            "threadId":"unit-native-thread","turnId":"unit-native-turn",
-            "itemId":"unit-command","startedAtMs":1
-        }
-    }))).unwrap();
+    let batch = host
+        .receive(&wire(json!({
+            "id":"unit-approval","method":"item/commandExecution/requestApproval","params":{
+                "threadId":"unit-native-thread","turnId":"unit-native-turn",
+                "itemId":"unit-command","startedAtMs":1
+            }
+        })))
+        .unwrap();
     assert_eq!(batch.events[0].request_id, Some(request));
-    assert!(matches!(&batch.events[0].kind, EventKind::ApprovalRequired { .. }));
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::ApprovalRequired { .. }
+    ));
     assert_eq!(batch.outbound.len(), 1);
-    assert_eq!(message(&batch.outbound[0]), json!({
-        "id":"unit-approval","result":{"decision":"decline"}
-    }));
+    assert_eq!(
+        message(&batch.outbound[0]),
+        json!({
+            "id":"unit-approval","result":{"decision":"decline"}
+        })
+    );
     assert_eq!(host.state(), State::Active);
 }
 
 #[test]
 fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_success() {
     let (mut host, _) = active();
-    assert!(host.receive(&wire(json!({"method":"item/agentMessage/delta","params":{
-        "threadId":"unit-wrong-thread","turnId":"unit-native-turn",
-        "itemId":"unit-native-item","delta":"unit stale data"
-    }}))).is_err());
+    assert!(
+        host.receive(&wire(json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"unit-wrong-thread","turnId":"unit-native-turn",
+            "itemId":"unit-native-item","delta":"unit stale data"
+        }})))
+        .is_err()
+    );
     assert_eq!(host.state(), State::Failed);
     let mut other = protocol();
     other.initialize().unwrap();
@@ -397,7 +485,9 @@ fn codex_host_eof_with_partial_frame_reports_disconnection_without_completion_or
 #[test]
 fn codex_host_noncodex_or_nonlaunch_provenance_is_rejected() {
     let mut wrong = action();
-    let NativeAction::Launch { harness, .. } = &mut wrong else { unreachable!() };
+    let NativeAction::Launch { harness, .. } = &mut wrong else {
+        unreachable!()
+    };
     *harness = NativeHarness::Claude;
     assert!(CodexHostProtocol::new(wrong, CredentialRef::new("unit-account").unwrap()).is_err());
     let cancel = NativeAction::CancelChild {

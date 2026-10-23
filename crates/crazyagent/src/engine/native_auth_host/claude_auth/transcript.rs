@@ -12,7 +12,10 @@ pub(super) struct Transcript {
 }
 
 impl Transcript {
-    pub(super) fn push(&mut self, bytes: &[u8]) -> Result<Option<ClaudeAuthChallenge>, EngineError> {
+    pub(super) fn push(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Option<ClaudeAuthChallenge>, EngineError> {
         if bytes.len() > BYTES_MAX.saturating_sub(self.input.len()) {
             return Err(EngineError("native_auth_claude_output_bound".into()));
         }
@@ -23,13 +26,23 @@ impl Transcript {
             Err(error) if error.error_len().is_none() => return Ok(None),
             Err(_) => return Err(EngineError("native_auth_claude_output_invalid".into())),
         };
-        let Some((_, tail)) = text.split_once(PREFIX) else { return Ok(None) };
-        let Some(end) = tail.find(['\r', '\n']) else { return Ok(None) };
+        let Some((_, tail)) = text.split_once(PREFIX) else {
+            return Ok(None);
+        };
+        let Some(end) = tail.find(['\r', '\n']) else {
+            return Ok(None);
+        };
         let challenge = ClaudeAuthChallenge::new(tail[..end].into(), tail[end..].contains(PROMPT))?;
-        if self.emitted.as_ref().is_some_and(|previous| previous.url() != challenge.url()) {
+        if self
+            .emitted
+            .as_ref()
+            .is_some_and(|previous| previous.url() != challenge.url())
+        {
             return Err(EngineError("native_auth_claude_challenge_changed".into()));
         }
-        if self.emitted.as_ref() == Some(&challenge) { return Ok(None) }
+        if self.emitted.as_ref() == Some(&challenge) {
+            return Ok(None);
+        }
         self.emitted = Some(challenge.clone());
         Ok(Some(challenge))
     }
@@ -47,12 +60,24 @@ fn presentation(input: &[u8]) -> Result<Vec<u8>, EngineError> {
             index += 1;
             continue;
         }
-        let Some(kind) = input.get(index + 1) else { break };
+        let Some(kind) = input.get(index + 1) else {
+            break;
+        };
         if *kind == b'[' {
-            let Some(end) = input[index + 2..].iter().position(|byte| (0x40..=0x7e).contains(byte)) else { break };
+            let Some(end) = input[index + 2..]
+                .iter()
+                .position(|byte| (0x40..=0x7e).contains(byte))
+            else {
+                break;
+            };
             index += end + 3;
         } else if *kind == b']' {
-            let Some(end) = input[index + 2..].windows(2).position(|pair| pair == b"\x1b\\") else { break };
+            let Some(end) = input[index + 2..]
+                .windows(2)
+                .position(|pair| pair == b"\x1b\\")
+            else {
+                break;
+            };
             if !input[index + 2..].starts_with(b"8;;") {
                 return Err(EngineError("native_auth_claude_output_invalid".into()));
             }

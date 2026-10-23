@@ -1168,7 +1168,10 @@ async fn retained_profile_capacity_refuses_one_past_the_limit_but_reuses_retaine
             retained.push(prepared.binding().custody_id.clone());
         }
         for index in retained.len()..MAX_PROFILES {
-            let key = format!("{:x}", Sha256::digest(format!("occupied-{index}").as_bytes()));
+            let key = format!(
+                "{:x}",
+                Sha256::digest(format!("occupied-{index}").as_bytes())
+            );
             private_directory(&context.custody().join(key));
         }
         assert_eq!(slot_count(&context), MAX_PROFILES);

@@ -58,7 +58,10 @@ fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineErr
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
-            matches!(part, "rcli_master_cleanup_incomplete" | "rcli_master_wait_failed")
+            matches!(
+                part,
+                "rcli_master_cleanup_incomplete" | "rcli_master_wait_failed"
+            )
         })
 }
 
@@ -118,7 +121,10 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
     ) -> Result<MasterTurnView, EngineError> {
         match self.run_rcli_master_turn(prepared, turn_id).await {
-            Ok(observation) => self.observe_master_turn(prepared, turn_id, observation).await,
+            Ok(observation) => {
+                self.observe_master_turn(prepared, turn_id, observation)
+                    .await
+            }
             Err(error)
                 if matches!(
                     error.0.as_str(),
@@ -155,7 +161,9 @@ impl OwnerRuntimeHandle {
             return Err(failure("master_runtime_binding"));
         }
         let resources = &prepared.attempt.request.route.resources;
-        resources.validate().map_err(|_| failure("master_runtime_budget_exhausted"))?;
+        resources
+            .validate()
+            .map_err(|_| failure("master_runtime_budget_exhausted"))?;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(resources.wall_time_ms))
             .ok_or_else(|| failure("master_runtime_budget_exhausted"))?;
@@ -239,7 +247,9 @@ impl OwnerRuntimeHandle {
             generation: current.ordinal,
             deadline,
         };
-        let observed = self.collect_rcli_master_turn(prepared, turn_id, &mut active).await;
+        let observed = self
+            .collect_rcli_master_turn(prepared, turn_id, &mut active)
+            .await;
         let cancel = !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }));
         let retirement = active.custody.retire(cancel.then_some(turn_id));
         let capture = if active.capture.sequence() > 0 {
@@ -282,7 +292,8 @@ impl OwnerRuntimeHandle {
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
             let Some(observed) = active.custody.poll()? else {
-                tokio::time::sleep_until((Instant::now() + POLL_INTERVAL).min(active.deadline)).await;
+                tokio::time::sleep_until((Instant::now() + POLL_INTERVAL).min(active.deadline))
+                    .await;
                 continue;
             };
             active.capture.record(&observed.event)?;
@@ -301,7 +312,9 @@ impl OwnerRuntimeHandle {
                     .observe_master_turn(
                         prepared,
                         turn_id,
-                        MasterRuntimeObservation::Running { runtime: active.runtime.clone() },
+                        MasterRuntimeObservation::Running {
+                            runtime: active.runtime.clone(),
+                        },
                     )
                     .await?;
                 if running.phase == MasterTurnPhase::Cancelled {
@@ -314,7 +327,9 @@ impl OwnerRuntimeHandle {
                 active.custody.prompt(turn_id.clone(), &prepared.text)?;
                 prompted = true;
             }
-            let Some(completion) = observed.completion else { continue; };
+            let Some(completion) = observed.completion else {
+                continue;
+            };
             if !prompted || completion.turn_id != *turn_id {
                 return Err(failure("rcli_master_turn_scope"));
             }
@@ -324,7 +339,9 @@ impl OwnerRuntimeHandle {
             }
             match completion.status {
                 RcliMasterStatus::Succeeded => {
-                    let text = completion.reply.ok_or_else(|| failure("rcli_master_empty_reply"))?;
+                    let text = completion
+                        .reply
+                        .ok_or_else(|| failure("rcli_master_empty_reply"))?;
                     if text.trim().is_empty() || text.contains('\0') {
                         return Err(failure("rcli_master_capture_incomplete"));
                     }
@@ -406,4 +423,3 @@ fn validate_turn(
     assert!(current.attempt.is_some());
     Ok(())
 }
-

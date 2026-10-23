@@ -1250,9 +1250,9 @@ async fn real_compact_and_tiny_rendering_use_panel_body_without_changing_metadat
 }
 
 mod account_onboarding;
-mod pool_assignment;
 mod account_profile;
+mod pool_assignment;
 
 mod claude_code;
-mod preview;
 mod managed_setup;
+mod preview;
