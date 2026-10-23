@@ -130,7 +130,7 @@ impl GoTo {
 struct QuitAsk {
     quit_focused: bool,
     running: usize,
-    draft: bool,
+    loss: Option<&'static str>,
 }
 
 enum Overlay {
@@ -226,21 +226,25 @@ impl Shell {
         })
     }
 
-    fn draft(&self) -> bool {
-        self.stack.iter().any(|screen| screen.draft())
+    fn loss(&self) -> Option<&'static str> {
+        self.stack
+            .iter()
+            .rev()
+            .find(|screen| screen.draft())
+            .map(|screen| screen.loss())
     }
 
     fn ask_quit(&mut self) {
         let running = self.running();
-        let draft = self.draft();
-        if running == 0 && !draft {
+        let loss = self.loss();
+        if running == 0 && loss.is_none() {
             self.quit = true;
             return;
         }
         self.overlay = Some(Overlay::Quit(QuitAsk {
             quit_focused: false,
             running,
-            draft,
+            loss,
         }));
     }
 
@@ -619,8 +623,8 @@ impl Shell {
                 if ask.running == 1 { "s" } else { "" },
             )));
         }
-        if ask.draft {
-            body.push(Line::raw("Your new project draft will be lost."));
+        if let Some(loss) = ask.loss {
+            body.push(Line::raw(loss));
         }
         body.push(Line::default());
         body.push(buttons(
@@ -900,6 +904,59 @@ mod tests {
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a second Ctrl-Q quits");
+    }
+
+    #[test]
+    fn quit_asks_before_unsaved_profile_changes_are_lost() {
+        let loaded = || {
+            let mut ctx = ctx();
+            ctx.store.profile = Load::Ready(Some(OwnerProfile {
+                name: "Mira".into(),
+                role: String::new(),
+                bio: String::new(),
+                preferred_stack: Vec::new(),
+                working_style: Default::default(),
+            }));
+            at(Place::Settings(SettingsSection::Profile), ctx)
+        };
+        let mut shell = loaded();
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an untouched profile quits at once");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(
+                (ask.running, ask.loss),
+                (0, Some("Your profile changes will be lost."))
+            ),
+            _ => panic!("edited profile asks first"),
+        }
+        shell.key(Key::Esc);
+        assert!(!shell.quitting());
+        shell.key(Key::Backspace);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "undoing the edit leaves nothing to lose");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        for _ in 0..7 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        shell.key(Key::Ctrl('q'));
+        assert!(
+            matches!(&shell.overlay, Some(Overlay::Quit(ask)) if ask.loss.is_some()),
+            "a save still in flight can be lost"
+        );
+        shell.key(Key::Esc);
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "a saved profile has nothing to lose");
     }
 
     #[test]
