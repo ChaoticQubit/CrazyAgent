@@ -4,6 +4,10 @@ use crate::engine::EngineError;
 use crate::engine::owner::{AccountCheck, AccountPage, AccountSecret};
 use crate::protocol::CredentialRef;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "built by the Settings > Accounts view")
+)]
 pub(in crate::tui) enum AccountsRequest {
     Catalog,
     List {
@@ -47,6 +51,10 @@ pub(in crate::tui) struct AccountsEvent {
 impl Connection {
     /// Queues one Settings > Accounts request on the paired owner connection. The reply
     /// arrives later as `OwnerEvent::Accounts`. Input: the request. Output: queued or why not.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the Settings > Accounts view")
+    )]
     pub(in crate::tui) fn accounts(&mut self, request: AccountsRequest) -> Result<(), String> {
         self.owner_job(Job::Accounts(Box::new(request)))
     }
@@ -178,17 +186,29 @@ mod tests {
         };
         assert_eq!(local.url.as_deref(), Some("http://127.0.0.1:11434/v1"));
         assert_eq!(local.status_label, "Signed in");
-        let Ok(AccountsReply::Models(models)) = reply(
+        let models = reply(
             &mut connection,
             AccountsRequest::LocalModels {
                 url: "http://127.0.0.1:11434".into(),
             },
         )
-        .await
-        else {
-            panic!("models required")
+        .await;
+        let Ok(AccountsReply::Models(models)) = models else {
+            panic!("models required: {models:?}")
         };
         assert!(models.iter().any(|model| model == "qwen2.5:0.5b"));
+        let Ok(AccountsReply::Checked(checked)) = reply(
+            &mut connection,
+            AccountsRequest::Check {
+                id: local.id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("checked account required")
+        };
+        assert_eq!(checked.account.status_label, "Signed in");
+        assert!(checked.models.iter().any(|model| model == "qwen2.5:0.5b"));
         let Ok(AccountsReply::Account(renamed)) = reply(
             &mut connection,
             AccountsRequest::Rename {

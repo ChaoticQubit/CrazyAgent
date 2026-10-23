@@ -113,7 +113,7 @@ pub(super) fn pool_materialization(
 /// `accounts` table; the config holds only accounts routing needs (subscriptions and pool
 /// members). Inputs: database, live config, writable sources, owner admission, command.
 /// Output: the changed or listed accounts with their latest managed sign-in phase.
-pub(crate) fn execute(
+pub(super) fn execute(
     db: &mut Connection,
     config: &mut EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
