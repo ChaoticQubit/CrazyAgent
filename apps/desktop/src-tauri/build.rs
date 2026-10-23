@@ -30,6 +30,8 @@ fn main() {
         "desktop_delete_memory",
         "desktop_forget_memory",
         "desktop_remember_research",
+        "desktop_save_selection_to_memory",
+        "desktop_cancel_master_turn",
         "desktop_open_project",
         "desktop_history",
         "desktop_send_message",
