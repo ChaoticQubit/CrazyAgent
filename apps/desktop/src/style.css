@@ -32,8 +32,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: no-preference) { .icon.spin { animation: spin 1s linear infinite; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.brand-mark { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; font-size: 15px; line-height: 20px; letter-spacing: -0.02em; color: var(--text); }
-.brand-mark.large { font-size: 20px; line-height: 28px; }
+.brand-mark { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 600; font-size: 16px; line-height: 24px; letter-spacing: -0.02em; color: var(--text); }
+.brand-mark.large { gap: var(--space-3); font-size: 26px; line-height: 32px; }
+.brand-glyph { flex: none; display: block; width: 24px; height: 24px; }
+.brand-mark.large .brand-glyph { width: 48px; height: 48px; }
+.brand-glyph .brand-square { fill: var(--brand); }
+.brand-glyph.reduced { display: none; }
+@media (max-resolution: 1.5dppx) {
+  .brand-mark:not(.large) .brand-glyph.full { display: none; }
+  .brand-mark:not(.large) .brand-glyph.reduced { display: block; }
+}
 
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-control); border: 1px solid var(--border-input); background: var(--surface); color: var(--text); font-weight: 500; cursor: pointer; white-space: nowrap; text-decoration: none; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 .btn:hover { background: var(--surface-2); }
