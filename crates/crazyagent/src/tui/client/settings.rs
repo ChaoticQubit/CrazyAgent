@@ -8,7 +8,10 @@ use crate::engine::owner::{
     NativeAuthMethod, NativeAuthPhase, NativeAuthStart,
 };
 use crate::harnesses::HarnessEntry;
-use crate::memory::library::{LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory};
+use crate::memory::library::{
+    LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory,
+};
+use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::CredentialRef;
 
 const POOL_JOINS_MAX: usize = 64;
@@ -37,6 +40,43 @@ pub(in crate::tui) enum SettingsJob {
         memory: RequestId,
         generation: u64,
     },
+    Plugins,
+    Plugin(PluginChange),
+}
+
+/// One change on Settings, Plugins and skills; everything there applies to
+/// every project.
+/// Input: built by the plugins page. Output: one plugins call on the engine.
+pub(in crate::tui) enum PluginChange {
+    AddSkill {
+        folder: String,
+    },
+    SetSkill {
+        id: String,
+        enabled: bool,
+    },
+    RemoveSkill {
+        id: String,
+    },
+    AddServer {
+        name: String,
+        spec: ServerSpec,
+        secrets: Vec<(String, AccountSecret)>,
+    },
+    Approve {
+        id: String,
+        spec: ServerSpec,
+    },
+    SetServer {
+        id: String,
+        enabled: bool,
+    },
+    RemoveServer {
+        id: String,
+    },
+    CheckServer {
+        id: String,
+    },
 }
 
 impl std::fmt::Debug for SettingsJob {
@@ -49,6 +89,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
             Self::DeleteMemory { .. } => "DeleteMemory",
+            Self::Plugins => "Plugins",
+            Self::Plugin(_) => "Plugin",
         })
     }
 }
@@ -125,6 +167,8 @@ pub(in crate::tui) enum SettingsEvent {
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
+    Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    PluginChanged(Result<Option<ServerView>, String>),
 }
 
 impl SettingsEvent {
@@ -140,6 +184,8 @@ impl SettingsEvent {
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
+            SettingsJob::Plugins => Self::Plugins(Err(problem)),
+            SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
         }
     }
 }
@@ -229,21 +275,36 @@ impl NativeOwner {
 
     async fn settings_event(&mut self, job: SettingsJob, lost: &mut bool) -> SettingsEvent {
         match job {
-            SettingsJob::Accounts(request) => SettingsEvent::Accounts(self.accounts(request).await.result),
-            SettingsJob::AllAccounts => SettingsEvent::AllAccounts(self.all_accounts(ACCOUNTS_PAGE, lost).await),
+            SettingsJob::Accounts(request) => {
+                SettingsEvent::Accounts(self.accounts(request).await.result)
+            }
+            SettingsJob::AllAccounts => {
+                SettingsEvent::AllAccounts(self.all_accounts(ACCOUNTS_PAGE, lost).await)
+            }
             SettingsJob::Harnesses => SettingsEvent::Harnesses(match self.settings_controller() {
-                Ok(controller) => controller.harness_catalog().await.map_err(|error| problem(&error, lost)),
+                Ok(controller) => controller
+                    .harness_catalog()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
             SettingsJob::SignIn(job) => SettingsEvent::SignIn(self.sign_in(job, lost).await),
             SettingsJob::JoinPools { account, pools } => {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
             }
-            SettingsJob::Memories { scopes } => SettingsEvent::Memories(self.all_memories(scopes, lost).await),
+            SettingsJob::Memories { scopes } => {
+                SettingsEvent::Memories(self.all_memories(scopes, lost).await)
+            }
+            SettingsJob::Plugins => SettingsEvent::Plugins(self.plugins(lost).await),
+            SettingsJob::Plugin(change) => {
+                SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
+            }
             SettingsJob::DeleteMemory { memory, generation } => {
                 SettingsEvent::MemoryDeleted(match self.settings_controller() {
                     Ok(controller) => match controller.delete_memory(memory, generation).await {
-                        Ok(OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }) => Ok(()),
+                        Ok(OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }) => {
+                            Ok(())
+                        }
                         Ok(OwnerResponse::Rejected { code }) => Err(bounded_problem(&code)),
                         Ok(_) => Err("memory_outcome_unknown".into()),
                         Err(error) => Err(problem(&error, lost)),
@@ -252,6 +313,66 @@ impl NativeOwner {
                 })
             }
         }
+    }
+
+    /// Reads the skills and MCP servers added for every project.
+    /// Input: the lost-connection flag. Output: both lists, or the plain problem code.
+    pub(super) async fn plugins(
+        &mut self,
+        lost: &mut bool,
+    ) -> Result<(Vec<SkillView>, Vec<ServerView>), String> {
+        let controller = self.settings_controller()?;
+        let skills = controller
+            .plugin_skills(None)
+            .await
+            .map_err(|error| problem(&error, lost))?;
+        let servers = controller
+            .plugin_servers(None)
+            .await
+            .map_err(|error| problem(&error, lost))?;
+        Ok((skills, servers))
+    }
+
+    /// Runs one plugins change for every project.
+    /// Inputs: the change and the lost-connection flag. Output: the changed MCP
+    /// server when the change was about one, or the plain problem code.
+    pub(super) async fn plugin_change(
+        &mut self,
+        change: PluginChange,
+        lost: &mut bool,
+    ) -> Result<Option<ServerView>, String> {
+        let controller = self.settings_controller()?;
+        let done = match change {
+            PluginChange::AddSkill { folder } => controller
+                .add_skill(Scope::Global, folder)
+                .await
+                .map(|_| None),
+            PluginChange::SetSkill { id, enabled } => controller
+                .set_skill_enabled(id, enabled)
+                .await
+                .map(|_| None),
+            PluginChange::RemoveSkill { id } => controller.remove_skill(id).await.map(|()| None),
+            PluginChange::AddServer {
+                name,
+                spec,
+                secrets,
+            } => controller
+                .add_mcp_server(Scope::Global, name, spec, secrets)
+                .await
+                .map(Some),
+            PluginChange::Approve { id, spec } => {
+                controller.approve_mcp_server(id, spec).await.map(Some)
+            }
+            PluginChange::SetServer { id, enabled } => controller
+                .set_mcp_server_enabled(id, enabled)
+                .await
+                .map(Some),
+            PluginChange::RemoveServer { id } => {
+                controller.remove_mcp_server(id).await.map(|()| None)
+            }
+            PluginChange::CheckServer { id } => controller.check_mcp_server(id).await.map(Some),
+        };
+        done.map_err(|error| problem(&error, lost))
     }
 
     /// Reads the saved memories of several scopes, newest first overall.
@@ -305,13 +426,21 @@ impl NativeOwner {
     /// Reads every account page by page, stopping at the load limit.
     /// Inputs: the page size and the lost-connection flag. Output: the
     /// accounts in engine order, or the plain problem code.
-    pub(super) async fn all_accounts(&mut self, page: u16, lost: &mut bool) -> Result<Vec<AccountView>, String> {
+    pub(super) async fn all_accounts(
+        &mut self,
+        page: u16,
+        lost: &mut bool,
+    ) -> Result<Vec<AccountView>, String> {
         assert!(page > 0);
         let mut accounts: Vec<AccountView> = Vec::new();
         let mut after = None;
         let pages_max = ACCOUNTS_LOADED_MAX.div_ceil(usize::from(page)) + 1;
         for _ in 0..pages_max {
-            let read = match self.accounts(AccountsRequest::List { after, limit: page }).await.result {
+            let read = match self
+                .accounts(AccountsRequest::List { after, limit: page })
+                .await
+                .result
+            {
                 Ok(AccountsReply::Page(read)) => read,
                 Ok(_) => return Err("account_reply_unexpected".into()),
                 Err(code) => {
@@ -559,14 +688,23 @@ mod tests {
                 model: Some("qwen2.5:0.5b".into()),
             };
             let added = native
-                .settings(SettingsJob::Accounts(AccountsRequest::Add { draft, key: None }))
+                .settings(SettingsJob::Accounts(AccountsRequest::Add {
+                    draft,
+                    key: None,
+                }))
                 .await;
-            assert!(matches!(added, SettingsEvent::Accounts(Ok(AccountsReply::Account(_)))));
+            assert!(matches!(
+                added,
+                SettingsEvent::Accounts(Ok(AccountsReply::Account(_)))
+            ));
         }
         let mut lost = false;
         let accounts = native.all_accounts(2, &mut lost).await.unwrap();
         assert!(!lost);
-        let mut names: Vec<&str> = accounts.iter().map(|account| account.name.as_str()).collect();
+        let mut names: Vec<&str> = accounts
+            .iter()
+            .map(|account| account.name.as_str())
+            .collect();
         names.sort_unstable();
         assert_eq!(names, ["Laptop", "Mini", "Studio"]);
 
@@ -574,10 +712,17 @@ mod tests {
             .controller
             .as_mut()
             .unwrap()
-            .add_memory(MemoryScope::Global, "Use metric units in every recipe.".into(), 1)
+            .add_memory(
+                MemoryScope::Global,
+                "Use metric units in every recipe.".into(),
+                1,
+            )
             .await
             .unwrap();
-        assert!(matches!(written, OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }));
+        assert!(matches!(
+            written,
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ));
         let SettingsEvent::Memories(Ok(memories)) = native
             .settings(SettingsJob::Memories {
                 scopes: vec![MemoryScope::Global],
