@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Review                                 
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   ✓ Pool   ✓ Team   Review           
+───────────────────────────────────────────────────────────────━━━━━━───────────
+  Review                                                                        
+  Tidepool                                                                      
+  A live dashboard for marine researchers to watch sensor buoys and get alerts  
+  when readings look wrong.                                                     
+                                                                                
+  Project folder ┌─ Quit CrazyAgent? ─────────────────────────┐                 
+  Stack          │ 3 agents keep running in the background.   │leDB             
+  Platforms      │ Your new project draft will be lost.       │                 
+  Documents      │                                            │                 
+  Work to start  │ [ Quit ]   [> Stay ]                       │                 
+  Pool           └────────────────────────────────────────────┘                 
+  Team            Codex leads. Claude Code x2, Codex x1. Tools on.              
+                                                                                
+  Research starts right away. You can close CrazyAgent and agents keep          
+  working.                                                                      
+                                                                                
+  [ Back ]   [> Create project ]                                                
+                                                                                
+                                                                                
+ ←→ Choose  Enter Confirm  Esc Stay                                      ? Help 

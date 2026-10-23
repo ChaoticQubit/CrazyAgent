@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home                                                            
+────────────────────────────────────────────────────────────────────────────────
+  Projects                                    │ Get set up                      
+                                              │                                 
+  No projects yet.                            │ ▌ [ ] Add an account            
+  Start one with n. You can add accounts      │ ▌     Sign in with ChatGPT or   
+  first, or start a project now and pick a    │ ▌     Claude, or add an API     
+  pool later.                                 │ ▌     key or local model.       
+                                              │                                 
+                                              │   [ ] Create a pool             
+                                              │       Group up to 15 accounts   
+                                              │       for projects to use.      
+                                              │                                 
+                                              │   [x] Check your harnesses      
+                                              │       2 of 9 harnesses ready    
+                                              │       on this Mac.              
+                                              │                                 
+                                              │ Enter opens Settings            
+                                              │                                 
+                                              │                                 
+                                              │                                 
+                                              │                                 
+                                                                                
+ Enter Add an account  ↑↓ Move  Tab Switch panel  n New project          ? Help 

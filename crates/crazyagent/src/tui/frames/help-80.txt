@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home                                           2 agents running 
+────────────────────────────────────────────────────────────────────────────────
+  P┌─ Keys ─────────────────────────────────────────────────────────────────┐t  
+   │ Everywhere                          Lists                              │   
+  ▌│ Ctrl-K     Go to anything           ↑↓        Move                     │g  
+  ▌│ Esc        Back or cancel           PgUp PgDn Page                     │   
+  ▌│ Tab        Next field or panel      Home End  First, last              │o  
+   │ Shift-Tab  Previous                 /         Filter                   │   
+   │ Shift-←→   Next tab                 Space     Select                   │e  
+   │ ?          This help                Enter     Open                     │   
+   │ Ctrl-Q     Quit                                                        │y  
+   │                                                                        │   
+   │ Text fields                         This screen                        │l  
+   │ ←→         Move the cursor          n         New project              │   
+   │ Ctrl-A E   Start, end               s         Settings                 │9  
+   │ Ctrl-W     Delete a word            Enter     Open project             │   
+   │ Ctrl-U     Clear the field                                             │   
+   │ Ctrl-J     New line                                                    │   
+   │                                                                        │   
+   │ Letter keys work when you are not typing in a field.                   │   
+   └────────────────────────────────────────────────────────────────────────┘   
+                                                                                
+                                                                                
+ Esc Close  ? Close                                                      ? Help 

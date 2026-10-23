@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Plugins and skills                                 
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+────────────────────────────────────━━━━━━━━━━━━━━━━━━━━────────────────────────
+  Plugins and skills                                         For every project  
+  Skills teach agents how to do a task. MCP servers give agents new tools. A    
+  project ┌─ Approve MCP server ─────────────────────────────────────┐          
+          │ postgres-local wants to give agents new tools.           │          
+  Skills  │                                                          │          
+  > fronte│ Runs       uvx mcp-server-postgres                       │          
+    tiger-│ Network    Yes                                           │          
+    linear│ Secrets    DATABASE_URL  ✓ Key saved                     │          
+    releas│ Projects   All projects                                  │          
+          │                                                          │          
+  MCP serv│ Agents can call its tools only after you approve.        │          
+    github│                                                          │rotocol…  
+    postgr│ [> Approve ]   [ Not now ]   [ Turn off ]                │tgres     
+    figma └──────────────────────────────────────────────────────────┘com/mcp   
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ←→ Choose  Enter Confirm  Esc Not now                                   ? Help 

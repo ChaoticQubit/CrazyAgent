@@ -1,0 +1,36 @@
+ CrazyAgent  /  Settings  /  Pools  /  New pool                                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
+───────────────────━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────
+  New pool                                                                                            7 of 15 selected  
+                                                                                                                        
+  Pool name                                                                                                             
+  [ Build team                                                   ]                                                      
+                                                                                                                        
+  Accounts  / Filter                                                                             v  Show selected only  
+        Account                     Provider           Status                                                           
+    [x] Anthropic API - team        ✻ Anthropic API    ✓ Key saved                                                   █  
+    [x] ChatGPT Plus - spare 1      ⬡ ChatGPT / Codex  ✓ Signed in                                                   █  
+  > [ ] ChatGPT Plus - spare 2      ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [ ] ChatGPT Plus - spare 3      ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [ ] ChatGPT Plus - spare 4      ⬡ ChatGPT / Codex  ! Not signed in                                               │  
+    [x] ChatGPT Pro - main          ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [x] ChatGPT Team - seat 01      ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [ ] ChatGPT Team - seat 02      ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [ ] ChatGPT Team - seat 03      ⬡ ChatGPT / Codex  ✓ Signed in                                                   │  
+    [x] Claude Max - work           ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Max - work 2         ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Pro - personal       ✻ Claude           ! Not signed in                                               │  
+    [x] Claude Team - seat 01       ✻ Claude           ✓ Signed in                                                   │  
+    [x] Claude Team - seat 02       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Team - seat 03       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Team - seat 04       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Team - seat 05       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Team - seat 06       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] Claude Team - seat 07       ✻ Claude           ✓ Signed in                                                   │  
+    [ ] LM Studio on mini           ⌂ Local model      ✗ Can't reach this URL                                        │  
+  Showing 1-20 of 240                                                                                                   
+                                                                                                                        
+  [ Save pool ]   [ Cancel ]                                                                                            
+                                                                                                                        
+ Space Select   / Filter   v Selected only   Tab Next   Esc Cancel                                               ? Help 

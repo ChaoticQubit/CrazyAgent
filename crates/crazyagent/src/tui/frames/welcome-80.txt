@@ -1,0 +1,24 @@
+ CrazyAgent  /  Welcome                                                         
+────────────────────────────────────────────────────────────────────────────────
+  Welcome to CrazyAgent                                                         
+  Tell us about you. Agents read this before they start.                        
+                                                                                
+  Name                                                                Required  
+  [ Mira Ok█                                                                 ]  
+  Role                                                                          
+  [ For example: Founder and full-stack developer                            ]  
+  Short bio                                                                     
+  [ A sentence or two agents should know about you                           ]  
+  Preferred stack                                                               
+  [ For example: TypeScript, React, Postgres                                 ]  
+  Working style                                                                 
+  Replies               (*) Short       ( ) Detailed                            
+  Before big changes    (*) Ask first   ( ) Act first                           
+                                                                                
+  [ Save and continue ]                                                         
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Tab Next field  Shift-Tab Previous  ←→ Choose  Enter Next  Ctrl-Q Quit  ? Help 

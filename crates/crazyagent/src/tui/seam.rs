@@ -1,0 +1,230 @@
+use super::client::{ConversationJob, CreationJob, OwnerEvent, SetupQuery};
+use super::master_session;
+use crate::owner_profile::OwnerProfile;
+use crate::pools::PoolSummary;
+use crate::project_setup::{Platform, ResearchJob, ResearchStatus, StoredSetup};
+use crate::protocol::{Command, CredentialRef, Cursor, ProjectId, StoredProject};
+
+/// A pool change asked for in Settings, Pools. The engine side builds the
+/// exact pool record, keeping an existing pool's projects and roles.
+/// Input: built by the pool list and editor. Output: one model access edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PoolChange {
+    Create {
+        name: String,
+        members: Vec<CredentialRef>,
+    },
+    Update {
+        id: CredentialRef,
+        name: String,
+        members: Vec<CredentialRef>,
+    },
+    Remove {
+        id: CredentialRef,
+    },
+}
+
+/// One account as lists show it: never a secret, only plain labels.
+/// Input: built from the engine's account list. Output: list and pool editor
+/// rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountRow {
+    pub id: CredentialRef,
+    pub name: String,
+    pub provider: String,
+    pub status: String,
+}
+
+/// One engine request a screen asks the shell to send.
+/// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
+/// time on the owner connection; the reply comes back as an `Arrival`.
+#[expect(dead_code, reason = "project setup, creation and conversation requests are built by the project screens")]
+pub enum Request {
+    Profile,
+    SaveProfile { profile: OwnerProfile },
+    Pools,
+    Projects,
+    EditPool { change: PoolChange },
+    Setup(SetupQuery),
+    Creation(Box<CreationJob>),
+    Conversation(Box<ConversationJob>),
+    Master(Box<master_session::Job>),
+    Wire { command: Command, revision: Cursor },
+    Settings(Box<super::client::settings::SettingsJob>),
+    Reconnect,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Profile => "Profile",
+            Self::SaveProfile { .. } => "SaveProfile",
+            Self::Pools => "Pools",
+            Self::Projects => "Projects",
+            Self::EditPool { .. } => "EditPool",
+            Self::Setup(_) => "Setup",
+            Self::Creation(_) => "Creation",
+            Self::Conversation(_) => "Conversation",
+            Self::Master(_) => "Master",
+            Self::Wire { .. } => "Wire",
+            Self::Settings(_) => "Settings",
+            Self::Reconnect => "Reconnect",
+        })
+    }
+}
+
+/// A shell request run through the owner controller.
+/// Input: built from a `Request` by the shell. Output: executed on the engine
+/// worker thread; the result comes back as a `ShellEvent`.
+#[derive(Clone)]
+pub(in crate::tui) enum ShellRequest {
+    Profile,
+    SaveProfile {
+        profile: OwnerProfile,
+        generation: u64,
+    },
+    Pools,
+    Projects,
+    EditPool {
+        change: PoolChange,
+        generation: u64,
+    },
+}
+
+/// The result of one shell request, with the engine's plain problem code on
+/// failure.
+/// Input: produced by the engine worker. Output: turned into an `Arrival`.
+pub(in crate::tui) enum ShellEvent {
+    Profile(Result<Option<OwnerProfile>, String>),
+    ProfileSaved(Result<(), String>),
+    Pools(Result<Vec<PoolSummary>, String>),
+    Projects(Result<Vec<ProjectCard>, String>),
+    PoolEdited(Result<(), String>),
+}
+
+/// Something that arrived from the engine, broadcast to every open screen.
+/// Input: an engine reply. Output: screens react; the shell updates `Store`.
+#[expect(dead_code, reason = "owner and wire replies are read by the project screens")]
+pub enum Arrival {
+    Connected,
+    Disconnected(String),
+    Profile(Result<Option<OwnerProfile>, String>),
+    ProfileSaved(Result<(), String>),
+    Pools(Result<Vec<PoolSummary>, String>),
+    Projects(Result<Vec<ProjectCard>, String>),
+    PoolEdited(Result<(), String>),
+    Owner(Box<OwnerEvent>),
+    Wire(Result<crate::protocol::WireReply, String>),
+}
+
+/// Research progress of one project, counted by status.
+/// Input: the project's research jobs. Output: counts per status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResearchCounts {
+    pub done: usize,
+    pub running: usize,
+    pub queued: usize,
+    pub needs_pool: usize,
+    pub failed: usize,
+}
+
+impl ResearchCounts {
+    /// Counts research jobs by status.
+    /// Input: the jobs. Output: the counts; cancelled jobs are not counted.
+    pub fn of(jobs: &[ResearchJob]) -> Self {
+        let mut counts = Self::default();
+        for job in jobs {
+            match job.status {
+                ResearchStatus::Done => counts.done += 1,
+                ResearchStatus::Running => counts.running += 1,
+                ResearchStatus::Queued => counts.queued += 1,
+                ResearchStatus::NeedsPool => counts.needs_pool += 1,
+                ResearchStatus::Failed => counts.failed += 1,
+                ResearchStatus::Cancelled => {}
+            }
+        }
+        counts
+    }
+
+    /// The plain research summary on a project card.
+    /// Input: none. Output: "Research: 2 done, 1 running", "Research: needs a
+    /// pool" or "No research".
+    pub fn summary(&self) -> String {
+        if self.needs_pool > 0 {
+            return "Research: needs a pool".into();
+        }
+        let parts: Vec<String> = [
+            (self.done, "done"),
+            (self.running, "running"),
+            (self.queued, "queued"),
+            (self.failed, "failed"),
+        ]
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, word)| format!("{count} {word}"))
+        .collect();
+        if parts.is_empty() {
+            "No research".into()
+        } else {
+            format!("Research: {}", parts.join(", "))
+        }
+    }
+}
+
+/// One project as Home shows it, built only from engine data.
+/// Input: the stored project, its setup and research jobs, and pool names.
+/// Output: the card fields in plain words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectCard {
+    pub id: ProjectId,
+    pub name: String,
+    pub about: String,
+    pub platforms: Vec<Platform>,
+    pub pool: Option<String>,
+    pub research: ResearchCounts,
+    pub created_ms: Option<i64>,
+}
+
+impl ProjectCard {
+    /// Builds a card from engine records.
+    /// Inputs: the stored project, its setup if any, its jobs and the pools.
+    /// Output: the card; a pool the engine no longer lists shows by its name
+    /// only when known.
+    pub fn build(
+        project: &StoredProject,
+        setup: Option<&StoredSetup>,
+        jobs: &[ResearchJob],
+        pools: &[PoolSummary],
+    ) -> Self {
+        let pool = setup.and_then(|setup| setup.pool.as_ref()).map(|reference| {
+            pools
+                .iter()
+                .find(|pool| &pool.id == reference)
+                .map_or_else(|| "A removed pool".to_owned(), |pool| pool.name.clone())
+        });
+        Self {
+            id: project.project_id.clone(),
+            name: project.spec.name.clone(),
+            about: setup.map(|setup| setup.about.clone()).unwrap_or_default(),
+            platforms: setup.map(|setup| setup.platforms.clone()).unwrap_or_default(),
+            pool,
+            research: ResearchCounts::of(jobs),
+            created_ms: setup.map(|setup| setup.created_ms),
+        }
+    }
+}
+
+impl ShellEvent {
+    /// The failure event for a request that reached no trusted connection.
+    /// Input: the request. Output: its event carrying the plain problem code.
+    pub(in crate::tui) fn unavailable(request: &ShellRequest) -> Self {
+        let problem = "trusted_connection_unavailable".to_owned();
+        match request {
+            ShellRequest::Profile => Self::Profile(Err(problem)),
+            ShellRequest::SaveProfile { .. } => Self::ProfileSaved(Err(problem)),
+            ShellRequest::Pools => Self::Pools(Err(problem)),
+            ShellRequest::Projects => Self::Projects(Err(problem)),
+            ShellRequest::EditPool { .. } => Self::PoolEdited(Err(problem)),
+        }
+    }
+}

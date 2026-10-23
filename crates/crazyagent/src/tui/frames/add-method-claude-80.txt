@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Claude                
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Claude                                                                        
+  How do you want to connect?                                                   
+                                                                                
+  ▌ Sign in with your Claude subscription                                       
+  ▌   Uses your Claude Pro or Max plan. Claude opens in your browser.           
+                                                                                
+    Use an API key                                                              
+      Pay per use with an Anthropic key.                                        
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  Enter Choose  Esc Back                                         ? Help 

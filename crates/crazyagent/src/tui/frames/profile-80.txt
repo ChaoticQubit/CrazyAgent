@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Profile                                            
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+────────────────────────────────────────────────────────────────────━━━━━━━━━───
+  Name                                                                Required  
+  [ Mira Okafor                                                              ]  
+  Role                                                                          
+  [ Founder and full-stack developer                                         ]  
+  Short bio                                                                     
+  [ Building tools for marine researchers. Ten years of                      ]  
+  [ TypeScript, learning Rust.                                               ]  
+  Preferred stack                                                               
+  [ TypeScript, React, Rust, Postgres                                        ]  
+  Working style                                                                 
+  Replies               (*) Short       ( ) Detailed                            
+  Before big changes    (*) Ask first   ( ) Act first                           
+                                                                                
+  Colors                                                                        
+  (*) Follow macOS   ( ) Dark   ( ) Light   ( ) Terminal colors                 
+                                                                                
+  [ Save changes ]                                                              
+                                                                                
+ ✓ Saved.                                                                       
+ Tab Next field  Enter Next  Shift-←→ Sections  Esc Home                 ? Help 
