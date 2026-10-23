@@ -6,7 +6,7 @@ import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { MarkdownView } from "./markdown";
-import { masterStatus, resendText, sendFailureLine, turnLine, turnSettled } from "./research";
+import { masterStatus, nearBottom, resendText, sendFailureLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import type { Tone } from "../../ui";
@@ -108,7 +108,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
 
   useEffect(() => {
     const element = thread.current;
-    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 120) element.scrollTop = element.scrollHeight;
+    if (element && nearBottom(element)) element.scrollTop = element.scrollHeight;
   }, [turns.length, Object.keys(sent).length]);
 
   const send = (again?: string) => act(async () => {

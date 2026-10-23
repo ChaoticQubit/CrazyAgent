@@ -231,3 +231,10 @@ test("a failed send says Couldn't send and keeps specific engine copy", () => {
   assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again.");
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
+
+test("a log follows new lines only while the owner is near its bottom", () => {
+  assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 240 }), true);
+  assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 240 }), true);
+  assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 600, clientHeight: 240 }), false);
+  assert.equal(research.nearBottom({ scrollHeight: 100, scrollTop: 0, clientHeight: 240 }), true);
+});

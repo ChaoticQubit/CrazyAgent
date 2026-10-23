@@ -128,6 +128,14 @@ export function turnLine(turn: MasterTurn): string {
   }
 }
 
+const FOLLOW_SLACK_PX = 120;
+
+/** Tells whether a scrolled list sits close enough to its bottom to keep following new lines.
+ * Input: the element's scroll sizes. Output: true within FOLLOW_SLACK_PX of the bottom. */
+export function nearBottom(box: { scrollHeight: number; scrollTop: number; clientHeight: number }): boolean {
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK_PX;
+}
+
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.

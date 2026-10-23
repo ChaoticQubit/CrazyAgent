@@ -1,11 +1,11 @@
 import { call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { failureCopy, loadResearchLog } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { researchRow } from "./research";
+import { nearBottom, researchRow } from "./research";
 import type { ResearchRow } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -23,18 +23,31 @@ export function agentStatus(row: ResearchRow): { word: string; tone: Tone } {
 
 function AgentLog({ data, job }: { data: ProjectData; job: ResearchJob }) {
   const [log, setLog] = useState<Result<string[]>>();
+  const [follow, setFollow] = useState(true);
+  const list = useRef<HTMLOListElement>(null);
   const live = job.status === "running";
+  const latest = () => {
+    if (list.current) list.current.scrollTop = list.current.scrollHeight;
+    setFollow(true);
+  };
   useEffect(() => {
     let current = true;
     void loadResearchLog(data.id, job.id).then((result) => { if (current) setLog(result); });
     return () => { current = false; };
   }, [data.id, job.id, live ? data.now : 0]);
+  useEffect(() => {
+    if (follow && list.current) list.current.scrollTop = list.current.scrollHeight;
+  }, [log]);
   return <div className="pj-log" id={`pj-log-${job.id}`}>
     {log === undefined && <p className="pj-muted pj-small" role="status">Loading log...</p>}
     {log?.kind === "not_ready" && <NotReady what="the agent log isn't in this build." />}
     {log?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the log. {failureCopy(log.code)}</p>}
     {log?.kind === "ok" && (log.value.length
-      ? <ol className="pj-log-lines" aria-label={`${displayText(job.kind_label)} log`}>{log.value.map((line, index) => <li key={index}>{displayText(line)}</li>)}</ol>
+      ? <>
+        <ol className="pj-log-lines" ref={list} aria-label={`${displayText(job.kind_label)} log`} onScroll={(event) => setFollow(nearBottom(event.currentTarget))}>
+          {log.value.map((line, index) => <li key={index}>{displayText(line)}</li>)}</ol>
+        {!follow && <button type="button" className="btn quiet" onClick={latest}>Jump to latest</button>}
+      </>
       : <p className="pj-muted pj-small">No log lines yet.</p>)}
   </div>;
 }
