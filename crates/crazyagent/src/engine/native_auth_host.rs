@@ -6,7 +6,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
-const EXECUTABLE_BYTES_MAX: u64 = 256 * 1024 * 1024;
+const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
 pub async fn run_native_auth_custodian(
     runtime_dir: &Path,

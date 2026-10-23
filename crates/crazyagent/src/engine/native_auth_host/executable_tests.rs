@@ -162,8 +162,21 @@ fn native_auth_registered_executable_rejects_empty_and_oversize_files() {
     let file = File::create(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&path).is_err());
-    file.set_len(256 * 1024 * 1024 + 1).unwrap();
+    file.set_len(super::EXECUTABLE_BYTES_MAX + 1).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&path).is_err());
+}
+
+#[test]
+fn native_auth_registered_executable_accepts_claude_code_2_1_309_size() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claude");
+    let file = File::create(&path).unwrap();
+    file.set_len(275_923_296).unwrap();
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    assert_eq!(registered.verified_path().unwrap(), path);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 275_923_296);
 }
 
 #[test]
