@@ -150,20 +150,20 @@ impl OwnedChild {
             while input.try_recv().is_ok() {}
             return;
         }
-        if self.pending.is_none() {
-            if let Ok(request) = input.try_recv() {
-                if let Some(profile) = &self.profile {
-                    if let Err(error) = profile.revalidate_retained() {
-                        let _ = request.done.send(Err(error));
-                        self.shared.fail("codex_host_profile_invalid");
-                        return;
-                    }
-                }
-                self.pending = Some(PendingWrite {
-                    request,
-                    written: 0,
-                });
+        if self.pending.is_none()
+            && let Ok(request) = input.try_recv()
+        {
+            if let Some(profile) = &self.profile
+                && let Err(error) = profile.revalidate_retained()
+            {
+                let _ = request.done.send(Err(error));
+                self.shared.fail("codex_host_profile_invalid");
+                return;
             }
+            self.pending = Some(PendingWrite {
+                request,
+                written: 0,
+            });
         }
         self.write_pending();
         if self.shared.close_stdin.load(Ordering::Acquire)
@@ -187,10 +187,10 @@ impl OwnedChild {
             Ok(count) => {
                 pending.written += count;
                 assert!(pending.written <= pending.request.bytes.len());
-                if pending.written == pending.request.bytes.len() {
-                    if let Some(done) = self.pending.take() {
-                        let _ = done.request.done.send(Ok(()));
-                    }
+                if pending.written == pending.request.bytes.len()
+                    && let Some(done) = self.pending.take()
+                {
+                    let _ = done.request.done.send(Ok(()));
                 }
             }
             Err(error)
@@ -274,10 +274,10 @@ impl OwnedChild {
     fn publish_completion(&self) {
         assert!(self.complete());
         assert!(self.status.is_some());
-        if let Some(profile) = &self.profile {
-            if profile.revalidate_retained().is_err() {
-                self.shared.fail("codex_host_profile_invalid");
-            }
+        if let Some(profile) = &self.profile
+            && profile.revalidate_retained().is_err()
+        {
+            self.shared.fail("codex_host_profile_invalid");
         }
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
@@ -289,13 +289,13 @@ impl OwnedChild {
 
 impl Drop for Custody {
     fn drop(&mut self) {
-        if let Some(mut retained) = self.0.take() {
-            if !retained.complete() {
-                retained.stop();
-                retained.observe_exit();
-                retained.shared.accounting_failed();
-                std::mem::forget(retained);
-            }
+        if let Some(mut retained) = self.0.take()
+            && !retained.complete()
+        {
+            retained.stop();
+            retained.observe_exit();
+            retained.shared.accounting_failed();
+            std::mem::forget(retained);
         }
     }
 }
@@ -364,12 +364,12 @@ fn record_output(
         shared.stop.store(true, Ordering::Release);
         return Ok(());
     }
-    let output = if stderr {
-        CodexHostOutput::Stderr(bytes.to_vec())
-    } else {
-        CodexHostOutput::Stdout(bytes.to_vec())
-    };
-    state.output.push_back(output);
+    if stderr {
+        return Ok(());
+    }
+    state
+        .output
+        .push_back(CodexHostOutput::Stdout(bytes.to_vec()));
     assert!(state.output.len() <= OUTPUT_QUEUE_MAX);
     Ok(())
 }
