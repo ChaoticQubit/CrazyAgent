@@ -11,6 +11,7 @@
 .pj-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .pj-stack { display: grid; gap: 24px; align-content: start; min-width: 0; }
 .pj-stack-s { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.pj-stack > .btn, .pj-stack-s > .btn { justify-self: start; }
 .pj-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pj-row.between { justify-content: space-between; }
 .pj-row.end { justify-content: flex-end; }
@@ -33,7 +34,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-field > label, .pj-field > legend, .pj-label { font-weight: 600; padding: 0; }
 .pj-help { color: var(--text-3); font-size: 12px; line-height: 16px; }
 .pj-error { color: var(--danger); font-size: 12px; line-height: 16px; }
-.pj-note { padding: 10px 12px; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--text); display: grid; gap: 8px; justify-items: start; }
+.pj-note { padding: 10px 12px; border-radius: var(--radius-control); background: var(--surface-2); color: var(--text); display: grid; gap: 8px; justify-items: start; }
 .pj-note.warn { background: var(--warn-soft); }
 .pj-note.pj-inline { display: flex; align-items: center; gap: 8px; }
 .pj-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: var(--radius-panel); background: var(--surface-2); }
