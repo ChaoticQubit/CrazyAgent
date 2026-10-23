@@ -30,6 +30,7 @@ const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
+const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 const SESSION_EVENTS_MAX: usize = 200_000;
 const HISTORY_MESSAGES_MAX: i64 = 12;
@@ -171,6 +172,8 @@ struct Worker {
     idle_since: Instant,
     stopping: bool,
     held: bool,
+    warm: bool,
+    worked: bool,
     managed: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
@@ -1017,9 +1020,12 @@ impl TeamRuntime {
                 let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
                     break;
                 };
-                if let Err(problem) =
-                    self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)?
-                {
+                let started =
+                    self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)?;
+                if let Ok(agent) = started {
+                    self.workers.get_mut(&agent).expect("worker exists").warm = true;
+                }
+                if let Err(problem) = started {
                     self.connection
                         .execute(
                             "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
@@ -1146,11 +1152,16 @@ impl TeamRuntime {
                 idle_since: Instant::now(),
                 stopping: false,
                 held: false,
+                warm: false,
+                worked: false,
                 managed,
                 grants: 0,
                 thread: Some(thread),
             },
         );
+        if managed {
+            self.mark_agent(id, AgentStatus::Idle, None)?;
+        }
         Ok(Ok(id))
     }
 
@@ -1322,6 +1333,7 @@ impl TeamRuntime {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
                 worker.idle_since = Instant::now();
+                worker.worked = true;
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
@@ -1375,6 +1387,25 @@ impl TeamRuntime {
                         params![id, status.name(), problem, now_ms()],
                     )
                     .map_err(error)?;
+                if status == AgentStatus::Failed
+                    && worker.warm
+                    && !worker.worked
+                    && super::keep_warm(&self.connection, &worker.project)?
+                {
+                    self.connection
+                        .execute(
+                            "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
+                            [worker.project.as_str()],
+                        )
+                        .map_err(error)?;
+                    self.note(
+                        &worker.project,
+                        &format!(
+                            "Keeping sub-agents warm was turned off: a warm sub-agent stopped before it did any work ({}).",
+                            bound_text(problem.as_deref().unwrap_or("no reason"), 300)
+                        ),
+                    )?;
+                }
                 Ok(true)
             }
         }
@@ -1612,18 +1643,36 @@ fn work(
     let _ = reports.send(Report::Ended { problem });
 }
 
+enum Next {
+    Turn(String, Option<Box<Grant>>),
+    Stop,
+    Closed,
+}
+
+/// Waits for the agent's next order. While it waits, an agent that keeps its process
+/// watches that process, so a harness that exits between turns ends the agent.
 fn next_turn(
     orders: &Receiver<Order>,
     cancel: &AtomicBool,
-) -> Option<(String, Option<Box<Grant>>)> {
+    mut idle: Option<&mut Session>,
+) -> Next {
     loop {
         if cancel.load(Ordering::SeqCst) {
-            return None;
+            return Next::Stop;
         }
         match orders.recv_timeout(ORDER_WAIT) {
-            Ok(Order::Turn(prompt, grant)) => return Some((prompt, grant)),
-            Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return None,
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(Order::Turn(prompt, grant)) => return Next::Turn(prompt, grant),
+            Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(session) = idle.as_deref_mut()
+                    && matches!(
+                        session.next_event(IDLE_EVENT_WAIT),
+                        Ok(Some(LaunchEvent::Exited { .. })) | Err(_)
+                    )
+                {
+                    return Next::Closed;
+                }
+            }
         }
     }
 }
@@ -1644,7 +1693,15 @@ fn kept(
         group: session.process_group(),
     });
     let mut problem = None;
-    while let Some((prompt, grant)) = next_turn(orders, cancel) {
+    loop {
+        let (prompt, grant) = match next_turn(orders, cancel, Some(&mut session)) {
+            Next::Turn(prompt, grant) => (prompt, grant),
+            Next::Stop => break,
+            Next::Closed => {
+                problem = Some("The agent process closed".to_owned());
+                break;
+            }
+        };
         assert!(grant.is_none());
         let (text, end) = turn(&mut session, &prompt, reports, cancel, turn_time);
         let reusable = matches!(end, TurnEnd::Success | TurnEnd::Failed);
@@ -1667,7 +1724,7 @@ fn per_turn(
     cancel: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
-    while let Some((prompt, grant)) = next_turn(orders, cancel) {
+    while let Next::Turn(prompt, grant) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
                 text: String::new(),

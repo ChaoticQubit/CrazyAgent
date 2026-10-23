@@ -850,6 +850,112 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
 }
 
 #[test]
+fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-warm",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    setup.team.min_agents = 3;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-warm", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::KeepWarm {
+                project_id: setup.project_id.clone(),
+                on: true,
+            }
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let executable = base.join("codex");
+    std::fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        team.tick().unwrap();
+        if !status(&connection, &setup).unwrap().keep_warm {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:#?}",
+            status(&connection, &setup).unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for _ in 0..10 {
+        team.tick().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let cold = status(&connection, &setup).unwrap();
+    assert!(!cold.keep_warm);
+    assert_eq!(
+        cold.agents.len(),
+        2,
+        "the plan's two warm sub-agents start once and are not started again: {cold:#?}"
+    );
+    assert!(cold.agents.iter().all(|a| a.status == AgentStatus::Failed));
+    assert!(
+        cold.messages.iter().any(|m| m.state == MessageState::Note
+            && m.text.starts_with("Keeping sub-agents warm was turned off")),
+        "{cold:#?}"
+    );
+    assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
+
+#[test]
 fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
