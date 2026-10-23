@@ -4,7 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import { assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, setupProject } from "../../api-projects";
 import type { Platform, PoolChoice, ProjectCatalog, ResearchKind } from "../../api-projects";
 import { SessionContext } from "../../state";
-import { Button, ConfirmDialog, Icon, PageHeader, Switch } from "../../ui";
+import { Button, ConfirmDialog, Icon, Notice, PageHeader, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
 import { NotReady } from "../project/shared";
@@ -313,12 +313,12 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>
+          {createError && <Notice tone="danger" alert>{createError}</Notice>}
           {harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build, so installed status isn't checked." />}
           {draft.team ? <TeamEditor prefix="np" team={draft.team} harnesses={harnessValue} pool={chosenPool} research={draft.research}
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
-          {createError && <p className="pj-error" role="alert">{createError}</p>}
           <p className="pj-summary">{summary(draft, chosenPool?.pool.id ?? null)}</p>
         </div>}
         <footer className="pj-footer">

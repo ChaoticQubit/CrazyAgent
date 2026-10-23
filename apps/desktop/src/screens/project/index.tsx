@@ -106,6 +106,7 @@ function ProjectMenu({ data }: { data: ProjectData }) {
   }
   return <Menu label="Project actions" items={[
     { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
+    { label: "Pause all agents", icon: "circle-pause", onSelect: () => data.notify("Not ready yet: pausing agents isn't in this build.") },
     { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
   ]} />;
 }
