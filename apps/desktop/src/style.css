@@ -82,7 +82,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .checkbox { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent-solid); }
 
-.segmented { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border-input); border-radius: var(--radius-control); padding: 2px; background: var(--surface); gap: 2px; }
+.segmented { display: inline-flex; justify-self: start; align-self: flex-start; max-width: 100%; flex-wrap: wrap; border: 1px solid var(--border-input); border-radius: var(--radius-control); padding: 2px; background: var(--surface); gap: 2px; }
 .segmented button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border: 0; border-radius: var(--radius-segment); background: transparent; cursor: pointer; color: var(--text-2); }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
@@ -149,6 +149,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .empty-state > .icon { color: var(--text-3); margin-bottom: var(--space-1); }
 .empty-state p { color: var(--text-2); max-width: 60ch; }
 .empty-state.compact { padding: var(--space-6); }
+.panel .empty-state { border: 0; border-radius: 0; background: transparent; }
 .not-ready { border-style: solid; background: var(--surface); }
 .not-ready .badge { margin-bottom: var(--space-1); }
 
