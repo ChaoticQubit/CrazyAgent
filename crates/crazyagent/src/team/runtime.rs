@@ -4,6 +4,9 @@ use super::{
     append_message, bound_text, eligible_accounts, launch_harness, now_ms, parse_delegations,
     pick_account, tool,
 };
+use crate::agents::{
+    AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
+};
 use crate::config::ModelAccess;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
@@ -37,6 +40,7 @@ const SESSION_EVENTS_MAX: usize = 200_000;
 const HISTORY_MESSAGES_MAX: i64 = 12;
 const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
+const TEAM_HOST: &str = "team";
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
 /// Bounds every team agent obeys.
@@ -145,6 +149,7 @@ enum TurnEnd {
     TimedOut,
     TooLong,
     Cancelled,
+    Interrupted,
     Closed,
 }
 
@@ -173,12 +178,15 @@ struct Worker {
     idle_since: Instant,
     stopping: bool,
     held: bool,
+    restarting: bool,
     warm: bool,
     worked: bool,
     managed: bool,
+    tools: bool,
     team_tool: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
+    hosted: Option<Hosted>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -196,6 +204,7 @@ pub struct TeamRuntime {
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
     delegation_tool: Option<PathBuf>,
+    agents: Option<Arc<Agents>>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -262,7 +271,7 @@ impl TeamRuntime {
         connection
             .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
-                 UPDATE team_agents SET status='stopped', task=NULL, error='The engine restarted', stopped_ms={now}
+                 UPDATE team_agents SET status='stopped', task=NULL, error='Stopped when CrazyAgent closed', stopped_ms={now}
                    WHERE status IN ('starting','idle','working');
                  UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
                    WHERE status='running' AND cancel_requested=0;
@@ -284,7 +293,16 @@ impl TeamRuntime {
             workers: BTreeMap::new(),
             custody,
             delegation_tool: None,
+            agents: None,
         })
+    }
+
+    /// Records every team agent in the engine's agent register, so the owner can stop,
+    /// interrupt and restart each one with every other agent.
+    /// Takes the register of the same engine database. Returns the runtime.
+    pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
+        self.agents = Some(agents);
+        self
     }
 
     /// Gives every team master with tools on the engine's `delegate` tool, served by `executable`.
@@ -300,16 +318,132 @@ impl TeamRuntime {
         Ok(self)
     }
 
-    /// Runs one step for every project with team work: applies agent reports, sends
-    /// pending messages to the master, delivers finished results, starts or reuses
-    /// sub-agents within the plan's limits and stops idle or cancelled agents.
+    /// Runs one step for every project with team work: applies agent reports and the
+    /// owner's stop and restart from the agent register, sends pending messages to the
+    /// master, delivers finished results, starts or reuses sub-agents within the plan's
+    /// limits and stops idle or cancelled agents.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.collect()?;
+        self.owner_controls();
         let access = (self.access)().unwrap_or_default();
+        self.owner_restarts(&access)?;
         for project in self.active_projects()? {
             self.step(&project, &access)?;
         }
-        self.collect()
+        self.collect()?;
+        self.owner_controls();
+        Ok(())
+    }
+
+    /// Applies the owner's stop and restart from the agent register to live agents and
+    /// shows the register which agents are working. A stop cancels the agent's work; a
+    /// restart returns it to its queue for the fresh process.
+    fn owner_controls(&mut self) {
+        for worker in self.workers.values_mut() {
+            let Some(hosted) = &worker.hosted else {
+                continue;
+            };
+            hosted.set_busy(worker.busy.is_some());
+            let asked = hosted.requested();
+            if asked == Some(HostedRequest::Restart) && !worker.held {
+                worker.held = true;
+                worker.restarting = true;
+            } else if asked != Some(HostedRequest::Stop) || worker.stopping {
+                continue;
+            }
+            worker.stopping = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    fn owner_restarts(&mut self, access: &ModelAccess) -> Result<(), EngineError> {
+        let Some(agents) = self.agents.clone() else {
+            return Ok(());
+        };
+        for restart in agents.take_restarts(TEAM_HOST) {
+            self.restart_agent(&restart, access)?;
+        }
+        Ok(())
+    }
+
+    /// Starts a fresh process for a team agent the owner restarted, under the same register
+    /// entry, when the team plan and the pool still allow it; otherwise notes why not.
+    fn restart_agent(
+        &mut self,
+        restart: &HostedRestart,
+        access: &ModelAccess,
+    ) -> Result<(), EngineError> {
+        let Ok(reference) = restart.reference.parse::<i64>() else {
+            return Ok(());
+        };
+        let row: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT project,role,harness FROM team_agents WHERE id=?1",
+                [reference],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((project, role, harness)) = row else {
+            return Ok(());
+        };
+        let (Ok(project), Some(role)) = (ProjectId::new(project), AgentRole::parse(&role)) else {
+            return Ok(());
+        };
+        let Some(stored) = self.stored(&project)? else {
+            return Ok(());
+        };
+        if super::paused(&self.connection, &project)? {
+            return self.note(
+                &project,
+                "The agent was not restarted because the team is paused. Resume the team, then restart it.",
+            );
+        }
+        let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
+        let (harness, tools) = match role {
+            AgentRole::Master if self.master(&project).is_some() => {
+                return self.note(
+                    &project,
+                    "The master is already running, so no second master was started.",
+                );
+            }
+            AgentRole::Master => (stored.team.master.clone(), stored.team.master_tools),
+            AgentRole::Sub => match super::slot(&stored.team, &harness) {
+                None => {
+                    return self.note(
+                        &project,
+                        "That sub-agent's harness is no longer in the team plan, so it was not restarted.",
+                    );
+                }
+                Some(slot)
+                    if self.live(&project, AgentRole::Sub, Some(&slot.harness))
+                        >= usize::from(slot.agents)
+                        || self.live(&project, AgentRole::Sub, None) >= subs_max =>
+                {
+                    return self.note(
+                        &project,
+                        "The team already runs as many sub-agents as its plan allows, so no other was started.",
+                    );
+                }
+                Some(slot) => (slot.harness.clone(), slot.tools),
+            },
+        };
+        let paused = self.paused()?;
+        let started = match self.account_for(access, &project, &harness, &paused) {
+            Ok(account) => {
+                self.spawn_run(&stored, role, &harness, tools, &account, Some(restart))?
+            }
+            Err(reason) => Err(reason),
+        };
+        match started {
+            Ok(_) => Ok(()),
+            Err(reason) => self.note(
+                &project,
+                &format!("The agent could not restart: {}.", bound_text(&reason, 300)),
+            ),
+        }
     }
 
     /// Tells whether any agent process is still running.
@@ -512,7 +646,7 @@ impl TeamRuntime {
             .filter(|w| {
                 &w.project == project
                     && w.role == role
-                    && !w.stopping
+                    && (!w.stopping || w.restarting)
                     && harness.is_none_or(|h| w.harness == h)
             })
             .count()
@@ -639,7 +773,7 @@ impl TeamRuntime {
             Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
             Err(problem) => return Err(problem.0),
         };
-        let context = self.context(project, id, self.workers[&id].team_tool)?;
+        let context = self.context(project, id, self.workers[&id].role, self.workers[&id].tools)?;
         self.workers.get_mut(&id).expect("worker exists").grants = generation;
         Ok(Some(Box::new(Grant { profile, context })))
     }
@@ -671,8 +805,12 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
+        let restarting = self
+            .workers
+            .values()
+            .any(|w| &w.project == project && w.role == AgentRole::Master && w.restarting);
         let master = self.master(project);
-        if master.is_some_and(|id| self.workers[&id].busy.is_some()) {
+        if restarting || master.is_some_and(|id| self.workers[&id].busy.is_some()) {
             return Ok(());
         }
         let pending: Option<(i64, String, String)> = self
@@ -1121,6 +1259,18 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
     ) -> Result<Result<i64, String>, EngineError> {
+        self.spawn_run(stored, role, harness, tools, account, None)
+    }
+
+    fn spawn_run(
+        &mut self,
+        stored: &StoredSetup,
+        role: AgentRole,
+        harness: &str,
+        tools: bool,
+        account: &TeamAccount,
+        again: Option<&HostedRestart>,
+    ) -> Result<Result<i64, String>, EngineError> {
         let now = now_ms();
         self.connection
             .execute(
@@ -1157,6 +1307,21 @@ impl TeamRuntime {
                 params![id, worktree],
             )
             .map_err(error)?;
+        let hosted = match self.host(stored, id, role, &plan.harness, again) {
+            Ok(hosted) => hosted,
+            Err(problem) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+        };
+        let interrupt = hosted
+            .as_ref()
+            .map_or_else(|| Arc::new(AtomicBool::new(false)), Hosted::interrupt_flag);
         let (orders, inbox) = channel();
         let (outbox, reports) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1165,7 +1330,7 @@ impl TeamRuntime {
         let managed = matches!(mode, Mode::PerTurn { .. });
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(plan, mode, inbox, outbox, flag, turn_time))
+            .spawn(move || work(plan, mode, inbox, outbox, flag, interrupt, turn_time))
             .map_err(error)?;
         self.workers.insert(
             id,
@@ -1181,12 +1346,15 @@ impl TeamRuntime {
                 idle_since: Instant::now(),
                 stopping: false,
                 held: false,
+                restarting: false,
                 warm: false,
                 worked: false,
                 managed,
+                tools,
                 team_tool: role == AgentRole::Master && tools && self.delegation_tool.is_some(),
                 grants: 0,
                 thread: Some(thread),
+                hosted,
             },
         );
         if managed {
@@ -1240,7 +1408,7 @@ impl TeamRuntime {
                 )
             }
         };
-        let context = self.context(&stored.project_id, id, role == AgentRole::Master && tools)?;
+        let context = self.context(&stored.project_id, id, role, tools)?;
         let network = if tools {
             SandboxNetwork::Open
         } else {
@@ -1308,20 +1476,64 @@ impl TeamRuntime {
         self.agent_folder(id).join("tmp").join(tool::DROP_FILE)
     }
 
+    /// Reads what one team agent launch receives: the project context and approved
+    /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
+    /// tool for a master with tools on, and the team's skill and server names for a master
+    /// with tools off. Takes the project, the agent id, its role and tools switch.
     fn context(
         &self,
         project: &ProjectId,
         id: i64,
-        team_tool: bool,
+        role: AgentRole,
+        tools: bool,
     ) -> Result<AgentContext, String> {
         let context =
             crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+        let master = role == AgentRole::Master;
         match &self.delegation_tool {
-            Some(engine) if team_tool => context
+            Some(engine) if master && tools => context
                 .with_team_tool(engine, &self.tool_record(id))
+                .map_err(|e| e.0),
+            _ if master && !tools => context
+                .with_team_index(&self.connection, project)
                 .map_err(|e| e.0),
             _ => Ok(context),
         }
+    }
+
+    /// Records one team agent in the engine's agent register, continuing the register
+    /// entry of an agent the owner restarted. Takes the setup, the team agent id, its role,
+    /// launch harness and the restart. Returns the register handle, none without a register.
+    fn host(
+        &self,
+        stored: &StoredSetup,
+        id: i64,
+        role: AgentRole,
+        harness: &str,
+        again: Option<&HostedRestart>,
+    ) -> Result<Option<Hosted>, String> {
+        let Some(agents) = &self.agents else {
+            return Ok(None);
+        };
+        let (role, label) = match role {
+            AgentRole::Master => (crate::agents::AgentRole::Master, "Team master".to_owned()),
+            AgentRole::Sub => (
+                crate::agents::AgentRole::SubAgent,
+                format!("Team sub-agent {id}"),
+            ),
+        };
+        let agent = HostedAgent {
+            project: stored.project_id.clone(),
+            role,
+            label,
+            harness: harness.to_owned(),
+            host: TEAM_HOST,
+            reference: again.map_or_else(|| id.to_string(), |restart| restart.reference.clone()),
+        };
+        agents
+            .host(agent, again.map(|restart| restart.id.as_str()))
+            .map(Some)
+            .map_err(|problem| format!("The agent could not be recorded ({})", problem.0))
     }
 
     fn collect(&mut self) -> Result<(), EngineError> {
@@ -1350,6 +1562,9 @@ impl TeamRuntime {
         match report {
             Report::Ready { group } => {
                 let busy = self.workers[&id].busy;
+                if let Some(hosted) = &self.workers[&id].hosted {
+                    hosted.started(group);
+                }
                 self.connection
                     .execute(
                         "UPDATE team_agents SET process_group=?2, status=?3, heartbeat_ms=?4 WHERE id=?1",
@@ -1383,6 +1598,10 @@ impl TeamRuntime {
             Report::Finished { text, end } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
+                if let Some(hosted) = &worker.hosted {
+                    hosted.text(&text);
+                    hosted.set_busy(false);
+                }
                 worker.idle_since = Instant::now();
                 worker.worked = true;
                 let connection = worker.connection.clone();
@@ -1408,7 +1627,10 @@ impl TeamRuntime {
                     }
                     None => {}
                 }
-                if !matches!(end, TurnEnd::Success | TurnEnd::Failed) {
+                if !matches!(
+                    end,
+                    TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+                ) {
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
                 }
                 self.mark_agent(id, AgentStatus::Idle, None)?;
@@ -1442,6 +1664,14 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
+                if let Some(hosted) = worker.hosted.take() {
+                    let state = if status == AgentStatus::Failed {
+                        RunState::Failed
+                    } else {
+                        RunState::Stopped
+                    };
+                    hosted.finish(state, problem.as_deref());
+                }
                 self.connection
                     .execute(
                         "UPDATE team_agents SET status=?2, task=NULL, error=?3, stopped_ms=?4 WHERE id=?1",
@@ -1499,6 +1729,7 @@ impl TeamRuntime {
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
             TurnEnd::Cancelled => (TaskStatus::Cancelled, Some("Cancelled by you")),
+            TurnEnd::Interrupted => (TaskStatus::Cancelled, Some("Interrupted by you")),
             TurnEnd::RateLimited => (
                 if retry {
                     TaskStatus::Queued
@@ -1569,7 +1800,12 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             if state == "failed" {
-                self.note(project, "The master stopped before it replied.")?;
+                let why = if end == TurnEnd::Interrupted {
+                    "You interrupted the master before it replied."
+                } else {
+                    "The master stopped before it replied."
+                };
+                self.note(project, why)?;
             }
             return Ok(());
         }
@@ -1695,6 +1931,7 @@ fn work(
     orders: Receiver<Order>,
     reports: Sender<Report>,
     cancel: Arc<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
     turn_time: Duration,
 ) {
     let problem = match mode {
@@ -1704,9 +1941,12 @@ fn work(
             &orders,
             &reports,
             &cancel,
+            &interrupt,
             turn_time,
         ),
-        Mode::PerTurn { home } => per_turn(&plan, &home, &orders, &reports, &cancel, turn_time),
+        Mode::PerTurn { home } => per_turn(
+            &plan, &home, &orders, &reports, &cancel, &interrupt, turn_time,
+        ),
     };
     let _ = reports.send(Report::Ended { problem });
 }
@@ -1751,6 +1991,7 @@ fn kept(
     orders: &Receiver<Order>,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
+    interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
     let mut session = match Session::start_with_context(request, context) {
@@ -1771,8 +2012,11 @@ fn kept(
             }
         };
         assert!(grant.is_none());
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, turn_time);
-        let reusable = matches!(end, TurnEnd::Success | TurnEnd::Failed);
+        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        let reusable = matches!(
+            end,
+            TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+        );
         if end == TurnEnd::Closed {
             problem = Some("The agent process closed".to_owned());
         }
@@ -1790,6 +2034,7 @@ fn per_turn(
     orders: &Receiver<Order>,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
+    interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
     while let Next::Turn(prompt, grant) = next_turn(orders, cancel, None) {
@@ -1824,10 +2069,13 @@ fn per_turn(
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
         });
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, turn_time);
+        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let _ = session.stop();
         drop(profile);
-        let reusable = matches!(end, TurnEnd::Success | TurnEnd::Failed);
+        let reusable = matches!(
+            end,
+            TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+        );
         if reports.send(Report::Finished { text, end }).is_err() || !reusable {
             return (end == TurnEnd::Closed).then(|| "The agent process closed".to_owned());
         }
@@ -1840,18 +2088,24 @@ fn turn(
     prompt: &str,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
+    interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> (String, TurnEnd) {
+    interrupt.store(false, Ordering::SeqCst);
     if session.send(prompt).is_err() {
         return (String::new(), TurnEnd::Closed);
     }
     let deadline = Instant::now() + turn_time;
     let mut text = String::new();
     let mut limited = false;
+    let mut interrupted = false;
     let mut progress = Instant::now();
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
+        }
+        if interrupt.swap(false, Ordering::SeqCst) {
+            let _ = session.interrupt();
         }
         if Instant::now() >= deadline {
             break TurnEnd::TimedOut;
@@ -1869,9 +2123,12 @@ fn turn(
                 text.push_str(&part);
             }
             Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
                 break if success {
                     TurnEnd::Success
+                } else if interrupted {
+                    TurnEnd::Interrupted
                 } else if limited {
                     TurnEnd::RateLimited
                 } else {
@@ -1950,14 +2207,16 @@ impl Drop for TeamService {
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
 /// pool assignment read live from the engine's settings files on every tick.
-/// Takes the runtime folder, both settings files, the launch executables by harness and the
-/// engine executable that serves masters their `delegate` tool. Returns the service, or a plain reason.
+/// Takes the runtime folder, both settings files, the launch executables by harness, the
+/// engine executable that serves masters their `delegate` tool and the engine's agent register
+/// that lists every team agent with its owner controls. Returns the service, or a plain reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
     executables: BTreeMap<&'static str, PathBuf>,
     engine: Option<&Path>,
+    agents: Option<Arc<Agents>>,
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
@@ -1981,6 +2240,10 @@ pub fn start_for_engine(
     .map_err(|e| e.0)?;
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
+        None => runtime,
+    };
+    let runtime = match agents {
+        Some(agents) => runtime.with_agents(agents),
         None => runtime,
     };
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
