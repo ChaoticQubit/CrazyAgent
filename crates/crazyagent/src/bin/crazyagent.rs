@@ -307,9 +307,35 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     .map(Some),
                 })
                 .and_then(|research| {
+                    let mut executables = std::collections::BTreeMap::new();
+                    if let Some(executable) = codex.as_deref() {
+                        executables.insert("codex", executable.to_path_buf());
+                    }
+                    if let Some(executable) = claude.as_deref() {
+                        executables.insert("claude-code", executable.to_path_buf());
+                    }
+                    if !writable || executables.is_empty() {
+                        return Ok((research, None));
+                    }
+                    match crazyagent::team::runtime::start_for_engine(
+                        runtime_dir,
+                        Path::new(&args[2]),
+                        Path::new(&args[3]),
+                        executables,
+                    ) {
+                        Ok(team) => Ok((research, Some(team))),
+                        Err(error) => {
+                            if let Some(research) = research {
+                                research.stop();
+                            }
+                            Err(error)
+                        }
+                    }
+                })
+                .and_then(|(research, team)| {
                     let mut output = io::stdout().lock();
                     match writeln!(output, "ready").and_then(|()| output.flush()) {
-                        Ok(()) => Ok(research),
+                        Ok(()) => Ok((research, team)),
                         Err(error) => {
                             if let Some(research) = research {
                                 research.stop();
@@ -318,8 +344,8 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         }
                     }
                 });
-            let research = match ready {
-                Ok(research) => research,
+            let (research, team) = match ready {
+                Ok(started) => started,
                 Err(error) => {
                     return match service.shutdown().await {
                         Ok(()) => Err(error),
@@ -330,6 +356,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(research) = research {
                 let _ = tokio::task::spawn_blocking(move || research.stop()).await;
+            }
+            if let Some(team) = team {
+                let _ = tokio::task::spawn_blocking(move || team.stop()).await;
             }
             result
         }
