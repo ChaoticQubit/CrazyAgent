@@ -1,7 +1,7 @@
 use super::client::{
     ConversationContext, ConversationEvent, ConversationJob, ConversationQuery,
     ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
-    MutationDelivery, OwnerEvent, OwnerProgress,
+    MutationDelivery, OwnerEvent, OwnerProgress, SetupQuery, SetupView,
 };
 use super::{dispatch, master_session, model_access};
 use crate::config::EffectiveConfig;
@@ -235,6 +235,9 @@ pub struct App {
     conversation_job: Option<ConversationJob>,
     edit_requested: Option<(OwnerConnectionIdentity, ProjectId)>,
     brief_completion: Option<(String, ProjectId)>,
+    setup_query: Option<SetupQuery>,
+    pub(super) setup_view: Option<SetupView>,
+    pub(super) setup_problem: Option<String>,
 }
 
 impl Default for App {
@@ -293,6 +296,9 @@ impl App {
             conversation_job: None,
             edit_requested: None,
             brief_completion: None,
+            setup_query: None,
+            setup_view: None,
+            setup_problem: None,
         }
     }
 
@@ -855,6 +861,16 @@ impl App {
                 }
             }
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
+            OwnerEvent::Setup(event) => match event.result {
+                Ok(view) => {
+                    self.setup_view = Some(view);
+                    self.setup_problem = None;
+                }
+                Err(problem) => {
+                    self.notice(&format!("Project setup read unavailable. {problem}"));
+                    self.setup_problem = Some(problem);
+                }
+            },
             OwnerEvent::ModelAccess(event) => {
                 self.model_access.apply(*event)?;
                 if self.model_access.disconnected() {
@@ -1622,6 +1638,46 @@ impl App {
 
     pub(super) fn queue_creation(&mut self) -> Result<(), String> {
         let spec = self.declaration.spec()?;
+        self.submit_creation(spec, None)?;
+        self.notice("Submitting declared project; first brief remains a separate Ctrl-B action");
+        Ok(())
+    }
+
+    /// Queues a New Project creation with its folder, documents, team plan and research toggles.
+    /// Takes the name spec and the full setup collected by the client.
+    /// Returns an error while another owner intent is unresolved.
+    pub(super) fn queue_project_setup(
+        &mut self,
+        spec: ProjectSpec,
+        setup: crate::project_setup::ProjectSetup,
+    ) -> Result<(), String> {
+        spec.validate().map_err(|e| e.to_string())?;
+        setup.validate().map_err(|e| e.0)?;
+        self.submit_creation(spec, Some(setup))?;
+        self.notice("Creating project, its folder and research jobs");
+        Ok(())
+    }
+
+    /// Queues one New Project read for the owner worker.
+    /// Takes the catalog, setup, jobs, context or context item query.
+    /// Returns an error while another read is waiting.
+    pub(super) fn request_project_setup(&mut self, query: SetupQuery) -> Result<(), String> {
+        if self.setup_query.is_some() {
+            return Err("A project setup read is already waiting".into());
+        }
+        self.setup_query = Some(query);
+        Ok(())
+    }
+
+    pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {
+        self.setup_query.take()
+    }
+
+    fn submit_creation(
+        &mut self,
+        spec: ProjectSpec,
+        setup: Option<crate::project_setup::ProjectSetup>,
+    ) -> Result<(), String> {
         if !self.owner_ready {
             return Err("Owner creation disabled in limited mode; declaration retained".into());
         }
@@ -1648,6 +1704,7 @@ impl App {
             ))
             .map_err(|e| e.to_string())?,
             spec,
+            setup,
         };
         self.creation_job = Some(CreationJob {
             submission: submission.clone(),
@@ -1659,7 +1716,6 @@ impl App {
             retry_allowed: false,
             committed: None,
         });
-        self.notice("Submitting declared project; first brief remains a separate Ctrl-B action");
         Ok(())
     }
 

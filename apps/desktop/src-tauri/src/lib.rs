@@ -13,6 +13,9 @@ use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
 };
+use crazyagent::project_setup::{
+    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+};
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -128,6 +131,86 @@ async fn desktop_create_project(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)?.create_project(spec, generation).await
+}
+
+#[tauri::command]
+async fn desktop_project_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    pool: Option<String>,
+    research: Vec<ResearchKind>,
+) -> Result<ProjectCatalog, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_catalog(pool, research).await
+}
+
+#[tauri::command]
+async fn desktop_setup_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    setup: ProjectSetup,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.setup_project(spec, setup, generation).await
+}
+
+#[tauri::command]
+async fn desktop_project_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Option<StoredSetup>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_setup(&id).await
+}
+
+#[tauri::command]
+async fn desktop_research_jobs(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bridge::project_setup::ResearchJobs, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.research_jobs(&id).await
+}
+
+#[tauri::command]
+async fn desktop_project_context(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ProjectContext, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_context(&id).await
+}
+
+#[tauri::command]
+async fn desktop_project_context_item(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+    offset: u64,
+) -> Result<ContextChunk, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_context_item(&id, path, offset).await
+}
+
+#[tauri::command]
+async fn desktop_save_research_to_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    research: ResearchKind,
+    section: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .save_research_to_memory(&id, research, section, generation)
+        .await
 }
 
 #[tauri::command]
@@ -451,6 +534,13 @@ pub fn run() {
             desktop_retry,
             desktop_projects,
             desktop_create_project,
+            desktop_project_catalog,
+            desktop_setup_project,
+            desktop_project_setup,
+            desktop_research_jobs,
+            desktop_project_context,
+            desktop_project_context_item,
+            desktop_save_research_to_memory,
             desktop_open_project,
             desktop_history,
             desktop_send_message,

@@ -492,28 +492,28 @@ fn claims_follow_pool_assignment_and_finish_records_the_report() {
         "a job without a pool is never claimed"
     );
 
-    assert!(finish_research_job(&mut connection, &first.id, "other-runner", None, 40).is_err());
-    finish_research_job(&mut connection, &first.id, "runner", None, 41).unwrap();
+    assert!(finish_research_job(&mut connection, first.id, "other-runner", None, 40).is_err());
+    finish_research_job(&mut connection, first.id, "runner", None, 41).unwrap();
     finish_research_job(
         &mut connection,
-        &second.id,
+        second.id,
         "runner",
         Some("harness_unavailable"),
         42,
     )
     .unwrap();
     assert!(
-        finish_research_job(&mut connection, &first.id, "runner", None, 43).is_err(),
+        finish_research_job(&mut connection, first.id, "runner", None, 43).is_err(),
         "a finished job is final"
     );
     let tx = connection.unchecked_transaction().unwrap();
     let done = list_jobs(&tx, &config, &ProjectId::new("assigned-project").unwrap()).unwrap();
-    let by_id = |id: &str| done.iter().find(|j| j.id == id).unwrap().clone();
-    assert_eq!(by_id(&first.id).status, ResearchStatus::Done);
-    assert_eq!(by_id(&first.id).finished_ms, Some(41));
-    assert_eq!(by_id(&second.id).status, ResearchStatus::Failed);
+    let by_id = |id: i64| done.iter().find(|j| j.id == id).unwrap().clone();
+    assert_eq!(by_id(first.id).status, ResearchStatus::Done);
+    assert_eq!(by_id(first.id).finished_ms, Some(41));
+    assert_eq!(by_id(second.id).status, ResearchStatus::Failed);
     assert_eq!(
-        by_id(&second.id).failure.as_deref(),
+        by_id(second.id).error.as_deref(),
         Some("harness_unavailable")
     );
     let stored: String = tx
@@ -536,4 +536,63 @@ fn markdown_sections_are_selected_by_heading() {
     );
     assert_eq!(section(report, Some("Trends")).unwrap(), "## Trends\nup");
     assert!(section(report, Some("Absent")).is_none());
+}
+
+#[test]
+fn job_table_matches_the_research_runner_queue_columns() {
+    let root = tempfile::tempdir().unwrap();
+    let runner_first = Connection::open(root.path().join("runner-first.db")).unwrap();
+    runner_first
+        .execute_batch(
+            "CREATE TABLE research_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, kind TEXT NOT NULL,
+                harness TEXT NOT NULL, tools INTEGER NOT NULL, status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, claimer TEXT, report_path TEXT, error TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0, output_bytes INTEGER NOT NULL DEFAULT 0,
+                created_ms INTEGER NOT NULL, started_ms INTEGER, heartbeat_ms INTEGER, finished_ms INTEGER);",
+        )
+        .unwrap();
+    initialize(&runner_first).unwrap();
+    let columns = |connection: &Connection| -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('research_jobs') ORDER BY cid")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let ours = database(root.path());
+    assert_eq!(columns(&runner_first), columns(&ours));
+    queued(&ours, "assigned-project", &[ResearchKind::FrontEndDesign]);
+    let (harness, tools, status, report): (String, bool, String, String) = ours
+        .query_row(
+            "SELECT harness, tools, status, report_path FROM research_jobs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (harness.as_str(), tools, status.as_str(), report.as_str()),
+        (
+            "codex",
+            true,
+            "queued",
+            "context/research/front_end_design.md"
+        )
+    );
+    ours.execute(
+        "UPDATE research_jobs SET status='cancelled', cancel_requested=1",
+        [],
+    )
+    .unwrap();
+    let jobs = list_jobs(
+        &ours.unchecked_transaction().unwrap(),
+        &config(),
+        &ProjectId::new("assigned-project").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(jobs[0].status_label, "Cancelled");
+    assert!(jobs[0].cancel_requested);
 }

@@ -208,14 +208,19 @@ impl TeamPlan {
             .sum::<u32>()
     }
 
-    fn research_harnesses(&self) -> Vec<&str> {
-        let slots: Vec<&str> = self
+    fn research_harnesses(&self) -> Vec<(&str, bool)> {
+        let slots: Vec<(&str, bool)> = self
             .sub_harnesses
             .iter()
-            .flat_map(|slot| std::iter::repeat_n(slot.harness.as_str(), usize::from(slot.agents)))
+            .flat_map(|slot| {
+                std::iter::repeat_n(
+                    (slot.harness.as_str(), slot.tools),
+                    usize::from(slot.agents),
+                )
+            })
             .collect();
         if slots.is_empty() {
-            vec![self.master.as_str()]
+            vec![(self.master.as_str(), self.master_tools)]
         } else {
             slots
         }
@@ -330,9 +335,19 @@ pub enum ResearchStatus {
     Running,
     Done,
     Failed,
+    Cancelled,
 }
 
 impl ResearchStatus {
+    pub const ALL: [ResearchStatus; 6] = [
+        Self::Queued,
+        Self::NeedsPool,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
     /// Names the job status in plain language.
     /// Takes the status.
     /// Returns its label, for example "Needs a pool".
@@ -343,6 +358,7 @@ impl ResearchStatus {
             Self::Running => "Running",
             Self::Done => "Done",
             Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
         }
     }
 
@@ -353,27 +369,22 @@ impl ResearchStatus {
             Self::Running => "running",
             Self::Done => "done",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     fn parse(value: &str) -> Result<Self, EngineError> {
-        [
-            Self::Queued,
-            Self::NeedsPool,
-            Self::Running,
-            Self::Done,
-            Self::Failed,
-        ]
-        .into_iter()
-        .find(|status| status.stored() == value)
-        .ok_or_else(|| failure("research_status_corrupt"))
+        Self::ALL
+            .into_iter()
+            .find(|status| status.stored() == value)
+            .ok_or_else(|| failure("research_status_corrupt"))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchJob {
-    pub id: String,
+    pub id: i64,
     pub project_id: ProjectId,
     pub kind: ResearchKind,
     pub kind_label: String,
@@ -381,12 +392,16 @@ pub struct ResearchJob {
     pub status_label: String,
     pub report_path: String,
     pub harness: String,
+    pub tools: bool,
     pub attempts: u32,
+    pub claimer: Option<String>,
+    pub error: Option<String>,
+    pub cancel_requested: bool,
+    pub output_bytes: u64,
     pub created_ms: i64,
-    pub updated_ms: i64,
     pub started_ms: Option<i64>,
+    pub heartbeat_ms: Option<i64>,
     pub finished_ms: Option<i64>,
-    pub failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,36 +769,35 @@ fn copy_each(
     Ok(())
 }
 
-/// Creates the research tables when the engine database opens.
-/// Takes the engine connection.
+/// Creates the setup and research job tables when the engine database opens.
+/// Takes the engine connection; the job columns match the research runner's queue.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS project_setups (project TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS research_jobs (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('queued','needs_pool','running','done','failed')),
-                report_path TEXT NOT NULL,
                 harness TEXT NOT NULL,
-                claimed_by TEXT,
+                tools INTEGER NOT NULL,
+                status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
+                claimer TEXT,
+                report_path TEXT,
+                error TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                output_bytes INTEGER NOT NULL DEFAULT 0,
                 created_ms INTEGER NOT NULL,
-                updated_ms INTEGER NOT NULL,
                 started_ms INTEGER,
-                finished_ms INTEGER,
-                failure TEXT,
-                UNIQUE(project, kind));
-            CREATE INDEX IF NOT EXISTS research_jobs_status ON research_jobs(status, created_ms, id);",
+                heartbeat_ms INTEGER,
+                finished_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS research_jobs_project_status
+                ON research_jobs(project, status, id);",
         )
         .map_err(error)
-}
-
-fn job_id(project: &ProjectId, kind: ResearchKind) -> String {
-    let digest = crate::memory::hash(format!("{}\n{}", project.as_str(), kind.name()).as_bytes());
-    format!("research-{}", &digest[..24])
 }
 
 /// Queues one research job per toggle for a project.
@@ -805,16 +819,17 @@ pub fn insert_jobs(
         ResearchStatus::NeedsPool
     };
     for (index, kind) in kinds.iter().enumerate() {
+        let (harness, tools) = harnesses[index % harnesses.len()];
         tx.execute(
-            "INSERT INTO research_jobs(id,project,kind,status,report_path,harness,created_ms,updated_ms)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
+            "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
-                job_id(project, *kind),
                 project.as_str(),
                 kind.name(),
+                harness,
+                tools,
                 status.stored(),
                 kind.report_path(),
-                harnesses[index % harnesses.len()],
                 now
             ],
         )
@@ -823,66 +838,76 @@ pub fn insert_jobs(
     Ok(())
 }
 
-const JOB_COLUMNS: &str = "id,project,kind,status,report_path,harness,attempts,created_ms,updated_ms,started_ms,finished_ms,failure";
+const JOB_COLUMNS: &str = "id,project,kind,harness,tools,status,attempts,claimer,report_path,error,cancel_requested,output_bytes,created_ms,started_ms,heartbeat_ms,finished_ms";
 
-fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<[Option<String>; 6]> {
-    Ok([
+type JobRow = (
+    i64,
+    [String; 4],
+    (bool, u32, Option<String>, Option<String>, Option<String>),
+    (bool, i64),
+    [Option<i64>; 4],
+);
+
+fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+    Ok((
         row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-    ])
+        [row.get(1)?, row.get(2)?, row.get(3)?, row.get(5)?],
+        (
+            row.get(4)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        ),
+        (row.get(10)?, row.get(11)?),
+        [row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?],
+    ))
+}
+
+fn job(row: JobRow) -> Result<ResearchJob, EngineError> {
+    let corrupt = || failure("research_job_corrupt");
+    let (id, [project, kind, harness, status], (tools, attempts, claimer, report, job_error)) =
+        (row.0, row.1, row.2);
+    let (cancel_requested, output_bytes) = row.3;
+    let [created_ms, started_ms, heartbeat_ms, finished_ms] = row.4;
+    let kind = ResearchKind::parse(&kind).ok_or_else(corrupt)?;
+    let status = ResearchStatus::parse(&status)?;
+    Ok(ResearchJob {
+        id,
+        project_id: ProjectId::new(project).map_err(|_| corrupt())?,
+        kind,
+        kind_label: kind.label().into(),
+        status,
+        status_label: status.label().into(),
+        report_path: report.unwrap_or_else(|| kind.report_path()),
+        harness,
+        tools,
+        attempts,
+        claimer,
+        error: job_error,
+        cancel_requested,
+        output_bytes: u64::try_from(output_bytes).map_err(|_| corrupt())?,
+        created_ms: created_ms.ok_or_else(corrupt)?,
+        started_ms,
+        heartbeat_ms,
+        finished_ms,
+    })
 }
 
 fn load_jobs(
     tx: &Transaction<'_>,
     filter: &str,
-    value: &str,
+    value: &dyn rusqlite::ToSql,
 ) -> Result<Vec<ResearchJob>, EngineError> {
     let mut statement = tx
         .prepare(&format!(
-            "SELECT {JOB_COLUMNS} FROM research_jobs WHERE {filter}=?1 ORDER BY created_ms, id LIMIT 65"
+            "SELECT {JOB_COLUMNS} FROM research_jobs WHERE {filter}=?1 ORDER BY id LIMIT 65"
         ))
         .map_err(error)?;
-    let rows = statement
-        .query_map([value], |row| {
-            Ok((
-                job_row(row)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-                row.get::<_, Option<i64>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-            ))
-        })
-        .map_err(error)?;
+    let rows = statement.query_map([value], job_row).map_err(error)?;
     let mut jobs = Vec::new();
     for row in rows {
-        let (text, attempts, created_ms, updated_ms, started_ms, finished_ms, failure_code) =
-            row.map_err(error)?;
-        let [id, project, kind, status, report_path, harness] =
-            text.map(|value| value.ok_or_else(|| failure("research_job_corrupt")));
-        let kind = ResearchKind::parse(&kind?).ok_or_else(|| failure("research_job_corrupt"))?;
-        let status = ResearchStatus::parse(&status?)?;
-        jobs.push(ResearchJob {
-            id: id?,
-            project_id: ProjectId::new(project?).map_err(|e| failure(&e.0))?,
-            kind,
-            kind_label: kind.label().into(),
-            status,
-            status_label: status.label().into(),
-            report_path: report_path?,
-            harness: harness?,
-            attempts: u32::try_from(attempts).map_err(error)?,
-            created_ms,
-            updated_ms,
-            started_ms,
-            finished_ms,
-            failure: failure_code,
-        });
+        jobs.push(job(row.map_err(error)?)?);
     }
     if jobs.len() > 64 {
         return Err(failure("research_job_capacity"));
@@ -907,7 +932,7 @@ pub fn list_jobs(
     project: &ProjectId,
 ) -> Result<Vec<ResearchJob>, EngineError> {
     let has_pool = project_has_pool(config, project);
-    let mut jobs = load_jobs(tx, "project", project.as_str())?;
+    let mut jobs = load_jobs(tx, "project", &project.as_str())?;
     for job in &mut jobs {
         job.status = effective(job.status, has_pool);
         job.status_label = job.status.label().into();
@@ -916,11 +941,7 @@ pub fn list_jobs(
     Ok(jobs)
 }
 
-fn sync_pool_status(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    now: i64,
-) -> Result<(), EngineError> {
+fn sync_pool_status(tx: &Transaction<'_>, config: &EffectiveConfig) -> Result<(), EngineError> {
     let projects: Vec<String> = {
         let mut statement = tx
             .prepare("SELECT DISTINCT project FROM research_jobs WHERE status IN ('queued','needs_pool') LIMIT 4096")
@@ -932,9 +953,9 @@ fn sync_pool_status(
         let id = ProjectId::new(project.clone()).map_err(|e| failure(&e.0))?;
         let status = effective(ResearchStatus::Queued, project_has_pool(config, &id));
         tx.execute(
-            "UPDATE research_jobs SET status=?1, updated_ms=?2
-            WHERE project=?3 AND status IN ('queued','needs_pool') AND status<>?1",
-            params![status.stored(), now, project],
+            "UPDATE research_jobs SET status=?1
+            WHERE project=?2 AND status IN ('queued','needs_pool') AND status<>?1",
+            params![status.stored(), project],
         )
         .map_err(error)?;
     }
@@ -954,11 +975,14 @@ pub fn claim_research_job(
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    sync_pool_status(&tx, config, now)?;
-    let id: Option<String> = tx
+    sync_pool_status(&tx, config)?;
+    let id: Option<i64> = tx
         .query_row(
-            "SELECT id FROM research_jobs WHERE status='queued' ORDER BY created_ms, id LIMIT 1",
-            [],
+            "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
+            started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
+            WHERE id=(SELECT id FROM research_jobs WHERE status='queued' ORDER BY id LIMIT 1)
+            AND status='queued' RETURNING id",
+            params![claimer, now],
             |row| row.get(0),
         )
         .optional()
@@ -967,29 +991,21 @@ pub fn claim_research_job(
         tx.commit().map_err(error)?;
         return Ok(None);
     };
-    let changed = tx
-        .execute(
-            "UPDATE research_jobs SET status='running', claimed_by=?2, attempts=attempts+1,
-            started_ms=?3, updated_ms=?3, finished_ms=NULL, failure=NULL
-            WHERE id=?1 AND status='queued'",
-            params![id, claimer, now],
-        )
-        .map_err(error)?;
-    assert_eq!(changed, 1);
     let job = load_jobs(&tx, "id", &id)?
         .pop()
         .ok_or_else(|| failure("research_job_corrupt"))?;
     tx.commit().map_err(error)?;
     assert_eq!(job.status, ResearchStatus::Running);
+    assert_eq!(job.claimer.as_deref(), Some(claimer));
     Ok(Some(job))
 }
 
 /// Finishes a running job that the same claimer holds.
-/// Takes a connection, the job, the claimer, an optional failure code and the time.
+/// Takes a connection, the job id, the claimer, an optional failure code and the time.
 /// Returns `research_job_not_claimed` unless the job is running under that claimer.
 pub fn finish_research_job(
     connection: &mut Connection,
-    id: &str,
+    id: i64,
     claimer: &str,
     failure_code: Option<&str>,
     now: i64,
@@ -1007,8 +1023,8 @@ pub fn finish_research_job(
         .map_err(error)?;
     let changed = tx
         .execute(
-            "UPDATE research_jobs SET status=?1, failure=?2, finished_ms=?3, updated_ms=?3
-            WHERE id=?4 AND status='running' AND claimed_by=?5",
+            "UPDATE research_jobs SET status=?1, error=?2, finished_ms=?3
+            WHERE id=?4 AND status='running' AND claimer=?5",
             params![status.stored(), failure_code, now, id, claimer],
         )
         .map_err(error)?;

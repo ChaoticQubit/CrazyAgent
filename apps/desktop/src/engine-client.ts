@@ -207,7 +207,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "master";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "master";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -233,6 +233,132 @@ export interface ProjectSpec {
 
 export function createProject(spec: ProjectSpec, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_create_project", { spec, generation });
+}
+
+export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
+export type ResearchKind =
+  | "market_research"
+  | "competitor_research"
+  | "design_research"
+  | "front_end_design"
+  | "tech_stack_research";
+export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+
+export interface HarnessSlot {
+  harness: string;
+  agents: number;
+  tools: boolean;
+}
+
+export interface TeamPlan {
+  master: string;
+  master_tools: boolean;
+  sub_harnesses: HarnessSlot[];
+  min_agents: number;
+  max_agents: number;
+}
+
+export interface ProjectSetup {
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan | null;
+  documents: string[];
+}
+
+export interface ProjectCatalog {
+  tech_stack: { id: string; label: string; group: "language" | "framework" | "database" }[];
+  platforms: { kind: Platform; label: string }[];
+  research: { kind: ResearchKind; label: string }[];
+  document_extensions: string[];
+  documents_max: number;
+  document_bytes_max: number;
+  project_document_bytes_max: number;
+  default_team: TeamPlan;
+}
+
+export interface StoredSetup {
+  project_id: string;
+  name: string;
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan;
+  documents: { name: string; bytes: number }[];
+  folder: string;
+  created_ms: number;
+}
+
+export interface ResearchJob {
+  id: number;
+  project_id: string;
+  kind: ResearchKind;
+  kind_label: string;
+  status: ResearchStatus;
+  status_label: string;
+  report_path: string;
+  harness: string;
+  tools: boolean;
+  attempts: number;
+  claimer: string | null;
+  error: string | null;
+  cancel_requested: boolean;
+  output_bytes: number;
+  created_ms: number;
+  started_ms: number | null;
+  heartbeat_ms: number | null;
+  finished_ms: number | null;
+}
+
+export interface ProjectContext {
+  project_id: string;
+  folder: string;
+  items: { path: string; kind: "brief" | "document" | "research"; bytes: number }[];
+}
+
+export interface ContextChunk {
+  path: string;
+  bytes: number;
+  offset: number;
+  text: string | null;
+  next_offset: number | null;
+}
+
+export function projectCatalog(pool: string | null, research: ResearchKind[]): Promise<ProjectCatalog> {
+  return invoke<ProjectCatalog>("desktop_project_catalog", { pool, research });
+}
+
+export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
+}
+
+export function projectSetup(id: string): Promise<StoredSetup | null> {
+  return invoke<StoredSetup | null>("desktop_project_setup", { id });
+}
+
+export function researchJobs(id: string): Promise<{ project_id: string; jobs: ResearchJob[] }> {
+  return invoke<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
+}
+
+export function projectContext(id: string): Promise<ProjectContext> {
+  return invoke<ProjectContext>("desktop_project_context", { id });
+}
+
+export function projectContextItem(id: string, path: string, offset = 0): Promise<ContextChunk> {
+  return invoke<ContextChunk>("desktop_project_context_item", { id, path, offset });
+}
+
+export function saveResearchToMemory(
+  id: string,
+  research: ResearchKind,
+  section: string | null,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

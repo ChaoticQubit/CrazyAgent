@@ -20,6 +20,7 @@ mod account_setup;
 pub mod master;
 mod model_access;
 mod native_auth;
+pub mod project_setup;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -437,6 +438,12 @@ impl NativeBridge {
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::SetupProject { project_id, .. } => {
+                ("setup_project", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::SaveResearchToMemory { project_id, .. } => {
+                ("research_memory", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
@@ -460,7 +467,8 @@ impl NativeBridge {
                 _ => None,
             },
             project_spec: match mutation {
-                OwnerMutation::CreateProject { spec, .. } => Some(spec.clone()),
+                OwnerMutation::CreateProject { spec, .. }
+                | OwnerMutation::SetupProject { spec, .. } => Some(spec.clone()),
                 _ => None,
             },
             operation_id: pending.request().request_id.as_str().to_owned(),
@@ -837,6 +845,25 @@ fn rejection_code(code: &str) -> &'static str {
         "project_missing" => "project_missing",
         "stale_revision" => "stale_revision",
         "owner_revoked" => "owner_revoked",
+        "project_exists" => "project_exists",
+        "project_folder_exists" => "project_folder_exists",
+        "project_folder_unwritable" => "project_folder_unwritable",
+        "pool_missing" => "pool_missing",
+        "document_not_found" => "document_not_found",
+        "document_not_a_regular_file" => "document_not_a_regular_file",
+        "document_type_not_allowed" => "document_type_not_allowed",
+        "document_too_large" => "document_too_large",
+        "document_name_duplicate" => "document_name_duplicate",
+        "document_name_invalid" => "document_name_invalid",
+        "document_unreadable" => "document_unreadable",
+        "document_changed_while_copying" => "document_changed_while_copying",
+        "documents_too_many" => "documents_too_many",
+        "project_documents_too_large" => "project_documents_too_large",
+        "project_setup_missing" => "project_setup_missing",
+        "research_report_missing" => "research_report_missing",
+        "research_section_missing" => "research_section_missing",
+        "memory_text_too_long" => "memory_text_too_long",
+        "memory_entry_exists" => "memory_entry_exists",
         _ => "owner_rejected",
     }
 }
