@@ -1,8 +1,8 @@
 import type { IconName, Tone } from "../../ui";
-import { failureCopy } from "../../api-projects";
+import { failureCopy, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
-import type { HarnessEntry, PoolSummary } from "../../api";
-import type { MasterState, MasterTurn } from "../../engine-client";
+import type { HarnessEntry, PoolSummary, Result } from "../../api";
+import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -71,6 +71,7 @@ export interface TeamAgentRow {
   account: string;
   word: string;
   task: string;
+  folder: string;
 }
 
 export interface TeamTaskRow {
@@ -97,7 +98,8 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
-/** Builds the Team panel: each agent with its role, plain name, harness, account and current task,
+/** Builds the Team panel: each agent with its role, plain name, harness, account, current task and
+ * the folder it works in (the master in the project folder, a sub-agent in its own worktree),
  * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
  * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
@@ -123,6 +125,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
       account: account(agent.account),
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
+      folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
@@ -137,6 +140,29 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** What one change to a project memory tells the owner: a toast when the engine applied it,
+ * otherwise a line in the panel. Inputs: the engine result, the toast and what is missing when
+ * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
+export function memoryOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
+  if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
+  if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
+  const state = receiptState(result.value);
+  if (state.kind === "applied") return { toast: done, note: "", reload: true };
+  return { toast: "", note: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
+}
+
+/** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
+ * cancelled. Input: the team tasks. Output: how many it touches and the confirm line. */
+export function pauseSummary(tasks: Pick<TeamStatus["tasks"][number], "status">[]): { count: number; line: string } {
+  const running = tasks.filter((task) => task.status === "running").length;
+  const waiting = tasks.filter((task) => WAITING.includes(task.status)).length;
+  const parts = [
+    running ? `${running} running ${running === 1 ? "task stops" : "tasks stop"}` : "",
+    waiting ? `${waiting} waiting ${waiting === 1 ? "task is" : "tasks are"} cancelled` : "",
+  ].filter((part) => part !== "");
+  return { count: running + waiting, line: parts.length ? `${parts.join(" and ")}.` : "No team agents are working or waiting." };
 }
 
 /** The Needs you line for team tasks that wait for a pool account, with the engine's first

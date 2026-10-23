@@ -276,9 +276,10 @@ export function loadTeamStatus(id: string): Promise<Result<TeamStatus>> {
   return call<TeamStatus>("desktop_team_status", { id });
 }
 
-/** Stops a running team task or cancels a waiting one. Inputs: the project id, the task id
- * and a generation. Output: the engine receipt. */
-export function cancelTeamTask(id: string, task: number, generation: number): Promise<Result<IntentReceipt>> {
+/** Stops a running team task or cancels a waiting one; with no task id it does this for every
+ * team task of the project at once. Inputs: the project id, the task id or null and a generation.
+ * Output: the engine receipt. */
+export function cancelTeamTask(id: string, task: number | null, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_cancel", { id, task, generation });
 }
 
@@ -325,6 +326,12 @@ export function loadProjectMemories(id: string, after: string | null): Promise<R
  * Output: the engine receipt. */
 export function reviewMemory(id: string, memory: string, version: number, decision: MemoryDecision, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
+}
+
+/** Makes one of the project's memories app-wide with one owner click; the engine keeps a
+ * suggested one first. Inputs: project id, memory id, its version and a generation. Output: the receipt. */
+export function promoteProjectMemory(id: string, memory: string, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
 }
 
 /** Deletes one document or research report from the project folder.

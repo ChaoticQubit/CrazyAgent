@@ -1,6 +1,13 @@
+import type { ReactNode } from "react";
 import type { HarnessEntry, Result } from "../../api";
-import { Icon, StatusBadge, type Tone } from "../../ui";
-import type { PoolChoice, ProjectContext, ResearchJob, StoredSetup } from "../../api-projects";
+import { BrandMark, Icon, StatusBadge, type Tone } from "../../ui";
+import type { PoolChoice, ProjectContext, ResearchJob, StoredSetup, TeamStatus } from "../../api-projects";
+
+/** The latest live team read and when it arrived, in milliseconds. */
+export interface TeamRead {
+  result: Result<TeamStatus> | undefined;
+  at: number;
+}
 
 export interface ProjectData {
   id: string;
@@ -16,6 +23,8 @@ export interface ProjectData {
   notify: (message: string) => void;
   reload: () => void;
   reloadPools: () => void;
+  team: TeamRead;
+  reloadTeam: () => void;
 }
 
 /** Reads a result's value. Input: an engine result. Output: its value, or null. */
@@ -33,4 +42,16 @@ export function NotReady({ what }: { what: string }) {
  * Inputs: the word and its tone. Output: the badge. */
 export function Badge({ word, tone }: { word: string; tone: Tone }) {
   return <StatusBadge word={word} tone={tone} />;
+}
+
+/** The CrazyAgent mark without its name, as decoration beside an empty state or a master reply.
+ * Input: large for an empty state. Output: the mark, hidden from screen readers. */
+export function ProjectMark({ large = false }: { large?: boolean }) {
+  return <span className={`pj-mark${large ? " large" : ""}`} aria-hidden="true"><BrandMark large={large} /></span>;
+}
+
+/** An empty state on the project page: the mark, a heading and one plain line.
+ * Inputs: the heading and the line. Output: the empty state. */
+export function ProjectEmpty({ title, children }: { title: string; children: ReactNode }) {
+  return <div className="pj-empty"><ProjectMark large /><h3>{title}</h3><p className="pj-secondary">{children}</p></div>;
 }
