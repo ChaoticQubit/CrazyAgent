@@ -148,14 +148,21 @@ impl Screen for Welcome {
                 .map(|index| {
                     join([
                         Line::raw("  "),
-                        pad(intro.get(index).cloned().unwrap_or_default(), INTRO_WIDTH, ctx.glyphs),
+                        pad(
+                            intro.get(index).cloned().unwrap_or_default(),
+                            INTRO_WIDTH,
+                            ctx.glyphs,
+                        ),
                         Line::raw(" ".repeat(INTRO_GAP)),
                         form.get(index).cloned().unwrap_or_default(),
                     ])
                 })
                 .collect::<Vec<_>>();
             let offset = (2 + INTRO_WIDTH + INTRO_GAP) as u16;
-            (lines, cursor.map(|at| Position::new(at.x + offset, at.y + 1)))
+            (
+                lines,
+                cursor.map(|at| Position::new(at.x + offset, at.y + 1)),
+            )
         } else {
             let limit = area.width as usize - 4;
             let (form, cursor) = self.form.lines(limit, false, "Save and continue", ctx);

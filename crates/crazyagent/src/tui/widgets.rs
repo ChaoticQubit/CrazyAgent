@@ -292,7 +292,9 @@ impl TextField {
         let bracket = if focused { theme.accent } else { theme.muted };
         let (texts, cursor_row, cursor_column) = self.display_lines(inner, glyphs);
         let visible = if self.multiline { VISIBLE_LINES_MAX } else { 1 };
-        let first = cursor_row.saturating_sub(visible - 1).min(texts.len().saturating_sub(1));
+        let first = cursor_row
+            .saturating_sub(visible - 1)
+            .min(texts.len().saturating_sub(1));
         let shown: Vec<String> = if texts.is_empty() {
             vec![String::new()]
         } else {
@@ -300,11 +302,12 @@ impl TextField {
         };
         let mut cursor = None;
         for (index, text) in shown.iter().enumerate() {
-            let content = if text.is_empty() && self.is_empty() && !focused && !self.placeholder.is_empty() {
-                Line::from(Span::styled(self.placeholder.clone(), theme.muted))
-            } else {
-                Line::raw(text.clone())
-            };
+            let content =
+                if text.is_empty() && self.is_empty() && !focused && !self.placeholder.is_empty() {
+                    Line::from(Span::styled(self.placeholder.clone(), theme.muted))
+                } else {
+                    Line::raw(text.clone())
+                };
             if focused && first + index == cursor_row {
                 cursor = Some(Position::new(2 + cursor_column as u16, out.len() as u16));
             }
@@ -480,7 +483,10 @@ mod tests {
         assert!(key.key(&Key::Paste("sk-test-1234567890".into())));
         let (lines, cursor) = key.lines(64, true, &theme(), &UNICODE);
         let text: Vec<String> = lines.iter().map(plain).collect();
-        assert_eq!(text[0].trim_end(), format!("API key{}18 characters", " ".repeat(64 - 7 - 13)).trim_end());
+        assert_eq!(
+            text[0].trim_end(),
+            format!("API key{}18 characters", " ".repeat(64 - 7 - 13)).trim_end()
+        );
         assert_eq!(text[1], format!("[ {}{} ]", "•".repeat(18), " ".repeat(42)));
         assert!(!text.join("\n").contains("sk-test"));
         assert_eq!(cursor, Some(Position::new(20, 1)));
@@ -523,7 +529,11 @@ mod tests {
         bio.set("Building tools for marine researchers. Ten years of TypeScript, learning Rust.");
         let (lines, cursor) = bio.lines(72, true, &theme(), &UNICODE);
         assert_eq!(
-            lines.iter().map(plain).map(|line| line.trim_end().to_owned()).collect::<Vec<_>>(),
+            lines
+                .iter()
+                .map(plain)
+                .map(|line| line.trim_end().to_owned())
+                .collect::<Vec<_>>(),
             [
                 "Short bio",
                 "[ Building tools for marine researchers. Ten years of TypeScript,      ]",
@@ -535,11 +545,17 @@ mod tests {
         tall.set("1\n2\n3\n4\n5\n6");
         let (lines, cursor) = tall.lines(20, true, &theme(), &UNICODE);
         assert_eq!(lines.len(), 5);
-        assert_eq!(plain(&lines[4]).trim_end(), "[ 6                ]".trim_end());
+        assert_eq!(
+            plain(&lines[4]).trim_end(),
+            "[ 6                ]".trim_end()
+        );
         assert_eq!(cursor, Some(Position::new(3, 4)));
         tall.key(&Key::Home);
         let (lines, cursor) = tall.lines(20, true, &theme(), &UNICODE);
-        assert_eq!(plain(&lines[1]).trim_end(), "[ 1                ]".trim_end());
+        assert_eq!(
+            plain(&lines[1]).trim_end(),
+            "[ 1                ]".trim_end()
+        );
         assert_eq!(cursor, Some(Position::new(2, 1)));
     }
 
@@ -571,12 +587,19 @@ mod tests {
 
     #[test]
     fn a_note_shows_under_the_field_until_an_error_replaces_it() {
-        let mut field = TextField::new("Endpoint URL", 200).note("For example: http://127.0.0.1:11434/v1");
+        let mut field =
+            TextField::new("Endpoint URL", 200).note("For example: http://127.0.0.1:11434/v1");
         let (lines, _) = field.lines(40, false, &theme(), &UNICODE);
-        assert_eq!(plain(lines.last().unwrap()), "For example: http://127.0.0.1:11434/v1");
+        assert_eq!(
+            plain(lines.last().unwrap()),
+            "For example: http://127.0.0.1:11434/v1"
+        );
         field.error = Some("Enter a URL that starts with http.".into());
         let (lines, _) = field.lines(40, false, &theme(), &UNICODE);
-        assert_eq!(plain(lines.last().unwrap()), "Enter a URL that starts with http.");
+        assert_eq!(
+            plain(lines.last().unwrap()),
+            "Enter a URL that starts with http."
+        );
         assert!(!lines.iter().any(|line| plain(line).contains("For example")));
     }
 }

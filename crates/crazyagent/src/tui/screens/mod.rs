@@ -1,5 +1,15 @@
 pub mod home;
+pub(in crate::tui) mod new_project;
+mod new_project_input;
+pub(in crate::tui) mod new_project_page;
+pub(in crate::tui) mod new_project_view;
 pub mod profile_form;
+pub(in crate::tui) mod project;
+pub(in crate::tui) mod project_markdown;
+pub(in crate::tui) mod project_master;
+pub(in crate::tui) mod project_page;
+pub(in crate::tui) mod project_time;
+pub(in crate::tui) mod project_view;
 pub mod settings;
 pub mod settings_accounts;
 pub mod settings_add_account;
@@ -9,6 +19,17 @@ pub mod settings_plugins;
 pub mod startup;
 pub mod stub;
 pub mod welcome;
+
+#[cfg(test)]
+mod new_project_frames;
+#[cfg(test)]
+mod new_project_tests;
+#[cfg(test)]
+mod project_frames;
+#[cfg(test)]
+mod project_page_tests;
+#[cfg(test)]
+mod project_tests;
 
 use super::ctx::Ctx;
 use super::frame::{Hint, Modal};
@@ -227,6 +248,12 @@ pub trait Screen {
         false
     }
 
+    /// The sentence Quit shows for this screen's unsaved work.
+    /// Input: none. Output: a plain sentence; read only while `draft` is true.
+    fn loss(&self) -> &'static str {
+        "Your new project draft will be lost."
+    }
+
     /// The place this screen stands for, used by Go to to avoid duplicates.
     fn place(&self) -> Option<Place> {
         None
@@ -244,10 +271,13 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddAccount => settings::open_add_account(ctx),
         Place::NewPool => Box::new(settings::pool_editor::PoolEditor::new(None, ctx)),
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
-        Place::NewProject => Box::new(stub::NotReady::new_project()),
-        Place::Project { id, name, tab } => {
-            Box::new(stub::NotReady::project(id.clone(), name.clone(), *tab))
-        }
+        Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
+        Place::Project { id, name, tab } => Box::new(project_page::ProjectPage::new(
+            id.clone(),
+            name.clone(),
+            *tab,
+            ctx,
+        )),
     };
     screen
 }

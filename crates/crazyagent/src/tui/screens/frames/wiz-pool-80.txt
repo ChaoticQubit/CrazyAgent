@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Pool
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   Pool   Team   Review
+─────────────────────────────────────────────━━━━───────────────────────────────
+  Pool
+  Agents in this project use accounts from one pool.
+
+  > (*) Main          3 accounts    rcli, Claude Code, Codex
+    ( ) Unnamed pool  1 account     rcli
+    ( ) No pool yet                 Work waits and shows "Needs a pool"
+
+  a  Create a pool
+
+  [ Back ]   [ Continue ]
+
+
+
+
+
+
+
+
+
+ ↑↓ Choose  a Create a pool  Tab Buttons  Shift-←→ Steps                 ? Help

@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Documents
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   Documents   Work   Pool   Team   Review
+──────────────────────━━━━━━━━━─────────────────────────────────────────────────
+  Documents
+  Add PDFs, notes or research files. They are copied into context/documents in
+  the project folder. This step is optional.
+
+  Add a file or folder
+  [ ~/Research/buoy-video.pdf█                                           ]
+  Too big: buoy-video.pdf is 51 MB. The limit is 50 MB per file.
+
+    File                            Type          Size
+    buoy-spec-v3.pdf                PDF           2.4 MB
+    interviews-2026-09.md           Markdown      38 KB
+    competitor-notes.txt            Text          6 KB
+  3 files, 2.4 MB in total
+
+  [ Back ]   [ Continue ]
+
+
+
+
+ Enter Add  Tab Complete path  ↓ To the list  d Remove  Shift-←→ Steps   ? Help
