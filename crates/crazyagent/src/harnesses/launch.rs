@@ -168,7 +168,7 @@ impl Default for LaunchLimits {
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
 /// account, optional model, tools switch, the project sandbox profile and limits.
-/// Tools on is refused unless a sandbox profile is given.
+/// Every launch is refused unless a sandbox profile is given.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -260,15 +260,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => {
-            let mut command = Command::new(SANDBOX_EXEC);
-            command.arg("-f").arg(profile).arg(&request.executable);
-            command
-        }
-        None => Command::new(&request.executable),
-    };
+    let profile = request
+        .sandbox_profile
+        .as_ref()
+        .ok_or_else(|| failure("launch_sandbox_required"))?;
+    let mut command = Command::new(SANDBOX_EXEC);
     command
+        .arg("-f")
+        .arg(profile)
+        .arg(&request.executable)
         .args(&arguments)
         .env_clear()
         .env("HOME", home)
@@ -294,6 +294,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
+    assert_eq!(command.get_program(), SANDBOX_EXEC);
     assert!(command.get_args().all(|argument| {
         request
             .account
@@ -448,8 +449,8 @@ fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
         Some(profile) if !profile.is_absolute() || !profile.is_file() => {
             return Err(failure("launch_sandbox_profile_unavailable"));
         }
-        None if request.tools => return Err(failure("launch_tools_require_sandbox")),
-        _ => {}
+        Some(_) => {}
+        None => return Err(failure("launch_sandbox_required")),
     }
     let limits = request.limits;
     if limits.run_time.is_zero()

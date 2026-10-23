@@ -285,6 +285,7 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 
     let reference = |value: &str| CredentialRef::new(value).unwrap();
     let root = tempfile::Builder::new()
@@ -336,8 +337,28 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
         .unwrap();
     let home = profile.profile_path().unwrap();
     let command = launch_command(&installed_claude(), &project, &home, "native-default", None).unwrap();
+    let tmp = root.path().join("agent-tmp");
+    fs::create_dir(&tmp).unwrap();
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &fs::canonicalize(&project).unwrap(),
+        &fs::canonicalize(&home).unwrap(),
+        &fs::canonicalize(&tmp).unwrap(),
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+    )
+    .unwrap()
+    .allow_read(installed_claude().parent().unwrap())
+    .unwrap();
+    let sandbox = InstalledSandbox::install(sandbox, &root.path().join("master.sb")).unwrap();
+    assert!(
+        !sandbox
+            .sandbox()
+            .writable_roots()
+            .any(|writable| sandbox.profile().starts_with(writable))
+    );
     let mut claude = ClaudeHost::spawn(
         command,
+        sandbox,
         profile,
         NativeAction::Launch {
             session_id: SessionId::new("claude-master-session").unwrap(),

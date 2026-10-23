@@ -11,6 +11,7 @@ use crate::master_session::{
     MasterTurnPhase, MasterTurnView,
 };
 use crate::protocol::{ProjectId, RequestId, SessionId};
+use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
@@ -26,6 +27,7 @@ const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
+    pub(super) sandbox: InstalledSandbox,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
@@ -371,12 +373,21 @@ impl OwnerRuntimeHandle {
         let resources = prepared.attempt.request.route.resources.clone();
         let host = if harness == NativeHarness::Claude {
             MasterHost::Claude(Box::new(
-                ClaudeHost::spawn(launch.command, profile, action, account_ref, resources).await?,
+                ClaudeHost::spawn(
+                    launch.command,
+                    launch.sandbox,
+                    profile,
+                    action,
+                    account_ref,
+                    resources,
+                )
+                .await?,
             ))
         } else {
             MasterHost::Codex(Box::new(
                 CodexHost::spawn(
                     launch.command,
+                    launch.sandbox,
                     profile,
                     action,
                     account_ref,

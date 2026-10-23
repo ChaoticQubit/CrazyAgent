@@ -2,6 +2,7 @@ use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::sandbox::{InstalledSandbox, SANDBOX_EXEC};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
@@ -54,6 +55,7 @@ struct Process {
 
 pub(super) fn run(
     mut command: Command,
+    sandbox: InstalledSandbox,
     profile: NativeProfileUse,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
@@ -84,6 +86,21 @@ pub(super) fn run(
         .env("TERM", "dumb")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .process_group(0);
+    let mut command = match sandbox.wrap(&command) {
+        Ok(command) => command,
+        Err(_) => {
+            report.send_replace(Status {
+                phase: Phase::Retired,
+                fault: Some(Fault::Host("claude_host_sandbox_refused")),
+            });
+            return;
+        }
+    };
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    assert_eq!(command.get_program(), SANDBOX_EXEC);
     let child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {

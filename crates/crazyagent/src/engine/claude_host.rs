@@ -5,6 +5,7 @@ use crate::adapters::events::ObservedEvent;
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
 use crate::routing::ResourceBudget;
+use crate::sandbox::InstalledSandbox;
 use std::ffi::OsStr;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -202,6 +203,7 @@ pub(in crate::engine) struct ClaudeHost {
 impl ClaudeHost {
     pub(in crate::engine) async fn spawn(
         command: Command,
+        sandbox: InstalledSandbox,
         profile: NativeProfileUse,
         action: NativeAction,
         account_ref: CredentialRef,
@@ -230,6 +232,7 @@ impl ClaudeHost {
             .spawn(move || {
                 process::run(
                     command,
+                    sandbox,
                     profile,
                     protocol,
                     limits,
