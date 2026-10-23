@@ -1,6 +1,9 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
-import { retryBusy } from "./engine-client";
-import type { AccountPool, IntentReceipt, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, ProjectPage } from "./engine-client";
+import { errorMessage, retryBusy } from "./engine-client";
+import type { AccountPool, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView } from "./engine-client";
+
+export type { SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -61,6 +64,29 @@ const COPY: Record<string, string> = {
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
+  picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
+  link_not_allowed: "CrazyAgent only opens web links that start with https:// or http://.",
+  open_failed: "Your Mac couldn't open this. Try again.",
+  project_folder_missing: "The project folder isn't on this Mac anymore.",
+  context_item_not_openable: "CrazyAgent opens only documents inside the project folder.",
+  rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
+  native_profile_in_use: "An agent is using this account now. Try again after it stops.",
+  account_profile_operations_full: "This engine can't set up more accounts for agents.",
+  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
+  memory_note_blank: "Write something to remember.",
+  memory_note_too_long: "Keep the memory under 2000 characters.",
+  memory_note_invalid: "Remove special control characters from the memory.",
+  memory_duplicate: "This memory is already saved.",
+  memory_full: "Memory is full. Delete an old memory first.",
+  memory_missing: "That memory no longer exists.",
+  memory_changed: "This memory changed. Reload it and try again.",
+  memory_not_kept: "Only memories you kept can be made global.",
+  memory_already_global: "This memory is already in global memory.",
+  memory_project_missing: "That project no longer exists.",
+  memory_search_invalid: "Keep the search on one line, up to 100 characters.",
+  memory_page_invalid: "Show between 1 and 20 memories at a time.",
+  knowledge_version_conflict: "This memory changed. Reload it and try again.",
+  knowledge_source_revoked: "The research this came from was deleted.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -68,7 +94,8 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
 /** Turns an engine error code into one plain sentence for the owner.
  * Input: an error code. Output: the copy for it, or the generic fallback. */
 export function plainError(code: string): string {
-  return COPY[code] ?? FALLBACK;
+  if (COPY[code]) return COPY[code];
+  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : FALLBACK;
 }
 
 /** Sorts a failed bridge call into "not ready yet" (the command is not in this build) or a
@@ -260,6 +287,29 @@ export function signInRecord(id: string): Promise<Result<ModelAccessDetail>> {
   return call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
 }
 
+const PROFILE_NOT_NEEDED = new Set(["account_profile_harness_unsupported", "account_profile_auth_unsupported"]);
+
+/** Tells whether a refusal to set an account up for agents only means it needs no harness
+ * profile (for example a harness that reads the key itself). Input: the error code. */
+export function profileNotNeeded(code: string): boolean {
+  return PROFILE_NOT_NEEDED.has(code);
+}
+
+/** Sets a saved-key, URL or local account up for agents once it is in a pool. No key is
+ * sent: the engine uses the key it already holds. Input: account id. Output: ok when the
+ * engine configured it or it needs no profile, otherwise a plain error. */
+export async function readyForAgents(id: string): Promise<Result<void>> {
+  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+  if (detail.kind !== "ok") return detail;
+  const configured = await call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  if (configured.kind === "error" && profileNotNeeded(configured.code)) return { kind: "ok", value: undefined };
+  if (configured.kind !== "ok") return configured;
+  if (configured.value.pending || configured.value.reply.outcome === "not_recorded") {
+    return { kind: "error", code: "account_profile_outcome_unknown_read_same_request", message: plainError("account_profile_outcome_unknown_read_same_request") };
+  }
+  return { kind: "ok", value: undefined };
+}
+
 export interface PoolMember {
   id: string;
   kind: "chatgpt" | "claude" | "api_key" | "url" | "local" | "other";
@@ -351,73 +401,145 @@ export function harnessCatalog(): Promise<Result<HarnessEntry[]>> {
   return call<HarnessEntry[]>("desktop_harness_catalog");
 }
 
-export interface Skill {
-  id: string;
-  name: string;
-  description: string;
-  path: string;
-  default_on: boolean;
+/** Reads skills for global settings (no project) or one project's settings, where global
+ * items carry the project's own switch. Output: skills in engine order. */
+export function listSkills(projectId?: string): Promise<Result<SkillView[]>> {
+  return call<SkillView[]>("desktop_plugin_skills", { projectId: projectId ?? null });
 }
 
-export interface McpServer {
-  id: string;
-  name: string;
-  runs: string;
-  status: "approved" | "needs_approval" | "turned_off" | "cant_start";
-  status_label: string;
-  reason: string | null;
-  network: boolean;
-  secrets: string[];
-  default_on: boolean;
+/** Adds a skill from a folder that holds SKILL.md; the engine keeps its own copy.
+ * Inputs: where it applies and the folder's full path. Output: the new skill. */
+export function addSkill(scope: PluginScope, folder: string): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-export interface Memory {
+/** Turns a skill on or off where it was added. Inputs: skill id and the switch. */
+export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
+}
+
+/** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
+export function removeSkill(id: string): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id });
+}
+
+/** Reads MCP servers for global settings (no project) or one project's settings.
+ * Output: servers with how they run, status, saved secret names and tools. */
+export function listMcpServers(projectId?: string): Promise<Result<McpServerView[]>> {
+  return call<McpServerView[]>("desktop_plugin_servers", { projectId: projectId ?? null });
+}
+
+/** Adds an MCP server that waits for approval. Secret values go to the engine once, in its
+ * own private frame, and never come back. Inputs: scope, name, spec, secrets by name. */
+export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSpec, secrets: [string, string][]): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_add_mcp_server", { scope, name, spec, secrets });
+}
+
+/** Approves an MCP server exactly as the owner saw it; the engine refuses one that changed.
+ * Inputs: server id and the shown spec. Output: the approved server. */
+export function approveMcpServer(id: string, spec: McpServerSpec): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_approve_mcp_server", { id, spec });
+}
+
+/** Turns an MCP server on or off where it was added. Inputs: server id and the switch. */
+export function setMcpServerEnabled(id: string, enabled: boolean): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+}
+
+/** Removes an MCP server and its saved secrets. Input: server id. */
+export function removeMcpServer(id: string): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id });
+}
+
+/** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.
+ * Inputs: server id, secret name and value. Output: the server with its secret names. */
+export function setMcpSecret(id: string, name: string, value: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_secret", { id, name, value });
+}
+
+/** Deletes one saved MCP server secret. Inputs: server id and secret name. */
+export function removeMcpSecret(id: string, name: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_remove_mcp_secret", { id, name });
+}
+
+/** Starts a command MCP server, lists its tools and stops it. Input: server id.
+ * Output: the server with its tools or the plain reason it can't start. */
+export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_check_mcp_server", { id });
+}
+
+/** Switches a global skill or MCP server on or off for one project.
+ * Inputs: project id, item id and the switch. */
+export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId, id, on });
+}
+
+/** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
+ * owner closed the chooser. */
+export function pickFolder(): Promise<Result<string | null>> {
+  return call<string | null>("desktop_pick_folder");
+}
+
+const SUGGESTION_PROJECTS_MAX = 50;
+
+export interface Suggestion {
+  project_id: string;
+  project_name: string;
   id: string;
+  version: number;
   text: string;
-  source: string;
-  scope: "app" | { project: string };
-  state: "saved" | "suggested";
-  saved_at: string | null;
 }
 
-/** Reads the app-wide skills. Output: skills with their folder and default switch. */
-export function listSkills(): Promise<Result<Skill[]>> {
-  return call<Skill[]>("desktop_skills");
+/** Reads one page of saved memory, newest first: app-wide (no project) or one project's
+ * own notes. Inputs: project id or null, search text, and the previous page's next value.
+ * Output: the page. */
+export function savedMemories(project: string | null, search: string, before: number | null = null): Promise<Result<SavedMemoryPage>> {
+  return call<SavedMemoryPage>("desktop_memories", { project, search: search.trim() || null, before });
 }
 
-/** Turns a global skill on or off for new projects. Inputs: skill id and the switch. */
-export function setSkillDefault(id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_set_skill_default", { id, on });
+/** Saves a memory the owner wrote, app-wide or for one project. Inputs: project id or null
+ * and the text. Output: ok once saved. */
+export function addMemory(project: string | null, text: string): Promise<Result<void>> {
+  return change("desktop_add_memory", { project, text, generation: nextGeneration() });
 }
 
-/** Reads the app-wide MCP servers with their approval status. Output: the servers. */
-export function listMcpServers(): Promise<Result<McpServer[]>> {
-  return call<McpServer[]>("desktop_mcp_servers");
+/** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */
+export function deleteMemory(id: string): Promise<Result<void>> {
+  return change("desktop_delete_memory", { id, generation: nextGeneration() });
 }
 
-/** Approves one MCP server after the owner reviewed what it runs. Input: server id. */
-export function approveMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_approve_mcp_server", { id });
+/** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
+ * memory list. Output: the suggestions, in engine order. */
+export function suggestionsFrom(project: { id: string; name: string }, items: MemoryItem[]): Suggestion[] {
+  return items.filter((item) => item.status === "Provisional" && !item.human_reviewed)
+    .map((item) => ({ project_id: project.id, project_name: project.name, id: item.id, version: item.version, text: item.text }));
 }
 
-/** Turns a global MCP server on or off for new projects. Inputs: server id and the switch. */
-export function setMcpDefault(id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_set_mcp_default", { id, on });
+/** Reads unreviewed research memories across projects (first page of each, up to 50
+ * projects). Input: the projects. Output: the suggestions. */
+export async function memorySuggestions(projects: { id: string; name: string }[]): Promise<Result<Suggestion[]>> {
+  const found: Suggestion[] = [];
+  for (const project of projects.slice(0, SUGGESTION_PROJECTS_MAX)) {
+    const items = await call<MemoryItem[]>("desktop_project_memories", { id: project.id, after: null });
+    if (items.kind !== "ok") return items;
+    found.push(...suggestionsFrom(project, items.value));
+  }
+  return { kind: "ok", value: found };
 }
 
-/** Reads saved and suggested memories across projects. Output: the memories. */
-export function listMemories(): Promise<Result<Memory[]>> {
-  return call<Memory[]>("desktop_memories");
+/** Saves a research suggestion to app-wide memory with one owner click: the engine first
+ * keeps it in its project, then makes it global. Input: the suggestion. Output: ok once both
+ * are saved, or the plain reason the second step failed. */
+export async function saveSuggestion(suggestion: Suggestion): Promise<Result<void>> {
+  const kept = await change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Keep" }, generation: nextGeneration() });
+  if (kept.kind !== "ok") return kept;
+  assert(suggestion.version < Number.MAX_SAFE_INTEGER, "memory version exhausted");
+  return change("desktop_promote_memory", { project: suggestion.project_id, memory: suggestion.id, version: suggestion.version + 1, generation: nextGeneration() });
 }
 
-/** Saves a suggested memory; this click is the owner's approval. Input: memory id. */
-export function keepMemory(id: string): Promise<Result<void>> {
-  return call<void>("desktop_keep_memory", { id });
-}
-
-/** Dismisses a suggestion or deletes a saved memory. Input: memory id. */
-export function forgetMemory(id: string): Promise<Result<void>> {
-  return call<void>("desktop_forget_memory", { id });
+/** Dismisses a research suggestion; it stays out of memory. Input: the suggestion. */
+export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>> {
+  return change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Reject" }, generation: nextGeneration() });
 }
 
 /** Reads the first page of projects for Home and the sidebar. Output: projects. */

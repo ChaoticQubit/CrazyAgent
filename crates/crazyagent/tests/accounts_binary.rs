@@ -501,6 +501,7 @@ async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through
                 edit: ModelAccessEdit::CreatePool {
                     pool: AccountPool {
                         id: CredentialRef::new(format!("{name}-pool")).unwrap(),
+                        name: None,
                         members: vec![account.id.clone()],
                         projects: vec![CredentialRef::new(project_id.as_str()).unwrap()],
                         roles: vec![CredentialRef::new("project_leader").unwrap()],

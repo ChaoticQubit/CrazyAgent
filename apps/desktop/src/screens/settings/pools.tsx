@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { deletePool, listAccounts, poolSummaries, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
+import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
@@ -48,14 +48,39 @@ export function deleteRefusal(pool: PoolSummary): string {
   return `Can't delete ${pool.name}. ${users}. Choose another pool for ${count === 1 ? "it" : "them"} first.`;
 }
 
+/** The accounts newly added to a pool that agents can use only after the engine sets them
+ * up: saved-key and URL accounts (subscriptions sign in instead). Inputs: the members before
+ * and after saving, and the known accounts. Output: those accounts, in member order. */
+export function setupTargets(previous: string[], members: string[], accounts: AccountView[]): AccountView[] {
+  const known = new Map(accounts.map((account) => [account.id, account]));
+  return members.filter((id) => !previous.includes(id)).map((id) => known.get(id))
+    .filter((account): account is AccountView => account !== undefined && (account.method === "api_key" || account.method === "url"));
+}
+
+/** The members of a saved pool that agents use through a harness profile: saved-key, URL
+ * and local accounts. Input: the pool. Output: their ids, in member order. */
+export function keyedMembers(pool: PoolSummary): string[] {
+  return pool.members.filter((member) => member.kind === "api_key" || member.kind === "url" || member.kind === "local").map((member) => member.id);
+}
+
+/** The note after saving a pool when some accounts are not ready for agents yet.
+ * Input: the failed accounts with plain messages. Output: one sentence, or undefined. */
+export function setupNote(failures: { name: string; message: string }[]): string | undefined {
+  if (failures.length === 0) return undefined;
+  const names = failures.map((failure) => failure.name);
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${list} ${names.length === 1 ? "isn't" : "aren't"} ready for agents yet. ${failures[0]!.message}`;
+}
+
 /** The pool list as a pure view. Inputs: the pools read and the new, edit, delete and retry
  * actions. */
-export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry }: {
+export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }: {
   pools: Loaded<PoolSummary[]>;
   onNew: () => void;
   onEdit: (pool: PoolSummary) => void;
   onDelete: (pool: PoolSummary) => void;
   onRetry: () => void;
+  onPrepare?: (pool: PoolSummary) => void;
 }) {
   if (pools.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (pools.kind === "not_ready") return <NotReady what="Pools" />;
@@ -76,6 +101,7 @@ export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry }: {
         <span className="secondary">{poolUse(pool.project_count)}</span>
         <Menu label={`More for ${pool.name}`} items={[
           { label: "Edit pool", icon: "pencil", onSelect: () => onEdit(pool) },
+          ...(onPrepare && keyedMembers(pool).length > 0 ? [{ label: "Get ready for agents", icon: "refresh-cw" as const, onSelect: () => onPrepare(pool) }] : []),
           { label: "Delete pool", icon: "trash", danger: true, onSelect: () => onDelete(pool) },
         ]} />
       </div>)}
@@ -201,6 +227,24 @@ export function Pools({ creating }: { creating: boolean }) {
   const [refusal, setRefusal] = useState<string>();
   useEffect(() => { if (creating) setEditing({}); }, [creating]);
 
+  const prepare = async (targets: { id: string; name: string }[]) => {
+    const failures: { name: string; message: string }[] = [];
+    for (const target of targets) {
+      const ready = session.noteResult(await readyForAgents(target.id));
+      if (ready.kind !== "ok") failures.push({ name: target.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
+    }
+    return failures;
+  };
+
+  const prepareAll = async (pool: PoolSummary) => {
+    setRefusal(undefined);
+    const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
+    const ids = keyedMembers(pool);
+    const failures = await prepare(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })));
+    setRefusal(setupNote(failures));
+    if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
+  };
+
   const leave = () => {
     setEditing(undefined);
     if (creating) navigate({ name: "settings", tab: "pools" }, true);
@@ -210,7 +254,12 @@ export function Pools({ creating }: { creating: boolean }) {
     const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
     return <PoolEditorView key={editing.id ?? "new"} pool={pool} accounts={accounts} onCancel={leave} onSave={async (name, members) => {
       const saved = session.noteResult(await savePool(editing.id, name, members));
-      if (saved.kind === "ok") { session.showToast(`${name.trim()} saved.`); reload(); leave(); }
+      if (saved.kind !== "ok") return saved;
+      const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
+      setRefusal(setupNote(await prepare(targets.map((account) => ({ id: account.id, name: account.name })))));
+      session.showToast(`${name.trim()} saved.`);
+      reload();
+      leave();
       return saved;
     }} />;
   }
@@ -230,7 +279,7 @@ export function Pools({ creating }: { creating: boolean }) {
   return <div className="stack">
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
     <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id })}
-      onDelete={(pool) => { setRefusal(undefined); setDeleting(pool); }} onRetry={reload} />
+      onDelete={(pool) => { setRefusal(undefined); setDeleting(pool); }} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel="Delete pool" pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
       {deleting && deleting.project_count > 0 ? `${poolUse(deleting.project_count)}. The engine refuses while a project uses it.`

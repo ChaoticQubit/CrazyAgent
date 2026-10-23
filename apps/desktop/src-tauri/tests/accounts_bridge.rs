@@ -208,6 +208,7 @@ async fn desktop_configures_a_pooled_key_account_from_the_saved_key() -> TestRes
     assert!(page.fresh && page.writable);
     let pool = AccountPool {
         id: CredentialRef::new("saved-router-pool").unwrap(),
+        name: None,
         members: vec![added.id.clone()],
         projects: Vec::new(),
         roles: Vec::new(),
