@@ -1714,6 +1714,21 @@ impl App {
         })
     }
 
+    /// Queues one team action: a message to the master, a task handed to a sub-agent,
+    /// a cancel or the keep-warm switch. Team status reads use SetupQuery::Team.
+    /// Takes the team action.
+    /// Returns an error in limited mode, for an invalid action or while another setup request waits.
+    pub fn request_team_change(&mut self, action: crate::team::TeamAction) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Team changes are disabled in limited mode".into());
+        }
+        action.validate().map_err(|e| e.0)?;
+        self.request_project_setup(SetupQuery::TeamChange {
+            action,
+            generation: self.declaration.generation,
+        })
+    }
+
     /// Queues one saved-memory read: a page of global or project memory, one memory,
     /// or the approved set a project's agents start with.
     /// Returns an error for a change, which goes through request_library_change.

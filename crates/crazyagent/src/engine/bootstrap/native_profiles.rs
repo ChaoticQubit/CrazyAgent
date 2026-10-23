@@ -287,7 +287,7 @@ pub(crate) struct NativeProfileUse {
 }
 
 impl NativeProfileUse {
-    pub(in crate::engine) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
+    pub(crate) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
         self.revalidate_retained()?;
         if let Some(configured) = &self.configured {
             return Ok(configured.path().to_path_buf());
@@ -401,6 +401,17 @@ impl NativeProfileCustody {
             self.database_identity,
             false,
         )
+    }
+
+    /// Names the home directory of a native managed profile without taking it, so a
+    /// sandbox can allow it before the first turn. Input: the profile reference.
+    /// Output: the path; only a held `NativeProfileUse` proves it is signed in and free.
+    pub(crate) fn profile_home(&self, profile_ref: &CredentialRef) -> std::path::PathBuf {
+        self.anchor
+            .path
+            .join(ROOT)
+            .join(digest(profile_ref.as_str().as_bytes()))
+            .join("home")
     }
 
     fn retain(&self) -> Result<Self, EngineError> {

@@ -1076,6 +1076,20 @@ fn current_auth(
         return configured_auth(tx, config, host, session).map(MasterBootstrapAuth::RcliConfigured);
     }
     let connection = native_profile_connection(config, &session.selection.target_profile_ref)?;
+    native_sign_in(tx, host, connection, Some(&session.selection.route.account_ref))
+        .map(MasterBootstrapAuth::NativeSignIn)
+}
+
+/// Proves the latest sign-in of a native managed connection can authorize a launch on
+/// this engine run, the same check every master turn uses. Input: the transaction, the
+/// active host, the connection and, for a master, the account its route names. Output:
+/// the authenticated sign-in fact, or the unknown, stale or in-use code.
+pub(crate) fn native_sign_in(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &ModelConnection,
+    account_ref: Option<&crate::protocol::CredentialRef>,
+) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
     let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
         return Err(error("native_profile_not_managed"));
     };
@@ -1102,7 +1116,7 @@ fn current_auth(
         || fact.binding.database_instance != host.db_instance
         || fact.binding.engine_epoch != host.engine_epoch
         || fact.binding.connection != *connection
-        || fact.binding.connection.account_ref != session.selection.route.account_ref
+        || account_ref.is_some_and(|account| &fact.binding.connection.account_ref != account)
         || fact.binding.at_revision.value() > owner_revision(tx)?
     {
         return Err(error("master_authentication_stale"));
@@ -1111,7 +1125,7 @@ fn current_auth(
     if fenced {
         return Err(error("native_profile_in_use"));
     }
-    Ok(MasterBootstrapAuth::NativeSignIn(fact))
+    Ok(fact)
 }
 
 fn ready_lease(

@@ -54,7 +54,7 @@ fn project(id: &str) -> Result<ProjectId, BridgeError> {
 }
 
 impl NativeBridge {
-    fn ready_for_intent(&self, generation: u64) -> Result<(), BridgeError> {
+    pub(super) fn ready_for_intent(&self, generation: u64) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
         if self.status().pending {
             return Err(failure("pending_intent"));
