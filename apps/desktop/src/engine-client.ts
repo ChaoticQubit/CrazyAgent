@@ -627,6 +627,15 @@ export interface TeamStatus {
   agents: TeamAgent[];
   tasks: TeamTask[];
   messages: TeamMessage[];
+  plan: TeamPlanStep[];
+}
+
+export interface TeamPlanStep {
+  reply: number;
+  step: number;
+  harness: string | null;
+  prompt: string;
+  task: number | null;
 }
 
 export function teamStatus(id: string): Promise<TeamStatus> {
@@ -656,6 +665,10 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
 
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
+}
+
+export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

@@ -556,6 +556,152 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
 }
 
 #[test]
+fn the_owner_hands_off_plan_steps_the_master_proposed() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-plan",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-plan", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    let reply = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Master,
+        "Two steps:\nDELEGATE: Write apple.txt\nDELEGATE gemini: Write pear.txt",
+        MessageState::Reply,
+        10,
+    )
+    .unwrap()
+    .unwrap();
+    let handed = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "Write apple.txt",
+        TaskSource::Master,
+        Some(reply),
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+
+    let team = status(&connection, &setup).unwrap();
+    assert_eq!(
+        team.plan,
+        [
+            PlanStep {
+                reply,
+                step: 0,
+                harness: None,
+                prompt: "Write apple.txt".into(),
+                task: Some(handed),
+            },
+            PlanStep {
+                reply,
+                step: 1,
+                harness: Some("gemini".into()),
+                prompt: "Write pear.txt".into(),
+                task: None,
+            },
+        ]
+    );
+
+    let tx = connection.transaction().unwrap();
+    let hand = |step| TeamAction::HandOff {
+        project_id: project.clone(),
+        reply,
+        step,
+    };
+    for (step, code) in [
+        (0, "team_plan_step_handed"),
+        (1, "team_harness_not_in_plan"),
+        (2, "team_plan_step_missing"),
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &hand(step)).unwrap(),
+            Outcome::Rejected { code: code.into() },
+            "step {step}"
+        );
+    }
+    let owner_message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "DELEGATE: Not a master step",
+        MessageState::Pending,
+        12,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::HandOff {
+                project_id: project.clone(),
+                reply: owner_message,
+                step: 0,
+            }
+        )
+        .unwrap(),
+        Outcome::Rejected {
+            code: "team_plan_step_missing".into()
+        },
+        "only a master reply holds plan steps"
+    );
+    let second = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Master,
+        "DELEGATE: Write plum.txt",
+        MessageState::Reply,
+        13,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::HandOff {
+                project_id: project.clone(),
+                reply: second,
+                step: 0,
+            }
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let team = status(&connection, &setup).unwrap();
+    let plum = team.tasks.last().unwrap();
+    assert_eq!(
+        (plum.prompt.as_str(), plum.source, plum.status),
+        ("Write plum.txt", TaskSource::Master, TaskStatus::Queued),
+        "a handed-off step is the master's task, so its result goes back to the master"
+    );
+    assert_eq!(team.plan.len(), 1, "the plan is the latest master reply");
+    assert_eq!(team.plan[0].task, Some(plum.id));
+}
+
+#[test]
 fn reopening_the_runtime_returns_interrupted_work_to_the_queue() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();

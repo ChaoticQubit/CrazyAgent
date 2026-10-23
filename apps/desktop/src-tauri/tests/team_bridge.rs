@@ -9,13 +9,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 6] = [
+const COMMANDS: [&str; 7] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
     "desktop_team_cancel",
     "desktop_team_keep_warm",
     "desktop_team_pause",
+    "desktop_team_hand_off",
 ];
 
 #[test]
@@ -180,7 +181,20 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         matches!(resumed.outcome, ActionOutcome::Applied),
         "{resumed:?}"
     );
-    assert!(!bridge.team_status(&id).await?.paused);
+    let team = bridge.team_status(&id).await?;
+    assert!(!team.paused);
+    assert!(team.plan.is_empty(), "no master reply proposed steps yet");
+    let owner_message = team.messages[0].id;
+    let not_a_plan = bridge.team_hand_off(&id, owner_message, 0, 10).await?;
+    assert_eq!(not_a_plan.rejection, Some("team_plan_step_missing"));
+    assert_eq!(
+        bridge
+            .team_hand_off(&id, owner_message, 8, 11)
+            .await
+            .unwrap_err()
+            .code,
+        "team_action_invalid"
+    );
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,
         "project_setup_missing"
