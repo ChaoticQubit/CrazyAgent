@@ -172,6 +172,27 @@ fn where_a_memory_came_from_is_plain() {
 }
 
 #[test]
+fn a_memory_selected_from_a_project_file_names_that_project() {
+    let ctx = memory_ctx(80, 24);
+    let selected = |scope| {
+        saved(
+            8,
+            "Readings arrive every 90 s.",
+            scope,
+            MemoryOrigin::Selected {
+                path: "context/research/market_research.md".into(),
+            },
+        )
+    };
+    let memory = selected(only("tidepool"));
+    assert_eq!(source(&memory, &ctx), "Tidepool");
+    assert_eq!(saved_line(&memory, &ctx), "Saved for Tidepool only.");
+    let global = selected(MemoryScope::Global);
+    assert_eq!(source(&global, &ctx), "You");
+    assert_eq!(saved_line(&global, &ctx), "Saved by you for every project.");
+}
+
+#[test]
 fn filtering_narrows_by_text_and_source() {
     let mut ctx = memory_ctx(80, 24);
     let mut screen = Memory::with(memories());
