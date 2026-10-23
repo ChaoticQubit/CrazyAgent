@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="apps/desktop/src/assets/brand/lockup-dark.svg">
+  <img src="apps/desktop/src/assets/brand/lockup.svg" alt="CrazyAgent" width="360">
+</picture>
+
 # CrazyAgent
 
 CrazyAgent runs one master agent that plans your work and hands it to sub-agents. Each agent can use any coding harness you choose, runs in a sandbox for its project, and works with your own accounts and pools.
