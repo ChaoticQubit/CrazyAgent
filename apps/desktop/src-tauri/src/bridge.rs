@@ -18,6 +18,7 @@ use std::time::Duration;
 mod account_profile;
 mod account_setup;
 mod accounts;
+mod agents;
 mod harnesses;
 pub mod master;
 pub mod memory;

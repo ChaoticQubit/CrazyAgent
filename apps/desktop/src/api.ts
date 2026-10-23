@@ -1,9 +1,10 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import { errorMessage, retryBusy } from "./engine-client";
-import type { AccountPool, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView } from "./engine-client";
+import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
+export type { AgentRole, AgentState, AgentView } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -472,6 +473,27 @@ export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
  * Inputs: project id, item id and the switch. */
 export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
   return call<void>("desktop_switch_plugin", { projectId, id, on });
+}
+
+/** Lists launched agents, newest first. Input: a project id, or none for every project.
+ * Output: each agent's plain status and the controls usable now. */
+export function agents(projectId?: string): Promise<Result<AgentView[]>> {
+  return call<AgentView[]>("desktop_agents", { projectId: projectId ?? null });
+}
+
+/** Stops one agent and everything it started; other agents keep running. Input: agent id. */
+export function stopAgent(id: string): Promise<Result<AgentView>> {
+  return call<AgentView>("desktop_stop_agent", { id });
+}
+
+/** Interrupts what one agent is doing now; the agent keeps running. Input: agent id. */
+export function interruptAgent(id: string): Promise<Result<void>> {
+  return call<void>("desktop_interrupt_agent", { id });
+}
+
+/** Restarts one agent with its first task. Input: agent id. Output: the running agent. */
+export function restartAgent(id: string): Promise<Result<AgentView>> {
+  return call<AgentView>("desktop_restart_agent", { id });
 }
 
 /** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
