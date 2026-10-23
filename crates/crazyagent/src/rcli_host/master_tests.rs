@@ -1,6 +1,7 @@
 use super::{RcliMasterBinding, RcliMasterHost, RcliMasterLaunch};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -57,6 +58,26 @@ impl Case {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         self.launch.profile_config_sha256 = digest(&bytes);
     }
+}
+
+fn sandbox(case: &Case, project: &Path) -> InstalledSandbox {
+    let root = case.launch.executable.parent().unwrap();
+    let tmp = root.join("agent-tmp");
+    let profiles = root.join("profiles");
+    for path in [&tmp, &profiles] {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(
+        project,
+        &case.launch.home_dir,
+        &tmp,
+        SandboxNetwork::Only(vec![SandboxRemote::Loopback(11434)]),
+    )
+    .unwrap()
+    .allow_read(root)
+    .unwrap();
+    InstalledSandbox::install(sandbox, &profiles.join("rcli.sb")).unwrap()
 }
 
 fn credential(text: &str) -> CredentialRef {
@@ -221,7 +242,16 @@ fn real_private_paths_reject_aliases_overlap_and_group_access() {
 #[test]
 fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child() {
     let case = Case::new();
-    let mut host = RcliMasterHost::launch(case.launch).unwrap();
+    let root = case.launch.executable.parent().unwrap().to_path_buf();
+    let other = root.join("other-project");
+    fs::create_dir(&other).unwrap();
+    let elsewhere = sandbox(&case, &other);
+    let refused = RcliMasterHost::launch(case.launch.clone(), &elsewhere)
+        .err()
+        .unwrap();
+    assert_eq!(refused.0, "rcli_master_sandbox_refused");
+    let boundary = sandbox(&case, &case.launch.cwd);
+    let mut host = RcliMasterHost::launch(case.launch, &boundary).unwrap();
     assert_eq!(host.binding().connection.account_ref, credential("account-a"));
     let turn = RequestId::new("turn-before-ready").unwrap();
     let error = host.prompt(turn, "A prompt cannot run before actual Ready").unwrap_err();

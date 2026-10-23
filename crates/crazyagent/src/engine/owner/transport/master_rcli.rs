@@ -191,6 +191,15 @@ impl OwnerRuntimeHandle {
         }
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
+        let sandbox = super::master_host_launch::master_sandbox(
+            &self.authority.root,
+            &runtime_ref,
+            &prepared.repository,
+            &prepared.cwd,
+            &launch.home_dir,
+            &launch.executable,
+            &prepared.attempt.connection.endpoint,
+        )?;
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self
             .inspect_master_turn(
@@ -221,7 +230,7 @@ impl OwnerRuntimeHandle {
             artifact_sha256: launch.artifact_sha256.clone(),
             native_session_id: None,
         };
-        let custody = RcliCustody::launch(launch, profile)?;
+        let custody = RcliCustody::launch(launch, sandbox, profile)?;
         let mut active = ActiveRcliMaster {
             custody,
             capture,
