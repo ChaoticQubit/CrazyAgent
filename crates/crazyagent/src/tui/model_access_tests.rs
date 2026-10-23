@@ -364,6 +364,7 @@ async fn all_eight_keyboard_edits_persist_through_the_real_owner_engine() {
     assert_eq!(h.metadata().pools.len(), 1);
     let created = h.metadata().pools[0].clone();
     assert_eq!(created.members[0].as_str(), "connection-one");
+    assert_eq!(created.name.as_deref(), Some("Pool one"));
     h.key(KeyCode::Char('e'));
     h.drain().await;
     assert!(h.render().contains("Choose connections"), "{}", h.render());
@@ -815,4 +816,21 @@ async fn compact_form_keeps_the_active_field_visible_after_a_long_url() {
             > 2000
     );
     h.close().await;
+}
+
+#[test]
+fn pool_refusals_read_as_plain_sentences_and_other_codes_stay_visible() {
+    assert_eq!(
+        super::rejection_notice("pool_member_limit"),
+        "A pool can hold up to 15 accounts; values retained; Ctrl-P refreshes"
+    );
+    assert_eq!(
+        super::rejection_notice("pool_in_use"),
+        "This pool is used by a project. Remove it from the project first.; values retained; Ctrl-P refreshes"
+            .replace(".;", ";")
+    );
+    assert_eq!(
+        super::rejection_notice("invalid_model_access"),
+        "Engine rejected metadata: invalid_model_access; values retained; Ctrl-P refreshes"
+    );
 }

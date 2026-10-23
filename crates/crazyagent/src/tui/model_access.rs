@@ -804,9 +804,7 @@ impl State {
                                     self.confirmation = None;
                                 }
                                 OwnerResult::Rejected { code } => {
-                                    self.notice = format!(
-                                        "Engine rejected metadata: {code}; values retained; Ctrl-P refreshes"
-                                    );
+                                    self.notice = rejection_notice(&code);
                                     self.confirmation = None;
                                 }
                                 OwnerResult::VerificationUnavailable { .. } => {
@@ -1161,6 +1159,19 @@ pub(super) fn rcli_home_supported(connection: &ModelConnection) -> bool {
 #[cfg(test)]
 #[path = "model_access_tests.rs"]
 mod tests;
+
+/// Words the notice for a refused metadata edit.
+/// Input: the engine rejection code. Output: the plain sentence for a known pool
+/// refusal, else the code itself, followed by the retained-values hint.
+fn rejection_notice(code: &str) -> String {
+    match crate::config::plain_problem(code) {
+        Some(text) => format!(
+            "{}; values retained; Ctrl-P refreshes",
+            text.trim_end_matches('.')
+        ),
+        None => format!("Engine rejected metadata: {code}; values retained; Ctrl-P refreshes"),
+    }
+}
 
 fn record_in(record: &ModelAccessRecord, collection: ModelAccessCollection) -> bool {
     matches!(
