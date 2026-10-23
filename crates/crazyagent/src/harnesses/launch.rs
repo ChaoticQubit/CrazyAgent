@@ -1,6 +1,6 @@
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
-use crate::adapters::events::{EventKind, TurnOutcome};
+use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -180,7 +180,26 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
+}
+
+/// Tells whether a provider error message says the account hit a rate or usage limit.
+/// Takes the provider's error text, which is never stored or shown.
+/// Returns true for rate limit, usage limit, quota and HTTP 429 wording.
+pub fn rate_limited(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "usage_limit",
+        "quota",
+        "429",
+        "too many requests",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// A plain failure code from a launch adapter. It never carries secrets or raw output.
@@ -685,6 +704,11 @@ impl Driver {
                             );
                             events.push(LaunchEvent::ApprovalDenied);
                         }
+                        CodexEvent::TurnError { message, .. } => {
+                            events.push(LaunchEvent::TurnError {
+                                rate_limited: rate_limited(&message),
+                            });
+                        }
                         CodexEvent::RequestFailed {
                             method: "turn/interrupt",
                             ..
@@ -736,6 +760,15 @@ impl Driver {
                                 EventKind::ToolUse { name, .. } => {
                                     events.push(LaunchEvent::ToolUse { name })
                                 }
+                                EventKind::AssistantError { code } => {
+                                    events.push(LaunchEvent::TurnError {
+                                        rate_limited: rate_limited(&code),
+                                    })
+                                }
+                                EventKind::RateLimitObserved {
+                                    status: RateLimitStatus::Rejected,
+                                    ..
+                                } => events.push(LaunchEvent::TurnError { rate_limited: true }),
                                 EventKind::TurnFinished { outcome, .. } => {
                                     *interrupt = None;
                                     events.push(LaunchEvent::TurnFinished {
@@ -1001,3 +1034,6 @@ impl Drop for Session {
         self.stop_group();
     }
 }
+
+#[cfg(test)]
+mod tests;

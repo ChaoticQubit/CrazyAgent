@@ -696,6 +696,7 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
     plugins::initialize(connection)?;
+    crate::team::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
@@ -1120,6 +1121,11 @@ fn execute(
         Command::ProjectSetup { action } => {
             crate::project_setup::execute(tx, config, path, action, revision)
         }
+        Command::Team { action } => crate::team::execute(
+            tx,
+            &config.settings.model_access.clone().unwrap_or_default(),
+            action,
+        ),
         Command::Snapshot => {
             let mut outcome = snapshot(tx)?;
             if let Outcome::Snapshot { tasks, .. } = &mut outcome {
@@ -1975,6 +1981,9 @@ fn owner_read(
         OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
+        },
+        OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
+            status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
         },
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),

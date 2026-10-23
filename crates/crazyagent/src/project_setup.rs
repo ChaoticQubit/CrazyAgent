@@ -475,6 +475,13 @@ pub enum SetupQuery {
         generation: u64,
     },
     Library(crate::memory::library::LibraryQuery),
+    Team {
+        project: ProjectId,
+    },
+    TeamChange {
+        action: crate::team::TeamAction,
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -487,6 +494,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Library(crate::memory::library::LibraryView),
+    Team(Box<crate::team::TeamStatus>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,7 +503,7 @@ pub enum SetupAction {
     Create {
         project_id: ProjectId,
         spec: ProjectSpec,
-        setup: ProjectSetup,
+        setup: Box<ProjectSetup>,
     },
     SaveToMemory {
         project_id: ProjectId,
@@ -1293,16 +1301,14 @@ fn write_brief(context: &rustix::fd::OwnedFd, stored: &StoredSetup) -> Result<()
     rustix::fs::renameat(context, BRIEF_PARTIAL, context, "brief.md").map_err(unwritable)
 }
 
-fn stage(staging: &Path, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, Outcome> {
+fn stage(staging: &Path, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, &'static str> {
     let builder = || {
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
         builder
     };
-    let unwritable = || Outcome::Rejected {
-        code: "project_folder_unwritable".into(),
-    };
-    builder().create(staging).map_err(|_| unwritable())?;
+    let unwritable = |_| "project_folder_unwritable";
+    builder().create(staging).map_err(unwritable)?;
     for directory in [
         "context",
         "context/documents",
@@ -1311,14 +1317,13 @@ fn stage(staging: &Path, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, Ou
     ] {
         builder()
             .create(staging.join(directory))
-            .map_err(|_| unwritable())?;
+            .map_err(unwritable)?;
     }
     copy_documents(
         &setup.documents,
         &staging.join("context/documents"),
         PROJECT_DOCUMENT_BYTES_MAX,
     )
-    .map_err(|code| Outcome::Rejected { code: code.into() })
 }
 
 /// Executes a host-only project setup action inside the owner transaction.
@@ -1520,9 +1525,9 @@ fn create(
     }
     let documents = match stage(&staging, setup) {
         Ok(documents) => documents,
-        Err(outcome) => {
+        Err(code) => {
             let _ = std::fs::remove_dir_all(&staging);
-            return Ok(outcome);
+            return Ok(rejected(code));
         }
     };
     let result = record(

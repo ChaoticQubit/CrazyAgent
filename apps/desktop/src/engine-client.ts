@@ -550,6 +550,104 @@ export function deleteProjectContext(id: string, path: string, generation: numbe
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
+export type TeamRole = "master" | "sub";
+export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
+export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+export type TeamMessageAuthor = "owner" | "master" | "engine";
+export type TeamMessageState = "pending" | "sent" | "answered" | "failed" | "reply" | "note";
+
+export interface TeamHarness {
+  harness: string;
+  role: TeamRole;
+  agents_max: number;
+  tools: boolean;
+  live: number;
+  delegation: "reply" | "unavailable" | null;
+  delegation_label: string | null;
+  runnable: boolean;
+}
+
+export interface TeamAgent {
+  id: number;
+  role: TeamRole;
+  harness: string;
+  tools: boolean;
+  account: string | null;
+  worktree: string | null;
+  status: TeamAgentStatus;
+  status_label: string;
+  task: number | null;
+  turns: number;
+  problem: string | null;
+  process_group: number | null;
+  created_ms: number;
+  heartbeat_ms: number;
+  stopped_ms: number | null;
+}
+
+export interface TeamTask {
+  id: number;
+  source: "master" | "owner";
+  harness: string;
+  tools: boolean;
+  prompt: string;
+  status: TeamTaskStatus;
+  status_label: string;
+  agent: number | null;
+  attempts: number;
+  result: string | null;
+  problem: string | null;
+  delivered: boolean;
+  output_bytes: number;
+  created_ms: number;
+  started_ms: number | null;
+  finished_ms: number | null;
+}
+
+export interface TeamMessage {
+  id: number;
+  author: TeamMessageAuthor;
+  text: string;
+  state: TeamMessageState;
+  created_ms: number;
+}
+
+export interface TeamStatus {
+  project_id: string;
+  keep_warm: boolean;
+  min_agents: number;
+  max_agents: number;
+  harnesses: TeamHarness[];
+  agents: TeamAgent[];
+  tasks: TeamTask[];
+  messages: TeamMessage[];
+}
+
+export function teamStatus(id: string): Promise<TeamStatus> {
+  return invoke<TeamStatus>("desktop_team_status", { id });
+}
+
+export function teamMessage(id: string, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_message", { id, text, generation });
+}
+
+export function teamDelegate(
+  id: string,
+  harness: string | null,
+  prompt: string,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_delegate", { id, harness, prompt, generation });
+}
+
+export function teamCancel(id: string, task: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_cancel", { id, task, generation });
+}
+
+export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
 export function openProject(id: string): Promise<ProjectDetail> {
   return invoke<ProjectDetail>("desktop_open_project", { id });
 }

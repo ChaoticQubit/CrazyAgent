@@ -28,6 +28,7 @@ mod owner_setup;
 mod plugins;
 pub mod open;
 pub mod picker;
+mod team;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -457,6 +458,9 @@ impl NativeBridge {
             }
             OwnerMutation::DeleteProjectContext { project_id, .. } => {
                 ("project_context_delete", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::Team { action } => {
+                ("team", Some(action.project().as_str().to_owned()), None)
             }
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },

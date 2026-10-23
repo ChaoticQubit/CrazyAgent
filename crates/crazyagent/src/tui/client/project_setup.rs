@@ -110,6 +110,15 @@ impl NativeOwner {
                         .map_err(problem)?,
                 )?),
             }),
+            SetupQuery::Team { project } => SetupView::Team(Box::new(
+                controller.team_status(project).await.map_err(problem)?,
+            )),
+            SetupQuery::TeamChange { action, generation } => changed(
+                controller
+                    .team_action(action, generation)
+                    .await
+                    .map_err(problem)?,
+            )?,
             SetupQuery::Change { action, generation } => {
                 let response = match action {
                     SetupAction::Create { .. } => {
@@ -402,6 +411,51 @@ mod tests {
             app.request_setup_change(SetupAction::DeleteContext {
                 project_id: project.clone(),
                 path: "../engine.db".into(),
+            })
+            .is_err()
+        );
+
+        app.request_team_change(crate::team::TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the notes app.".into(),
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        let Some((SetupQuery::TeamChange { .. }, SetupView::Changed(result))) = &app.setup_view
+        else {
+            panic!("team change view required: {:?}", app.setup_problem);
+        };
+        assert_eq!(result, &crate::engine::owner::OwnerResult::Applied);
+        app.request_project_setup(SetupQuery::Team {
+            project: project.clone(),
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        let Some((SetupQuery::Team { .. }, SetupView::Team(team))) = &app.setup_view else {
+            panic!("team view required");
+        };
+        assert_eq!(team.project_id, project);
+        assert_eq!(team.harnesses[0].role, crate::team::AgentRole::Master);
+        assert_eq!(team.harnesses[0].harness, "codex");
+        assert_eq!(
+            team.messages
+                .iter()
+                .map(|m| (m.author, m.state, m.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                crate::team::MessageAuthor::Owner,
+                crate::team::MessageState::Pending,
+                "Plan the notes app."
+            )]
+        );
+        assert!(
+            app.request_team_change(crate::team::TeamAction::Message {
+                project_id: project.clone(),
+                text: " ".into(),
             })
             .is_err()
         );
