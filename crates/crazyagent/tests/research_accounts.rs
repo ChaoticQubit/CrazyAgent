@@ -1,12 +1,11 @@
 mod research_support;
 
-use crazyagent::config::ModelAccess;
+use crazyagent::config::{ModelAccess, ModelAuthentication, ModelConnection};
 use crazyagent::protocol::CredentialRef;
 use crazyagent::research::accounts::{AccountPick, pick_account};
 use crazyagent::research::runner::ResearchAccount;
 use sha2::Digest;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
 const ACCESS: &str = r#"
 accounts = ["anthropic-local-account", "claude-account", "codex-account", "key-account", "local-account", "remote-account"]
@@ -33,13 +32,25 @@ fn access() -> ModelAccess {
     access
 }
 
-fn signed_in(reference: &CredentialRef) -> Option<PathBuf> {
-    matches!(reference.as_str(), "codex-profile" | "claude-profile")
-        .then(|| PathBuf::from("/private/managed").join(reference.as_str()))
+fn signed_in(connection: &ModelConnection) -> bool {
+    matches!(
+        &connection.auth,
+        ModelAuthentication::NativeManaged { profile_ref }
+            if matches!(profile_ref.as_str(), "codex-profile" | "claude-profile")
+    )
 }
 
-fn signed_out(_: &CredentialRef) -> Option<PathBuf> {
-    None
+fn signed_out(_: &ModelConnection) -> bool {
+    false
+}
+
+fn connection(access: &ModelAccess, id: &str) -> ModelConnection {
+    access
+        .connections
+        .iter()
+        .find(|connection| connection.id.as_str() == id)
+        .cloned()
+        .unwrap()
 }
 
 #[test]
@@ -63,7 +74,7 @@ fn a_mixed_pool_gives_codex_its_first_signed_in_managed_account() {
         AccountPick::Account {
             connection: CredentialRef::new("codex-connection").unwrap(),
             account: ResearchAccount::ManagedCodex {
-                home: PathBuf::from("/private/managed/codex-profile"),
+                connection: connection(&access, "codex-connection"),
                 model: None,
             },
         }
@@ -164,7 +175,7 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
         AccountPick::Account {
             connection: CredentialRef::new("claude-connection").unwrap(),
             account: ResearchAccount::ManagedClaude {
-                home: PathBuf::from("/private/managed/claude-profile"),
+                connection: connection(&access, "claude-connection"),
                 model: None,
             },
         }

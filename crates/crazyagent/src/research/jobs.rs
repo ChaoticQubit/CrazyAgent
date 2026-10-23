@@ -432,6 +432,23 @@ impl ResearchJobs {
         crate::launch_context::for_project(&self.connection, project)
     }
 
+    /// Proves a managed connection is signed in for the running engine, with
+    /// the check every master and team turn uses, on the engine database this
+    /// queue lives in. Returns the engine host and the sign-in, or a plain code
+    /// such as `native_profile_in_use` or `master_authentication_stale`.
+    pub(crate) fn managed_sign_in(
+        &self,
+        connection: &crate::config::ModelConnection,
+    ) -> Result<
+        (
+            crate::engine::owner::HostStamp,
+            crate::engine::owner::native_auth::NativeAuthFact,
+        ),
+        String,
+    > {
+        super::accounts::managed_sign_in(&self.connection, connection)
+    }
+
     /// One job by id.
     pub fn get(&self, id: i64) -> Result<Option<ResearchJob>, JobError> {
         Ok(self
