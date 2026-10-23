@@ -183,6 +183,10 @@ pub enum Command {
     ProjectSetup {
         action: crate::project_setup::SetupAction,
     },
+    #[serde(skip_deserializing)]
+    Team {
+        action: crate::team::TeamAction,
+    },
     ProposePlan {
         plan: crate::coordination::WorkPlan,
     },

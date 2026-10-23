@@ -1,0 +1,36 @@
+ CrazyAgent                                                                                          Engine not running 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+  CrazyAgent's engine isn't running                                                                                     
+                                                                                                                        
+  Projects, accounts and agents live in the engine.                                                                     
+  Start it, then press r to try again.                                                                                  
+                                                                                                                        
+  Looked for it at  ~/.crazyagent/engine.sock                                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ r Try again   c Copy details for support   Ctrl-Q Quit                                                          ? Help 

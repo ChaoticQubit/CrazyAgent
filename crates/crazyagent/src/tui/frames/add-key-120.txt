@@ -1,0 +1,36 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  OpenAI API                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
+──━━━━━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Use an API key                                                                                                        
+  OpenAI API                                                                                                            
+                                                                                                                        
+  Account name                                                                                                          
+  [ OpenAI API - billing                                         ]                                                      
+  API key                                            51 characters                                                      
+  [ •••••••••••••••••••••••••••••••••••••••••••••••••••█         ]                                                      
+  Stored in your macOS Keychain. Never shown again.                                                                     
+                                                                                                                        
+  [ Save key ]                                                                                                          
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Enter Save key   Ctrl-U Clear   Tab Next field   Esc Back                                                       ? Help 

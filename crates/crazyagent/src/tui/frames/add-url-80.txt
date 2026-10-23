@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Local model           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Connect a URL                                                                 
+  Local model                                                                   
+                                                                                
+  Account name                                                                  
+  [ Ollama on this Mac                                           ]              
+  Server URL                                                                    
+  [ http://127.0.0.1:11434/v1                                    ]              
+  An OpenAI-compatible address. It usually ends in /v1.                         
+  API key                                                 Optional              
+  [ Leave empty if the server has no key                         ]              
+                                                                                
+  ✓ Connected. 3 models found                                                   
+  Default model                                                                 
+  > qwen2.5:0.5b                                                                
+    llama3.2:3b                                                                 
+    nomic-embed-text                                                            
+                                                                                
+  [ Save account ]                                                              
+                                                                                
+ ↑↓ Choose model  Tab Next  Enter Save account  Esc Back                 ? Help 

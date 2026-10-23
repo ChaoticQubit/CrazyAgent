@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Plugins and skills  /  Add MCP server              
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+────────────────────────────────────━━━━━━━━━━━━━━━━━━━━────────────────────────
+  Add MCP server                                                                
+  Agents can use it only after you approve it.                                  
+                                                                                
+  Name                                                                          
+  [ postgres-local                                               ]              
+  Type          (*) Command on this Mac   ( ) URL                               
+  Command and arguments                                                         
+  [ uvx mcp-server-postgres                                      ]              
+                                                                                
+  Secrets                                                 Optional              
+    DATABASE_URL      ✓ Key saved                                               
+  [ PGPASSWORD    ]  [ ••••••••••••••█         ]                                
+  Type the name, then the value. Values stay hidden.                            
+                                                                                
+  [ Add server ]                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Tab Next field  Enter Add secret  Ctrl-U Clear  Esc Cancel              ? Help 

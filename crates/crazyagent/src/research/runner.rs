@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
+static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -464,24 +465,7 @@ impl ResearchRunner {
         sandbox.install(&profile)?;
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
-        fs::create_dir_all(root.join("worktrees"))?;
-        let mut git = sandbox.command(&profile, Path::new(GIT));
-        git.args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-        ])
-        .arg(&worktree)
-        .arg("HEAD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
-            return Err(RunError::Invalid("git worktree add failed".into()));
-        }
+        add_worktree(&sandbox, &profile, &worktree)?;
         drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
@@ -625,7 +609,7 @@ impl ResearchRunner {
     }
 }
 
-fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
+pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
             Ok(SandboxRemote::AnyHost(443))
@@ -811,7 +795,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+/// Makes the project folder a git repository with one empty start commit and
+/// worktrees/ and context/ excluded, once per process at a time.
+/// Takes the project folder and a private temporary home for git.
+pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if root.join(".git").is_dir() {
         return Ok(());
     }
@@ -856,6 +846,43 @@ fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(info.join("exclude"))?;
     exclude.write_all(b"/worktrees/\n/context/\n")?;
+    Ok(())
+}
+
+/// Adds a detached git worktree at `worktree` inside the sandbox's project
+/// folder, running git under the installed profile with hooks disabled.
+/// Takes the sandbox, its installed profile and the new worktree path.
+pub(crate) fn add_worktree(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let worktrees = sandbox.project_root().join("worktrees");
+    if worktree.parent() != Some(worktrees.as_path()) {
+        return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
+    }
+    fs::create_dir_all(&worktrees)?;
+    let mut git = sandbox.command(profile, Path::new(GIT));
+    git.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+    ])
+    .arg(worktree)
+    .arg("HEAD")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
+        return Err(RunError::Invalid("git worktree add failed".into()));
+    }
+    assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
 }
 

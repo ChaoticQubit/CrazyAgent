@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  OpenRouter - shared                   
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  OpenRouter - shared                                              ✓ Key saved  
+                                                                                
+  Provider       ⇄ OpenRouter                                                   
+  Sign-in        API key                                                        
+  Key            ✓ Key saved  in your macOS Keychain                            
+  Model          anthropic/claude-sonnet-4.5                                    
+  Pools          Main                                                           
+  Used by        Tidepool, Ledgerline                                           
+  Last checked   Today 10:40                                                    
+                                                                                
+  [ Replace key ]   [> Rename ]   [ Remove ]                                    
+                                                                                
+  i  Technical details                                                          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ←→ Choose  Enter Select  i Technical details  Esc Back                  ? Help 

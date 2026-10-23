@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home                                                                                   2 agents running 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Projects  3                                                                                        Most recent first  
+                                                                                                                        
+  ▌ Tidepool                                                                                          2 agents running  
+  ▌ Live dashboard for marine sensor buoys.  Website                                                                    
+  ▌ Research: 2 done, 1 running   Pool: Main                                                         Updated 4 min ago  
+                                                                                                                        
+    Ledgerline                                                                                                    Idle  
+    Invoicing for small design studios.  Website, Desktop app                                                           
+    Research: 3 done   Pool: Main                                                                    Updated yesterday  
+                                                                                                                        
+    Fieldnotes Mobile                                                                                   ! Needs a pool  
+    Offline field notes for ecologists.  Mobile app                                                                     
+    Research: needs a pool   Pool: none                                                                 Updated Oct 19  
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ n New project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit                                 ? Help 

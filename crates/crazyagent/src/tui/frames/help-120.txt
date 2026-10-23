@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home                                                                                   2 agents running 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Projects  3                                                                                        Most recent first  
+                                                                                                                        
+  ▌ Tidepool                                                                                          2 agents running  
+  ▌ Live dashboard for marine sensor buoys.  Website                                                                    
+  ▌ Research: 2 done, 1 running   Pool: Main                                                         Updated 4 min ago  
+                                                                                                                        
+    Ledgerline         ┌─ Keys ─────────────────────────────────────────────────────────────────┐                 Idle  
+    Invoicing for small│ Everywhere                          Lists                              │                       
+    Research: 3 done   │ Ctrl-K     Go to anything           ↑↓        Move                     │    Updated yesterday  
+                       │ Esc        Back or cancel           PgUp PgDn Page                     │                       
+    Fieldnotes Mobile  │ Tab        Next field or panel      Home End  First, last              │       ! Needs a pool  
+    Offline field notes│ Shift-Tab  Previous                 /         Filter                   │                       
+    Research: needs a p│ Shift-←→   Next tab                 Space     Select                   │       Updated Oct 19  
+                       │ ?          This help                Enter     Open                     │                       
+                       │ Ctrl-Q     Quit                                                        │                       
+                       │                                                                        │                       
+                       │ Text fields                         This screen                        │                       
+                       │ ←→         Move the cursor          n         New project              │                       
+                       │ Ctrl-A E   Start, end               s         Settings                 │                       
+                       │ Ctrl-W     Delete a word            Enter     Open project             │                       
+                       │ Ctrl-U     Clear the field                                             │                       
+                       │ Ctrl-J     New line                                                    │                       
+                       │                                                                        │                       
+                       │ Letter keys work when you are not typing in a field.                   │                       
+                       └────────────────────────────────────────────────────────────────────────┘                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Esc Close   ? Close                                                                                             ? Help 

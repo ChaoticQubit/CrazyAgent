@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts                                           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts                                                                      
+                                                                                
+  No accounts yet.                                                              
+  An account lets agents use a model: a ChatGPT or Claude subscription, an API  
+  key, or a model at a URL. Add as many as you like.                            
+                                                                                
+  [> Add account ]                                                              
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter Add account  Shift-←→ Sections  Esc Home                          ? Help 

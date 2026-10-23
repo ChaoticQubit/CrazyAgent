@@ -1,0 +1,36 @@
+ CrazyAgent  /  Settings  /  Plugins and skills                                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
+────────────────────────────────────────────────────━━━━━━━━━━━━━━━━━━━━────────────────────────────────────────────────
+  Plugins and skills                                                                                 For every project  
+  Skills teach agents how to do a task. MCP servers give agents new tools. A project can add its own in its settings.   
+                                                                                                                        
+  Skills  4                                                                                                             
+  > frontend-design         On     ~/Skills/frontend-design                                                             
+    tiger-style             On     ~/Skills/tiger-style                                                                 
+    linear-method           Off    ~/Skills/linear-method                                                               
+    release-notes           On     ~/Skills/release-notes                                                               
+                                                                                                                        
+  MCP servers  3                                                                                                        
+    github                  ✓ Approved              npx @modelcontextprotocol/server-github                             
+    postgres-local          ! Needs approval        uvx mcp-server-postgres                                             
+    figma                   ✗ Can't start           https://mcp.figma.com/mcp                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ a Add skill   m Add MCP server   Space On or off   Enter Details   Shift-←→ Sections   Esc Home                 ? Help 
