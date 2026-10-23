@@ -400,6 +400,12 @@ impl Screen for PoolEditor {
         }
     }
 
+    fn shown(&mut self, ctx: &mut Ctx) {
+        if ctx.store.accounts.ready().is_none() {
+            crate::tui::screens::settings_accounts::load_accounts(ctx);
+        }
+    }
+
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
             Arrival::PoolEdited(result) if self.saving => {

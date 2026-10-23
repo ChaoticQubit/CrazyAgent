@@ -1,5 +1,6 @@
 use super::accounts::{AccountsReply, AccountsRequest};
 use super::*;
+use crate::accounts::AccountView;
 use crate::config::ModelAccessEdit;
 use crate::engine::EngineError;
 use crate::engine::owner::{
@@ -12,12 +13,17 @@ use crate::protocol::CredentialRef;
 
 const POOL_JOINS_MAX: usize = 64;
 const DISPLAY_BYTES_MAX: usize = 4096;
+/// Accounts read per engine page when every account is loaded.
+pub(in crate::tui) const ACCOUNTS_PAGE: u16 = 200;
+/// Most accounts one full load returns; the rest stay in the engine.
+pub(in crate::tui) const ACCOUNTS_LOADED_MAX: usize = 5000;
 
 /// One Settings request the settings screens send through the shell.
 /// Input: built by the Accounts, Add account, Harnesses and Memory screens.
 /// Output: run on the owner worker; the reply arrives as `OwnerEvent::Settings`.
 pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
+    AllAccounts,
     Harnesses,
     SignIn(SignInJob),
     JoinPools {
@@ -39,6 +45,7 @@ impl std::fmt::Debug for SettingsJob {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Accounts(_) => "Accounts",
+            Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
@@ -114,6 +121,7 @@ impl std::fmt::Debug for SignInView {
 /// Input: produced on the owner worker. Output: read by the settings screens.
 pub(in crate::tui) enum SettingsEvent {
     Accounts(Result<AccountsReply, String>),
+    AllAccounts(Result<Vec<AccountView>, String>),
     Harnesses(Result<Vec<HarnessEntry>, String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
@@ -131,6 +139,7 @@ impl SettingsEvent {
         let problem = "trusted_connection_unavailable".to_owned();
         match job {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
+            SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
@@ -229,6 +238,7 @@ impl NativeOwner {
     async fn settings_event(&mut self, job: SettingsJob, lost: &mut bool) -> SettingsEvent {
         match job {
             SettingsJob::Accounts(request) => SettingsEvent::Accounts(self.accounts(request).await.result),
+            SettingsJob::AllAccounts => SettingsEvent::AllAccounts(self.all_accounts(ACCOUNTS_PAGE, lost).await),
             SettingsJob::Harnesses => SettingsEvent::Harnesses(match self.settings_controller() {
                 Ok(controller) => controller.harness_catalog().await.map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
@@ -267,6 +277,34 @@ impl NativeOwner {
                 Err(error) => Err(error),
             }),
         }
+    }
+
+    /// Reads every account page by page, stopping at the load limit.
+    /// Inputs: the page size and the lost-connection flag. Output: the
+    /// accounts in engine order, or the plain problem code.
+    pub(super) async fn all_accounts(&mut self, page: u16, lost: &mut bool) -> Result<Vec<AccountView>, String> {
+        assert!(page > 0);
+        let mut accounts: Vec<AccountView> = Vec::new();
+        let mut after = None;
+        let pages_max = ACCOUNTS_LOADED_MAX.div_ceil(usize::from(page)) + 1;
+        for _ in 0..pages_max {
+            let read = match self.accounts(AccountsRequest::List { after, limit: page }).await.result {
+                Ok(AccountsReply::Page(read)) => read,
+                Ok(_) => return Err("account_reply_unexpected".into()),
+                Err(code) => {
+                    *lost |= connection_lost(&code);
+                    return Err(code);
+                }
+            };
+            let room = ACCOUNTS_LOADED_MAX - accounts.len();
+            accounts.extend(read.accounts.into_iter().take(room));
+            assert!(accounts.len() <= ACCOUNTS_LOADED_MAX);
+            match read.next {
+                Some(next) if accounts.len() < ACCOUNTS_LOADED_MAX => after = Some(next),
+                _ => return Ok(accounts),
+            }
+        }
+        Err("account_pages_unbounded".into())
     }
 
     fn settings_controller(&mut self) -> Result<&mut OwnerController, String> {
@@ -417,7 +455,7 @@ impl NativeOwner {
                 joined += 1;
                 continue;
             }
-            if pool.members.len() >= crate::tui::screens::settings::pools::POOL_MEMBERS_MAX {
+            if pool.members.len() >= crate::config::POOL_MEMBERS_MAX {
                 return Err("pool_member_limit".into());
             }
             pool.members.push(account.clone());
@@ -447,8 +485,12 @@ fn fresh_id() -> Result<RequestId, String> {
     RequestId::new(id).map_err(|_| "native_auth_request_id_invalid".to_owned())
 }
 
+fn connection_lost(code: &str) -> bool {
+    code == "controller_disconnected" || code.contains("transport")
+}
+
 fn problem(error: &EngineError, lost: &mut bool) -> String {
-    if error.0 == "controller_disconnected" || error.0.contains("transport") {
+    if connection_lost(&error.0) {
         *lost = true;
     }
     bounded_problem(&error.0)

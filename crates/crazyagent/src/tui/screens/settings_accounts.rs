@@ -9,7 +9,7 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::glyphs::Glyphs;
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{AccountRow, Arrival, Request};
 use crate::tui::text::{cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, with_bar, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons};
@@ -18,10 +18,6 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
-/// Accounts read per engine page.
-pub const ACCOUNTS_PAGE: u16 = 200;
-/// Most accounts the list loads; the rest stay in the engine.
-pub const ACCOUNTS_LOADED_MAX: usize = 5000;
 const FILTER_CHARS_MAX: usize = 96;
 const NAME_CHARS_MAX: usize = crate::accounts::ACCOUNT_NAME_MAX;
 const CHROME_ROWS: usize = 6;
@@ -120,6 +116,41 @@ pub fn sorted<'a>(accounts: &'a [AccountView], ctx: &Ctx) -> Vec<&'a AccountView
     rows
 }
 
+/// One account as the shared lists show it.
+/// Input: the account. Output: the row with the plain provider and status words.
+pub fn account_row(account: &AccountView) -> AccountRow {
+    AccountRow {
+        id: account.id.clone(),
+        name: account.name.clone(),
+        provider: provider_word(account.provider).into(),
+        status: account.status_label.clone(),
+    }
+}
+
+/// Asks the engine for every account; the store shows Loading until the
+/// first reply and keeps old rows during a refresh.
+/// Input: the context. Output: none.
+pub fn load_accounts(ctx: &mut Ctx) {
+    if ctx.store.accounts.ready().is_none() {
+        ctx.store.accounts = Load::Loading;
+    }
+    send(ctx, SettingsJob::AllAccounts);
+}
+
+/// Keeps the shared account rows in step with a full account load.
+/// Inputs: the arrival and the context. Output: none.
+pub fn keep_rows(arrival: &Arrival, ctx: &mut Ctx) {
+    match settings_event(arrival) {
+        Some(SettingsEvent::AllAccounts(Ok(accounts))) => {
+            ctx.store.accounts = Load::Ready(accounts.iter().map(account_row).collect());
+        }
+        Some(SettingsEvent::AllAccounts(Err(code))) if ctx.store.accounts.ready().is_none() => {
+            ctx.store.accounts = Load::Failed(code.clone());
+        }
+        _ => {}
+    }
+}
+
 fn matches_filter(account: &AccountView, words: &[String], ctx: &Ctx) -> bool {
     let haystack = format!(
         "{} {} {} {}",
@@ -132,21 +163,14 @@ fn matches_filter(account: &AccountView, words: &[String], ctx: &Ctx) -> bool {
     words.iter().all(|word| haystack.contains(word.as_str()))
 }
 
-enum Loading {
-    Idle,
-    First,
-    After,
-}
-
 /// Settings, Accounts: every account with provider, sign-in, status and pools,
 /// built for hundreds of rows.
 /// Input: keys and account pages from the engine. Output: the account table,
 /// the empty state, or the error with the key to try again.
 pub struct Accounts {
     accounts: Vec<AccountView>,
-    incoming: Vec<AccountView>,
     load: Load<()>,
-    loading: Loading,
+    waiting: bool,
     selected: usize,
     offset: usize,
     filter: TextField,
@@ -167,9 +191,8 @@ impl Accounts {
     pub fn new() -> Self {
         Self {
             accounts: Vec::new(),
-            incoming: Vec::new(),
             load: Load::Idle,
-            loading: Loading::Idle,
+            waiting: false,
             selected: 0,
             offset: 0,
             filter: TextField::new("Filter", FILTER_CHARS_MAX),
@@ -189,51 +212,23 @@ impl Accounts {
     }
 
     fn reload(&mut self, ctx: &mut Ctx) {
-        if !matches!(self.loading, Loading::Idle) {
+        if self.waiting {
             return;
         }
         if matches!(self.load, Load::Idle | Load::Failed(_)) {
             self.load = Load::Loading;
         }
-        self.incoming.clear();
-        self.loading = Loading::First;
-        send(
-            ctx,
-            SettingsJob::Accounts(AccountsRequest::List {
-                after: None,
-                limit: ACCOUNTS_PAGE,
-            }),
-        );
+        self.waiting = true;
+        load_accounts(ctx);
     }
 
-    fn page(&mut self, accounts: &[AccountView], next: Option<&CredentialRef>, ctx: &mut Ctx) {
-        let room = ACCOUNTS_LOADED_MAX.saturating_sub(self.incoming.len());
-        self.incoming.extend(accounts.iter().take(room).cloned());
-        match next {
-            Some(after) if self.incoming.len() < ACCOUNTS_LOADED_MAX => {
-                self.loading = Loading::After;
-                send(
-                    ctx,
-                    SettingsJob::Accounts(AccountsRequest::List {
-                        after: Some(after.clone()),
-                        limit: ACCOUNTS_PAGE,
-                    }),
-                );
-            }
-            _ => {
-                self.loading = Loading::Idle;
-                self.accounts = std::mem::take(&mut self.incoming);
-                self.load = Load::Ready(());
-                if next.is_none() {
-                    ctx.store.accounts = Load::Ready(self.accounts.len());
-                }
-                let shown = self.visible(ctx).len();
-                self.selected = self.selected.min(shown.saturating_sub(1));
-                self.marked
-                    .retain(|id| self.accounts.iter().any(|account| &account.id == id));
-            }
-        }
-        assert!(self.incoming.len() <= ACCOUNTS_LOADED_MAX);
+    fn loaded(&mut self, accounts: &[AccountView], ctx: &Ctx) {
+        self.accounts = accounts.to_vec();
+        self.load = Load::Ready(());
+        let shown = self.visible(ctx).len();
+        self.selected = self.selected.min(shown.saturating_sub(1));
+        self.marked
+            .retain(|id| accounts.iter().any(|account| &account.id == id));
     }
 
     fn words(&self) -> Vec<String> {
@@ -593,24 +588,15 @@ impl Screen for Accounts {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
-        let Some(SettingsEvent::Accounts(result)) = settings_event(arrival) else {
+        let Some(SettingsEvent::AllAccounts(result)) = settings_event(arrival) else {
             return Flow::Handled;
         };
-        if matches!(self.loading, Loading::Idle) {
-            return Flow::Handled;
-        }
+        let asked = std::mem::take(&mut self.waiting);
         match result {
-            Ok(AccountsReply::Page(page)) => self.page(&page.accounts, page.next.as_ref(), ctx),
-            Ok(_) => {}
-            Err(code) => {
-                self.loading = Loading::Idle;
-                self.incoming.clear();
-                if self.accounts.is_empty() {
-                    self.load = Load::Failed(code.clone());
-                } else {
-                    ctx.say(Message::error("Could not refresh accounts.", plain(code)));
-                }
-            }
+            Ok(accounts) => self.loaded(accounts, ctx),
+            Err(code) if self.accounts.is_empty() => self.load = Load::Failed(code.clone()),
+            Err(code) if asked => ctx.say(Message::error("Could not refresh accounts.", plain(code))),
+            Err(_) => {}
         }
         Flow::Handled
     }

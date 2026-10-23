@@ -179,7 +179,7 @@ fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary>) {
 
 fn list_ctx(width: u16, height: u16, pools: Vec<PoolSummary>) -> Ctx {
     let mut ctx = ctx(width, height);
-    ctx.store.accounts = Load::Ready(240);
+    ctx.store.accounts = Load::Ready(dataset(None).0.iter().map(account_row).collect());
     ctx.store.pools = Load::Ready(pools);
     ctx.store.projects = Load::Ready(Vec::new());
     ctx.store.memory = Load::Ready(41);
@@ -261,27 +261,31 @@ fn list_keys_open_add_account_details_and_selection() {
 }
 
 #[test]
-fn a_page_reply_loads_the_next_page_until_the_engine_has_no_more() {
+fn a_full_load_fills_the_list_and_the_shared_rows() {
     let (accounts, pools) = dataset(None);
-    let mut ctx = list_ctx(80, 24, pools);
-    ctx.store.accounts = Load::NotReady;
+    let mut shell = Shell::with(list_ctx(80, 24, pools), Box::new(Accounts::new()));
+    shell.ctx.store.accounts = Load::NotReady;
     let mut screen = Accounts::new();
-    screen.shown(&mut ctx);
-    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
-    let page = |accounts: &[AccountView], next: Option<CredentialRef>| {
-        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::Accounts(Ok(
-            AccountsReply::Page(crate::engine::owner::AccountPage {
-                accounts: accounts.to_vec(),
-                next,
-            }),
-        ))))))
+    screen.shown(&mut shell.ctx);
+    assert_eq!(shell.ctx.store.accounts, Load::Loading);
+    assert!(screen.busy(&shell.ctx));
+    let loaded = |result: Result<Vec<AccountView>, String>| {
+        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::AllAccounts(result)))))
     };
-    screen.arrive(&page(&accounts[..200], Some(accounts[199].id.clone())), &mut ctx);
-    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
-    assert!(screen.accounts.is_empty(), "a partial load keeps the old rows");
-    screen.arrive(&page(&accounts[200..], None), &mut ctx);
+    shell.arrive(loaded(Ok(accounts.clone())));
+    screen.arrive(&loaded(Ok(accounts.clone())), &mut shell.ctx);
     assert_eq!(screen.accounts.len(), 240);
-    assert_eq!(ctx.store.accounts, Load::Ready(240));
+    assert!(!screen.busy(&shell.ctx));
+    let rows = shell.ctx.store.accounts.ready().unwrap();
+    assert_eq!(rows.len(), 240);
+    assert_eq!(rows[2].provider, "Local model");
+    assert_eq!(rows[2].status, "Can't reach this URL");
+    screen.shown(&mut shell.ctx);
+    screen.arrive(&loaded(Err("controller_pending_intent".into())), &mut shell.ctx);
+    shell.arrive(loaded(Err("controller_pending_intent".into())));
+    assert_eq!(screen.accounts.len(), 240, "a failed refresh keeps the rows");
+    assert_eq!(shell.ctx.store.accounts.ready().map(Vec::len), Some(240));
+    assert_eq!(shell.ctx.message().unwrap().lead, "Could not refresh accounts.");
 }
 
 #[test]

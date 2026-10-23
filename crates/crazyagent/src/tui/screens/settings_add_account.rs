@@ -1,5 +1,5 @@
 use super::settings::draw_page;
-use super::settings::pools::POOL_MEMBERS_MAX;
+use crate::config::POOL_MEMBERS_MAX;
 use super::settings_accounts::{Accounts, plain, provider_cell, provider_word, send, settings_event};
 use super::{Flow, Screen, SettingsSection};
 use crate::accounts::{AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry, SignInMethod};
