@@ -20,6 +20,7 @@ fn stored(folder: &Path) -> StoredSetup {
         documents: vec![],
         folder: folder.display().to_string(),
         created_ms: 1,
+        revision: 1,
     }
 }
 

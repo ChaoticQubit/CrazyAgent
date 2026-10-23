@@ -140,6 +140,23 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         path: String,
     },
+    UpdateProjectSetup {
+        project_id: ProjectId,
+        expected_revision: u64,
+        name: Option<String>,
+        setup: crate::project_setup::ProjectSetup,
+    },
+    RemoveProject {
+        project_id: ProjectId,
+    },
+    CancelResearch {
+        project_id: ProjectId,
+        job: i64,
+    },
+    RetryResearch {
+        project_id: ProjectId,
+        job: i64,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -248,6 +265,42 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::DeleteContext {
                     project_id: project_id.clone(),
                     path: path.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::UpdateProjectSetup {
+                project_id,
+                expected_revision,
+                name,
+                setup,
+            } => {
+                let action = crate::project_setup::SetupAction::Update {
+                    project_id: project_id.clone(),
+                    expected_revision: *expected_revision,
+                    name: name.clone(),
+                    setup: setup.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::RemoveProject { project_id } => Command::ProjectSetup {
+                action: crate::project_setup::SetupAction::Remove {
+                    project_id: project_id.clone(),
+                },
+            },
+            Self::CancelResearch { project_id, job } => {
+                let action = crate::project_setup::SetupAction::CancelResearch {
+                    project_id: project_id.clone(),
+                    job: *job,
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::RetryResearch { project_id, job } => {
+                let action = crate::project_setup::SetupAction::RetryResearch {
+                    project_id: project_id.clone(),
+                    job: *job,
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -418,6 +471,10 @@ pub enum OwnerRead {
         path: String,
         offset: u64,
     },
+    ResearchLog {
+        project_id: ProjectId,
+        job: i64,
+    },
     OwnerProfile,
     Memories {
         scope: crate::memory::library::MemoryScope,
@@ -508,6 +565,12 @@ impl OwnerRead {
             Self::ProjectContextItem { path, .. } => {
                 if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
                     return Err(failure("context_path_invalid"));
+                }
+                return Ok(None);
+            }
+            Self::ResearchLog { job, .. } => {
+                if *job <= 0 {
+                    return Err(failure("research_job_missing"));
                 }
                 return Ok(None);
             }
@@ -814,6 +877,11 @@ pub enum OwnerData {
     },
     ProjectContextItem {
         chunk: crate::project_setup::ContextChunk,
+    },
+    ResearchLog {
+        project_id: ProjectId,
+        job: i64,
+        lines: Vec<String>,
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
