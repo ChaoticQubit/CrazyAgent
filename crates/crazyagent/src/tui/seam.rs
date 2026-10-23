@@ -25,10 +25,6 @@ pub enum PoolChange {
     Remove {
         id: CredentialRef,
     },
-    #[allow(
-        dead_code,
-        reason = "used by the Project screens on feat/v1-tui-projects; drop after integration"
-    )]
     Assign {
         pool: CredentialRef,
         project: ProjectId,

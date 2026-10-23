@@ -1,4 +1,5 @@
 pub mod app;
+mod brand;
 mod client;
 mod clock;
 mod ctx;
