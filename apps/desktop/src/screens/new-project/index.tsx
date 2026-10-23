@@ -240,7 +240,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
               <button type="button" aria-label={`Remove ${item}`} onClick={() => setDraft({ ...draft, stack: removeStack(draft.stack, item) })}>{"×"}</button></span>)}</div>}
             <div className="pj-row">
               <label className="pj-sr" htmlFor="np-stack-search">Search or add a tech stack item</label>
-              <input className="pj-input" id="np-stack-search" value={stackQuery} aria-describedby="np-stack-help" onChange={(event) => { setStackQuery(event.target.value); setStackError(""); }}
+              <input className="pj-input" id="np-stack-search" value={stackQuery} placeholder="Search, or type your own and press Enter" aria-describedby="np-stack-help" onChange={(event) => { setStackQuery(event.target.value); setStackError(""); }}
                 onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); const result = addStack(draft.stack, stackQuery); setStackError(result.error ?? ""); if (!result.error) { setDraft({ ...draft, stack: result.stack }); setStackQuery(""); } } }} />
               <button type="button" className="btn" disabled={!stackQuery.trim()} onClick={() => { const result = addStack(draft.stack, stackQuery); setStackError(result.error ?? ""); if (!result.error) { setDraft({ ...draft, stack: result.stack }); setStackQuery(""); } }}>Add custom</button>
             </div>
