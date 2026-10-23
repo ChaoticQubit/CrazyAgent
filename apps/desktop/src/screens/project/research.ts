@@ -1,6 +1,7 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
+import type { HarnessEntry } from "../../api";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
@@ -148,6 +149,14 @@ export function nearBottom(box: { scrollHeight: number; scrollTop: number; clien
  * Input: the turns. Output: the newest unsettled turn, or null. */
 export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
   return turns.filter((turn) => !turnSettled(turn)).reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
+}
+
+/** The Conversation line when the master's harness is not installed on this Mac.
+ * Inputs: the harness catalog, or null while it is not ready, and the master's harness id.
+ * Output: the line, or null when the harness is installed or unknown. */
+export function masterMissingLine(harnesses: HarnessEntry[] | null, master: string): string | null {
+  const entry = harnesses?.find((harness) => harness.id === master);
+  return entry?.status.kind === "not_installed" ? `${entry.name} isn't installed on this Mac.` : null;
 }
 
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);

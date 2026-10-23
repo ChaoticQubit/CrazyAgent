@@ -6,10 +6,10 @@ import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { MarkdownView } from "./markdown";
-import { masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import type { Tone } from "../../ui";
+import { Menu, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
 const sentByProject = new Map<string, Record<number, string>>();
@@ -161,13 +161,16 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const latest = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0);
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
+  const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
 
   return <div className="pj-convo">
     <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
-        {active && <button type="button" className="btn" disabled={working} onClick={() => void end()}>End conversation</button>}
-        <button type="button" className="btn quiet" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></span>
+        <Menu label="Conversation actions" items={[
+          ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
+          { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
+        ]} /></span>
     </div>
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     <div className="pj-thread" ref={thread} aria-live="polite">
@@ -183,6 +186,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       {Object.entries(sent).filter(([ordinal]) => !turns.some((turn) => turn.ordinal === Number(ordinal))).map(([ordinal, message]) =>
         <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[Number(ordinal)], now)}</p></div>)}
     </div>
+    {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
+      <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
     {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${data.assigned.pool.id}` : ""} aren't signed in.</p>
