@@ -4,7 +4,7 @@ graphify-out
 .local-state/
 .serena/
 target/
-node_modules/
+node_modules
 dist/
 .DS_Store
 .env*
