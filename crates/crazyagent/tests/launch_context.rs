@@ -80,6 +80,18 @@ impl Case {
         launch_context::for_project(&connection, project).map_err(|problem| problem.0)
     }
 
+    fn master(&self, project: &ProjectId) -> Result<String, String> {
+        let connection = rusqlite::Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let tx = connection.unchecked_transaction().unwrap();
+        let text = launch_context::for_master(&tx, project).map_err(|problem| problem.0);
+        drop(tx);
+        text
+    }
+
     async fn close(mut self) {
         self.service.take().unwrap().shutdown().await.unwrap();
     }
@@ -406,6 +418,44 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
         assert!(!instructions.contains(secret));
         assert!(!format!("{context:?}").contains(secret));
     }
+
+    let master = case.master(&project).unwrap();
+    assert!(master.len() <= launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(
+        master.starts_with(&instructions),
+        "the master gets the same brief, context index and approved memories"
+    );
+    for named in [
+        "- Skill meal-tips: ",
+        "- Skill release-notes: ",
+        "- MCP server approved-tools\n",
+        "- MCP server remote-docs\n",
+    ] {
+        assert!(master.contains(named), "{named}");
+    }
+    for hidden in [
+        "waiting-tools",
+        "switched-off",
+        "other-only",
+        "/usr/bin/true",
+        "two words",
+        "mcp.example.invalid",
+        "API_TOKEN",
+        APPROVED_SECRET,
+        WAITING_SECRET,
+        HEADER_SECRET,
+        PENDING_MEMORY,
+        OTHER_NOTE,
+    ] {
+        assert!(!master.contains(hidden), "{hidden}");
+    }
+    let other_master = case.master(&other).unwrap();
+    assert!(other_master.contains("- Skill other-only: "));
+    assert!(other_master.contains("- MCP server approved-tools\n"));
+    assert!(!other_master.contains("meal-tips"));
+    assert!(!other_master.contains("remote-docs"));
+    assert!(!other_master.contains(KEPT_MEMORY));
+    assert!(other_master.contains(OTHER_NOTE));
 
     let agents = private_directory(&root.join("agents"));
     let codex_home = private_directory(&agents.join("codex-home"));

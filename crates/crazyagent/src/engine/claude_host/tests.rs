@@ -42,6 +42,7 @@ impl Directories {
             &self.project,
             &self.home,
             model,
+            None,
         )
     }
 }
@@ -147,21 +148,24 @@ fn claude_launch_rejects_relative_paths_and_shared_profile_home() {
         Path::new("claude"),
         &directories.project,
         &directories.home,
-        "claude-sonnet-4-6"
+        "claude-sonnet-4-6",
+        None
     )
     .is_err());
     assert!(launch_command(
         Path::new("/approved/claude"),
         Path::new("project"),
         &directories.home,
-        "claude-sonnet-4-6"
+        "claude-sonnet-4-6",
+        None
     )
     .is_err());
     assert!(launch_command(
         Path::new("/approved/claude"),
         &directories.project,
         Path::new("home"),
-        "claude-sonnet-4-6"
+        "claude-sonnet-4-6",
+        None
     )
     .is_err());
     fs::set_permissions(&directories.home, fs::Permissions::from_mode(0o755)).unwrap();
@@ -177,11 +181,66 @@ fn claude_launch_rejects_symlinked_profile_and_missing_project() {
         Path::new("/approved/claude"),
         &directories.project,
         &alias,
-        "claude-sonnet-4-6"
+        "claude-sonnet-4-6",
+        None
     )
     .is_err());
     fs::remove_dir(&directories.project).unwrap();
     assert!(directories.command("claude-sonnet-4-6").is_err());
+}
+
+#[test]
+fn claude_launch_appends_only_a_private_engine_instruction_file() {
+    let directories = Directories::new();
+    let plain_command = directories.command("native-default").unwrap();
+    let plain: Vec<_> = plain_command.get_args().collect();
+    assert!(!plain.contains(&OsStr::new("--append-system-prompt-file")));
+    let file = directories.root.join("instructions.md");
+    fs::write(&file, "# Project context from CrazyAgent\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let launch = |path: &Path| {
+        launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            Some(path),
+        )
+    };
+
+    let command = launch(file.as_path()).unwrap();
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args.len(), plain.len() + 2);
+    assert_eq!(&args[..plain.len()], &plain[..]);
+    assert_eq!(
+        &args[plain.len()..],
+        &[OsStr::new("--append-system-prompt-file"), file.as_os_str()]
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [OsStr::new("--tools"), OsStr::new("")])
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [OsStr::new("--max-turns"), OsStr::new("1")])
+    );
+
+    assert!(launch(Path::new("instructions.md")).is_err());
+    assert!(launch(directories.root.join("missing.md").as_path()).is_err());
+    let alias = directories.root.join("alias.md");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    assert!(launch(alias.as_path()).is_err());
+    let linked = directories.root.join("linked.md");
+    fs::hard_link(&file, &linked).unwrap();
+    assert!(launch(file.as_path()).is_err());
+    fs::remove_file(&linked).unwrap();
+    assert!(launch(file.as_path()).is_ok());
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(launch(file.as_path()).is_err());
+    let oversized = directories.root.join("oversized.md");
+    fs::write(&oversized, "x".repeat(64 * 1024 + 1)).unwrap();
+    fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(launch(oversized.as_path()).is_err());
 }
 
 #[test]
@@ -276,7 +335,7 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
         .acquire_use(&host, &binding, &turn, 1, NativeProfileUsePurpose::Execution)
         .unwrap();
     let home = profile.profile_path().unwrap();
-    let command = launch_command(&installed_claude(), &project, &home, "native-default").unwrap();
+    let command = launch_command(&installed_claude(), &project, &home, "native-default", None).unwrap();
     let mut claude = ClaudeHost::spawn(
         command,
         profile,
