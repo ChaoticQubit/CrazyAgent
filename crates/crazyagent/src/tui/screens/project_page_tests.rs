@@ -10,11 +10,12 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crate::tui::client::{Connection, OwnerEvent};
+use crate::tui::client::Connection;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request, ShellEvent, ShellRequest};
+use crate::tui::run::owner_arrival;
+use crate::tui::seam::{Request, ShellRequest};
 use crate::tui::shell::Shell;
 use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -63,21 +64,6 @@ fn member(id: &str, kind: MemberKind) -> PoolMember {
     }
 }
 
-fn arrival(event: OwnerEvent) -> Arrival {
-    match event {
-        OwnerEvent::Access { ready: true, .. } => Arrival::Connected,
-        OwnerEvent::Access { problem, .. } => Arrival::Disconnected(problem),
-        OwnerEvent::Shell(event) => match *event {
-            ShellEvent::Pools(result) => Arrival::Pools(result),
-            ShellEvent::Projects(result) => Arrival::Projects(result),
-            ShellEvent::Profile(result) => Arrival::Profile(result),
-            ShellEvent::ProfileSaved(result) => Arrival::ProfileSaved(result),
-            ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
-        },
-        other => Arrival::Owner(Box::new(other)),
-    }
-}
-
 async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -85,7 +71,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
     loop {
         let mut moved = false;
         while let Some(event) = connection.poll_owner().unwrap() {
-            shell.arrive(arrival(event));
+            shell.arrive(owner_arrival(event));
             moved = true;
         }
         if !connection.busy() && shell.ctx.link == crate::tui::ctx::Link::Ready {
@@ -96,9 +82,28 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         sent.push("pools");
                         connection.shell(ShellRequest::Pools).unwrap();
                     }
+                    Request::PoolProjects => {
+                        sent.push("pool projects");
+                        connection.shell(ShellRequest::PoolProjects).unwrap();
+                    }
                     Request::Projects => {
                         sent.push("projects");
                         connection.shell(ShellRequest::Projects).unwrap();
+                    }
+                    Request::EditPool { change } => {
+                        sent.push("edit pool");
+                        let generation = shell.ctx.next_generation();
+                        connection
+                            .shell(ShellRequest::EditPool { change, generation })
+                            .unwrap();
+                    }
+                    Request::Creation(job) => {
+                        sent.push("create");
+                        connection.creation(*job).unwrap();
+                    }
+                    Request::Master(job) => {
+                        sent.push("master");
+                        connection.master(*job).unwrap();
                     }
                     Request::Setup(query) => {
                         sent.push(match &query {
@@ -133,6 +138,21 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
     }
 }
 
+const SETTINGS: &str = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-1"]
+connections = [
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [
+  { id = "pool-a", name = "Main", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
+  { id = "pool-b", name = "Spare", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
+]
+"#;
+
 struct Engine {
     root: tempfile::TempDir,
     _service: EngineService,
@@ -147,12 +167,19 @@ impl Engine {
             .tempdir_in("/private/tmp")
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, SETTINGS).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let config =
-            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-        let service = EngineService::start(root.path(), "e.sock", &config, &stopped)
-            .await
-            .unwrap();
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
         let client = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
         let (_, controller) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
             .await
@@ -275,14 +302,27 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     );
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent, ["setup", "jobs", "context", "memories"]);
+    assert_eq!(
+        sent,
+        [
+            "pools",
+            "pool projects",
+            "setup",
+            "jobs",
+            "context",
+            "memories"
+        ]
+    );
     let shown = render(&mut shell, 80, 24);
     assert!(
         shown.contains("CrazyAgent  /  Home  /  Notes CLI"),
         "{shown}"
     );
     assert!(shown.contains("Notes CLI keeps notes."), "{shown}");
-    assert!(shown.contains("Not ready yet"), "{shown}");
+    assert!(
+        shown.contains("This project has no pool, so no agent can start."),
+        "{shown}"
+    );
 
     connection
         .project_setup(SetupQuery::Setup {
@@ -314,7 +354,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(
-        shown.contains("The master conversation is not ready yet in this window."),
+        shown.contains("This project has no pool, so the master cannot start."),
         "{shown}"
     );
     shell.key(Key::Char('h'));
@@ -323,11 +363,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         assert!(
             matches!(
                 request,
-                Request::Setup(
-                    SetupQuery::Jobs { .. }
-                        | SetupQuery::Context { .. }
-                        | SetupQuery::Memories { .. }
-                )
+                Request::Pools
+                    | Request::PoolProjects
+                    | Request::Setup(
+                        SetupQuery::Jobs { .. }
+                            | SetupQuery::Context { .. }
+                            | SetupQuery::Memories { .. }
+                    )
             ),
             "{request:?}"
         );
@@ -335,7 +377,51 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_opens_the_wizard_with_the_real_catalog_and_keeps_the_draft_on_create() {
+async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("No pool yet"), "{shown}");
+
+    shell.key(Key::Enter);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Pick a pool"), "{shown}");
+    assert!(shown.contains("( ) Main"), "{shown}");
+    assert!(shown.contains("( ) Spare"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    assert!(sent.contains(&"pool projects"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Spare is assigned."), "{shown}");
+    assert!(shown.contains("Spare   Enter Change"), "{shown}");
+
+    shell.key(Key::Enter);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("(*) Spare"), "{shown}");
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    assert!(shown.contains("Main   Enter Change"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     let engine = Engine::start().await;
     let mut connection = engine.connect();
     let mut ctx = ctx(80, 24);
@@ -343,7 +429,7 @@ async fn shell_opens_the_wizard_with_the_real_catalog_and_keeps_the_draft_on_cre
     let screen = open(&Place::NewProject, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent, ["pools", "catalog"]);
+    assert_eq!(sent, ["pools", "catalog", "catalog"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  About"), "{shown}");
     assert!(
@@ -367,16 +453,22 @@ async fn shell_opens_the_wizard_with_the_real_catalog_and_keeps_the_draft_on_cre
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Tidepool"), "{shown}");
+    assert!(shown.contains("Main"), "{shown}");
     shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(&sent[..2], ["create", "projects"], "{sent:?}");
+    assert!(sent.contains(&"edit pool"), "{sent:?}");
+    let Some(Place::Project { id, name, tab }) = shell.place() else {
+        panic!("the new project opens, got {:?}", shell.place());
+    };
+    assert_eq!((name.as_str(), tab), ("Tidepool", ProjectTab::Overview));
+    assert!(id.as_str().starts_with("project-"));
+    assert_eq!(kept_draft(), None);
+    pump(&mut shell, &mut connection).await;
     let shown = render(&mut shell, 80, 24);
-    assert!(
-        shown.contains("Creating projects is not ready yet."),
-        "{shown}"
-    );
-    assert!(shell.ctx.next_request().is_none());
-    shell.key(Key::Enter);
-    let shown = render(&mut shell, 80, 24);
-    assert!(shown.contains("Tidepool"), "{shown}");
+    assert!(shown.contains("Home  /  Tidepool"), "{shown}");
+    assert!(shown.contains("Main  1 account"), "{shown}");
+    assert!(!shown.contains("no pool"), "{shown}");
 }
 
 #[test]

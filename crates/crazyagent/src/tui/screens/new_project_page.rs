@@ -1,13 +1,18 @@
 use super::new_project::{Phase, PoolChoice, Reply, Wizard};
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
-use super::{Flow, Place, Screen, SettingsSection};
+use super::project_page::ProjectPage;
+use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
+use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
 use crate::pools::{MemberKind, PoolSummary};
-use crate::project_setup::{SetupQuery, SetupView};
-use crate::tui::client::OwnerEvent;
+use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
+use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::tui::client::{
+    CreationEvent, CreationJob, CreationSubmission, MutationDelivery, OwnerEvent,
+};
 use crate::tui::ctx::Ctx;
-use crate::tui::frame::{Hint, draw_lines, hint};
+use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{Arrival, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -142,6 +147,22 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
 pub(in crate::tui) struct NewProjectPage {
     wizard: Wizard,
     view: View,
+    creation: Option<Creation>,
+}
+
+struct Creation {
+    submission: CreationSubmission,
+    pool: Option<CredentialRef>,
+    recovered: bool,
+    assigning: bool,
+    finished: bool,
+}
+
+fn send_creation(submission: &CreationSubmission, delivery: MutationDelivery, ctx: &mut Ctx) {
+    ctx.request(Request::Creation(Box::new(CreationJob {
+        submission: submission.clone(),
+        delivery,
+    })));
 }
 
 impl NewProjectPage {
@@ -168,6 +189,7 @@ impl NewProjectPage {
         let mut page = Self {
             wizard,
             view: View::default(),
+            creation: None,
         };
         page.redraw(ctx);
         page
@@ -188,17 +210,141 @@ impl NewProjectPage {
         let flow = match reply {
             Reply::Ignored => Flow::Ignored,
             Reply::Handled => Flow::Handled,
-            Reply::Leave | Reply::Background => Flow::Back,
+            Reply::Leave => Flow::Back,
+            Reply::Background => Flow::Open(Place::Home),
             Reply::CreatePool => Flow::Open(Place::NewPool),
             Reply::CheckHarnesses => Flow::Open(Place::Settings(SettingsSection::Harnesses)),
-            Reply::Create(_) => {
-                self.wizard.failed("creation_not_ready");
+            Reply::Create(request) => {
+                let (spec, setup) = *request;
+                self.create(spec, setup, ctx);
                 Flow::Handled
             }
         };
         self.ask_catalog(ctx);
         self.redraw(ctx);
         flow
+    }
+
+    fn create(&mut self, spec: ProjectSpec, setup: ProjectSetup, ctx: &mut Ctx) {
+        assert!(self.creation.is_none());
+        let Some(identity) = ctx.identity.clone() else {
+            self.wizard.failed("trusted_connection_unavailable");
+            return;
+        };
+        let project_id = random_id()
+            .ok()
+            .and_then(|id| ProjectId::new(format!("project-{id}")).ok());
+        let Some(project_id) = project_id else {
+            self.wizard.failed("creation_not_ready");
+            return;
+        };
+        let pool = setup.pool.clone();
+        let submission = CreationSubmission {
+            identity,
+            generation: ctx.next_generation(),
+            navigation: 0,
+            project_id,
+            spec,
+            setup: Some(setup),
+        };
+        send_creation(&submission, MutationDelivery::Submit, ctx);
+        self.creation = Some(Creation {
+            submission,
+            pool,
+            recovered: false,
+            assigning: false,
+            finished: false,
+        });
+    }
+
+    fn created(&mut self, event: &CreationEvent, ctx: &mut Ctx) -> Flow {
+        let Some(creation) = self
+            .creation
+            .as_mut()
+            .filter(|creation| creation.submission == event.submission)
+        else {
+            return Flow::Handled;
+        };
+        let recover = event.retained && !creation.recovered;
+        let outcome = match &event.result {
+            Ok(response) => match response.as_ref() {
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+                    match &operation.result {
+                        OwnerResult::Applied => Ok(()),
+                        OwnerResult::Rejected { code } => Err(code.clone()),
+                        _ => Err("creation_outcome_unknown".to_owned()),
+                    }
+                }
+                OwnerResponse::NotRecordedAtBarrier { .. } if recover => {
+                    creation.recovered = true;
+                    send_creation(&creation.submission, MutationDelivery::Retry, ctx);
+                    return Flow::Handled;
+                }
+                OwnerResponse::OutcomeUnknown { .. } if recover => {
+                    creation.recovered = true;
+                    send_creation(&creation.submission, MutationDelivery::Reconcile, ctx);
+                    return Flow::Handled;
+                }
+                OwnerResponse::Rejected { code } => Err(code.clone()),
+                _ => Err("creation_outcome_unknown".to_owned()),
+            },
+            Err(_) if recover => {
+                creation.recovered = true;
+                send_creation(&creation.submission, MutationDelivery::Reconcile, ctx);
+                return Flow::Handled;
+            }
+            Err(problem) => Err(problem.clone()),
+        };
+        if let Err(code) = outcome {
+            self.creation = None;
+            self.wizard.failed(&code);
+            return Flow::Handled;
+        }
+        self.wizard.created();
+        ctx.request(Request::Projects);
+        match creation.pool.clone() {
+            Some(pool) => {
+                creation.assigning = true;
+                ctx.request(Request::EditPool {
+                    change: PoolChange::Assign {
+                        pool,
+                        project: creation.submission.project_id.clone(),
+                    },
+                });
+                Flow::Handled
+            }
+            None => self.finish(ctx),
+        }
+    }
+
+    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) -> Flow {
+        let Some(creation) = self.creation.as_mut().filter(|creation| creation.assigning) else {
+            return Flow::Handled;
+        };
+        creation.assigning = false;
+        match result {
+            Ok(()) => ctx.request(Request::PoolProjects),
+            Err(_) => ctx.say(Message::error(
+                "The project is made, but its pool is not assigned.",
+                "Open the project's Settings tab to assign it.",
+            )),
+        }
+        self.finish(ctx)
+    }
+
+    fn finish(&mut self, ctx: &mut Ctx) -> Flow {
+        let creation = self
+            .creation
+            .as_mut()
+            .expect("only a finished creation opens its project");
+        assert!(!creation.assigning);
+        creation.finished = true;
+        Flow::Replace(Box::new(ProjectPage::new(
+            creation.submission.project_id.clone(),
+            creation.submission.spec.name.clone(),
+            ProjectTab::Overview,
+            ctx,
+        )))
     }
 
     fn set_pools(&mut self, pools: &[PoolSummary]) {
@@ -237,6 +383,13 @@ impl Screen for NewProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self
+            .creation
+            .as_ref()
+            .is_some_and(|creation| creation.finished)
+        {
+            return self.finish(ctx);
+        }
         self.wizard.width = ctx.width;
         let reply = match key {
             Key::Paste(text) => self.wizard.paste(text),
@@ -261,19 +414,30 @@ impl Screen for NewProjectPage {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
             Arrival::Pools(Ok(pools)) => self.set_pools(pools),
-            Arrival::Owner(event) => {
-                if let OwnerEvent::Setup(event) = event.as_ref()
-                    && let SetupQuery::Catalog { pool, research } = &event.query
-                {
-                    let result = match &event.result {
-                        Ok(SetupView::Catalog(catalog)) => Ok(catalog.as_ref().clone()),
-                        Ok(_) => Err("project_catalog_unavailable".to_owned()),
-                        Err(problem) => Err(problem.clone()),
-                    };
-                    self.wizard
-                        .apply_catalog(pool.clone(), research.clone(), result);
-                }
+            Arrival::PoolEdited(result) => {
+                let flow = self.assigned(result, ctx);
+                self.redraw(ctx);
+                return flow;
             }
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Creation(event) => {
+                    let flow = self.created(event, ctx);
+                    self.redraw(ctx);
+                    return flow;
+                }
+                OwnerEvent::Setup(event) => {
+                    if let SetupQuery::Catalog { pool, research } = &event.query {
+                        let result = match &event.result {
+                            Ok(SetupView::Catalog(catalog)) => Ok(catalog.as_ref().clone()),
+                            Ok(_) => Err("project_catalog_unavailable".to_owned()),
+                            Err(problem) => Err(problem.clone()),
+                        };
+                        self.wizard
+                            .apply_catalog(pool.clone(), research.clone(), result);
+                    }
+                }
+                _ => return Flow::Handled,
+            },
             _ => return Flow::Handled,
         }
         self.ask_catalog(ctx);

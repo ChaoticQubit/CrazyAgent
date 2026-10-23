@@ -130,6 +130,57 @@ pub(in crate::tui) fn project_screen(
         rows = modal(&rows, width, 46, "Delete file", body, 5, look);
         help = vec![("y", "Delete"), ("n", "Keep"), ("Esc", "Keep")];
     }
+    if let Some(cursor) = screen.pool_picker {
+        let mut body = vec![
+            Row::of(
+                "Agents of this project use its pool's accounts.",
+                look.muted,
+            ),
+            Row::default(),
+        ];
+        let first = cursor.saturating_sub(PICKER_ROWS - 1);
+        for (index, choice) in screen
+            .pool_choices
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(PICKER_ROWS)
+        {
+            let current = screen
+                .pool
+                .as_ref()
+                .is_some_and(|pool| pool.assigned && pool.id == choice.id);
+            let row = Row::of(
+                format!("{} {}", if current { "(*)" } else { "( )" }, choice.name),
+                look.fg,
+            )
+            .pad(32)
+            .push(
+                format!(
+                    "{} {}",
+                    choice.accounts,
+                    if choice.accounts == 1 {
+                        "account"
+                    } else {
+                        "accounts"
+                    }
+                ),
+                look.muted,
+            )
+            .pad(44);
+            body.push(if index == cursor {
+                row.restyle(look.selection)
+            } else {
+                row
+            });
+        }
+        rows = modal(&rows, width, 50, "Pick a pool", body, 4, look);
+        help = vec![
+            ("\u{2191}\u{2193}", "Move"),
+            ("Enter", "Assign"),
+            ("Esc", "Cancel"),
+        ];
+    }
     Screen {
         rows,
         cursor: cursor.map(|(x, y)| ((2 + x) as u16, (2 + y) as u16)),
@@ -149,6 +200,8 @@ fn header_status(running: usize, look: &Look) -> Option<Row> {
 
 type Help = Vec<(&'static str, &'static str)>;
 type Drawn = (Vec<Row>, Option<(usize, usize)>, Help);
+
+const PICKER_ROWS: usize = 8;
 
 const TABS: (&str, &str) = ("Shift-\u{2190}\u{2192}", "Tabs");
 

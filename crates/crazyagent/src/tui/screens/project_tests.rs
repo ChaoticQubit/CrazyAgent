@@ -251,6 +251,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     let picked = CredentialRef::new("pool-main").unwrap();
     screen.setup.as_mut().unwrap().pool = Some(picked.clone());
     screen.pool = Some(PoolInfo {
+        id: picked.clone(),
         name: "Main".into(),
         accounts: 1,
         assigned: false,

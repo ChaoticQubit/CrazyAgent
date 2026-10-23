@@ -1,12 +1,14 @@
+use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::project_markdown::{MdLine, render};
-use crate::config::EffectiveConfig;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
+use crate::pools::PoolSummary;
 use crate::project_setup::{
     CONTEXT_DIRECTORY, ContextItem, ContextKind, ProjectContext, ResearchJob, ResearchKind,
     ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
 };
-use crate::protocol::{ProjectId, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::tui::seam::PoolScope;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
@@ -72,37 +74,44 @@ impl Tab {
 /// A pool picked in New project but not yet assigned is shown as waiting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct PoolInfo {
+    pub id: CredentialRef,
     pub name: String,
     pub accounts: usize,
     pub assigned: bool,
 }
 
-/// Finds the project's pool in the engine settings.
-/// Takes the configuration, the project and the pool picked when it was created.
-/// Returns the assigned pool, else the picked pool marked unassigned, else none.
+/// Finds the project's pool in the engine's pool list.
+/// Takes the pool summaries, the projects each pool serves, the project and the pool picked when it was created.
+/// Returns the assigned pool with accounts, else the picked pool marked unassigned, else none.
 pub(in crate::tui) fn project_pool(
-    config: &EffectiveConfig,
+    pools: &[PoolSummary],
+    scopes: &[PoolScope],
     project: &ProjectId,
-    picked: Option<&crate::protocol::CredentialRef>,
+    picked: Option<&CredentialRef>,
 ) -> Option<PoolInfo> {
-    let access = config.settings.model_access.as_ref()?;
-    let info = |pool: &crate::config::AccountPool, assigned| PoolInfo {
-        name: pool
-            .name
-            .clone()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| "Unnamed pool".into()),
+    let info = |pool: &PoolSummary, assigned| PoolInfo {
+        id: pool.id.clone(),
+        name: pool.name.clone(),
         accounts: pool.members.len(),
         assigned,
     };
-    if let Some(pool) = access.pools.iter().find(|pool| {
-        !pool.members.is_empty() && pool.projects.iter().any(|p| p.as_str() == project.as_str())
-    }) {
+    let holds = |id: &CredentialRef| {
+        scopes.iter().any(|scope| {
+            &scope.pool == id
+                && scope
+                    .projects
+                    .iter()
+                    .any(|held| held.as_str() == project.as_str())
+        })
+    };
+    if let Some(pool) = pools
+        .iter()
+        .find(|pool| !pool.members.is_empty() && holds(&pool.id))
+    {
         return Some(info(pool, true));
     }
     let picked = picked?;
-    access
-        .pools
+    pools
         .iter()
         .find(|pool| &pool.id == picked)
         .map(|pool| info(pool, false))
@@ -244,6 +253,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub memories: Option<Vec<KnowledgeEntry>>,
     pub pool: Option<PoolInfo>,
     pub pool_ready: bool,
+    pub pool_choices: Vec<PoolChoice>,
+    pub pool_picker: Option<usize>,
     pub transcript: Option<Transcript>,
     pub input: TextInput,
     pub typing: bool,
@@ -282,6 +293,8 @@ impl ProjectScreen {
             memories: None,
             pool: None,
             pool_ready: true,
+            pool_choices: Vec::new(),
+            pool_picker: None,
             transcript: None,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
@@ -549,6 +562,9 @@ impl ProjectScreen {
         self.problem = None;
         if self.edit.is_some() {
             return self.edit_key(key);
+        }
+        if let Some(cursor) = self.pool_picker {
+            return self.picker_key(key, cursor);
         }
         if let Some(path) = self.confirm_delete.clone() {
             return match key.code {
@@ -937,14 +953,55 @@ impl ProjectScreen {
         }
     }
 
-    fn pool_reply(&self) -> ProjectReply {
+    fn pool_reply(&mut self) -> ProjectReply {
         if !self.pool_ready {
             return ProjectReply::Handled;
         }
         let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
         match (&self.pool, picked) {
             (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
-            _ => ProjectReply::PickPool,
+            _ if self.pool_choices.is_empty() => ProjectReply::PickPool,
+            (pool, _) => {
+                let current = pool.as_ref().filter(|pool| pool.assigned).and_then(|pool| {
+                    self.pool_choices
+                        .iter()
+                        .position(|choice| choice.id == pool.id)
+                });
+                self.pool_picker = Some(current.unwrap_or(0));
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
+        assert!(cursor < self.pool_choices.len().max(1));
+        let last = self.pool_choices.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => self.pool_picker = Some(cursor.saturating_sub(1)),
+            KeyCode::Down => self.pool_picker = Some((cursor + 1).min(last)),
+            KeyCode::Esc => self.pool_picker = None,
+            KeyCode::Enter => {
+                self.pool_picker = None;
+                if let Some(choice) = self.pool_choices.get(cursor) {
+                    return ProjectReply::Assign(choice.id.clone());
+                }
+            }
+            _ => {}
+        }
+        ProjectReply::Handled
+    }
+
+    /// Replaces the pools the picker lists.
+    /// Takes the choices in the engine's order; an open picker keeps a cursor inside the list.
+    /// Returns nothing.
+    pub fn set_pool_choices(&mut self, choices: Vec<PoolChoice>) {
+        self.pool_choices = choices;
+        if let Some(cursor) = self.pool_picker {
+            self.pool_picker = if self.pool_choices.is_empty() {
+                None
+            } else {
+                Some(cursor.min(self.pool_choices.len() - 1))
+            };
         }
     }
 
@@ -959,6 +1016,9 @@ impl ProjectScreen {
     }
 
     fn assert_consistent(&self) {
+        if let Some(cursor) = self.pool_picker {
+            assert!(cursor < self.pool_choices.len());
+        }
         if let Some(jobs) = &self.jobs {
             assert!(self.agents_cursor <= jobs.len());
         }
@@ -1020,6 +1080,10 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "This project was made before project setup. Its context is not available."
         }
         "trusted_connection_unavailable" => "Not connected to the engine. Retrying.",
+        "pool_project_limit" => "That pool already serves 64 projects. Pick another pool.",
+        "pool_not_found" => "That pool no longer exists. Pick another pool.",
+        "pool_changed" => "The pools changed meanwhile. Try again.",
+        "model_access_read_only" => "Pools can't be changed in this setup.",
         _ => "That didn't work. Try again.",
     }
     .into()
