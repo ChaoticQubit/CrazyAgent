@@ -34,6 +34,19 @@ export interface DocumentPick {
   name: string;
 }
 
+const DOCUMENT_TYPES: Record<string, string> = {
+  md: "Markdown", pdf: "PDF", docx: "Word", csv: "CSV", jpg: "JPG", jpeg: "JPG", png: "PNG", txt: "Text",
+};
+
+/** Names a document's type from its extension, as the file list shows it.
+ * Input: the file name. Output: for example "Markdown", or "File" without an extension. */
+export function documentType(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "File";
+  const extension = name.slice(dot + 1).toLowerCase();
+  return DOCUMENT_TYPES[extension] ?? extension.toUpperCase();
+}
+
 export interface ProjectDraft {
   name: string;
   about: string;

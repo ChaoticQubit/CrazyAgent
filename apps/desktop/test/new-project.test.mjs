@@ -210,3 +210,16 @@ test("pool readiness uses the design's words and the most ready pool is preselec
   assert.equal(wizard.preselectPool(pools), "big");
   assert.equal(wizard.preselectPool(pools, []), "big");
 });
+
+test("an attached document shows its type from the extension", () => {
+  assert.equal(wizard.documentType("notes.md"), "Markdown");
+  assert.equal(wizard.documentType("Pitch.PDF"), "PDF");
+  assert.equal(wizard.documentType("brief.docx"), "Word");
+  assert.equal(wizard.documentType("rows.csv"), "CSV");
+  assert.equal(wizard.documentType("shot.jpeg"), "JPG");
+  assert.equal(wizard.documentType("shot.jpg"), "JPG");
+  assert.equal(wizard.documentType("logo.png"), "PNG");
+  assert.equal(wizard.documentType("read.txt"), "Text");
+  assert.equal(wizard.documentType("archive.tar.gz"), "GZ");
+  assert.equal(wizard.documentType("Makefile"), "File");
+});

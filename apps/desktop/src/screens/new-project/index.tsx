@@ -11,7 +11,7 @@ import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
 import { RESEARCH_ICONS, RESEARCH_LABELS, TeamEditor } from "./team-editor";
 import {
-  RESEARCH_COPY, STEPS, addDocuments, addStack, basicsErrors, buildRequest, defaultTeam, emptyDraft, poolName, preselectPool,
+  RESEARCH_COPY, STEPS, addDocuments, addStack, basicsErrors, buildRequest, defaultTeam, documentType, emptyDraft, poolName, preselectPool,
   removeStack, stepComplete, summary, teamValid,
 } from "./wizard";
 import type { ProjectDraft, StepId } from "./wizard";
@@ -289,7 +289,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           </div>}
           {docErrors.map((error) => <p className="pj-error" role="alert" key={error}>{displayText(error)}</p>)}
           {draft.documents.length > 0 ? <ul className="pj-files" aria-label="Attached documents">{draft.documents.map((document) => <li key={document.path}>
-            <span>{displayText(document.name)}</span><span className="pj-small pj-muted pj-mono">{displayText(document.path)}</span>
+            <span>{displayText(document.name)}</span><span className="pj-small pj-secondary">{documentType(document.name)}</span><span className="pj-small pj-muted pj-mono">{displayText(document.path)}</span>
             <button type="button" className="btn quiet" aria-label={`Remove ${document.name}`} onClick={() => setDraft({ ...draft, documents: draft.documents.filter((item) => item.path !== document.path) })}>Remove</button>
           </li>)}</ul> : <p className="pj-muted">No documents yet. Documents are optional.</p>}
         </div>}
