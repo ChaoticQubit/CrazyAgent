@@ -34,13 +34,10 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
         let name = format!("{index:03}-{}.md", "d".repeat(240));
         fs::write(context.join("documents").join(name), "x").unwrap();
     }
-    let memories: Vec<Memory> = (0..100)
-        .map(|index| Memory {
-            global: index % 2 == 0,
-            revision: index,
-            text: format!("memory {index} {}", "m".repeat(3900)),
-        })
-        .collect();
+    let memories = format!(
+        "## Approved memories\n\n{}",
+        "m".repeat(MEMORY_SECTION_BYTES_MAX - 32)
+    );
     let setup = stored(folder.path());
 
     let text = render(&setup.project_id, Some(&setup), &memories);
@@ -48,46 +45,23 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX, "{}", text.len());
     assert!(text.contains("The brief continues in context/brief.md."));
     assert!(text.contains("more files in context/"));
-    assert!(text.contains("Some approved memories were left out"));
-    assert!(text.matches("\n### From ").count() <= MEMORY_ITEMS_MAX);
+    assert!(text.ends_with(&memories));
     assert!(!text.contains(&"N".repeat(NAME_BYTES_MAX + 1)));
 }
 
 #[test]
-fn approved_memories_come_project_first_then_global_newest_first() {
-    let memories = vec![
-        Memory {
-            global: false,
-            revision: 9,
-            text: "newest project".into(),
-        },
-        Memory {
-            global: false,
-            revision: 3,
-            text: "older project".into(),
-        },
-        Memory {
-            global: true,
-            revision: 12,
-            text: "global".into(),
-        },
-    ];
-    let section = render_memories(&memories);
-    let first = section.find("newest project").unwrap();
-    let second = section.find("older project").unwrap();
-    let third = section.find("global").unwrap();
-    assert!(first < second && second < third, "{section}");
-    assert!(!section.contains("left out"));
-    assert_eq!(render_memories(&[]), "");
-}
-
-#[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
-    let text = render(&ProjectId::new("bare").unwrap(), None, &[]);
+    let text = render(&ProjectId::new("bare").unwrap(), None, "");
     assert_eq!(
         text,
         "# Project context from CrazyAgent\n\nYou are working on the project bare.\n"
     );
+    let with_memory = render(
+        &ProjectId::new("bare").unwrap(),
+        None,
+        "## Approved memories\n\nKept.\n",
+    );
+    assert!(with_memory.ends_with("bare.\n\n## Approved memories\n\nKept.\n"));
 }
 
 #[test]

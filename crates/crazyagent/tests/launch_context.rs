@@ -6,6 +6,7 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::launch_context::{self, AgentContext};
 use crazyagent::memory::ReviewDecision;
+use crazyagent::memory::library::MemoryScope;
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
@@ -24,6 +25,8 @@ const WAITING_SECRET: &str = "dummy-waiting-secret-9023";
 const HEADER_SECRET: &str = "dummy-header-secret-5150";
 const KEPT_MEMORY: &str = "About 2 million households plan meals weekly.";
 const PENDING_MEMORY: &str = "Pending insight the owner has not approved.";
+const GLOBAL_NOTE: &str = "The owner prefers short, terse answers.";
+const OTHER_NOTE: &str = "Only for the other project.";
 
 struct Case {
     root: tempfile::TempDir,
@@ -357,6 +360,24 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
             .await
             .unwrap(),
     );
+    applied(
+        owner
+            .add_memory(MemoryScope::Global, GLOBAL_NOTE.into(), 6)
+            .await
+            .unwrap(),
+    );
+    applied(
+        owner
+            .add_memory(
+                MemoryScope::Project {
+                    project_id: other.clone(),
+                },
+                OTHER_NOTE.into(),
+                7,
+            )
+            .await
+            .unwrap(),
+    );
 
     let context = case.context(&project).unwrap();
     let instructions = context.instructions().to_owned();
@@ -372,6 +393,14 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(
         !instructions.contains(PENDING_MEMORY),
         "a memory waiting for approval is not given"
+    );
+    assert!(
+        instructions.contains(GLOBAL_NOTE),
+        "global memory reaches every project"
+    );
+    assert!(
+        !instructions.contains(OTHER_NOTE),
+        "another project's memory never reaches this project"
     );
     for secret in [APPROVED_SECRET, WAITING_SECRET, HEADER_SECRET] {
         assert!(!instructions.contains(secret));
@@ -564,12 +593,10 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
             "switched-off".to_owned()
         ])
     );
-    assert!(
-        !other_config["developer_instructions"]
-            .as_str()
-            .unwrap()
-            .contains(KEPT_MEMORY)
-    );
+    let other_instructions = other_config["developer_instructions"].as_str().unwrap();
+    assert!(!other_instructions.contains(KEPT_MEMORY));
+    assert!(other_instructions.contains(GLOBAL_NOTE));
+    assert!(other_instructions.contains(OTHER_NOTE));
     drop(other_files);
 
     assert_eq!(

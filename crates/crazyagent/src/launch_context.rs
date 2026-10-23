@@ -1,9 +1,8 @@
 use crate::harnesses::launch::LaunchError;
-use crate::memory::{KnowledgeEntry, KnowledgeStatus};
 use crate::plugins::{LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec};
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::Connection;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -15,14 +14,13 @@ pub const HEADER_BYTES_MAX: usize = 1536;
 pub const BRIEF_BYTES_MAX: usize = crate::project_setup::CONTEXT_CHUNK_BYTES;
 pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
 pub const INDEX_BYTES_MAX: usize = 7 * 1024;
-pub const MEMORY_ITEMS_MAX: usize = 24;
-pub const MEMORY_BYTES_MAX: usize = 12 * 1024;
+pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
+pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 32 * 1024;
 pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
-const MEMORY_ROWS_MAX: i64 = 512;
 const NAME_BYTES_MAX: usize = 256;
 const FOLDER_BYTES_MAX: usize = 1024;
 const STATE: &str = "crazyagent";
@@ -33,9 +31,8 @@ const _: () = assert!(
     HEADER_BYTES_MAX
         + BRIEF_BYTES_MAX
         + INDEX_BYTES_MAX
-        + MEMORY_BYTES_MAX
-        + 4 * SECTION_SLACK
-        + MEMORY_ITEMS_MAX * 32
+        + MEMORY_SECTION_BYTES_MAX
+        + 3 * SECTION_SLACK
         <= INSTRUCTIONS_BYTES_MAX
 );
 
@@ -69,12 +66,6 @@ pub struct Installed {
     _lock: File,
 }
 
-struct Memory {
-    global: bool,
-    revision: u64,
-    text: String,
-}
-
 struct Budget {
     files: usize,
     bytes: u64,
@@ -99,7 +90,9 @@ pub fn for_project(
     let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
     let setup = crate::project_setup::load_setup(&tx, project).map_err(unavailable)?;
-    let memories = approved_memories(&tx, project)?;
+    let memories = crate::memory::library::approved_for_project(&tx, project)
+        .map_err(unavailable)?
+        .render();
     drop(tx);
     let instructions = render(project, setup.as_ref(), &memories);
     assert!(instructions.len() <= INSTRUCTIONS_BYTES_MAX);
@@ -268,7 +261,7 @@ fn size(bytes: u64) -> String {
     }
 }
 
-fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &[Memory]) -> String {
+fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> String {
     let mut header = String::from("# Project context from CrazyAgent\n\n");
     let mut brief = String::new();
     let mut index = String::new();
@@ -320,116 +313,17 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &[Memory])
             }
         }
     }
-    let memory = render_memories(memories);
     assert!(header.len() <= HEADER_BYTES_MAX);
     assert!(brief.len() <= BRIEF_BYTES_MAX + SECTION_SLACK);
     assert!(index.len() <= INDEX_BYTES_MAX + SECTION_SLACK);
-    let text = header + &brief + &index + &memory;
+    assert!(memories.len() <= MEMORY_SECTION_BYTES_MAX);
+    let mut text = header + &brief + &index;
+    if !memories.is_empty() {
+        text.push('\n');
+        text.push_str(memories);
+    }
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
     text
-}
-
-fn render_memories(memories: &[Memory]) -> String {
-    if memories.is_empty() {
-        return String::new();
-    }
-    let mut section = String::from(
-        "\n## Approved memories\n\nThe owner approved these notes. Use them as background knowledge for this project.\n",
-    );
-    let mut used = 0;
-    let mut given = 0;
-    for memory in memories {
-        let text = memory.text.trim();
-        if given == MEMORY_ITEMS_MAX || used + text.len() > MEMORY_BYTES_MAX {
-            break;
-        }
-        section.push_str(if memory.global {
-            "\n### From your global memory\n\n"
-        } else {
-            "\n### From this project\n\n"
-        });
-        section.push_str(text);
-        section.push('\n');
-        used += text.len();
-        given += 1;
-    }
-    if given < memories.len() {
-        section.push_str("\nSome approved memories were left out to keep this short.\n");
-    }
-    assert!(given <= MEMORY_ITEMS_MAX && used <= MEMORY_BYTES_MAX);
-    assert!(section.len() <= MEMORY_BYTES_MAX + SECTION_SLACK + MEMORY_ITEMS_MAX * 32);
-    section
-}
-
-fn approved_memories(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-) -> Result<Vec<Memory>, LaunchError> {
-    let mut statement = tx
-        .prepare(
-            "SELECT e.body FROM knowledge_heads h JOIN knowledge_entries e ON h.id=e.id AND h.version=e.version
-             WHERE h.project=?1 OR EXISTS(SELECT 1 FROM knowledge_globals g
-                 WHERE g.entry=h.id AND g.version=h.version AND g.approved=1)
-             ORDER BY h.rowid DESC LIMIT ?2",
-        )
-        .map_err(unavailable)?;
-    let bodies = statement
-        .query_map(params![project.as_str(), MEMORY_ROWS_MAX], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(unavailable)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(unavailable)?;
-    let mut memories = Vec::new();
-    for body in bodies {
-        let entry: KnowledgeEntry = serde_json::from_str(&body).map_err(unavailable)?;
-        let local = &entry.project_id == project;
-        let approved = if local {
-            entry.status == KnowledgeStatus::Confirmed && entry.human_reviewed
-        } else {
-            matches!(
-                entry.status,
-                KnowledgeStatus::Provisional | KnowledgeStatus::Confirmed
-            ) && globally_approved(tx, &entry)?
-        };
-        if approved && sources_live(tx, &entry)? {
-            memories.push(Memory {
-                global: !local,
-                revision: entry.revision.value(),
-                text: entry.text,
-            });
-        }
-    }
-    memories.sort_by(|a, b| a.global.cmp(&b.global).then(b.revision.cmp(&a.revision)));
-    assert!(memories.len() as i64 <= MEMORY_ROWS_MAX);
-    Ok(memories)
-}
-
-fn globally_approved(tx: &Transaction<'_>, entry: &KnowledgeEntry) -> Result<bool, LaunchError> {
-    let version =
-        i64::try_from(entry.version).map_err(|_| failure("launch_context_unavailable"))?;
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM knowledge_globals WHERE entry=?1 AND version=?2 AND hash=?3 AND approved=1)",
-        params![entry.id.as_str(), version, entry.content_hash],
-        |row| row.get(0),
-    )
-    .map_err(|_| failure("launch_context_unavailable"))
-}
-
-fn sources_live(tx: &Transaction<'_>, entry: &KnowledgeEntry) -> Result<bool, LaunchError> {
-    for source in &entry.source_ids {
-        let live: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM knowledge_sources WHERE project=?1 AND id=?2 AND revoked=0)",
-                params![entry.project_id.as_str(), source.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(|_| failure("launch_context_unavailable"))?;
-        if !live {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
