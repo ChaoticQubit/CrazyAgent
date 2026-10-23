@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  New project  /  Team
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New project             │ Team
+                          │ Choose which harness leads and which ones do the work. Defaults come from pool Main.
+  ✓ About                 │
+  ✓ Stack and platforms   │   Role          Harness         Agents    Tools   Accounts in pool
+  ✓ Documents             │ > Master        Codex           1         On      1 account
+  ✓ Work to start         │   Sub-agents    Codex           3         On      1 account
+  ✓ Pool                  │                 + Add harness
+  > Team                  │
+    Review                │ Team size   Min [ 1 ]   Max [ 4 ]
+                          │ At most 4 agents run at once. Extra work waits until one finishes.
+  Esc keeps this draft    │
+  and goes home.          │ Research: 3 agents, one per Work item, on the sub-agent harnesses.
+                          │
+                          │ Tools on: agents edit files and run commands, only in the project folder.
+                          │
+                          │ [ Back ]   [ Continue ]
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+
+ ←→ Change count   Enter Pick harness   Space Tools on or off   d Remove   Shift-←→ Steps                        ? Help

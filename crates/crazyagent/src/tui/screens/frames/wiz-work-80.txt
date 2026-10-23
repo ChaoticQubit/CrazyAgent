@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Work to start
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   Work   Pool   Team   Review
+────────────────────────────────────━━━━────────────────────────────────────────
+  Work to start
+  Agents start these as soon as the project exists. Results land in
+  context/research as Markdown, with links to every source.
+
+    [x] ◔ Market research       Who needs it, market size and pricing
+    [x] ≷ Competitor research   Similar products, their features and gaps
+  > [ ] ◬ Design research       Patterns and references for the look
+    [x] ▭ Front-end design      A first UI for the platforms you picked
+    [ ] ≣ Tech stack research   Libraries, hosting and architecture options
+
+  3 agents start, one per item. Change counts in Team.
+
+  [ Back ]   [ Continue ]
+
+
+
+
+
+
+ Space On or off  ↑↓ Move  Tab Buttons  Shift-←→ Steps                   ? Help

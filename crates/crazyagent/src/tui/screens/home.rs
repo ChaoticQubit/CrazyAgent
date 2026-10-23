@@ -40,13 +40,19 @@ impl Setup {
         let ready = |pool: &PoolSummary| {
             pool.members
                 .iter()
-                .filter(|member| matches!(member.status, MemberStatus::SignedIn | MemberStatus::SetUp))
+                .filter(|member| {
+                    matches!(member.status, MemberStatus::SignedIn | MemberStatus::SetUp)
+                })
                 .count()
         };
         Self {
             account_ready: pools.iter().any(|pool| ready(pool) > 0),
             pool_exists: !pools.is_empty(),
-            ready_in_first_pool: pools.iter().map(ready).find(|count| *count > 0).unwrap_or(0),
+            ready_in_first_pool: pools
+                .iter()
+                .map(ready)
+                .find(|count| *count > 0)
+                .unwrap_or(0),
         }
     }
 
@@ -117,8 +123,13 @@ impl Home {
         projects
             .iter()
             .filter(|card| {
-                let text = format!("{} {} {}", card.name, card.about, card.pool.clone().unwrap_or_default())
-                    .to_lowercase();
+                let text = format!(
+                    "{} {} {}",
+                    card.name,
+                    card.about,
+                    card.pool.clone().unwrap_or_default()
+                )
+                .to_lowercase();
                 words.iter().all(|word| text.contains(word))
             })
             .cloned()
@@ -145,7 +156,10 @@ impl Home {
             (
                 setup.pool_exists,
                 "Create a pool",
-                vec!["Group up to 15 accounts".into(), "for projects to use.".into()],
+                vec![
+                    "Group up to 15 accounts".into(),
+                    "for projects to use.".into(),
+                ],
                 Place::Settings(SettingsSection::Pools),
             ),
             (
@@ -175,17 +189,25 @@ impl Home {
     }
 
     fn running(ctx: &Ctx) -> usize {
-        ctx.store
-            .projects
-            .ready()
-            .map_or(0, |projects| projects.iter().map(|card| card.research.running).sum())
+        ctx.store.projects.ready().map_or(0, |projects| {
+            projects.iter().map(|card| card.research.running).sum()
+        })
     }
 
-    fn card(&self, card: &ProjectCard, limit: usize, selected: bool, ctx: &Ctx) -> Vec<Line<'static>> {
+    fn card(
+        &self,
+        card: &ProjectCard,
+        limit: usize,
+        selected: bool,
+        ctx: &Ctx,
+    ) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let gutter = || {
             if selected {
-                Line::from(vec![Span::styled(ctx.glyphs.bar, theme.accent), Span::raw(" ")])
+                Line::from(vec![
+                    Span::styled(ctx.glyphs.bar, theme.accent),
+                    Span::raw(" "),
+                ])
             } else {
                 Line::raw("  ")
             }
@@ -208,19 +230,39 @@ impl Home {
             .map(|platform| platform.label())
             .collect::<Vec<_>>()
             .join(", ");
-        let about = if card.about.is_empty() { "No description." } else { card.about.as_str() };
+        let about = if card.about.is_empty() {
+            "No description."
+        } else {
+            card.about.as_str()
+        };
         let first_line = about.lines().next().unwrap_or_default().to_owned();
         let created = card
             .created_ms
-            .map(|ms| format!("Created {}", clock::ago(ms, clock::now_ms(), clock::local_offset())))
+            .map(|ms| {
+                format!(
+                    "Created {}",
+                    clock::ago(ms, clock::now_ms(), clock::local_offset())
+                )
+            })
             .unwrap_or_default();
-        let pool = format!("Pool: {}", card.pool.clone().unwrap_or_else(|| "none".into()));
+        let pool = format!(
+            "Pool: {}",
+            card.pool.clone().unwrap_or_else(|| "none".into())
+        );
         vec![
             join([
                 gutter(),
                 row(
                     limit - 2,
-                    styled(card.name.clone(), if selected { Role::Accent } else { Role::Heading }, theme),
+                    styled(
+                        card.name.clone(),
+                        if selected {
+                            Role::Accent
+                        } else {
+                            Role::Heading
+                        },
+                        theme,
+                    ),
                     state,
                     ctx.glyphs,
                 ),
@@ -241,7 +283,11 @@ impl Home {
                 gutter(),
                 row(
                     limit - 2,
-                    styled(format!("{}   {pool}", card.research.summary()), Role::Muted, theme),
+                    styled(
+                        format!("{}   {pool}", card.research.summary()),
+                        Role::Muted,
+                        theme,
+                    ),
                     styled(created, Role::Muted, theme),
                     ctx.glyphs,
                 ),
@@ -256,7 +302,11 @@ impl Home {
         let title = |count: Option<usize>| {
             let mut spans = vec![Span::styled(
                 "Projects",
-                if focused && count.is_some() { theme.accent } else { theme.heading },
+                if focused && count.is_some() {
+                    theme.accent
+                } else {
+                    theme.heading
+                },
             )];
             if let Some(count) = count {
                 spans.push(Span::raw("  "));
@@ -312,7 +362,10 @@ impl Home {
                     None => lines.push(Line::default()),
                 }
                 if visible.is_empty() {
-                    lines.push(Line::raw(format!("No project matches. Showing 0 of {}.", projects.len())));
+                    lines.push(Line::raw(format!(
+                        "No project matches. Showing 0 of {}.",
+                        projects.len()
+                    )));
                 }
                 for (index, card) in visible
                     .iter()
@@ -320,13 +373,24 @@ impl Home {
                     .skip(self.offset)
                     .take(Self::page(ctx))
                 {
-                    lines.extend(self.card(card, limit, focused && index == self.selected && !self.filtering, ctx));
+                    lines.extend(self.card(
+                        card,
+                        limit,
+                        focused && index == self.selected && !self.filtering,
+                        ctx,
+                    ));
                 }
                 if ctx.link == Link::Reconnecting {
                     lines = lines
                         .into_iter()
                         .enumerate()
-                        .map(|(index, line)| if index == 0 { line } else { restyle(line, theme.backdrop) })
+                        .map(|(index, line)| {
+                            if index == 0 {
+                                line
+                            } else {
+                                restyle(line, theme.backdrop)
+                            }
+                        })
                         .collect();
                 }
                 (lines, cursor)
@@ -344,10 +408,7 @@ impl Home {
                 vec![
                     title(None),
                     Line::default(),
-                    Line::from(vec![
-                        Span::styled(ctx.spinner(), theme.running),
-                        Span::raw(" Loading projects"),
-                    ]),
+                    ctx.loading("Loading projects"),
                 ],
                 None,
             ),
@@ -358,7 +419,11 @@ impl Home {
         let theme = &ctx.theme;
         let focused = self.panel == Panel::Setup;
         let mut lines = vec![
-            styled("Get set up", if focused { Role::Accent } else { Role::Heading }, theme),
+            styled(
+                "Get set up",
+                if focused { Role::Accent } else { Role::Heading },
+                theme,
+            ),
             Line::default(),
         ];
         for (index, (done, label, description, _)) in Self::items(ctx).into_iter().enumerate() {
@@ -505,7 +570,8 @@ impl Screen for Home {
                 Flow::Handled
             }
             Key::Char('/') if self.panel == Panel::Projects => {
-                self.filter.get_or_insert_with(|| TextField::new("Filter", FILTER_CHARS_MAX));
+                self.filter
+                    .get_or_insert_with(|| TextField::new("Filter", FILTER_CHARS_MAX));
                 self.filtering = true;
                 Flow::Handled
             }
@@ -601,9 +667,20 @@ impl Screen for Home {
                 .map(|index| {
                     join([
                         Line::raw("  "),
-                        pad(projects.get(index).cloned().unwrap_or_default(), left, ctx.glyphs),
-                        Line::from(Span::styled(format!(" {} ", ctx.glyphs.vline), ctx.theme.muted)),
-                        pad(setup.get(index).cloned().unwrap_or_default(), right, ctx.glyphs),
+                        pad(
+                            projects.get(index).cloned().unwrap_or_default(),
+                            left,
+                            ctx.glyphs,
+                        ),
+                        Line::from(Span::styled(
+                            format!(" {} ", ctx.glyphs.vline),
+                            ctx.theme.muted,
+                        )),
+                        pad(
+                            setup.get(index).cloned().unwrap_or_default(),
+                            right,
+                            ctx.glyphs,
+                        ),
                     ])
                 })
                 .collect::<Vec<_>>();
@@ -666,7 +743,14 @@ mod tests {
         assert!(!waiting.done());
         let ready = Setup::of(&[
             pool("Empty", &[]),
-            pool("Main", &[MemberStatus::SignedIn, MemberStatus::SetUp, MemberStatus::NotSignedIn]),
+            pool(
+                "Main",
+                &[
+                    MemberStatus::SignedIn,
+                    MemberStatus::SetUp,
+                    MemberStatus::NotSignedIn,
+                ],
+            ),
         ]);
         assert!(ready.done());
         assert_eq!(ready.ready_in_first_pool, 2);

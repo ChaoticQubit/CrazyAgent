@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  New project  /  Work to start
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New project             │ Work to start
+                          │ Agents start these as soon as the project exists. Results land in context/research as
+  ✓ About                 │ Markdown, with links to every source.
+  ✓ Stack and platforms   │
+  ✓ Documents             │   [x] ◔ Market research       Who needs it, market size and pricing
+  > Work to start         │   [x] ≷ Competitor research   Similar products, their features and gaps
+    Pool                  │ > [ ] ◬ Design research       Patterns and references for the look
+    Team                  │   [x] ▭ Front-end design      A first UI for the platforms you picked
+    Review                │   [ ] ≣ Tech stack research   Libraries, hosting and architecture options
+                          │
+  Esc keeps this draft    │ 3 agents start, one per item. Change counts in Team.
+  and goes home.          │
+                          │ [ Back ]   [ Continue ]
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+
+ Space On or off   ↑↓ Move   Tab Buttons   Shift-←→ Steps   Esc Leave, keep draft                                ? Help

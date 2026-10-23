@@ -201,7 +201,7 @@ pub fn start_for_engine(
             .with_claude(claude)
             .map_err(|error| error.to_string())?;
     }
-    let resolver = SettingsResolver::new(global, project, &projects)?;
+    let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
         Arc::new(runner),
         move |id: &str, harness: &str| resolver.resolve(id, harness),

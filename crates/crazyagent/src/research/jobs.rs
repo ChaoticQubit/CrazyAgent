@@ -421,6 +421,17 @@ impl ResearchJobs {
         )?)
     }
 
+    /// Reads what every agent launched for `project` receives, its approved
+    /// skills, MCP servers, brief and memories, from the engine database this
+    /// queue lives in. Returns the context, or a plain launch code such as
+    /// `plugin_project_unknown` for a project the engine does not know.
+    pub fn project_context(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> Result<crate::launch_context::AgentContext, crate::harnesses::launch::LaunchError> {
+        crate::launch_context::for_project(&self.connection, project)
+    }
+
     /// One job by id.
     pub fn get(&self, id: i64) -> Result<Option<ResearchJob>, JobError> {
         Ok(self

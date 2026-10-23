@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  About
+────────────────────────────────────────────────────────────────────────────────
+  About   Stack   Documents   Work   Pool   Team   Review
+──━━━━━─────────────────────────────────────────────────────────────────────────
+  About
+  Tell agents what you are building.
+
+  Name
+  [ Tidepool                                                             ]
+  What is it about?
+  [ A live dashboard for marine researchers to watch sensor buoys and    ]
+  [ get alerts when readings look wrong.█                                ]
+
+  Project folder
+  (*) Create a new folder     Made when you create the project
+  ( ) Use an existing folder  Not ready yet
+  Agents can change files only inside this folder.
+
+  [ Back ]   [ Continue ]
+
+
+
+
+ Tab Next field  Ctrl-J New line  Shift-Tab Previous  Shift-←→ Steps     ? Help
