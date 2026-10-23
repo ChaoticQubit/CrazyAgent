@@ -12,7 +12,28 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
+use std::cell::RefCell;
 use std::path::PathBuf;
+
+thread_local! {
+    static KEPT: RefCell<Option<Wizard>> = const { RefCell::new(None) };
+}
+
+/// Names the New project draft kept after the owner left the wizard.
+/// Takes nothing; the draft lives on the TUI thread until the wizard opens again.
+/// Returns the typed name, "Untitled project" for a draft without one, or none.
+pub(in crate::tui) fn kept_draft() -> Option<String> {
+    KEPT.with_borrow(|kept| {
+        kept.as_ref().map(|wizard| {
+            let name = wizard.name.value().trim();
+            if name.is_empty() {
+                "Untitled project".to_owned()
+            } else {
+                name.to_owned()
+            }
+        })
+    })
+}
 
 /// Gives the wizard and project views the shell's colors and glyph set.
 /// Takes the shell context.
@@ -124,19 +145,28 @@ pub(in crate::tui) struct NewProjectPage {
 }
 
 impl NewProjectPage {
-    /// Opens an empty wizard with the pools the shell already has.
+    /// Opens the kept draft, or an empty wizard with the pools the shell already has.
     /// Takes the shell context for pools, the home folder and the size.
     /// Returns the screen, drawn once so the header and help line are current.
     pub fn new(ctx: &Ctx) -> Self {
-        let pools = ctx
-            .store
-            .pools
-            .ready()
-            .map(|pools| pool_choices_from(pools))
-            .unwrap_or_default();
-        let home = ctx.home.as_ref().map(PathBuf::from);
+        let pools = ctx.store.pools.ready();
+        let wizard = match KEPT.take() {
+            Some(mut wizard) => {
+                wizard.resume();
+                if let Some(pools) = pools {
+                    wizard.set_pools(pool_choices_from(pools));
+                }
+                wizard
+            }
+            None => Wizard::new(
+                pools
+                    .map(|pools| pool_choices_from(pools))
+                    .unwrap_or_default(),
+                ctx.home.as_ref().map(PathBuf::from),
+            ),
+        };
         let mut page = Self {
-            wizard: Wizard::new(pools, home),
+            wizard,
             view: View::default(),
         };
         page.redraw(ctx);
@@ -176,6 +206,15 @@ impl NewProjectPage {
         self.wizard.set_pools(pool_choices_from(pools));
         if first {
             self.wizard.pool = self.wizard.pools.first().map(|pool| pool.id.clone());
+        }
+    }
+}
+
+impl Drop for NewProjectPage {
+    fn drop(&mut self) {
+        if !matches!(self.wizard.phase, Phase::Creating { .. }) && self.draft() {
+            let wizard = std::mem::replace(&mut self.wizard, Wizard::new(Vec::new(), None));
+            KEPT.set(Some(wizard));
         }
     }
 }

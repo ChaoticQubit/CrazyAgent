@@ -1,6 +1,6 @@
-use super::new_project_page::{key_event, pool_choices_from};
+use super::new_project_page::{kept_draft, key_event, pool_choices_from};
 use super::project_page::open_path;
-use super::{Place, ProjectTab, open};
+use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
@@ -342,7 +342,10 @@ async fn shell_opens_the_wizard_with_the_real_catalog_and_keeps_the_draft_on_cre
     assert!(shell.ctx.next_request().is_none());
     shell.key(Key::ShiftRight);
     let shown = render(&mut shell, 80, 24);
-    assert!(shown.contains("New project  /  Tech stack"), "{shown}");
+    assert!(
+        shown.contains("New project  /  Stack and platforms"),
+        "{shown}"
+    );
     assert!(shown.contains("Rust"), "{shown}");
 
     shell.key(Key::ShiftLeft);
@@ -359,4 +362,39 @@ async fn shell_opens_the_wizard_with_the_real_catalog_and_keeps_the_draft_on_cre
     shell.key(Key::Enter);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Tidepool"), "{shown}");
+}
+
+#[test]
+fn leaving_the_wizard_keeps_the_draft_for_next_time() {
+    let mut ctx = ctx(80, 24);
+    let mut screen = open(&Place::NewProject, &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(matches!(screen.key(&Key::Esc, &mut ctx), Flow::Back));
+    drop(screen);
+    assert_eq!(kept_draft(), None);
+
+    let mut screen = open(&Place::NewProject, &mut ctx);
+    for character in "Fieldnotes".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    assert!(screen.draft());
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(matches!(screen.key(&Key::Esc, &mut ctx), Flow::Back));
+    drop(screen);
+    assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
+
+    let mut screen = open(&Place::NewProject, &mut ctx);
+    assert_eq!(kept_draft(), None);
+    assert!(screen.draft());
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            screen.draw(frame, frame.area(), &ctx);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let shown: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(shown.contains("Fieldnotes"), "{shown}");
+    drop(screen);
+    assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
 }

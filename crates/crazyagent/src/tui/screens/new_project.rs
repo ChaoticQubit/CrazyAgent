@@ -472,6 +472,17 @@ impl Wizard {
         Some(key)
     }
 
+    /// Reopens a kept draft: forgets a catalog read lost while it was away and any failure shown.
+    /// Takes the wizard; the next `catalog_request` asks again.
+    /// Returns nothing.
+    pub fn resume(&mut self) {
+        self.catalog_pending = None;
+        self.picker = None;
+        if matches!(self.phase, Phase::Failed { .. }) {
+            self.phase = Phase::Editing;
+        }
+    }
+
     /// Applies the engine's catalog: choices, limits and the smart team defaults.
     /// Takes the pool and research it was read for and the engine result.
     /// Returns nothing; a team the owner edited is kept.
