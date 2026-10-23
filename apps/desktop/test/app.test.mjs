@@ -118,3 +118,20 @@ test("Home shows the empty state, setup panel and Needs you from real reads only
     assert.match(renderToStaticMarkup(createElement(HomeView, { projects, accounts: ok([]), pools: ok([]), harnesses: ok([]), onRetryProjects: () => {} })), text);
   }
 });
+
+test("every app surface draws the Ember 4 brand mark, never the text-only placeholder", async () => {
+  const brand = await import("../src/ui/brand.tsx");
+  const shell = await import("../src/ui/shell.tsx");
+  assert.equal(shell.BrandMark, brand.BrandMark);
+  const mark = /<span class="brand-mark" role="img" aria-label="CrazyAgent"><svg class="brand-glyph full"/;
+  const large = /<span class="brand-mark large" role="img" aria-label="CrazyAgent"><svg class="brand-glyph full"/;
+  const placeholder = /<span class="brand-mark(?: large)?">CrazyAgent<\/span>/;
+  for (const markup of [renderToStaticMarkup(createElement(App)), render({ engine: "down" }), render({})]) {
+    assert.match(markup, mark);
+    assert.doesNotMatch(markup, placeholder);
+  }
+  assert.match(render({}), /<aside class="sidebar" aria-label="CrazyAgent"><span class="brand-mark" role="img"/);
+  const welcome = render({ profile: { kind: "ok", value: null } });
+  assert.match(welcome, large);
+  assert.doesNotMatch(welcome, placeholder);
+});
