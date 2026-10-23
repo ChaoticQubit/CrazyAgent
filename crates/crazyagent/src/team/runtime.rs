@@ -1412,11 +1412,21 @@ impl TeamService {
         let thread = std::thread::Builder::new()
             .name("team-runtime".into())
             .spawn(move || {
+                let mut last = None;
                 while !flag.load(Ordering::SeqCst) {
-                    let _ = runtime.tick();
+                    let problem = runtime.tick().err().map(|e| e.0);
+                    if problem.is_some() && problem != last {
+                        eprintln!(
+                            "team runtime: {}",
+                            bound_text(problem.as_deref().unwrap_or_default(), 300)
+                        );
+                    }
+                    last = problem;
                     std::thread::sleep(tick);
                 }
-                let _ = runtime.shutdown();
+                if let Err(problem) = runtime.shutdown() {
+                    eprintln!("team runtime shutdown: {}", bound_text(&problem.0, 300));
+                }
             })
             .ok();
         Self { stop, thread }
