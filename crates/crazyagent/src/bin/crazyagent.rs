@@ -14,6 +14,7 @@ const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
+crazyagent research STATE_DIR PROJECT_ID PROJECT_DIR --codex-executable ABS_PATH --endpoint URL --model MODEL [--tools on|off] [--minutes N] KIND [KIND...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -68,6 +69,15 @@ fn main() -> ExitCode {
         .is_some_and(|arg| arg == "native-auth-custodian")
     {
         return match run_native_auth_custodian(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.first().is_some_and(|arg| arg == "research") {
+        return match crazyagent::research::cli::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -286,19 +296,43 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     Ok(())
                 })
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
-                .and_then(|()| {
+                .and_then(|()| match codex.as_deref().filter(|_| writable) {
+                    None => Ok(None),
+                    Some(executable) => crazyagent::research::service::start_for_engine(
+                        runtime_dir,
+                        Path::new(&args[2]),
+                        Path::new(&args[3]),
+                        executable,
+                        claude.as_deref(),
+                    )
+                    .map(Some),
+                })
+                .and_then(|research| {
                     let mut output = io::stdout().lock();
-                    writeln!(output, "ready")
-                        .and_then(|()| output.flush())
-                        .map_err(|e| e.to_string())
+                    match writeln!(output, "ready").and_then(|()| output.flush()) {
+                        Ok(()) => Ok(research),
+                        Err(error) => {
+                            if let Some(research) = research {
+                                research.stop();
+                            }
+                            Err(error.to_string())
+                        }
+                    }
                 });
-            if let Err(error) = ready {
-                return match service.shutdown().await {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
-                };
+            let research = match ready {
+                Ok(research) => research,
+                Err(error) => {
+                    return match service.shutdown().await {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                    };
+                }
+            };
+            let result = service.run(stopped).await.map_err(|e| e.to_string());
+            if let Some(research) = research {
+                let _ = tokio::task::spawn_blocking(move || research.stop()).await;
             }
-            service.run(stopped).await.map_err(|e| e.to_string())
+            result
         }
         .await;
         signal.abort();
