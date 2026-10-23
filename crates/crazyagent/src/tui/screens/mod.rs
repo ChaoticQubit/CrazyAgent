@@ -8,6 +8,22 @@ pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "v1-tui-projects plugs the live research view into the project screen"
+    )
+)]
+pub(in crate::tui) mod project_research;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "v1-tui-projects plugs the live team view into the project screen"
+    )
+)]
+pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
 pub mod settings;
