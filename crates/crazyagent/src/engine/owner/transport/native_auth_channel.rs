@@ -1109,14 +1109,26 @@ impl Authority {
                 dispatch
             };
             self.native_auth_changed.notify_waiters();
-            if let Some(dispatch) = dispatch {
-                engine
+            if let Some(dispatch) = dispatch
+                && let Err(error) = engine
                     .native_auth_job(|reply| Job::NativeAuthCustodyLost(dispatch, reply))
-                    .await?;
+                    .await
+                && custody_loss_undelivered(&error)
+            {
+                return Err(error);
             }
             return task_error.map_or(Ok(()), Err);
         }
     }
+}
+
+/// Tells whether recording a lost custody may not have reached the storage actor.
+/// Input: the error from that job. Output: true when the job was not queued or its
+/// reply never arrived. False when storage answered with a refusal, which means the
+/// dispatch scope already changed and its durable fence stays in place for recovery.
+fn custody_loss_undelivered(error: &EngineError) -> bool {
+    error.0 == "owner_queue_not_submitted"
+        || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
 
 impl Drop for Authority {
@@ -1962,13 +1974,17 @@ fallback_allowed = false
 
     impl Case {
         async fn open(action: NativeAuthAction) -> Self {
+            Self::open_with(CATALOG, action).await
+        }
+
+        async fn open_with(catalog: &str, action: NativeAuthAction) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-auth-observe-")
                 .tempdir_in("/private/tmp")
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let global = root.path().join("g.toml");
-            std::fs::write(&global, CATALOG).unwrap();
+            std::fs::write(&global, catalog).unwrap();
             std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
             let project = root.path().join("p.toml");
             let config = crate::config::resolve_config(&global, &project).unwrap();
@@ -2256,6 +2272,280 @@ fallback_allowed = false
             assert_eq!(case.fence_count(), 1);
             assert_eq!(case.retire().await.phase, NativeAuthPhase::Cancelled);
             assert_eq!(case.fence_count(), 0);
+            case.close().await;
+        }).await.unwrap();
+    }
+
+    const MASTER_CATALOG: &str = r#"
+timeout_ms = 2000
+allowed_destinations = ["connection-a"]
+[routing]
+approved_accounts = ["account-a"]
+task_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+[model_access]
+accounts = ["account-a"]
+[[model_access.connections]]
+id = "connection-a"
+provider = "openai"
+harness = "codex"
+protocol = "native"
+account_ref = "account-a"
+endpoint = { kind = "native" }
+model = { id = "model-a", author = "openai" }
+auth = { method = "native_managed", profile_ref = "profile-a" }
+[[model_access.pools]]
+id = "pool-a"
+members = ["connection-a"]
+projects = ["project-a"]
+roles = ["project_leader"]
+fallback_allowed = false
+"#;
+
+    fn master_git(home: &std::path::Path, repository: &std::path::Path, arguments: &[&str]) {
+        let output = ProcessCommand::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+            .args(["-c", "user.name=Signed-in master fixture"])
+            .args(["-c", "user.email=signed-in-master@example.invalid"])
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "actual Git fixture failed: {output:?}");
+    }
+
+    fn master_project() -> crate::protocol::ProjectId {
+        crate::protocol::ProjectId::new("project-a").unwrap()
+    }
+
+    fn master_selection() -> crate::master_session::MasterSelection {
+        let target = CredentialRef::new("connection-a").unwrap();
+        crate::master_session::MasterSelection {
+            backend: crate::master_session::MasterBackend::Codex,
+            pool_ref: CredentialRef::new("pool-a").unwrap(),
+            target_profile_ref: target.clone(),
+            route: crate::routing::RouteRequest {
+                preferred_target: Some(target.clone()),
+                required_target: Some(target),
+                required_capabilities: vec![],
+                account_ref: CredentialRef::new("account-a").unwrap(),
+                budget_ref: CredentialRef::new("conversation-budget").unwrap(),
+                resources: crate::routing::ResourceBudget::unit(),
+            },
+        }
+    }
+
+    fn admitted(result: crate::storage::MasterRuntimeResult) -> Box<crate::storage::PreparedMasterTurn> {
+        match result {
+            crate::storage::MasterRuntimeResult::Prepared(prepared) => {
+                assert!(prepared.attempt.request.previous_attempt.is_none());
+                assert_eq!(prepared.attempt.connection.id.as_str(), "connection-a");
+                assert_eq!(prepared.attempt.request.project_id, master_project());
+                prepared
+            }
+            crate::storage::MasterRuntimeResult::Turn(turn) => {
+                panic!("signed-in master turn was not admitted: {:?} {:?}", turn.phase, turn.reason)
+            }
+            _ => panic!("actual master preparation returned an unexpected result"),
+        }
+    }
+
+    fn blocked(result: crate::storage::MasterRuntimeResult, reason: crate::master_session::MasterReason) {
+        let crate::storage::MasterRuntimeResult::Turn(turn) = result else {
+            panic!("actual master turn was admitted while it had to be blocked");
+        };
+        assert_eq!(turn.phase, crate::master_session::MasterTurnPhase::Blocked);
+        assert_eq!(turn.reason, Some(reason));
+    }
+
+    impl Case {
+        async fn owner_state(&self, query: OwnerRead) -> crate::engine::owner::OwnerReadReply {
+            let reply = self.client.request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: id("signed-in-master-read"),
+                expected_revision: Cursor::new(0),
+                operation: OwnerOperation::Read { query },
+            }).await.unwrap();
+            let OwnerResponse::Read { state } = reply.response else {
+                panic!("actual owner read failed")
+            };
+            state
+        }
+
+        async fn owner_apply(&self, request_id: &str, mutation: crate::engine::owner::OwnerMutation) {
+            let host = self.service.owner_runtime().unwrap();
+            let revision = self.owner_state(OwnerRead::Capabilities).await.revision;
+            let request = OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: id(request_id),
+                expected_revision: revision,
+                operation: OwnerOperation::Apply { mutation },
+            };
+            request.validate().unwrap();
+            let mut packet = [0; 37];
+            packet[..4].copy_from_slice(b"CAO1");
+            packet[5..].copy_from_slice(&self.client.token);
+            let admission = host.authority.authenticate(&packet).unwrap();
+            let operation = host.engine.owner_job(|reply| Job::OwnerApply(admission, request, reply))
+                .await.unwrap();
+            assert_eq!(operation.result, crate::engine::owner::OwnerResult::Applied, "{request_id}");
+        }
+
+        async fn model_access_basis(&self) -> (crate::protocol::ConfigId, String) {
+            let state = self.owner_state(OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools, cursor: None, limit: 16,
+            }).await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
+                panic!("actual model source basis missing")
+            };
+            (state.config_id, source_hash)
+        }
+
+        async fn edit_settings(&self, request_id: &str, edit: crate::config::ModelAccessEdit) {
+            let (config_id, source_hash) = self.model_access_basis().await;
+            self.owner_apply(request_id, crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: config_id.clone(), expected_source_hash: source_hash, edit,
+            }).await;
+            assert_ne!(self.model_access_basis().await.0, config_id);
+        }
+
+        fn configured_connection(&self) -> crate::config::ModelConnection {
+            let config = crate::config::resolve_config(
+                &self.root.path().join("g.toml"), &self.root.path().join("p.toml"),
+            ).unwrap();
+            config.settings.model_access.unwrap().connections[0].clone()
+        }
+
+        async fn complete_sign_in(&mut self) {
+            let mut protocol = protocol();
+            self.observe(challenge(&mut protocol, false)).await;
+            self.observe(control(&mut protocol, json!({"method":"account/login/completed",
+                "params":{"loginId":"observed-login","success":true}}))).await;
+            protocol.read_account(false).unwrap();
+            self.observe(control(&mut protocol, json!({"id":3,"result":{
+                "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},
+                "requiresOpenaiAuth":true
+            }}))).await;
+            assert_eq!(self.retire().await.phase, NativeAuthPhase::AuthenticatedObserved);
+            assert_eq!(self.fence_count(), 0);
+        }
+
+        async fn open_master(&self) {
+            let root = self.root.path();
+            let repository = root.join("repository");
+            std::fs::create_dir(&repository).unwrap();
+            std::fs::set_permissions(&repository, std::fs::Permissions::from_mode(0o700)).unwrap();
+            master_git(root, &repository, &["init", "--initial-branch=trunk"]);
+            std::fs::write(repository.join("README"), b"Actual signed-in master workspace.\n").unwrap();
+            master_git(root, &repository, &["add", "README"]);
+            master_git(root, &repository, &["commit", "-qm", "Initialize signed-in master fixture"]);
+            self.owner_apply("signed-in-master-project", crate::engine::owner::OwnerMutation::CreateProject {
+                project_id: master_project(),
+                spec: crate::protocol::ProjectSpec {
+                    name: "Signed-in master".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            }).await;
+            let (config_id, source_hash) = self.model_access_basis().await;
+            self.owner_apply("signed-in-master-open", crate::engine::owner::OwnerMutation::ProjectMaster {
+                action: crate::master_session::MasterOwnerAction::Open {
+                    project_id: master_project(),
+                    expected_config_id: config_id,
+                    expected_source_hash: source_hash,
+                    selection: master_selection(),
+                },
+            }).await;
+        }
+
+        async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
+            let state = self.owner_state(OwnerRead::ProjectMaster { project_id: master_project() }).await;
+            let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+                panic!("actual master session missing")
+            };
+            self.owner_apply(request_id, crate::engine::owner::OwnerMutation::ProjectMaster {
+                action: crate::master_session::MasterOwnerAction::Submit {
+                    project_id: session.project_id.clone(),
+                    session_id: session.session_id.clone(),
+                    text: "Describe the project without using tools.".into(),
+                },
+            }).await;
+            let host = self.service.owner_runtime().unwrap();
+            host.prepare_master_turn(&session.project_id, &session.session_id, &id(request_id))
+                .await.unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_in_master_survives_an_unrelated_settings_edit() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            }).await;
+            case.complete_sign_in().await;
+            case.edit_settings("rename-master-pool", crate::config::ModelAccessEdit::ReplacePool {
+                pool: crate::config::AccountPool {
+                    id: CredentialRef::new("pool-a").unwrap(),
+                    name: Some("Daily work".into()),
+                    members: vec![CredentialRef::new("connection-a").unwrap()],
+                    projects: vec![CredentialRef::new("project-a").unwrap()],
+                    roles: vec![CredentialRef::new("project_leader").unwrap()],
+                    fallback_allowed: false,
+                    provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                },
+            }).await;
+            case.open_master().await;
+            let prepared = admitted(case.prepare_next_turn("first-signed-in-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let profile = host.acquire_master_profile(&prepared, &id("first-signed-in-turn"))
+                .await.unwrap();
+            if let Err(error) = host.prepare_master_host(&prepared, &profile) {
+                assert_ne!(error.0, "master_runtime_binding");
+            }
+            drop(profile);
+            case.close().await;
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn signed_in_master_is_refused_after_its_connection_changes() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            }).await;
+            case.complete_sign_in().await;
+            let mut connection = case.configured_connection();
+            connection.model.id = "model-b".into();
+            case.edit_settings("change-master-model", crate::config::ModelAccessEdit::ReplaceConnection {
+                connection,
+            }).await;
+            case.open_master().await;
+            blocked(
+                case.prepare_next_turn("turn-after-connection-change").await,
+                crate::master_session::MasterReason::ReadinessStale,
+            );
+            case.close().await;
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_first_master_turn_does_not_lock_out_the_turn_after_sign_in() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            }).await;
+            case.open_master().await;
+            blocked(
+                case.prepare_next_turn("turn-before-sign-in").await,
+                crate::master_session::MasterReason::ReadinessStale,
+            );
+            case.complete_sign_in().await;
+            admitted(case.prepare_next_turn("turn-after-sign-in").await);
             case.close().await;
         }).await.unwrap();
     }

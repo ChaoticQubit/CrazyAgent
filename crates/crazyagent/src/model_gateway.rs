@@ -530,8 +530,6 @@ fn validate_initial_conversation(
     if auth.generation == 0
         || auth.fact.generation != auth.generation
         || &auth.fact.binding != auth.binding
-        || auth.binding.config_id != pinned.id
-        || auth.binding.config_id != current.id
         || auth.binding.connection.account_ref != request.route.account_ref
         || !matches!(
             auth.binding.connection.auth,
