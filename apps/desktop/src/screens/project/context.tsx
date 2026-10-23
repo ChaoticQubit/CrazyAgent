@@ -111,7 +111,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     }
     const state = receiptState(result.value);
     if (state.kind !== "applied") {
-      setSaveState({ busy: false, error: state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check Settings, Memory before saving again." : failureCopy(state.code) });
+      setSaveState({ busy: false, error: state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check Project memory before saving again." : failureCopy(state.code) });
       return;
     }
     setSaveState({ busy: false, error: "" });
