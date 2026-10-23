@@ -33,4 +33,4 @@
 
 
 
- ↑↓ Move   Enter Open report   Shift-←→ Tabs   Esc Home                                                          ? Help
+ ↑↓ Move   x Stop   Enter Open report   Shift-←→ Tabs   Esc Home                                                 ? Help

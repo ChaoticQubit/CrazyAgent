@@ -11,7 +11,7 @@ use super::project_view::project_screen;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
-use crate::project_setup::SetupQuery;
+use crate::project_setup::{SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
 use crate::tui::client::{OwnerEvent, SetupEvent};
@@ -382,13 +382,46 @@ impl ProjectPage {
         }
     }
 
-    fn setup_arrived(&mut self, event: &SetupEvent) {
+    fn setup_arrived(&mut self, event: &SetupEvent, ctx: &mut Ctx) {
         let Some(index) = self.sent.iter().position(|query| query == &event.query) else {
             return;
         };
         let query = self.sent.remove(index);
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
+        let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
+        let SetupQuery::Change { action, .. } = &query else {
+            return;
+        };
+        let name = |job: i64| {
+            self.screen
+                .jobs
+                .iter()
+                .flatten()
+                .find(|known| known.id == job)
+                .map_or_else(
+                    || "The research".to_owned(),
+                    |known| known.kind_label.clone(),
+                )
+        };
+        match action {
+            SetupAction::CancelResearch { job, .. } if applied => {
+                ctx.say(Message::success(&format!("Stopping {}.", name(*job)), ""));
+            }
+            SetupAction::RetryResearch { job, .. } if applied => {
+                ctx.say(Message::success(
+                    &format!("{} will run again.", name(*job)),
+                    "",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn say_problem(&mut self, ctx: &mut Ctx) {
+        if let Some(problem) = self.screen.problem.take() {
+            ctx.say(Message::error(&problem, ""));
+        }
     }
 
     fn stop_master(&mut self, ctx: &mut Ctx) {
@@ -565,6 +598,7 @@ impl ProjectPage {
         };
         self.sync_master(ctx);
         self.pump(ctx);
+        self.say_problem(ctx);
         self.redraw(ctx);
         flow
     }
@@ -612,7 +646,7 @@ impl Screen for ProjectPage {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
             Arrival::Owner(event) => match event.as_ref() {
-                OwnerEvent::Setup(event) => self.setup_arrived(event),
+                OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
                 _ => return Flow::Handled,
             },
@@ -633,6 +667,7 @@ impl Screen for ProjectPage {
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
+        self.say_problem(ctx);
         self.redraw(ctx);
         Flow::Handled
     }
@@ -643,6 +678,7 @@ impl Screen for ProjectPage {
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
+        self.say_problem(ctx);
         self.redraw(ctx);
     }
 
