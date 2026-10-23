@@ -55,7 +55,7 @@ pub(super) enum Job {
     },
     Read {
         context: Context,
-        confirmation: Option<Confirmation>,
+        confirmation: Option<Box<Confirmation>>,
     },
     Mutation {
         submission: Submission,
@@ -484,7 +484,7 @@ impl State {
             project_id: self.project.clone().unwrap(),
             expected_config_id: catalog.config_id.clone(),
             expected_source_hash: catalog.source_hash.clone(),
-            selection,
+            selection: Box::new(selection),
         };
         self.enqueue(action, self.forms[index].generation)?;
         self.forms[index].explicit = true;
@@ -717,7 +717,7 @@ impl State {
         self.flight = Some(context.clone());
         Some(Job::Read {
             context,
-            confirmation,
+            confirmation: confirmation.map(Box::new),
         })
     }
 
@@ -1253,7 +1253,7 @@ impl View {
                 expected_source_hash,
                 ..
             } => {
-                session.selection == *selection
+                session.selection == **selection
                     && session.config_id == *expected_config_id
                     && session.source_hash == *expected_source_hash
                     && session.phase == MasterSessionPhase::Configured
@@ -1948,6 +1948,7 @@ pub(super) async fn read_view(
     let OwnerData::ProjectMaster { session } = state.data else {
         return Err("master_session_read_required".into());
     };
+    let session = session.map(|session| *session);
     let mut view = View {
         session,
         turns: Vec::new(),
@@ -2207,7 +2208,7 @@ pub async fn default_master_open(
             project_id: project_id.clone(),
             expected_config_id: catalog.config_id.clone(),
             expected_source_hash: catalog.source_hash.clone(),
-            selection: MasterSelection {
+            selection: Box::new(MasterSelection {
                 backend,
                 pool_ref: pool.clone(),
                 target_profile_ref: target.clone(),
@@ -2219,7 +2220,7 @@ pub async fn default_master_open(
                     budget_ref: pool,
                     resources: budget,
                 },
-            },
+            }),
         });
     }
     Err("No account pool is assigned to this project as its master".into())

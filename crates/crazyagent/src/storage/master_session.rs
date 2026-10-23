@@ -386,7 +386,7 @@ fn decode_session(
                     project_id: session.project_id.clone(),
                     expected_config_id: session.config_id.clone(),
                     expected_source_hash: session.source_hash.clone(),
-                    selection: session.selection.clone(),
+                    selection: Box::new(session.selection.clone()),
                 },
             },
         },
@@ -2773,7 +2773,7 @@ fn execute(
             project_id: project_id.clone(),
             session_id: SessionId::new(format!("master-{}", random_id()?)).map_err(error)?,
             bootstrap_task_id: TaskId::new(format!("bootstrap-{}", random_id()?)).map_err(error)?,
-            selection: selection.clone(),
+            selection: (**selection).clone(),
             config_id: config.id.clone(),
             source_hash: source_hash.into(),
             phase: MasterSessionPhase::Configured,
@@ -3135,7 +3135,7 @@ pub(super) fn read(
     let source_hash = settings::verified_source_hash(config, sources)?;
     let data = match query {
         OwnerRead::ProjectMaster { project_id } => OwnerData::ProjectMaster {
-            session: latest(&tx, project_id, revision)?,
+            session: latest(&tx, project_id, revision)?.map(Box::new),
         },
         OwnerRead::ProjectMasterTurns {
             project_id,
@@ -3436,7 +3436,7 @@ fallback_allowed = false
                         project_id: project.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: MasterSelection {
+                        selection: Box::new(MasterSelection {
                             backend: MasterBackend::Rcli,
                             pool_ref: reference("local-pool"),
                             target_profile_ref: reference("local-profile"),
@@ -3448,7 +3448,7 @@ fallback_allowed = false
                                 budget_ref: reference("conversation-budget"),
                                 resources: ResourceBudget::unit(),
                             },
-                        },
+                        }),
                     },
                 },
             )
@@ -3467,6 +3467,7 @@ fallback_allowed = false
             else {
                 panic!("actual committed master session missing");
             };
+            let session = *session;
             owner_apply(
                 &storage,
                 &started,
@@ -3494,6 +3495,7 @@ fallback_allowed = false
             else {
                 panic!("actual submitted master session missing");
             };
+            let session = *session;
             let state = owner_read(
                 &storage,
                 &started,

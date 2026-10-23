@@ -335,7 +335,7 @@ impl Fixture {
                         project_id: project.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: selection(backend),
+                        selection: Box::new(selection(backend)),
                     },
                 },
             },
@@ -422,6 +422,7 @@ impl Fixture {
         else {
             panic!("actual committed session missing");
         };
+        let session = *session;
         session
     }
 

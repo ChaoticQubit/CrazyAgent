@@ -263,7 +263,7 @@ pub enum MasterOwnerAction {
         project_id: ProjectId,
         expected_config_id: ConfigId,
         expected_source_hash: String,
-        selection: MasterSelection,
+        selection: Box<MasterSelection>,
     },
     Submit {
         project_id: ProjectId,

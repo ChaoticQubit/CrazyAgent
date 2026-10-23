@@ -2834,7 +2834,7 @@ fallback_allowed = false
                         project_id: master_project(),
                         expected_config_id: config_id,
                         expected_source_hash: source_hash,
-                        selection: master_selection(),
+                        selection: Box::new(master_selection()),
                     },
                 },
             )
@@ -2853,6 +2853,7 @@ fallback_allowed = false
             else {
                 panic!("actual master session missing")
             };
+            let session = *session;
             self.owner_apply(
                 request_id,
                 crate::engine::owner::OwnerMutation::ProjectMaster {

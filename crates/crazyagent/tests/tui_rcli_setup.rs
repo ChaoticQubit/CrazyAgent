@@ -496,6 +496,7 @@ async fn verify_actual_receipt(
     else {
         panic!("Actual registered master is missing");
     };
+    let session = *session;
     assert_eq!(session.session_id, metadata.session_id);
     assert_eq!(session.phase, MasterSessionPhase::Configured);
     assert!(session.current_turn.is_none());

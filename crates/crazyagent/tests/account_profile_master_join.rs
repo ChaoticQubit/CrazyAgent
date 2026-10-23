@@ -461,7 +461,7 @@ impl Fixture {
                     project_id: project_id.clone(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Rcli,
                         pool_ref: pool().id,
                         target_profile_ref: receipt.profile_ref.clone(),
@@ -473,7 +473,7 @@ impl Fixture {
                             budget_ref: reference("conversation-budget"),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             },
         )
@@ -492,6 +492,7 @@ impl Fixture {
         else {
             panic!("actual committed master session required");
         };
+        let session = *session;
         assert_eq!(session.config_id, state.config_id);
         session
     }

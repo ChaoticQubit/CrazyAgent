@@ -849,7 +849,7 @@ pub enum OwnerSummary {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
     ProjectMaster {
-        session: Option<crate::master_session::MasterSessionView>,
+        session: Option<Box<crate::master_session::MasterSessionView>>,
     },
     ProjectMasterTurns {
         page: crate::master_session::MasterTurnPage,

@@ -161,7 +161,7 @@ fn imp1035_receipt_is_configured_only_and_contains_none_profile_join() {
                 custody_id: "e".repeat(64),
                 profile_config_sha256: "f".repeat(64),
                 profile_generation: 1,
-            },
+            }),
             historical_replay: true,
         },
     };

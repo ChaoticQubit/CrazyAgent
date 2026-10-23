@@ -173,7 +173,7 @@ impl AutoDispatchCase {
                     project_id: ProjectId::new("p").unwrap(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Claude,
                         pool_ref: CredentialRef::new("master-pool").unwrap(),
                         target_profile_ref: target.clone(),
@@ -185,7 +185,7 @@ impl AutoDispatchCase {
                             budget_ref: CredentialRef::new("planning-budget").unwrap(),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             )
             .await;
@@ -206,6 +206,7 @@ impl AutoDispatchCase {
         else {
             panic!("actual configured master session missing");
         };
+        let session = *session;
         session
     }
 

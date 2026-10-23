@@ -237,7 +237,7 @@ impl Fixture {
                         project_id: project(),
                         expected_config_id: catalog.config_id,
                         expected_source_hash: source_hash,
-                        selection: MasterSelection {
+                        selection: Box::new(MasterSelection {
                             backend: MasterBackend::Rcli,
                             pool_ref: reference("local-pool"),
                             target_profile_ref: reference("local-profile"),
@@ -249,7 +249,7 @@ impl Fixture {
                                 budget_ref: reference("conversation-budget"),
                                 resources: ResourceBudget::unit(),
                             },
-                        },
+                        }),
                     },
                 },
                 2,
@@ -269,6 +269,7 @@ impl Fixture {
         else {
             panic!("actual committed master session missing");
         };
+        let session = *session;
         assert_eq!(session.owner, opened.provenance);
         assert_eq!(session.phase, MasterSessionPhase::Configured);
         assert_eq!(session.current_turn, None);
@@ -489,7 +490,7 @@ async fn rcli_profile_registration_uses_real_owner_and_committed_session() {
         assert_eq!(
             read.data,
             OwnerData::ProjectMaster {
-                session: Some(session)
+                session: Some(Box::new(session))
             }
         );
         fixture.assert_no_execution();
