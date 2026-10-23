@@ -203,6 +203,21 @@ export function errorMessage(error: unknown): string {
     plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
     plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
+    agent_not_found: "This agent was not found. Refresh the list.",
+    agent_not_running: "This agent is not running. Refresh the list.",
+    agent_not_busy: "This agent is not working on anything to interrupt.",
+    agent_busy: "This agent is still handling the last request. Try again in a moment.",
+    agent_reconnected_read_only: "CrazyAgent reconnected to this agent after a restart. It can be stopped or restarted, not interrupted.",
+    agent_restart_needs_key: "CrazyAgent no longer holds this agent's API key since it restarted. Start the agent again from its project.",
+    agent_restart_conflict: "This agent is already running again. Refresh the list.",
+    agent_restart_limit: "This agent was restarted too many times. Start it again from its project.",
+    agent_launch_failed: "The agent could not start. Check its harness and account, then restart it.",
+    agent_spec_invalid: "This agent's saved settings are unreadable. Start it again from its project.",
+    agent_registry_unavailable: "CrazyAgent can't read its agent list. Restart CrazyAgent.",
+    agent_root_unsafe: "CrazyAgent's state folder is not private. Restart CrazyAgent after fixing its permissions.",
+    agent_state_unavailable: "CrazyAgent can't write this agent's state folder.",
+    agent_thread_unavailable: "CrazyAgent could not start watching this agent. Restart it.",
+    agents_outcome_unknown: "The agent request did not finish. Refresh the list before trying again.",
     owner_profile_role: "Keep the role on one line, up to 100 characters.",
     owner_profile_bio: "Keep the bio under 1000 characters.",
     owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
@@ -567,7 +582,7 @@ export interface TeamHarness {
   agents_max: number;
   tools: boolean;
   live: number;
-  delegation: "reply" | "unavailable" | null;
+  delegation: "reply" | "tool" | "unavailable" | null;
   delegation_label: string | null;
   runnable: boolean;
 }
@@ -620,12 +635,22 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  paused: boolean;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
   agents: TeamAgent[];
   tasks: TeamTask[];
   messages: TeamMessage[];
+  plan: TeamPlanStep[];
+}
+
+export interface TeamPlanStep {
+  reply: number;
+  step: number;
+  harness: string | null;
+  prompt: string;
+  task: number | null;
 }
 
 export function teamStatus(id: string): Promise<TeamStatus> {
@@ -651,6 +676,51 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
+}
+
+export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
+}
+
+/** Changes a project's name, description, stack, platforms, research, pool and team.
+ * Inputs: project id, the new setup, a generation, an optional new name and the setup revision
+ * shown (the engine's current one when null). Output: the engine receipt. */
+export function updateProjectSetup(
+  id: string,
+  setup: ProjectSetup,
+  generation: number,
+  name: string | null = null,
+  revision: number | null = null,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
+}
+
+/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
+ * Inputs: project id and a generation. Output: the engine receipt. */
+export function removeProject(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_remove_project", { id, generation });
+}
+
+/** Stops one research job; a running agent's whole process group stops.
+ * Inputs: project id, job id and a generation. Output: the engine receipt. */
+export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_cancel_research", { id, job, generation });
+}
+
+/** Queues a failed or cancelled research job again.
+ * Inputs: project id, job id and a generation. Output: the engine receipt. */
+export function retryResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_retry_research", { id, job, generation });
+}
+
+/** Reads the last plain lines of one research job's output, with secrets hidden.
+ * Inputs: project id and job id. Output: the lines, oldest first. */
+export function researchLog(id: string, job: number): Promise<{ lines: string[] }> {
+  return invoke<{ lines: string[] }>("desktop_research_log", { id, job });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
@@ -954,6 +1024,54 @@ export function removeMcpSecret(id: string, name: string): Promise<McpServerView
 /** Starts a command MCP server, lists its tools and stops it. */
 export function checkMcpServer(id: string): Promise<McpServerView> {
   return invoke<McpServerView>("desktop_check_mcp_server", { id });
+}
+
+/** Which part of a project's team an agent plays. */
+export type AgentRole = "master" | "sub_agent" | "research";
+
+/** Where an agent is; "closed" means it stopped when CrazyAgent closed. */
+export type AgentState = "running" | "stopped" | "exited" | "failed" | "closed";
+
+/** One launched agent, its plain status and the controls usable now. */
+export interface AgentView {
+  id: string;
+  project: string;
+  role: AgentRole;
+  label: string;
+  harness: string;
+  state: AgentState;
+  status: string;
+  reattached: boolean;
+  busy: boolean;
+  attempt: number;
+  can_stop: boolean;
+  can_interrupt: boolean;
+  can_restart: boolean;
+  exit_code: number | null;
+  reason: string | null;
+  last_text: string | null;
+  started_ms: number;
+  ended_ms: number | null;
+}
+
+/** Lists launched agents, newest first, for one project or for every project. */
+export function agents(projectId?: string): Promise<AgentView[]> {
+  return invoke<AgentView[]>("desktop_agents", { projectId: projectId ?? null });
+}
+
+/** Stops one agent and everything it started; other agents keep running. */
+export function stopAgent(id: string): Promise<AgentView> {
+  return invoke<AgentView>("desktop_stop_agent", { id });
+}
+
+/** Interrupts what one agent is doing now; the agent keeps running. */
+export function interruptAgent(id: string): Promise<void> {
+  return invoke<void>("desktop_interrupt_agent", { id });
+}
+
+/** Restarts one agent with its first task. */
+export function restartAgent(id: string): Promise<AgentView> {
+  return invoke<AgentView>("desktop_restart_agent", { id });
 }
 
 /** Reads what agents launched for a project receive: skill folders and approved MCP servers. */

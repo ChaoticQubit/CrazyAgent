@@ -5,6 +5,7 @@ export { StatusBadge, statusTone, statusIcon, Notice, Banner, Toast, EmptyState,
 export { Dialog, Drawer, ConfirmDialog, Menu, type MenuItem } from "./overlay";
 export { PageHeader, Tabs, Panel, type TabLink } from "./layout";
 export { WindowedList, windowRange } from "./windowed-list";
-export { AppShell, Sidebar, BrandMark, type EngineState, type SidebarProject } from "./shell";
+export { AppShell, Sidebar, type EngineState, type SidebarProject } from "./shell";
+export { BrandMark } from "./brand";
 export { Icon, ProviderMark, ICON_NAMES, type IconName } from "./icon";
 export { parseRoute, formatRoute, navigate, useRoute, type Route, type SettingsTab, type ProjectTab, type NewProjectStep } from "./router";

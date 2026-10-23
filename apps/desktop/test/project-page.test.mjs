@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -205,6 +206,7 @@ test("the Needs you line for waiting research uses the engine's reason when it g
 const tabData = (jobs) => ({
   id: "p-1", name: "Harbor Notes", setup: undefined, research: { kind: "ok", value: { project_id: "p-1", jobs } }, context: undefined,
   pools: undefined, harnesses: undefined, assigned: null, now: 1_000 + 60_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+  team: { result: undefined, at: 0 }, reloadTeam: () => {},
 });
 
 test("an agent that started offers View log, only a running one offers Stop", async () => {
@@ -296,6 +298,47 @@ test("only the brief offers Edit, which opens the project details it is written 
   assert.doesNotMatch(markup, />Edit</);
 });
 
+test("a project memory change shows a toast only when the engine applied it", () => {
+  const receipt = (outcome, rejection = null, pending = false) => ({ kind: "ok", value: {
+    kind: "research_memory", generation: "4", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "o", outcome, pending, rejection,
+  } });
+  const promote = (result) => research.memoryOutcome(result, "Now used in all projects.", "using a memory in all projects");
+  assert.deepEqual(promote(receipt("applied")), { toast: "Now used in all projects.", note: "", reload: true });
+  assert.deepEqual(promote(receipt("rejected", "memory_already_global")), { toast: "", note: "This memory is already in global memory.", reload: true });
+  assert.deepEqual(promote(receipt("rejected", "memory_changed")), { toast: "", note: "This memory changed. Reload it and try again.", reload: true });
+  assert.deepEqual(promote(receipt("uncertain", null, true)), { toast: "", note: "We couldn't confirm your last change. Check the list before trying again.", reload: true });
+  assert.deepEqual(promote({ kind: "not_ready" }), { toast: "", note: "Not ready yet: using a memory in all projects isn't in this build.", reload: false });
+  assert.deepEqual(promote({ kind: "error", code: "memory_missing", message: "" }), { toast: "", note: "That memory no longer exists.", reload: false });
+});
+
+test("project empty states show the brand mark, hidden from screen readers and without its name", async () => {
+  const mark = /<div class="pj-empty"><span class="pj-mark large" aria-hidden="true"><span class="brand-mark large" role="img" aria-label="CrazyAgent"><svg class="brand-glyph full" width="48" height="48"/;
+  const agents = await import("../src/screens/project/agents.tsx");
+  const noAgents = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([]) }));
+  assert.match(noAgents, mark);
+  assert.match(noAgents, /<h3>No agents yet<\/h3>/);
+  const context = await import("../src/screens/project/context.tsx");
+  const empty = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1", items: [] } };
+  const noFiles = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: empty } }));
+  assert.match(noFiles, mark);
+  assert.match(noFiles, /<h3>Nothing here yet<\/h3>/);
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const noMessages = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: tabData([]) }));
+  assert.match(noMessages, mark);
+  assert.match(noMessages, /<h3>No messages yet<\/h3>/);
+  assert.match(noMessages, /Ask the master anything about (<!-- -->)?Harbor Notes(<!-- -->)?\. It has read the brief/);
+});
+
+test("the master's reply mark is the small mark with the reduced drawing for low density screens", async () => {
+  const shared = await import("../src/screens/project/shared.tsx");
+  const markup = renderToStaticMarkup(createElement(shared.ProjectMark));
+  assert.match(markup, /^<span class="pj-mark" aria-hidden="true"><span class="brand-mark" role="img" aria-label="CrazyAgent">/);
+  assert.match(markup, /<svg class="brand-glyph full" width="24" height="24" viewBox="0 0 64 64"/);
+  assert.match(markup, /<svg class="brand-glyph reduced" width="24" height="24" viewBox="0 0 16 16"/);
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  assert.match(css, /\.pj-mark \.brand-name \{ display: none; \}/);
+});
+
 test("Needs you names the project's pool accounts that aren't signed in", () => {
   const member = (id, status) => ({ id, kind: "chatgpt", provider: "openai", status, status_label: "" });
   const pool = (members) => ({ id: "pool-1", name: "Main pool", summary: "", members, project_count: 1 });
@@ -354,7 +397,7 @@ test("the Team panel names each agent, its account and current task, and lists t
   const status = {
     agents: [
       teamAgent(1, "working", { role: "master", harness: "claude", account: "acct-a" }),
-      teamAgent(2, "working", { task: 10, turns: 3, account: "acct-b" }),
+      teamAgent(2, "working", { task: 10, turns: 3, account: "acct-b", worktree: "worktrees/agent-2" }),
       teamAgent(3, "idle", { account: "acct-gone" }),
       teamAgent(4, "failed", { problem: "Codex stopped answering." }),
     ],
@@ -369,16 +412,16 @@ test("the Team panel names each agent, its account and current task, and lists t
   const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
-    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "" },
-    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen" },
-    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work" },
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder" },
+    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
+    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work", folder: "" },
   ]);
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Codex 1", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering." });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "" });
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Codex 1", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
@@ -419,4 +462,13 @@ test("team tasks waiting for a pool ask the owner for one, with the engine's rea
     "2 team tasks wait: No account in this project's pool can run codex.");
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
   assert.equal(research.teamWaitingLine([]), null);
+});
+
+test("Pause all agents says what stops, or that nothing is running", () => {
+  assert.deepEqual(research.pauseSummary([teamTask(1, "running"), teamTask(2, "running"), teamTask(3, "queued"), teamTask(4, "needs_pool"), teamTask(5, "done")]),
+    { count: 4, line: "2 running tasks stop and 2 waiting tasks are cancelled." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "running")]), { count: 1, line: "1 running task stops." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "queued")]), { count: 1, line: "1 waiting task is cancelled." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "done"), teamTask(2, "cancelled")]), { count: 0, line: "No team agents are working or waiting." });
+  assert.deepEqual(research.pauseSummary([]), { count: 0, line: "No team agents are working or waiting." });
 });

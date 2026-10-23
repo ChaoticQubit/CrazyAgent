@@ -3,15 +3,15 @@ use super::project::{
     PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
-use super::project_view::project_screen;
+use super::project_view::{activity, project_screen};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::engine::{Client, EngineError};
 use crate::memory::ReviewDecision;
 use crate::project_setup::{
-    ContextKind, Platform, ProjectSetup, ResearchKind, ResearchStatus, SetupAction, SetupQuery,
-    SetupView,
+    ContextKind, Platform, ProjectSetup, ResearchJob, ResearchKind, ResearchStatus, SetupAction,
+    SetupQuery, SetupView,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -105,6 +105,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
             .map_err(problem)?,
         )?,
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
+        SetupQuery::Team { .. } | SetupQuery::TeamChange { .. } | SetupQuery::Library(_) => {
+            panic!("the project screen never reads the team or the library")
+        }
     })
 }
 
@@ -595,4 +598,76 @@ fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     );
     assert_eq!(memory_quote("## Only a heading\n"), "Only a heading");
     assert_eq!(memory_quote("  \n"), "");
+}
+
+#[test]
+fn the_agent_activity_lists_only_what_the_engine_recorded() {
+    let look = Look::plain();
+    let mut job = ResearchJob {
+        id: 7,
+        project_id: ProjectId::new("notes-cli").unwrap(),
+        kind: ResearchKind::MarketResearch,
+        kind_label: "Market research".into(),
+        status: ResearchStatus::NeedsPool,
+        status_label: "Needs a pool".into(),
+        report_path: "context/research/market_research.md".into(),
+        harness: "claude".into(),
+        tools: true,
+        attempts: 0,
+        claimer: None,
+        error: None,
+        cancel_requested: false,
+        output_bytes: 0,
+        created_ms: 1_000,
+        started_ms: None,
+        heartbeat_ms: None,
+        finished_ms: None,
+    };
+    let steps = |job: &ResearchJob| -> Vec<(Option<i64>, String)> {
+        activity(job, &look)
+            .into_iter()
+            .map(|(at, text, _)| (at, text))
+            .collect()
+    };
+    assert_eq!(
+        steps(&job),
+        [
+            (Some(1_000), "Queued".to_owned()),
+            (None, "Waiting for a pool".to_owned())
+        ]
+    );
+    job.status = ResearchStatus::Running;
+    job.attempts = 2;
+    job.started_ms = Some(2_000);
+    job.heartbeat_ms = Some(3_000);
+    job.output_bytes = 12 * 1024;
+    job.cancel_requested = true;
+    assert_eq!(
+        steps(&job),
+        [
+            (Some(1_000), "Queued".to_owned()),
+            (Some(2_000), "Started on Claude Code, try 2".to_owned()),
+            (
+                Some(3_000),
+                "Still working, 12 KB of output so far".to_owned()
+            ),
+            (None, "Stop asked, waiting for the agent to end".to_owned()),
+        ]
+    );
+    job.status = ResearchStatus::Done;
+    job.attempts = 1;
+    job.cancel_requested = false;
+    job.finished_ms = Some(4_000);
+    assert_eq!(
+        steps(&job),
+        [
+            (Some(1_000), "Queued".to_owned()),
+            (Some(2_000), "Started on Claude Code".to_owned()),
+            (Some(4_000), "Finished, report written".to_owned()),
+        ]
+    );
+    job.status = ResearchStatus::Failed;
+    assert_eq!(steps(&job).last().unwrap().1, "Failed");
+    job.status = ResearchStatus::Cancelled;
+    assert_eq!(steps(&job).last().unwrap().1, "Stopped");
 }

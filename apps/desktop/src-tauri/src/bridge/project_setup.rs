@@ -16,6 +16,11 @@ pub struct ResearchJobs {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ResearchLog {
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MemoryItem {
     pub id: String,
     pub version: u64,
@@ -45,6 +50,7 @@ fn read_failure(code: &str) -> BridgeError {
         "context_item_missing" => "context_item_missing",
         "context_offset_invalid" => "context_offset_invalid",
         "project_missing" => "project_missing",
+        "research_job_missing" => "research_job_missing",
         _ => "owner_read_failed",
     })
 }
@@ -306,5 +312,143 @@ impl NativeBridge {
             )
             .map_err(|_| failure("owner_not_ready"))?;
         self.deliver_intent(false).await
+    }
+
+    /// Changes a project's name, description, stack, platforms, research, pool and team.
+    /// Takes the project id, the new setup, an optional new name, the setup revision the screen
+    /// showed (the current one when absent) and the client generation. Returns the actual
+    /// commit receipt; a change made in between is the plain rejection `stale_revision`.
+    pub async fn update_project_setup(
+        &mut self,
+        id: &str,
+        setup: ProjectSetup,
+        name: Option<String>,
+        revision: Option<u64>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        let renamed = name.as_ref().map(|name| ProjectSpec {
+            name: name.clone(),
+            repositories: Vec::new(),
+        });
+        if renamed.is_some_and(|spec| spec.validate().is_err()) {
+            return Err(failure("project_spec_bounds"));
+        }
+        if !setup.documents.is_empty() {
+            return Err(failure("project_setup_bounds"));
+        }
+        setup
+            .validate()
+            .map_err(|_| failure("project_setup_bounds"))?;
+        let stored = self
+            .controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?
+            .ok_or_else(|| failure("project_setup_missing"))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::UpdateProjectSetup {
+                    project_id,
+                    expected_revision: revision.unwrap_or(stored.revision),
+                    name,
+                    setup,
+                },
+                generation,
+            )
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Removes a project from CrazyAgent; its research stops and its folder stays on disk.
+    /// Takes the project id and the client generation.
+    /// Returns the actual commit receipt; an open master conversation is a plain rejection.
+    pub async fn remove_project(
+        &mut self,
+        id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Stops one research job; the runner stops a running agent's whole process group.
+    /// Takes the project id, the job id and the client generation.
+    /// Returns the actual commit receipt; a finished job is a plain rejection.
+    pub async fn cancel_research(
+        &mut self,
+        id: &str,
+        job: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.research_change(
+            OwnerMutation::CancelResearch {
+                project_id: project_id.clone(),
+                job,
+            },
+            project_id,
+            generation,
+        )
+        .await
+    }
+
+    /// Queues a failed or cancelled research job again.
+    /// Takes the project id, the job id and the client generation.
+    /// Returns the actual commit receipt; a job that is not stopped is a plain rejection.
+    pub async fn retry_research(
+        &mut self,
+        id: &str,
+        job: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.research_change(
+            OwnerMutation::RetryResearch {
+                project_id: project_id.clone(),
+                job,
+            },
+            project_id,
+            generation,
+        )
+        .await
+    }
+
+    async fn research_change(
+        &mut self,
+        mutation: OwnerMutation,
+        project_id: ProjectId,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        self.controller()?
+            .research_jobs(project_id)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(mutation, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Reads the last plain lines of one research job's agent output, with secrets hidden.
+    /// Takes the project id and the job id.
+    /// Returns the bounded lines, oldest first; none before the job first runs.
+    pub async fn research_log(&mut self, id: &str, job: i64) -> Result<ResearchLog, BridgeError> {
+        let lines = self
+            .controller()?
+            .research_log(project(id)?, job)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(ResearchLog { lines })
     }
 }

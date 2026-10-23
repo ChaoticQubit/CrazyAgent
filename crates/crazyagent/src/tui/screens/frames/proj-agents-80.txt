@@ -1,4 +1,4 @@
- CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Agents
+ [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Agents
 ────────────────────────────────────────────────────────────────────────────────
   ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
 ────────────────────────────────━━━━━━━━────────────────────────────────────────
@@ -12,9 +12,9 @@
   Report        research/market_research.md
   Tools         On, inside the project folder
 
-
-
-
+  Activity
+  hh:mm  Queued
+         Waiting for a pool
 
 
 

@@ -188,7 +188,11 @@ impl Screen for Welcome {
     }
 
     fn draft(&self) -> bool {
-        false
+        self.form.edited()
+    }
+
+    fn loss(&self) -> &'static str {
+        "Your profile will not be saved."
     }
 
     fn place(&self) -> Option<Place> {

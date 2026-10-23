@@ -127,10 +127,15 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         .await
         .unwrap();
     assert_eq!(
-        catalog.default_team.master, "rcli",
-        "codex has no sign-in in this engine, so the configured endpoint leads"
+        catalog.default_team.master, "codex",
+        "codex has no sign-in in this engine, and RCLI never leads the default team"
     );
+    assert_eq!(catalog.default_team.sub_harnesses[0].harness, "codex");
     assert_eq!(catalog.default_team.sub_harnesses[0].agents, 2);
+    assert_eq!(
+        catalog.default_team_status, None,
+        "Codex can run on the pool's keyless endpoint"
+    );
     assert_eq!(
         owner
             .project_catalog(Some(CredentialRef::new("pool-absent").unwrap()), vec![])
@@ -190,7 +195,7 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
 
     let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
     assert_eq!(stored.folder, folder.to_str().unwrap());
-    assert_eq!(stored.team.master, "rcli");
+    assert_eq!(stored.team.master, "codex");
     assert!(stored.team.master_tools);
     assert_eq!(stored.documents.len(), 2);
 
@@ -204,8 +209,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
             ))
             .collect::<Vec<_>>(),
         [
-            ("Market research", "Queued", "rcli"),
-            ("Competitor research", "Queued", "rcli")
+            ("Market research", "Queued", "codex"),
+            ("Competitor research", "Queued", "codex")
         ]
     );
 
@@ -579,6 +584,381 @@ async fn owner_adds_documents_and_deletes_research_and_documents_through_the_eng
     );
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
     assert!(folder.join("context/brief.md").is_file());
+    drop(owner);
+    engine.stop().await;
+}
+
+fn pooled_setup(research: Vec<ResearchKind>) -> ProjectSetup {
+    ProjectSetup {
+        about: "Plans weekly meals.".into(),
+        tech_stack: vec!["typescript".into()],
+        platforms: vec![Platform::Website],
+        research,
+        pool: Some(CredentialRef::new("pool-team").unwrap()),
+        team: None,
+        documents: vec![],
+    }
+}
+
+fn rejected(code: &str) -> OwnerResult {
+    OwnerResult::Rejected { code: code.into() }
+}
+
+#[tokio::test]
+async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    let market = owner.research_jobs(project.clone()).await.unwrap()[0].id;
+
+    let solo = TeamPlan {
+        master: "codex".into(),
+        master_tools: false,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let edited = ProjectSetup {
+        about: "Plans meals for two.".into(),
+        tech_stack: vec![" rust ".into()],
+        platforms: vec![Platform::Cli],
+        team: Some(solo.clone()),
+        ..pooled_setup(vec![ResearchKind::CompetitorResearch])
+    };
+    let response = owner
+        .update_project_setup(
+            project.clone(),
+            1,
+            Some("Meals for two".into()),
+            edited.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(stored.revision, 2);
+    assert_eq!(stored.name, "Meals for two");
+    assert_eq!(stored.about, "Plans meals for two.");
+    assert_eq!(stored.tech_stack, ["rust"]);
+    assert_eq!(stored.platforms, [Platform::Cli]);
+    assert_eq!(stored.research, [ResearchKind::CompetitorResearch]);
+    assert_eq!(stored.team, solo);
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM projects WHERE id='setup-pooled'
+            AND json_extract(body,'$.spec.name')='Meals for two'"
+        ),
+        1
+    );
+    let brief =
+        std::fs::read_to_string(Path::new(&stored.folder).join("context/brief.md")).unwrap();
+    assert!(brief.contains("# Meals for two"), "{brief}");
+    assert!(brief.contains("Plans meals for two."), "{brief}");
+    let jobs = owner.research_jobs(project.clone()).await.unwrap();
+    assert_eq!(
+        jobs.iter()
+            .map(|job| (job.kind, job.status, job.cancel_requested))
+            .collect::<Vec<_>>(),
+        [
+            (
+                ResearchKind::MarketResearch,
+                ResearchStatus::Cancelled,
+                true
+            ),
+            (
+                ResearchKind::CompetitorResearch,
+                ResearchStatus::Queued,
+                false
+            ),
+        ]
+    );
+    assert_eq!(jobs[0].id, market);
+    assert_eq!((jobs[1].harness.as_str(), jobs[1].tools), ("codex", false));
+
+    let stale = owner
+        .update_project_setup(project.clone(), 1, None, edited.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(result(stale), rejected("stale_revision"));
+    let both = ProjectSetup {
+        research: vec![
+            ResearchKind::MarketResearch,
+            ResearchKind::CompetitorResearch,
+        ],
+        ..edited.clone()
+    };
+    let response = owner
+        .update_project_setup(project.clone(), 2, None, both, 4)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let jobs = owner.research_jobs(project.clone()).await.unwrap();
+    assert_eq!(jobs.len(), 2, "research turned back on reuses its job");
+    assert_eq!(
+        (jobs[0].id, jobs[0].status, jobs[0].harness.as_str()),
+        (market, ResearchStatus::Queued, "codex")
+    );
+    assert!(!jobs[0].cancel_requested);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.revision, stored.name.as_str()),
+        (3, "Meals for two")
+    );
+
+    let absent = ProjectSetup {
+        pool: Some(CredentialRef::new("pool-absent").unwrap()),
+        ..edited.clone()
+    };
+    let missing = owner
+        .update_project_setup(project.clone(), 3, None, absent, 5)
+        .await
+        .unwrap();
+    assert_eq!(result(missing), rejected("pool_missing"));
+    let with_documents = SetupAction::Update {
+        project_id: project.clone(),
+        expected_revision: 3,
+        name: None,
+        setup: ProjectSetup {
+            documents: vec!["/private/tmp/notes.md".into()],
+            ..edited.clone()
+        },
+    };
+    assert_eq!(
+        with_documents.validate().unwrap_err().0,
+        "project_setup_bounds"
+    );
+    let blank_name = SetupAction::Update {
+        project_id: project.clone(),
+        expected_revision: 3,
+        name: Some(" ".into()),
+        setup: edited,
+    };
+    assert_eq!(blank_name.validate().unwrap_err().0, "project_spec_bounds");
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![
+                ResearchKind::MarketResearch,
+                ResearchKind::CompetitorResearch,
+            ]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let jobs = owner.research_jobs(project.clone()).await.unwrap();
+    let (first, second) = (jobs[0].id, jobs[1].id);
+
+    let cancelled = owner.cancel_research(project.clone(), first, 2).await;
+    assert_eq!(result(cancelled.unwrap()), OwnerResult::Applied);
+    let again = owner.cancel_research(project.clone(), first, 3).await;
+    assert_eq!(result(again.unwrap()), rejected("research_job_finished"));
+    let waiting = owner.retry_research(project.clone(), second, 4).await;
+    assert_eq!(
+        result(waiting.unwrap()),
+        rejected("research_job_not_retryable")
+    );
+    let unknown = owner.cancel_research(project.clone(), 9999, 5).await;
+    assert_eq!(result(unknown.unwrap()), rejected("research_job_missing"));
+    let retried = owner.retry_research(project.clone(), first, 6).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    let job = owner
+        .research_jobs(project.clone())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (job.id, job.status, job.attempts, job.cancel_requested),
+        (first, ResearchStatus::Queued, 0, false)
+    );
+
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let claimed = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, first);
+    let stopping = owner.cancel_research(project.clone(), first, 7).await;
+    assert_eq!(result(stopping.unwrap()), OwnerResult::Applied);
+    let job = owner
+        .research_jobs(project.clone())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (job.status, job.cancel_requested),
+        (ResearchStatus::Running, true)
+    );
+    assert!(
+        store.heartbeat(first, "runner-test", 64).unwrap(),
+        "the runner's heartbeat sees the stop and kills the agent's process group"
+    );
+    store.cancelled(first, "runner-test").unwrap();
+    assert_eq!(
+        owner.research_jobs(project.clone()).await.unwrap()[0].status,
+        ResearchStatus::Cancelled
+    );
+
+    assert!(
+        owner
+            .research_log(project.clone(), second)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let agents = engine.root.path().join("research/agents");
+    let older = agents.join(format!("job-{first}-1"));
+    let newest = agents.join(format!("job-{first}-1-1"));
+    for run in [&older, &newest] {
+        std::fs::create_dir_all(run).unwrap();
+    }
+    std::fs::write(older.join("stderr.log"), "old run\n").unwrap();
+    std::fs::write(
+        newest.join("events.jsonl"),
+        concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Found three competitors.\"}}\n",
+            "{\"type\":\"error\",\"message\":\"Rate limited, waiting\"}\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        newest.join("stderr.log"),
+        "warning:\tslow network\nAuthorization: Bearer abc123\nusing key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX now\n",
+    )
+    .unwrap();
+    let lines = owner.research_log(project.clone(), first).await.unwrap();
+    assert_eq!(
+        lines,
+        [
+            "Found three competitors.",
+            "Rate limited, waiting",
+            "warning: slow network",
+            "[hidden: this line may contain a secret]",
+            "using key [hidden] now",
+        ]
+    );
+
+    let busy = agents.join(format!("job-{second}-2"));
+    std::fs::create_dir_all(&busy).unwrap();
+    let steps: String = (0..500).map(|n| format!("step {n}\n")).collect();
+    std::fs::write(busy.join("stderr.log"), steps).unwrap();
+    let lines = owner.research_log(project.clone(), second).await.unwrap();
+    assert_eq!(lines.len(), RESEARCH_LOG_LINES_MAX);
+    assert_eq!(
+        (
+            lines[0].as_str(),
+            lines[RESEARCH_LOG_LINES_MAX - 1].as_str()
+        ),
+        ("step 300", "step 499")
+    );
+    let wide = agents.join(format!("job-{second}-3"));
+    std::fs::create_dir_all(&wide).unwrap();
+    let mut output = format!("{}\n", "x".repeat(RESEARCH_LOG_LINE_CHARS_MAX)).repeat(100);
+    output.push_str(&"y".repeat(500));
+    std::fs::write(wide.join("output.md"), output).unwrap();
+    let lines = owner.research_log(project.clone(), second).await.unwrap();
+    assert_eq!(lines.len(), 61, "the newest lines that fit one owner frame");
+    assert!(lines.iter().map(String::len).sum::<usize>() <= RESEARCH_LOG_BYTES_MAX);
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("{}...", "y".repeat(RESEARCH_LOG_LINE_CHARS_MAX))
+    );
+    assert_eq!(
+        owner
+            .research_log(project.clone(), 9999)
+            .await
+            .unwrap_err()
+            .0,
+        "research_job_missing"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn owner_removes_a_project_and_keeps_its_folder() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .folder;
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-pooled'"),
+        0
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_setups WHERE project='setup-pooled'"),
+        0
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM research_jobs WHERE project='setup-pooled'
+            AND status='cancelled' AND cancel_requested=1"
+        ),
+        1
+    );
+    assert!(
+        Path::new(&folder).join("context/brief.md").is_file(),
+        "the project folder stays where it was"
+    );
+    assert!(
+        owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let again = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(again), rejected("invalid_project"));
     drop(owner);
     engine.stop().await;
 }

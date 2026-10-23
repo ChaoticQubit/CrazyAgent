@@ -8,8 +8,8 @@ import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { nearBottom, researchRow, teamPanel } from "./research";
 import type { ResearchRow } from "./research";
-import { TeamPanel, useTeam } from "./team";
-import { Badge, NotReady, valueOf } from "./shared";
+import { TeamPanel } from "./team";
+import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
 
@@ -67,7 +67,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
-  const [team, reloadTeam] = useTeam(data.id);
+  const team = data.team;
   const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
@@ -92,7 +92,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={reloadTeam} />
+    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={data.reloadTeam} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);
@@ -108,10 +108,10 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
         {logOpen === job.id && <AgentLog data={data} job={job} />}
       </li>;
-    })}</ul> : data.research?.kind === "ok" && teamShown.agents.length + teamShown.tasks.length === 0 && <div className="pj-empty">
-      <h3>{filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}</h3>
-      <p className="pj-secondary">Research agents start from the Work step, and the master starts agents when you ask it to build something.</p>
-    </div>}
+    })}</ul> : data.research?.kind === "ok" && teamShown.agents.length + teamShown.tasks.length === 0 &&
+      <ProjectEmpty title={filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}>
+        Research agents start from the Work step, and the master starts agents when you ask it to build something.
+      </ProjectEmpty>}
     <ConfirmDialog open={stopping !== null} title={`Stop ${displayText(stopping?.kind_label ?? "this agent")}?`} confirmLabel="Stop agent" cancelLabel="Keep running"
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       Work so far stays in its working copy.

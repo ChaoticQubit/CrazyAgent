@@ -162,6 +162,41 @@ impl AgentContext {
             .collect()
     }
 
+    /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
+    /// Input: the absolute canonical engine executable that serves it and the absolute drop file
+    /// in the master's private temporary folder. Output: the context, or a plain code when a path
+    /// is not plain or an approved server already uses the name.
+    pub fn with_team_tool(mut self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
+        let plain = |path: &Path| {
+            path.is_absolute()
+                .then(|| path.to_str())
+                .flatten()
+                .filter(|text| !text.chars().any(char::is_control))
+                .map(str::to_owned)
+        };
+        let (Some(command), Some(drop)) = (plain(executable), plain(drop)) else {
+            return Err(failure("launch_context_team_tool_invalid"));
+        };
+        let name = crate::team::tool::SERVER_NAME;
+        if self
+            .plugins
+            .servers
+            .iter()
+            .any(|server| server.name == name)
+        {
+            return Err(failure("launch_context_team_tool_taken"));
+        }
+        self.plugins.servers.push(LaunchServer {
+            name: name.into(),
+            spec: ServerSpec::Stdio {
+                command,
+                args: vec![crate::team::tool::SERVER_COMMAND.into(), drop],
+            },
+            secrets: Vec::new(),
+        });
+        Ok(self)
+    }
+
     /// Reports whether any MCP secret value occurs in `text`, so launchers can prove a
     /// command line or environment never carries one.
     pub fn exposes_secret(&self, text: &[u8]) -> bool {

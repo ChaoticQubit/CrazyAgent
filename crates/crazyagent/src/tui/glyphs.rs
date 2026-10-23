@@ -89,7 +89,7 @@ impl Status {
     }
 }
 
-/// Sections shown in tab strips and Go to.
+/// Settings sections shown in the Settings tab strip.
 /// Input: none. Output: one section; `Glyphs::section` draws its glyph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -99,11 +99,6 @@ pub enum Section {
     Plugins,
     Memory,
     Profile,
-    Settings,
-    Overview,
-    Conversation,
-    Agents,
-    Context,
 }
 
 /// One glyph set: Unicode, or ASCII of the same width so layouts never shift.
@@ -113,7 +108,7 @@ pub enum Section {
 pub struct Glyphs {
     pub ascii: bool,
     status: [&'static str; 9],
-    sections: [&'static str; 11],
+    sections: [&'static str; 6],
     providers: [&'static str; 8],
     research: [&'static str; 5],
     pub hline: &'static str,
@@ -138,7 +133,7 @@ pub struct Glyphs {
 pub static UNICODE: Glyphs = Glyphs {
     ascii: false,
     status: ["✓", "✗", "!", "▸", "◌", "⊘", "◧", "?", "✧"],
-    sections: ["@", "⊞", "❯", "✦", "⁂", "◉", "☰", "◫", "»", "⊛", "⧉"],
+    sections: ["@", "⊞", "❯", "✦", "⁂", "◉"],
     providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "•"],
     research: ["◔", "≷", "◬", "▭", "≣"],
     hline: "─",
@@ -163,7 +158,7 @@ pub static UNICODE: Glyphs = Glyphs {
 pub static ASCII: Glyphs = Glyphs {
     ascii: true,
     status: ["+", "x", "!", ">", "o", "-", "~", "?", "*"],
-    sections: ["@", "#", "$", "&", "*", "o", "=", "=", ">", "*", "["],
+    sections: ["@", "#", "$", "&", "*", "o"],
     providers: ["O", "O", "C", "A", "R", "U", "L", "*"],
     research: ["$", "v", "^", "[", "="],
     hline: "-",
