@@ -166,6 +166,16 @@ fn where_a_memory_came_from_is_plain() {
             ("Tidepool".to_owned(), "Saved for Tidepool only.".to_owned()),
         ]
     );
+    let selection = saved(
+        8,
+        "Readings arrive every 90 s.",
+        only("tidepool"),
+        MemoryOrigin::Selected {
+            path: "context/research/market_research.md".into(),
+        },
+    );
+    assert_eq!(source(&selection, &ctx), "Tidepool");
+    assert_eq!(saved_line(&selection, &ctx), "Saved for Tidepool only.");
     let mut unknown = memory_ctx(80, 24);
     unknown.store.projects = Load::Ready(Vec::new());
     assert_eq!(source(&memories()[2], &unknown), "A project");

@@ -304,7 +304,7 @@ fn a_skill_folder_under_home_is_sent_as_a_full_path() {
     match ctx.next_request() {
         Some(Request::Settings(job)) => {
             assert!(
-                matches!(*job, SettingsJob::Plugin(PluginChange::AddSkill { ref folder }) if folder == "/Users/mira/Skills/tiger-style")
+                matches!(*job, SettingsJob::Plugin(PluginChange::AddSkill { scope: Scope::Global, ref folder }) if folder == "/Users/mira/Skills/tiger-style")
             );
         }
         other => panic!("add skill expected, got {other:?}"),
@@ -556,4 +556,73 @@ fn a_command_without_a_full_path_is_refused_on_the_edit_page() {
         screen.target.error.as_deref(),
         Some("Use the full path of the command, such as /opt/homebrew/bin/uvx.")
     );
+}
+
+#[test]
+fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
+    let tidepool = crate::protocol::ProjectId::new("tidepool").unwrap();
+    let back = |flow: Flow| match flow {
+        Flow::Open(Place::Project { id, name, tab }) => {
+            assert_eq!(id.as_str(), "tidepool");
+            assert_eq!(name, "Tidepool");
+            assert_eq!(tab, ProjectTab::Settings);
+        }
+        other => panic!("the project's Settings tab expected, got {other:?}"),
+    };
+    let mut ctx = plugin_ctx(80, 24);
+    let mut form = AddPlugin::skill().for_project(tidepool.clone(), "Tidepool".into());
+    assert_eq!(form.crumbs(), ["Tidepool", "Settings", "Add skill"]);
+    assert!(matches!(
+        form.place(),
+        Some(Place::Project {
+            tab: ProjectTab::Settings,
+            ..
+        })
+    ));
+    let (lines, _) = form.body(76, &ctx);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.to_string() == "Only this project can use it. Turn it off any time.")
+    );
+    for character in "/Users/mira/Skills/tidepool-style".chars() {
+        form.key(&Key::Char(character), &mut ctx);
+    }
+    form.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(matches!(
+            *job,
+            SettingsJob::Plugin(PluginChange::AddSkill {
+                scope: Scope::Project { ref project_id },
+                ref folder,
+            }) if project_id.as_str() == "tidepool" && folder == "/Users/mira/Skills/tidepool-style"
+        )),
+        other => panic!("add skill expected, got {other:?}"),
+    }
+    back(form.arrive(&changed(None), &mut ctx));
+    assert_eq!(ctx.message().unwrap().lead, "Skill added for this project.");
+
+    let mut form = AddPlugin::server().for_project(tidepool, "Tidepool".into());
+    assert_eq!(form.crumbs(), ["Tidepool", "Settings", "Add MCP server"]);
+    for character in "postgres".chars() {
+        form.key(&Key::Char(character), &mut ctx);
+    }
+    form.key(&Key::Tab, &mut ctx);
+    form.key(&Key::Tab, &mut ctx);
+    for character in "/opt/homebrew/bin/uvx mcp-server-postgres".chars() {
+        form.key(&Key::Char(character), &mut ctx);
+    }
+    form.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(matches!(
+            *job,
+            SettingsJob::Plugin(PluginChange::AddServer {
+                scope: Scope::Project { ref project_id },
+                ref name,
+                ..
+            }) if project_id.as_str() == "tidepool" && name == "postgres"
+        )),
+        other => panic!("add server expected, got {other:?}"),
+    }
+    back(form.key(&Key::Esc, &mut ctx));
 }

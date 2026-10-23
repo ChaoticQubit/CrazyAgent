@@ -41,14 +41,18 @@ pub(in crate::tui) enum SettingsJob {
         generation: u64,
     },
     Plugins,
+    ProjectPlugins {
+        project: ProjectId,
+    },
     Plugin(PluginChange),
 }
 
-/// One change on Settings, Plugins and skills; everything there applies to
-/// every project.
-/// Input: built by the plugins page. Output: one plugins call on the engine.
+/// One change to skills and MCP servers, from Settings or from a project's
+/// settings. Switch turns an every-project item on or off for one project.
+/// Input: built by the plugins pages. Output: one plugins call on the engine.
 pub(in crate::tui) enum PluginChange {
     AddSkill {
+        scope: Scope,
         folder: String,
     },
     SetSkill {
@@ -59,6 +63,7 @@ pub(in crate::tui) enum PluginChange {
         id: String,
     },
     AddServer {
+        scope: Scope,
         name: String,
         spec: ServerSpec,
         secrets: Vec<(String, AccountSecret)>,
@@ -90,6 +95,11 @@ pub(in crate::tui) enum PluginChange {
         id: String,
         name: String,
     },
+    Switch {
+        project: ProjectId,
+        id: String,
+        on: bool,
+    },
 }
 
 impl std::fmt::Debug for SettingsJob {
@@ -103,6 +113,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Memories { .. } => "Memories",
             Self::DeleteMemory { .. } => "DeleteMemory",
             Self::Plugins => "Plugins",
+            Self::ProjectPlugins { .. } => "ProjectPlugins",
             Self::Plugin(_) => "Plugin",
         })
     }
@@ -181,6 +192,7 @@ pub(in crate::tui) enum SettingsEvent {
     Memories(Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
     PluginChanged(Result<Option<ServerView>, String>),
 }
 
@@ -198,6 +210,9 @@ impl SettingsEvent {
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
             SettingsJob::Plugins => Self::Plugins(Err(problem)),
+            SettingsJob::ProjectPlugins { project } => {
+                Self::ProjectPlugins(project.clone(), Err(problem))
+            }
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
         }
     }
@@ -308,7 +323,11 @@ impl NativeOwner {
             SettingsJob::Memories { scopes } => {
                 SettingsEvent::Memories(self.all_memories(scopes, lost).await)
             }
-            SettingsJob::Plugins => SettingsEvent::Plugins(self.plugins(lost).await),
+            SettingsJob::Plugins => SettingsEvent::Plugins(self.plugins(None, lost).await),
+            SettingsJob::ProjectPlugins { project } => SettingsEvent::ProjectPlugins(
+                project.clone(),
+                self.plugins(Some(project), lost).await,
+            ),
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
@@ -328,25 +347,28 @@ impl NativeOwner {
         }
     }
 
-    /// Reads the skills and MCP servers added for every project.
-    /// Input: the lost-connection flag. Output: both lists, or the plain problem code.
+    /// Reads the skills and MCP servers added for every project, or the ones one
+    /// project's agents can get with whether each every-project item is on there.
+    /// Inputs: the project, if any, and the lost-connection flag. Output: both
+    /// lists, or the plain problem code.
     pub(super) async fn plugins(
         &mut self,
+        project: Option<ProjectId>,
         lost: &mut bool,
     ) -> Result<(Vec<SkillView>, Vec<ServerView>), String> {
         let controller = self.settings_controller()?;
         let skills = controller
-            .plugin_skills(None)
+            .plugin_skills(project.clone())
             .await
             .map_err(|error| problem(&error, lost))?;
         let servers = controller
-            .plugin_servers(None)
+            .plugin_servers(project)
             .await
             .map_err(|error| problem(&error, lost))?;
         Ok((skills, servers))
     }
 
-    /// Runs one plugins change for every project.
+    /// Runs one plugins change.
     /// Inputs: the change and the lost-connection flag. Output: the changed MCP
     /// server when the change was about one, or the plain problem code.
     pub(super) async fn plugin_change(
@@ -356,21 +378,21 @@ impl NativeOwner {
     ) -> Result<Option<ServerView>, String> {
         let controller = self.settings_controller()?;
         let done = match change {
-            PluginChange::AddSkill { folder } => controller
-                .add_skill(Scope::Global, folder)
-                .await
-                .map(|_| None),
+            PluginChange::AddSkill { scope, folder } => {
+                controller.add_skill(scope, folder).await.map(|_| None)
+            }
             PluginChange::SetSkill { id, enabled } => controller
                 .set_skill_enabled(id, enabled)
                 .await
                 .map(|_| None),
             PluginChange::RemoveSkill { id } => controller.remove_skill(id).await.map(|()| None),
             PluginChange::AddServer {
+                scope,
                 name,
                 spec,
                 secrets,
             } => controller
-                .add_mcp_server(Scope::Global, name, spec, secrets)
+                .add_mcp_server(scope, name, spec, secrets)
                 .await
                 .map(Some),
             PluginChange::Approve { id, spec } => {
@@ -393,6 +415,10 @@ impl NativeOwner {
             PluginChange::RemoveSecret { id, name } => {
                 controller.remove_mcp_secret(id, name).await.map(Some)
             }
+            PluginChange::Switch { project, id, on } => controller
+                .switch_plugin(project, id, on)
+                .await
+                .map(|()| None),
         };
         done.map_err(|error| problem(&error, lost))
     }
@@ -780,6 +806,131 @@ mod tests {
             .await;
         assert!(matches!(again, SettingsEvent::MemoryDeleted(Err(_))));
 
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn changed(event: SettingsEvent) {
+        match event {
+            SettingsEvent::PluginChanged(Ok(None)) => {}
+            SettingsEvent::PluginChanged(Err(code)) => panic!("plugin change refused: {code}"),
+            _ => panic!("a plugin change reply without a server required"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tplug-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut native = NativeOwner::new(root.path().join("e.sock"), Duration::from_secs(5));
+        let _ = native.attach().await;
+        assert!(native.ready);
+
+        let project = ProjectId::new("tidepool").unwrap();
+        let created = native
+            .controller
+            .as_mut()
+            .unwrap()
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Tidepool".into(),
+                    repositories: vec![],
+                },
+                crate::project_setup::ProjectSetup {
+                    about: "Live dashboard for sensor buoys.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![crate::project_setup::Platform::Website],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            created,
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ));
+        let folder = root.path().join("picked/release");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\nname: release-notes\ndescription: Teaches release notes.\n---\n\nSteps.\n",
+        )
+        .unwrap();
+        let added = native
+            .settings(SettingsJob::Plugin(PluginChange::AddSkill {
+                scope: Scope::Global,
+                folder: folder.display().to_string(),
+            }))
+            .await;
+        changed(added);
+
+        let read = |event: SettingsEvent| match event {
+            SettingsEvent::ProjectPlugins(read, Ok((skills, servers))) => {
+                assert_eq!(read.as_str(), "tidepool");
+                assert!(servers.is_empty());
+                skills
+                    .into_iter()
+                    .map(|skill| (skill.name, skill.on_here))
+                    .collect::<Vec<_>>()
+            }
+            SettingsEvent::ProjectPlugins(_, Err(code)) => panic!("project plugins failed: {code}"),
+            _ => panic!("project plugins required"),
+        };
+        let here = read(
+            native
+                .settings(SettingsJob::ProjectPlugins {
+                    project: project.clone(),
+                })
+                .await,
+        );
+        assert_eq!(here, vec![("release-notes".to_owned(), Some(true))]);
+        let SettingsEvent::Plugins(Ok((skills, _))) = native.settings(SettingsJob::Plugins).await
+        else {
+            panic!("every-project plugins required")
+        };
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].on_here, None, "Settings shows no project switch");
+
+        let switched = native
+            .settings(SettingsJob::Plugin(PluginChange::Switch {
+                project: project.clone(),
+                id: skills[0].id.clone(),
+                on: false,
+            }))
+            .await;
+        changed(switched);
+        let here = read(
+            native
+                .settings(SettingsJob::ProjectPlugins {
+                    project: project.clone(),
+                })
+                .await,
+        );
+        assert_eq!(here, vec![("release-notes".to_owned(), Some(false))]);
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await
