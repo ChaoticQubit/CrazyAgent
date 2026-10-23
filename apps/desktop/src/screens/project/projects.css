@@ -18,7 +18,7 @@
 .pj-secondary { color: var(--text-2); }
 .pj-muted { color: var(--text-3); }
 .pj-small { font-size: 12px; line-height: 16px; }
-.pj-mono { font: 12px/18px var(--mono); overflow-wrap: anywhere; }
+.pj-mono { font: 12px/18px var(--mono); overflow-wrap: anywhere; word-break: break-all; }
 .pj-pre { white-space: pre-wrap; }
 .pj-truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 720px; }
 .pj-warn-text { color: var(--warn); }
@@ -98,9 +98,9 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-rows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
 .pj-rows > li { border-top: 1px solid var(--border); padding: 10px 16px; }
 .pj-rows > li:first-child { border-top: 0; }
-.pj-research-row { display: grid; grid-template-columns: minmax(140px, 1fr) auto minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
+.pj-research-row { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
 .pj-activity-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; }
-.pj-agent-row { display: grid; grid-template-columns: minmax(140px, 1fr) 120px minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
+.pj-agent-row { display: grid; grid-template-columns: minmax(max-content, 1fr) 120px minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
 .pj-agent-row .pj-wt { grid-column: 1 / -1; }
 .pj-agent-row .pj-log { grid-column: 1 / -1; }
 .pj-plugin-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -158,7 +158,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 @media (prefers-reduced-motion: reduce) {
   .pj *, .pj *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
 }
-.pj-kind { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.pj-kind { display: inline-flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
 .pj-kind > .icon { color: var(--text-2); flex: none; }
 .pj-folder { display: flex; align-items: center; gap: 6px; }
 .pj-title-skeleton { display: inline-block; width: 220px; vertical-align: middle; }
