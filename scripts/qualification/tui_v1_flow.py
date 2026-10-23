@@ -270,7 +270,7 @@ def start_engine(binary, root, logs, codex):
         os.close(output)
         os.close(errors)
     deadline = time.monotonic() + 60
-    while (logs / "engine.out").read_bytes() != b"ready\n":
+    while b"ready\n" not in (logs / "engine.out").read_bytes():
         assert child.poll() is None, ("engine exited before ready", child.returncode,
                                       (logs / "engine.err").read_bytes()[-2000:])
         assert time.monotonic() < deadline, "engine was not ready within 60 s"
