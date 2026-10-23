@@ -142,10 +142,10 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
   return { agents, tasks };
 }
 
-/** What one change to a project memory tells the owner: a toast when the engine applied it,
+/** What one owner change on the project page tells the owner: a toast when the engine applied it,
  * otherwise a line in the panel. Inputs: the engine result, the toast and what is missing when
  * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
-export function memoryOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
+export function changeOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
   if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
   if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
   const state = receiptState(result.value);

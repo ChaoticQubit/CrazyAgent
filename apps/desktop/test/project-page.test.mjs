@@ -298,11 +298,11 @@ test("only the brief offers Edit, which opens the project details it is written 
   assert.doesNotMatch(markup, />Edit</);
 });
 
-test("a project memory change shows a toast only when the engine applied it", () => {
+test("a project change shows a toast only when the engine applied it", () => {
   const receipt = (outcome, rejection = null, pending = false) => ({ kind: "ok", value: {
     kind: "research_memory", generation: "4", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "o", outcome, pending, rejection,
   } });
-  const promote = (result) => research.memoryOutcome(result, "Now used in all projects.", "using a memory in all projects");
+  const promote = (result) => research.changeOutcome(result, "Now used in all projects.", "using a memory in all projects");
   assert.deepEqual(promote(receipt("applied")), { toast: "Now used in all projects.", note: "", reload: true });
   assert.deepEqual(promote(receipt("rejected", "memory_already_global")), { toast: "", note: "This memory is already in global memory.", reload: true });
   assert.deepEqual(promote(receipt("rejected", "memory_changed")), { toast: "", note: "This memory changed. Reload it and try again.", reload: true });
@@ -365,6 +365,41 @@ test("project Settings opens Plugins and skills for the old Skills and MCP serve
   assert.equal(settings.settingsSection("team"), "team");
   assert.equal(settings.settingsSection("nope"), "general");
   assert.equal(settings.settingsSection(null), "general");
+});
+
+test("Save pool assigns a new pool, drops the old one and records the choice in the project details", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  assert.deepEqual(settings.poolSteps("old", "old", "new"), { add: true, drop: "old", record: true });
+  assert.deepEqual(settings.poolSteps(null, null, "new"), { add: true, drop: null, record: true });
+  assert.deepEqual(settings.poolSteps("new", "old", "new"), { add: false, drop: null, record: true });
+  assert.deepEqual(settings.poolSteps("new", "new", "new"), { add: false, drop: null, record: false });
+  assert.deepEqual(settings.poolSteps("old", undefined, "new"), { add: true, drop: "old", record: false });
+  assert.deepEqual(settings.poolSteps("old", "old", null), { add: false, drop: null, record: false });
+});
+
+test("removing a project says its folder stays on disk", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  assert.equal(settings.removeLine("/Users/me/CrazyAgent/harbor-notes"),
+    "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
+  assert.equal(settings.removeLine(null), "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
+});
+
+test("project Settings, General edits the saved details with the New Project controls", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  const setup = { kind: "ok", value: {
+    project_id: "p-1", name: "Harbor Notes", about: "Notes for marine engineers.", tech_stack: ["Rust"], platforms: ["desktop_app"], research: ["market_research"],
+    pool: null, team: { master: "codex", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 }, documents: [], folder: "/tmp/harbor-notes", created_ms: 0, revision: 2,
+  } };
+  const markup = renderToStaticMarkup(createElement(settings.SettingsTab, { data: { ...tabData([]), setup }, section: "general" }));
+  assert.match(markup, /<label for="ps-name">Project name<\/label><input class="pj-input" id="ps-name"[^>]*value="Harbor Notes"/);
+  assert.match(markup, /<label for="ps-about">What is it about\?<\/label>/);
+  assert.match(markup, /<legend>Tech stack<\/legend>/);
+  assert.match(markup, /<legend>Target platforms<\/legend>/);
+  assert.match(markup, /<legend>Research<\/legend>/);
+  assert.match(markup, /id="ps-research-market_research"/);
+  assert.match(markup, /<button[^>]*type="submit"[^>]*disabled=""[^>]*>.*Save changes/);
+  assert.doesNotMatch(markup, /isn&#x27;t in this build/);
+  assert.doesNotMatch(markup, /role="alert"/);
 });
 
 test("selected report text is cleaned before it can be saved to memory", async () => {
