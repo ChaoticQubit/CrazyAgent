@@ -690,7 +690,7 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
     })
 }
 
-fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
+pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;

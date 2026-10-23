@@ -25,6 +25,8 @@ fn main() {
         "desktop_team_delegate",
         "desktop_team_cancel",
         "desktop_team_keep_warm",
+        "desktop_team_pause",
+        "desktop_team_hand_off",
         "desktop_project_memories",
         "desktop_review_memory",
         "desktop_memories",

@@ -582,7 +582,7 @@ export interface TeamHarness {
   agents_max: number;
   tools: boolean;
   live: number;
-  delegation: "reply" | "unavailable" | null;
+  delegation: "reply" | "tool" | "unavailable" | null;
   delegation_label: string | null;
   runnable: boolean;
 }
@@ -635,12 +635,22 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  paused: boolean;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
   agents: TeamAgent[];
   tasks: TeamTask[];
   messages: TeamMessage[];
+  plan: TeamPlanStep[];
+}
+
+export interface TeamPlanStep {
+  reply: number;
+  step: number;
+  harness: string | null;
+  prompt: string;
+  task: number | null;
 }
 
 export function teamStatus(id: string): Promise<TeamStatus> {
@@ -666,6 +676,14 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
+}
+
+export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

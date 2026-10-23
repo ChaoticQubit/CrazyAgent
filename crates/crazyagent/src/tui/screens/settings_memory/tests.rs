@@ -169,6 +169,32 @@ fn where_a_memory_came_from_is_plain() {
     let mut unknown = memory_ctx(80, 24);
     unknown.store.projects = Load::Ready(Vec::new());
     assert_eq!(source(&memories()[2], &unknown), "A project");
+    let selected = |scope| {
+        saved(
+            9,
+            "Ship the page before the market opens.",
+            scope,
+            MemoryOrigin::Selected {
+                path: "context/brief.md".into(),
+            },
+        )
+    };
+    let kept = selected(only("ledgerline"));
+    assert_eq!(
+        (source(&kept, &ctx), saved_line(&kept, &ctx)),
+        (
+            "Ledgerline".to_owned(),
+            "Saved for Ledgerline only.".to_owned()
+        )
+    );
+    let everywhere = selected(MemoryScope::Global);
+    assert_eq!(
+        (source(&everywhere, &ctx), saved_line(&everywhere, &ctx)),
+        (
+            "You".to_owned(),
+            "Saved by you for every project.".to_owned()
+        )
+    );
 }
 
 #[test]

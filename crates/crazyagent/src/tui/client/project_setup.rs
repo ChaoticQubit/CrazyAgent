@@ -452,12 +452,54 @@ mod tests {
                 "Plan the notes app."
             )]
         );
+        assert!(!team.paused);
         assert!(
             app.request_team_change(crate::team::TeamAction::Message {
                 project_id: project.clone(),
                 text: " ".into(),
             })
             .is_err()
+        );
+        app.request_team_change(crate::team::TeamAction::Pause {
+            project_id: project.clone(),
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        assert!(matches!(
+            &app.setup_view,
+            Some((
+                SetupQuery::TeamChange { .. },
+                SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+            ))
+        ));
+        let read = native
+            .project_setup(SetupQuery::Team {
+                project: project.clone(),
+            })
+            .await;
+        let Ok(SetupView::Team(team)) = read.result else {
+            panic!("team view required");
+        };
+        assert!(team.paused, "the TUI pauses the whole team");
+        assert!(team.plan.is_empty(), "no master reply proposed steps yet");
+        app.request_team_change(crate::team::TeamAction::HandOff {
+            project_id: project.clone(),
+            reply: team.messages[0].id,
+            step: 0,
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        assert!(
+            matches!(
+                &app.setup_view,
+                Some((_, SetupView::Changed(crate::engine::owner::OwnerResult::Rejected { code })))
+                    if code == "team_plan_step_missing"
+            ),
+            "an owner message holds no plan steps"
         );
 
         let catalog = native
