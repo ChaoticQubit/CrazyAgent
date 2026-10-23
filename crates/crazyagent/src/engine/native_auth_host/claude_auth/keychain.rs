@@ -25,7 +25,11 @@ fn security(home: &Path, args: &[&std::ffi::OsStr]) -> Result<(), EngineError> {
     let deadline = Instant::now() + STEP_TIME;
     loop {
         if let Some(status) = child.try_wait().map_err(|_| failure())? {
-            return if status.success() { Ok(()) } else { Err(failure()) };
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(failure())
+            };
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -50,18 +54,48 @@ pub(super) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
     let path = keychain.as_os_str();
     let empty = std::ffi::OsStr::new("");
     if !keychain.exists() {
-        security(home, &["create-keychain".as_ref(), "-p".as_ref(), empty, path])?;
+        security(
+            home,
+            &["create-keychain".as_ref(), "-p".as_ref(), empty, path],
+        )?;
     }
-    let _ = security(home, &["unlock-keychain".as_ref(), "-p".as_ref(), empty, path]);
+    let _ = security(
+        home,
+        &["unlock-keychain".as_ref(), "-p".as_ref(), empty, path],
+    );
     let _ = security(home, &["set-keychain-settings".as_ref(), path]);
-    security(home, &["list-keychains".as_ref(), "-d".as_ref(), "user".as_ref(), "-s".as_ref(), path])?;
-    security(home, &["default-keychain".as_ref(), "-d".as_ref(), "user".as_ref(), "-s".as_ref(), path])?;
+    security(
+        home,
+        &[
+            "list-keychains".as_ref(),
+            "-d".as_ref(),
+            "user".as_ref(),
+            "-s".as_ref(),
+            path,
+        ],
+    )?;
+    security(
+        home,
+        &[
+            "default-keychain".as_ref(),
+            "-d".as_ref(),
+            "user".as_ref(),
+            "-s".as_ref(),
+            path,
+        ],
+    )?;
     for private in [home.join("Library"), directory.clone()] {
-        std::fs::set_permissions(&private, std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .map_err(|_| failure())?;
-    }
-    std::fs::set_permissions(&keychain, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        std::fs::set_permissions(
+            &private,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
         .map_err(|_| failure())?;
+    }
+    std::fs::set_permissions(
+        &keychain,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .map_err(|_| failure())?;
     assert!(keychain.is_file());
     Ok(keychain)
 }
@@ -71,8 +105,13 @@ mod tests {
     use super::*;
 
     fn read(home: &Path, args: &[&str]) -> String {
-        let output = Command::new(SECURITY).args(args).env_clear().env("HOME", home)
-            .env("PATH", "/usr/bin:/bin").output().unwrap();
+        let output = Command::new(SECURITY)
+            .args(args)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
         assert!(output.status.success(), "security {args:?} failed");
         String::from_utf8(output.stdout).unwrap()
     }
@@ -81,22 +120,74 @@ mod tests {
     fn private_home_gets_its_own_keychain_and_the_owner_keychain_is_untouched() {
         let real_home = PathBuf::from(std::env::var_os("HOME").unwrap());
         let real_default = read(&real_home, &["default-keychain", "-d", "user"]);
-        let root = tempfile::Builder::new().prefix("ca-keychain-").tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("ca-keychain-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
         let home = root.path().join("home");
         std::fs::create_dir(&home).unwrap();
         let keychain = prepare_profile_keychain(&home).unwrap();
         assert_eq!(keychain, home.join("Library/Keychains/login.keychain-db"));
-        assert!(read(&home, &["default-keychain", "-d", "user"]).contains(keychain.to_str().unwrap()));
+        assert!(
+            read(&home, &["default-keychain", "-d", "user"]).contains(keychain.to_str().unwrap())
+        );
         let stored = Command::new(SECURITY)
-            .args(["add-generic-password", "-U", "-a", "probe", "-s", "crazyagent-keychain-test", "-w", "value"])
-            .env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").status().unwrap();
+            .args([
+                "add-generic-password",
+                "-U",
+                "-a",
+                "probe",
+                "-s",
+                "crazyagent-keychain-test",
+                "-w",
+                "value",
+            ])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .status()
+            .unwrap();
         assert!(stored.success());
-        assert_eq!(read(&home, &["find-generic-password", "-a", "probe", "-s", "crazyagent-keychain-test", "-w"]).trim(), "value");
+        assert_eq!(
+            read(
+                &home,
+                &[
+                    "find-generic-password",
+                    "-a",
+                    "probe",
+                    "-s",
+                    "crazyagent-keychain-test",
+                    "-w"
+                ]
+            )
+            .trim(),
+            "value"
+        );
         assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain);
-        assert_eq!(read(&home, &["find-generic-password", "-a", "probe", "-s", "crazyagent-keychain-test", "-w"]).trim(), "value");
-        assert_eq!(read(&real_home, &["default-keychain", "-d", "user"]), real_default);
+        assert_eq!(
+            read(
+                &home,
+                &[
+                    "find-generic-password",
+                    "-a",
+                    "probe",
+                    "-s",
+                    "crazyagent-keychain-test",
+                    "-w"
+                ]
+            )
+            .trim(),
+            "value"
+        );
+        assert_eq!(
+            read(&real_home, &["default-keychain", "-d", "user"]),
+            real_default
+        );
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&keychain).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&keychain).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(prepare_profile_keychain(Path::new("relative")).is_err());
     }
 }

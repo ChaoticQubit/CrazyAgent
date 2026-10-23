@@ -278,9 +278,23 @@ async fn rcli_registry_codex_and_custodian_never_fill_the_absent_rcli_role() {
             .unwrap();
         let error = host.registered_rcli_master_executable().err().unwrap();
         assert_eq!(error.0, "native_auth_host_unavailable");
-        assert_eq!(host.registered_codex_executable().unwrap().verified_path().unwrap(), codex);
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
         let registration = host.authority.native_auth_host.lock().unwrap();
-        assert_eq!(registration.executable.as_ref().unwrap().verified_path().unwrap(), custodian);
+        assert_eq!(
+            registration
+                .executable
+                .as_ref()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            custodian
+        );
         assert!(!registration.frozen);
         assert!(!registration.disabled);
     })
@@ -296,7 +310,14 @@ async fn rcli_registry_roles_keep_distinct_files_and_independent_drift() {
         host.register_rcli_master_executable(RegisteredNativeAuthHost::capture(&rcli).unwrap())
             .unwrap();
         assert!(host.registered_codex_executable().is_err());
-        assert!(host.authority.native_auth_host.lock().unwrap().executable.is_none());
+        assert!(
+            host.authority
+                .native_auth_host
+                .lock()
+                .unwrap()
+                .executable
+                .is_none()
+        );
         host.register_codex_executable(RegisteredNativeAuthHost::capture(&codex).unwrap())
             .unwrap();
         host.register_native_auth_host(RegisteredNativeAuthHost::capture(&custodian).unwrap())
@@ -315,11 +336,20 @@ async fn rcli_registry_roles_keep_distinct_files_and_independent_drift() {
         assert!(!Arc::ptr_eq(&rcli_file, &codex_file));
         assert!(!Arc::ptr_eq(&rcli_file, &custodian_file));
         assert!(!Arc::ptr_eq(&codex_file, &custodian_file));
-        assert_ne!(rcli_file.verified_sha256().unwrap(), codex_file.verified_sha256().unwrap());
+        assert_ne!(
+            rcli_file.verified_sha256().unwrap(),
+            codex_file.verified_sha256().unwrap()
+        );
         assert_eq!(rcli_file.verified_path().unwrap(), rcli);
         std::fs::write(&rcli, b"changed-rcli-file").unwrap();
         assert!(host.registered_rcli_master_executable().is_err());
-        assert_eq!(host.registered_codex_executable().unwrap().verified_path().unwrap(), codex);
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
         assert_eq!(custodian_file.verified_path().unwrap(), custodian);
         assert_ne!(
             codex_file.verified_sha256().unwrap(),
@@ -347,7 +377,10 @@ async fn rcli_registry_real_runtime_directory_drift_rejects_both_methods() {
         std::fs::rename(&moved, &generation).unwrap();
         assert!(lookup.is_err());
         assert_eq!(
-            host.registered_rcli_master_executable().unwrap().verified_path().unwrap(),
+            host.registered_rcli_master_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
             path
         );
     })

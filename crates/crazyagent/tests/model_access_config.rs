@@ -180,10 +180,7 @@ fn catalog_rejects_duplicate_dangling_oversized_and_incompatible_metadata() {
         HTTP_CATALOG.replace("lab/model:version", &"m".repeat(257)),
         HTTP_CATALOG.replace(
             "accounts = [\"account\"]",
-            &format!(
-                "accounts = {:?}",
-                ["account", "account"]
-            ),
+            &format!("accounts = {:?}", ["account", "account"]),
         ),
     ];
     for (index, input) in cases.iter().enumerate() {
@@ -440,9 +437,16 @@ fn quota_policy_rejects_unknown_values_and_untyped_catalog_fields() {
 
 #[test]
 fn imp1038_unassigned_and_partial_catalog_scopes_round_trip() {
-    for (projects, roles) in [("[]", "[]"), ("[]", "[\"worker\"]"), ("[\"project\"]", "[]")] {
+    for (projects, roles) in [
+        ("[]", "[]"),
+        ("[]", "[\"worker\"]"),
+        ("[\"project\"]", "[]"),
+    ] {
         let input = HTTP_CATALOG
-            .replace("projects = [\"project\"]", &format!("projects = {projects}"))
+            .replace(
+                "projects = [\"project\"]",
+                &format!("projects = {projects}"),
+            )
             .replace("roles = [\"worker\"]", &format!("roles = {roles}"));
         let config = load_catalog(&input, "").expect("unassigned catalog scopes are valid");
         config.validate().unwrap();
@@ -482,6 +486,9 @@ fn imp1038_unassigned_catalog_retains_membership_uniqueness_and_bounds() {
         ));
     }
     for input in cases {
-        assert_eq!(load_catalog(&input, "").unwrap_err().0, "invalid_model_access");
+        assert_eq!(
+            load_catalog(&input, "").unwrap_err().0,
+            "invalid_model_access"
+        );
     }
 }

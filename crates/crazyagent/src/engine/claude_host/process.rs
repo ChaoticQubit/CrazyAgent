@@ -61,13 +61,24 @@ pub(super) fn run(
     limits: ClaudeHostLimits,
     channels: Channels,
 ) {
-    let Channels { input, output, report, stop } = channels;
+    let Channels {
+        input,
+        output,
+        report,
+        stop,
+    } = channels;
     if let Err(error) = validate_command(&command, &profile) {
-        report.send_replace(Status { phase: Phase::Retired, fault: Some(error) });
+        report.send_replace(Status {
+            phase: Phase::Retired,
+            fault: Some(error),
+        });
         return;
     }
     if stop.load(Ordering::Acquire) {
-        report.send_replace(Status { phase: Phase::Retired, fault: None });
+        report.send_replace(Status {
+            phase: Phase::Retired,
+            fault: None,
+        });
         return;
     }
     let home = match profile.profile_path() {
@@ -80,11 +91,15 @@ pub(super) fn run(
             return;
         }
     };
-    command.env_clear().env("HOME", &home)
+    command
+        .env_clear()
+        .env("HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)
         .env("TERM", "dumb")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .process_group(0);
     let mut command = match sandbox.wrap(&command) {
         Ok(command) => command,
@@ -137,7 +152,10 @@ pub(super) fn run(
     process.stdout = process.child.stdout.take();
     process.stderr = process.child.stderr.take();
     if process.prepare().is_ok() {
-        process.report.send_replace(Status { phase: Phase::Running, fault: None });
+        process.report.send_replace(Status {
+            phase: Phase::Running,
+            fault: None,
+        });
         process.drive();
     } else {
         process.fail(Fault::Host("claude_host_stdio_unavailable"));
@@ -277,7 +295,9 @@ impl Process {
     fn read_stdout(&mut self, decode: bool) {
         let mut buffer = [0_u8; 4096];
         for _ in 0..READ_BATCH {
-            let Some(stdout) = self.stdout.as_mut() else { return; };
+            let Some(stdout) = self.stdout.as_mut() else {
+                return;
+            };
             match stdout.read(&mut buffer) {
                 Ok(0) => {
                     self.stdout = None;
@@ -291,7 +311,8 @@ impl Process {
                     if self.stdout_bytes > self.limits.stdout_bytes {
                         self.fail(Fault::Host("claude_host_stdout_limit"));
                     }
-                    if self.stdout_bytes.saturating_add(self.stderr_bytes) > self.limits.stdout_bytes
+                    if self.stdout_bytes.saturating_add(self.stderr_bytes)
+                        > self.limits.stdout_bytes
                     {
                         self.fail(Fault::Host("claude_host_output_limit"));
                     }
@@ -358,7 +379,9 @@ impl Process {
     fn read_stderr(&mut self) {
         let mut buffer = [0_u8; 4096];
         for _ in 0..READ_BATCH {
-            let Some(stderr) = self.stderr.as_mut() else { return; };
+            let Some(stderr) = self.stderr.as_mut() else {
+                return;
+            };
             match stderr.read(&mut buffer) {
                 Ok(0) => {
                     self.stderr = None;
@@ -369,7 +392,8 @@ impl Process {
                     if self.stderr_bytes > self.limits.stderr_bytes {
                         self.fail(Fault::Host("claude_host_stderr_limit"));
                     }
-                    if self.stdout_bytes.saturating_add(self.stderr_bytes) > self.limits.stdout_bytes
+                    if self.stdout_bytes.saturating_add(self.stderr_bytes)
+                        > self.limits.stdout_bytes
                     {
                         self.fail(Fault::Host("claude_host_output_limit"));
                     }
@@ -397,13 +421,20 @@ impl Process {
     }
 
     fn cleanup(&mut self) {
-        self.report.send_replace(Status { phase: Phase::Closing, fault: self.fault });
+        self.report.send_replace(Status {
+            phase: Phase::Closing,
+            fault: self.fault,
+        });
         self.stdin = None;
         if let Some(pending) = self.pending.take() {
-            let _ = pending.reply.send(Err(Fault::Host("claude_host_input_closed")));
+            let _ = pending
+                .reply
+                .send(Err(Fault::Host("claude_host_input_closed")));
         }
         while let Ok(turn) = self.input.try_recv() {
-            let _ = turn.reply.send(Err(Fault::Host("claude_host_input_closed")));
+            let _ = turn
+                .reply
+                .send(Err(Fault::Host("claude_host_input_closed")));
         }
         assert!(self.stdin.is_none());
         assert!(self.pending.is_none());
@@ -439,7 +470,10 @@ impl Process {
             if !uncertain && Instant::now() >= cleanup_deadline {
                 uncertain = true;
                 self.fail(Fault::Host("claude_host_cleanup_uncertain"));
-                self.report.send_replace(Status { phase: Phase::Closing, fault: self.fault });
+                self.report.send_replace(Status {
+                    phase: Phase::Closing,
+                    fault: self.fault,
+                });
             }
             std::thread::sleep(POLL_TIME);
         }
@@ -449,7 +483,10 @@ impl Process {
         if self.protocol.state() == State::Active && !self.stop.load(Ordering::Acquire) {
             self.fail(Fault::Host("claude_host_incomplete_turn"));
         }
-        self.report.send_replace(Status { phase: Phase::Retired, fault: self.fault });
+        self.report.send_replace(Status {
+            phase: Phase::Retired,
+            fault: self.fault,
+        });
     }
 }
 

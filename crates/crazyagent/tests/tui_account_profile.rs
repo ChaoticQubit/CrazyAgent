@@ -318,10 +318,9 @@ fn catalog(root: &Path, endpoint: &str) -> EffectiveConfig {
 
 async fn owner_catalog(root: &Path, config: &EffectiveConfig) -> (String, String, String) {
     let access = config.settings.model_access.as_ref().unwrap();
-    let mut owner =
-        OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
-            .await
-            .unwrap();
+    let mut owner = OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+        .await
+        .unwrap();
     let mut observed_source = None;
     for (collection, expected) in [
         (
@@ -379,15 +378,19 @@ async fn owner_catalog(root: &Path, config: &EffectiveConfig) -> (String, String
 }
 
 fn profile_file(root: &Path, receipt: &AccountProfileReceipt, endpoint: &str) {
-    let home = root
-        .join("configured-sdk-homes")
-        .join(format!(
-            "{:x}",
-            Sha256::digest(receipt.profile_ref.as_str().as_bytes())
-        ));
+    let home = root.join("configured-sdk-homes").join(format!(
+        "{:x}",
+        Sha256::digest(receipt.profile_ref.as_str().as_bytes())
+    ));
     let path = home.join(".backboard/config.json");
-    assert_eq!(fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
-    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     let bytes = fs::read(path).unwrap();
     assert!(!bytes.is_empty() && bytes.len() <= 65536);
     assert_eq!(

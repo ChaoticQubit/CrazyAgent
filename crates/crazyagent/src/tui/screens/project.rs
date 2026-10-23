@@ -529,7 +529,10 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
-            SetupView::Catalog(_) | SetupView::Team(_) | SetupView::Library(_) => {}
+            SetupView::Catalog(_)
+            | SetupView::Team(_)
+            | SetupView::Library(_)
+            | SetupView::Log(_) => {}
         }
         self.assert_consistent();
     }

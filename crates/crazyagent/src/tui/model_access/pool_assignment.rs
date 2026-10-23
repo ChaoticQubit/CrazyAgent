@@ -22,19 +22,27 @@ impl Assignment {
         let mut lines = vec![
             "Assign pool to project".into(),
             self.pool.id.as_str().to_owned(),
-            self.project.1.chars().filter(|c| !c.is_control()).take(128).collect(),
+            self.project
+                .1
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(128)
+                .collect(),
             "Role: Project master".into(),
             "Adds this project scope and master role; both scope lists apply together".into(),
             "Existing membership, policy and assignments are retained".into(),
             notice.chars().take(240).collect(),
         ];
-        lines.push(match self.stage {
-            Stage::Confirm => "Enter confirms assignment | Esc cancels",
-            Stage::Saving => "Save pending; Ctrl-R checks original request",
-            Stage::Readback => "Reading the saved pool from the owner",
-            Stage::Load => "Reading the selected pool from the owner",
-            Stage::Review => "Close and reopen to review current project and pool",
-        }.into());
+        lines.push(
+            match self.stage {
+                Stage::Confirm => "Enter confirms assignment | Esc cancels",
+                Stage::Saving => "Save pending; Ctrl-R checks original request",
+                Stage::Readback => "Reading the saved pool from the owner",
+                Stage::Load => "Reading the selected pool from the owner",
+                Stage::Review => "Close and reopen to review current project and pool",
+            }
+            .into(),
+        );
         if let Some(pending) = pending {
             lines.push(pending);
         }
@@ -96,9 +104,10 @@ impl State {
     }
 
     pub(super) fn reduce_assignment(&mut self, event: &UiEvent) -> Result<bool, String> {
-        if matches!(event, UiEvent::Resize(..) | UiEvent::Scroll(_)
-            | UiEvent::FocusNext | UiEvent::FocusPrevious)
-        {
+        if matches!(
+            event,
+            UiEvent::Resize(..) | UiEvent::Scroll(_) | UiEvent::FocusNext | UiEvent::FocusPrevious
+        ) {
             return Ok(false);
         }
         if self.has_pending() {
@@ -106,7 +115,9 @@ impl State {
             return Ok(true);
         }
         if matches!(event, UiEvent::Cancel) {
-            let committed = self.assignment.as_ref()
+            let committed = self
+                .assignment
+                .as_ref()
                 .is_some_and(|assignment| assignment.stage == Stage::Readback);
             self.assignment = None;
             self.flight = None;
@@ -116,7 +127,8 @@ impl State {
                 "Assignment view closed; committed save remains; no additional save requested"
             } else {
                 "Assignment cancelled; no new save requested"
-            }.into();
+            }
+            .into();
         } else if matches!(event, UiEvent::Submit) && !self.loading() {
             if let Err(problem) = self.confirm_assignment() {
                 self.notice = problem;
@@ -135,8 +147,8 @@ impl State {
             return Err("Selected project changed; close and reopen the assignment".into());
         }
         let mut pool = assignment.pool.clone();
-        let project = CredentialRef::new(assignment.project.0.as_str())
-            .map_err(|error| error.to_string())?;
+        let project =
+            CredentialRef::new(assignment.project.0.as_str()).map_err(|error| error.to_string())?;
         let role = CredentialRef::new("project_leader").map_err(|error| error.to_string())?;
         if !pool.projects.contains(&project) {
             pool.projects.push(project);
@@ -164,15 +176,19 @@ impl State {
         if !matches!(assignment.stage, Stage::Load | Stage::Readback) {
             return Ok(false);
         }
-        if query != &(OwnerRead::ModelAccessRecord {
-            collection: ModelAccessCollection::Pools,
-            id: assignment.pool.id.clone(),
-        }) {
+        if query
+            != &(OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Pools,
+                id: assignment.pool.id.clone(),
+            })
+        {
             return Err("Pool assignment read context mismatch".into());
         }
         let OwnerData::ModelAccessRecord {
-            record: ModelAccessRecord::Pool { pool }, ..
-        } = data else {
+            record: ModelAccessRecord::Pool { pool },
+            ..
+        } = data
+        else {
             return Err("Pool assignment requires an actual owner pool record".into());
         };
         if pool != &assignment.pool || basis.identity != assignment.basis.identity {
@@ -182,7 +198,10 @@ impl State {
         }
         self.basis = Some(basis.clone());
         if assignment.stage == Stage::Readback {
-            self.notice = format!("Assigned to project: {} | Project master", assignment.project.1);
+            self.notice = format!(
+                "Assigned to project: {} | Project master",
+                assignment.project.1
+            );
             self.assignment = None;
             self.needs_page = true;
         } else if basis.writable {
@@ -198,7 +217,11 @@ impl State {
 
     pub(super) fn settle_assignment(&mut self, applied: bool) {
         if let Some(assignment) = &mut self.assignment {
-            assignment.stage = if applied { Stage::Readback } else { Stage::Review };
+            assignment.stage = if applied {
+                Stage::Readback
+            } else {
+                Stage::Review
+            };
         }
     }
 }

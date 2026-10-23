@@ -68,7 +68,10 @@ fn wait_file(path: &Path) -> Vec<u8> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => panic!("fixture observation failed: {error}"),
         }
-        assert!(Instant::now() < deadline, "fixture did not produce its marker");
+        assert!(
+            Instant::now() < deadline,
+            "fixture did not produce its marker"
+        );
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -154,10 +157,8 @@ impl Drop for InertChild {
             return;
         }
         if rustix::process::test_kill_process_group(pid(self.identity.process_group)).is_ok() {
-            let _ = rustix::process::kill_process_group(
-                pid(self.identity.process_group),
-                Signal::KILL,
-            );
+            let _ =
+                rustix::process::kill_process_group(pid(self.identity.process_group), Signal::KILL);
         }
     }
 }
@@ -456,7 +457,10 @@ fn native_auth_custody_replaces_preexec_environment_without_runtime_equality_cla
         .map(|line| line.split_once('=').unwrap())
         .collect();
     for (key, value) in environment(case.root.path()) {
-        assert_eq!(observed.get(key.to_str().unwrap()), Some(&value.to_str().unwrap()));
+        assert_eq!(
+            observed.get(key.to_str().unwrap()),
+            Some(&value.to_str().unwrap())
+        );
     }
     assert!(!observed.contains_key("CA772_SYNTHETIC_PARENT_ONLY"));
     assert!(!text.contains("must-not-reach-child"));

@@ -13,7 +13,8 @@ use serde_json::json;
 pub(in crate::engine) struct WirePresentation {
     challenge: Option<WireChallenge>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    claude_challenge: Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge>,
+    claude_challenge:
+        Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge>,
     account: Option<WireAccount>,
 }
 
@@ -70,7 +71,9 @@ fn invalid() -> EngineError {
     failure("native_auth_presentation_invalid")
 }
 
-pub(in crate::engine) fn encode(reply: &NativeAuthReply) -> Result<Option<WirePresentation>, EngineError> {
+pub(in crate::engine) fn encode(
+    reply: &NativeAuthReply,
+) -> Result<Option<WirePresentation>, EngineError> {
     validate(reply)?;
     if reply.challenge.is_none() && reply.claude_challenge.is_none() && reply.account.is_none() {
         return Ok(None);
@@ -117,7 +120,10 @@ fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
         return Ok(());
     }
     let connection = &reply.fact.binding.connection;
-    if (usize::from(reply.challenge.is_some()) + usize::from(reply.claude_challenge.is_some()) + usize::from(reply.account.is_some())) > 1
+    if (usize::from(reply.challenge.is_some())
+        + usize::from(reply.claude_challenge.is_some())
+        + usize::from(reply.account.is_some()))
+        > 1
         || reply.fact.binding.engine_epoch != reply.engine_epoch
         || connection.protocol.as_str() != "native"
         || !matches!(connection.endpoint, ModelEndpoint::Native {})
@@ -127,7 +133,8 @@ fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
     }
     if let NativeAuthAction::SignIn { method } = reply.fact.action {
         let expected = match method {
-            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+            NativeAuthMethod::CodexBrowser
+            | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => "codex",
             NativeAuthMethod::ClaudeOfficial => "claude",
         };
@@ -142,7 +149,11 @@ fn validate(reply: &NativeAuthReply) -> Result<(), EngineError> {
         challenge.validate()?;
         if reply.fact.phase != NativeAuthPhase::AwaitingOwner
             || connection.harness.as_str() != "claude"
-            || reply.fact.action != (NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial }) {
+            || reply.fact.action
+                != (NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::ClaudeOfficial,
+                })
+        {
             return Err(invalid());
         }
     }

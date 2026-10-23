@@ -16,7 +16,11 @@ impl RcliCustody {
         sandbox: InstalledSandbox,
         profile: NativeProfileUse,
     ) -> Result<Self, EngineError> {
-        let mut custody = Self { host: None, profile: Some(profile), uncertain: false };
+        let mut custody = Self {
+            host: None,
+            profile: Some(profile),
+            uncertain: false,
+        };
         match RcliMasterHost::launch(launch, &sandbox) {
             Ok(host) => {
                 custody.host = Some(host);
@@ -25,13 +29,18 @@ impl RcliCustody {
             }
             Err(error) => {
                 custody.uncertain = true;
-                Err(EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0)))
+                Err(EngineError(format!(
+                    "master_runtime_cleanup_uncertain:{}",
+                    error.0
+                )))
             }
         }
     }
 
     pub(super) fn profile(&self) -> &NativeProfileUse {
-        self.profile.as_ref().expect("retained RCLI execution custody")
+        self.profile
+            .as_ref()
+            .expect("retained RCLI execution custody")
     }
 
     pub(super) fn poll(&mut self) -> Result<Option<RcliMasterObservation>, EngineError> {
@@ -40,7 +49,11 @@ impl RcliCustody {
     }
 
     pub(super) fn prompt(&mut self, turn_id: RequestId, text: &str) -> Result<(), EngineError> {
-        let result = self.host.as_mut().expect("retained RCLI host").prompt(turn_id, text);
+        let result = self
+            .host
+            .as_mut()
+            .expect("retained RCLI host")
+            .prompt(turn_id, text);
         result.map_err(|error| self.observe_error(EngineError(error.0)))
     }
 
@@ -51,7 +64,9 @@ impl RcliCustody {
 
     pub(super) fn retire(&mut self, cancel: Option<&RequestId>) -> Result<(), EngineError> {
         if self.uncertain {
-            return Err(failure("master_runtime_cleanup_uncertain:rcli_master_cleanup_incomplete"));
+            return Err(failure(
+                "master_runtime_cleanup_uncertain:rcli_master_cleanup_incomplete",
+            ));
         }
         let host = self.host.as_mut().expect("retained RCLI host");
         if let Some(turn_id) = cancel
@@ -59,11 +74,17 @@ impl RcliCustody {
             && cleanup_uncertain(&EngineError(error.0.clone()))
         {
             self.uncertain = true;
-            return Err(EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0)));
+            return Err(EngineError(format!(
+                "master_runtime_cleanup_uncertain:{}",
+                error.0
+            )));
         }
         if let Err(error) = host.shutdown() {
             self.uncertain = true;
-            return Err(EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0)));
+            return Err(EngineError(format!(
+                "master_runtime_cleanup_uncertain:{}",
+                error.0
+            )));
         }
         self.host.take();
         assert!(!self.uncertain);

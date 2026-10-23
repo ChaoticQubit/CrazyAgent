@@ -1,5 +1,7 @@
-use super::{BridgeError, NativeBridge, NativeAuthQuery, auth_id, failure};
-use crazyagent::engine::owner::{AccountSecret, ClaudeAuthInput, NativeAuthAction, NativeAuthMethod};
+use super::{BridgeError, NativeAuthQuery, NativeBridge, auth_id, failure};
+use crazyagent::engine::owner::{
+    AccountSecret, ClaudeAuthInput, NativeAuthAction, NativeAuthMethod,
+};
 
 impl NativeBridge {
     pub fn claude_auth_secret(code: String) -> Result<AccountSecret, BridgeError> {
@@ -27,20 +29,34 @@ impl NativeBridge {
         let (scope, _) = self.native_auth_selection(ticket)?;
         let operation_id = self.auth_operation(&scope)?;
         let epoch = self.controller()?.identity().engine_epoch().to_owned();
-        let operation = self.native_auth.as_mut()
+        let operation = self
+            .native_auth
+            .as_mut()
             .ok_or_else(|| failure("native_auth_operation_missing"))?;
-        let (prompt_id, observed_epoch) = operation.claude_prompt.as_ref()
+        let (prompt_id, observed_epoch) = operation
+            .claude_prompt
+            .as_ref()
             .ok_or_else(|| failure("native_auth_claude_input_not_pending"))?;
-        if operation.claude_input_attempted || observed_epoch != &epoch || *prompt_id != 1
-            || operation.original.action() != (NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial })
+        if operation.claude_input_attempted
+            || observed_epoch != &epoch
+            || *prompt_id != 1
+            || operation.original.action()
+                != (NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::ClaudeOfficial,
+                })
         {
             return Err(failure("native_auth_claude_input_not_pending"));
         }
-        let generation = operation.generation
+        let generation = operation
+            .generation
             .ok_or_else(|| failure("native_auth_claude_input_not_pending"))?;
         let request_id = auth_id()?;
         let request = ClaudeAuthInput {
-            query: NativeAuthQuery { request_id: request_id.clone(), scope, operation_id },
+            query: NativeAuthQuery {
+                request_id: request_id.clone(),
+                scope,
+                operation_id,
+            },
             generation,
             prompt_id: *prompt_id,
         };
@@ -49,13 +65,18 @@ impl NativeBridge {
         operation.request_id = request_id;
         assert!(operation.claude_input_attempted && operation.claude_prompt.is_none());
         assert_ne!(operation.original.id(), &operation.request_id);
-        let result = self.controller()?.submit_claude_auth_code(request, secret).await;
+        let result = self
+            .controller()?
+            .submit_claude_auth_code(request, secret)
+            .await;
         match result {
             Ok(()) => Ok(()),
             Err(error) => {
                 let error = failure(match error.0.as_str() {
                     "native_auth_claude_input_invalid" => "native_auth_claude_input_invalid",
-                    "native_auth_claude_input_not_pending" => "native_auth_claude_input_not_pending",
+                    "native_auth_claude_input_not_pending" => {
+                        "native_auth_claude_input_not_pending"
+                    }
                     "controller_pending_intent" => "pending_intent",
                     "controller_disconnected" => "not_connected",
                     "owner_grant_stale_or_revoked" | "owner_revoked" => "owner_revoked",

@@ -495,8 +495,10 @@ impl EngineService {
             .owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?;
-        let master = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
-        let writer = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let master =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let writer =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
         runtime.register_rcli_master_executable(master)?;
         runtime.register_rcli_private_key_executable(writer)
     }
@@ -969,7 +971,10 @@ impl Drop for EngineService {
         if let Some(owner) = self.owner_runtime.as_ref()
             && let Err(error) = owner.invalidate_native_auth_dispatch()
         {
-            eprintln!("native_auth_dispatch_drop_cleanup_uncertain cause={}", error.0);
+            eprintln!(
+                "native_auth_dispatch_drop_cleanup_uncertain cause={}",
+                error.0
+            );
         }
     }
 }

@@ -11,8 +11,11 @@ async fn real_owner_database_installs_empty_bootstrap_receipts_without_execution
         .tempdir_in("/private/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = resolve_config(&root.path().join("global.toml"), &root.path().join("project.toml"))
-        .unwrap();
+    let config = resolve_config(
+        &root.path().join("global.toml"),
+        &root.path().join("project.toml"),
+    )
+    .unwrap();
     let (stop, stopped) = watch::channel(false);
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
@@ -33,7 +36,9 @@ async fn real_owner_database_installs_empty_bootstrap_receipts_without_execution
         .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
         .unwrap();
     let auth: i64 = db
-        .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let rows = if receipts == 1 {
         Some(
@@ -50,6 +55,9 @@ async fn real_owner_database_installs_empty_bootstrap_receipts_without_execution
     service.shutdown().await.unwrap();
     assert_eq!(tasks, 0);
     assert_eq!(auth, 0);
-    assert_eq!(receipts, 1, "owner database lacks pre-plan allocation receipts");
+    assert_eq!(
+        receipts, 1,
+        "owner database lacks pre-plan allocation receipts"
+    );
     assert_eq!(rows, Some(0));
 }

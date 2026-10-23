@@ -391,9 +391,13 @@ pub(super) fn recover(
     };
     let old_config = pending.old.config()?;
     let registered = super::accounts::pool_materialization(db, &old_config, edit)?;
-    let (new_global, next) =
-        edit_model_access(&pending.old.global.bytes, &pending.old.project.bytes, edit, &registered)
-            .map_err(|e| error(e.0))?;
+    let (new_global, next) = edit_model_access(
+        &pending.old.global.bytes,
+        &pending.old.project.bytes,
+        edit,
+        &registered,
+    )
+    .map_err(|e| error(e.0))?;
     if &old_config.id != expected_config_id
         || pending.old.hash()? != *expected_source_hash
         || new_global != pending.new_global
@@ -546,8 +550,9 @@ pub(super) fn apply(
             return Err(error("settings_source_conflict"));
         }
         let registered = super::accounts::pool_materialization(&tx, config, edit)?;
-        let (new_global, next) = edit_model_access(&old.global.bytes, &old.project.bytes, edit, &registered)
-            .map_err(|e| error(e.0))?;
+        let (new_global, next) =
+            edit_model_access(&old.global.bytes, &old.project.bytes, edit, &registered)
+                .map_err(|e| error(e.0))?;
         if revision == i64::MAX as u64 {
             return Err(error("revision_exhausted"));
         }
