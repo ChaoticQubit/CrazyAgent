@@ -568,8 +568,14 @@ pub(crate) fn edit_model_access(
                 return Err(ConfigError("account_in_pool".into()));
             }
             let removed = catalog.connections.remove(index);
-            if !catalog.connections.iter().any(|c| c.account_ref == removed.account_ref) {
-                catalog.accounts.retain(|account| *account != removed.account_ref);
+            if !catalog
+                .connections
+                .iter()
+                .any(|c| c.account_ref == removed.account_ref)
+            {
+                catalog
+                    .accounts
+                    .retain(|account| *account != removed.account_ref);
             }
         }
     }
@@ -617,7 +623,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
         "pool_in_use" => Some("This pool is used by a project. Remove it from the project first."),
-        "pool_name_bounds" => Some("Use a pool name of 1 to 64 characters, without control characters."),
+        "pool_name_bounds" => {
+            Some("Use a pool name of 1 to 64 characters, without control characters.")
+        }
         "pool_exists" => Some("A pool with this id already exists."),
         "pool_not_found" => Some("This pool no longer exists. Refresh and try again."),
         _ => None,
@@ -703,7 +711,10 @@ fn approve_assigned_accounts(
         .as_array_mut()
         .ok_or_else(shape)?;
     for account in assigned {
-        if !approved.iter().any(|value| value.as_str() == Some(account.as_str())) {
+        if !approved
+            .iter()
+            .any(|value| value.as_str() == Some(account.as_str()))
+        {
             approved.push(account.as_str());
         }
     }
@@ -716,7 +727,10 @@ fn approve_assigned_accounts(
         destinations.push(LOCAL_DESTINATION);
     }
     for connection in signed_in {
-        if !destinations.iter().any(|value| value.as_str() == Some(connection.as_str())) {
+        if !destinations
+            .iter()
+            .any(|value| value.as_str() == Some(connection.as_str()))
+        {
             destinations.push(connection.as_str());
         }
     }
@@ -900,7 +914,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
                 id: CredentialRef::new("local-pool").unwrap(),
                 name: None,
                 members: vec![CredentialRef::new("local-connection").unwrap()],
-                projects: projects.iter().map(|p| CredentialRef::new(*p).unwrap()).collect(),
+                projects: projects
+                    .iter()
+                    .map(|p| CredentialRef::new(*p).unwrap())
+                    .collect(),
                 roles: vec![CredentialRef::new("project_leader").unwrap()],
                 fallback_allowed: false,
                 provider_quota_policy: ProviderQuotaPolicy::default(),
@@ -968,9 +985,13 @@ pools = [{ id = "pool", members = ["key-connection", "local-connection"], projec
                 configured_profile_ref(connection).unwrap()
             ]
         );
-        let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"]), &[]).unwrap();
+        let (_, again) =
+            edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"]), &[]).unwrap();
         assert_eq!(again.settings.routing.approved_accounts.len(), 1);
-        assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
+        assert_eq!(
+            again.settings.allowed_destinations,
+            config.settings.allowed_destinations
+        );
     }
 
     #[test]
@@ -999,7 +1020,10 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
         let connection = CredentialRef::new("codex-connection").unwrap();
         assert!(config.settings.allowed_destinations.contains(&connection));
         let (_, again) = edit_model_access(&bytes, "", &edit, &[]).unwrap();
-        assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
+        assert_eq!(
+            again.settings.allowed_destinations,
+            config.settings.allowed_destinations
+        );
     }
 
     fn many_connections_global(count: usize) -> String {
@@ -1019,7 +1043,10 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
             members: (0..members)
                 .map(|index| CredentialRef::new(format!("c{index}")).unwrap())
                 .collect(),
-            projects: projects.iter().map(|p| CredentialRef::new(*p).unwrap()).collect(),
+            projects: projects
+                .iter()
+                .map(|p| CredentialRef::new(*p).unwrap())
+                .collect(),
             roles: vec![CredentialRef::new("project_leader").unwrap()],
             fallback_allowed: false,
             provider_quota_policy: ProviderQuotaPolicy::default(),
@@ -1030,13 +1057,31 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
     fn a_pool_holds_at_most_fifteen_accounts() {
         let global = many_connections_global(16);
         let full = sized_pool("work", 15, &[]);
-        let (bytes, config) =
-            edit_model_access(&global, "", &ModelAccessEdit::CreatePool { pool: full }, &[]).unwrap();
-        assert_eq!(config.settings.model_access.unwrap().pools[0].members.len(), 15);
-        let grown = ModelAccessEdit::ReplacePool { pool: sized_pool("work", 16, &[]) };
-        assert_eq!(edit_model_access(&bytes, "", &grown, &[]).unwrap_err().0, "pool_member_limit");
-        let created = ModelAccessEdit::CreatePool { pool: sized_pool("other", 16, &[]) };
-        assert_eq!(edit_model_access(&bytes, "", &created, &[]).unwrap_err().0, "pool_member_limit");
+        let (bytes, config) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool { pool: full },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            config.settings.model_access.unwrap().pools[0].members.len(),
+            15
+        );
+        let grown = ModelAccessEdit::ReplacePool {
+            pool: sized_pool("work", 16, &[]),
+        };
+        assert_eq!(
+            edit_model_access(&bytes, "", &grown, &[]).unwrap_err().0,
+            "pool_member_limit"
+        );
+        let created = ModelAccessEdit::CreatePool {
+            pool: sized_pool("other", 16, &[]),
+        };
+        assert_eq!(
+            edit_model_access(&bytes, "", &created, &[]).unwrap_err().0,
+            "pool_member_limit"
+        );
         assert_eq!(
             plain_problem("pool_member_limit"),
             Some("A pool can hold up to 15 accounts")
@@ -1049,20 +1094,28 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
         let (bytes, _) = edit_model_access(
             &global,
             "",
-            &ModelAccessEdit::CreatePool { pool: sized_pool("first", 2, &[]) },
+            &ModelAccessEdit::CreatePool {
+                pool: sized_pool("first", 2, &[]),
+            },
             &[],
         )
         .unwrap();
         let (_, config) = edit_model_access(
             &bytes,
             "",
-            &ModelAccessEdit::CreatePool { pool: sized_pool("second", 1, &["demo"]) },
+            &ModelAccessEdit::CreatePool {
+                pool: sized_pool("second", 1, &["demo"]),
+            },
             &[],
         )
         .unwrap();
         let pools = config.settings.model_access.unwrap().pools;
         assert_eq!(pools.len(), 2);
-        assert!(pools.iter().all(|pool| pool.members.contains(&CredentialRef::new("c0").unwrap())));
+        assert!(
+            pools
+                .iter()
+                .all(|pool| pool.members.contains(&CredentialRef::new("c0").unwrap()))
+        );
     }
 
     #[test]
@@ -1071,12 +1124,19 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
         let (bytes, _) = edit_model_access(
             &global,
             "",
-            &ModelAccessEdit::CreatePool { pool: sized_pool("work", 1, &["demo"]) },
+            &ModelAccessEdit::CreatePool {
+                pool: sized_pool("work", 1, &["demo"]),
+            },
             &[],
         )
         .unwrap();
-        let remove = ModelAccessEdit::RemovePool { id: CredentialRef::new("work").unwrap() };
-        assert_eq!(edit_model_access(&bytes, "", &remove, &[]).unwrap_err().0, "pool_in_use");
+        let remove = ModelAccessEdit::RemovePool {
+            id: CredentialRef::new("work").unwrap(),
+        };
+        assert_eq!(
+            edit_model_access(&bytes, "", &remove, &[]).unwrap_err().0,
+            "pool_in_use"
+        );
         assert_eq!(
             plain_problem("pool_in_use"),
             Some("This pool is used by a project. Remove it from the project first.")
@@ -1084,7 +1144,9 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
         let (bytes, _) = edit_model_access(
             &bytes,
             "",
-            &ModelAccessEdit::ReplacePool { pool: sized_pool("work", 1, &[]) },
+            &ModelAccessEdit::ReplacePool {
+                pool: sized_pool("work", 1, &[]),
+            },
             &[],
         )
         .unwrap();
@@ -1096,22 +1158,33 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
     fn a_pool_name_is_optional_bounded_and_renamable() {
         let global = many_connections_global(1);
         let mut pool = sized_pool("work", 1, &[]);
-        let (bytes, config) =
-            edit_model_access(&global, "", &ModelAccessEdit::CreatePool { pool: pool.clone() }, &[])
-                .unwrap();
+        let (bytes, config) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool { pool: pool.clone() },
+            &[],
+        )
+        .unwrap();
         assert_eq!(config.settings.model_access.unwrap().pools[0].name, None);
         assert!(!bytes.contains("name ="));
         pool.name = Some("Daily work".into());
-        let (bytes, config) =
-            edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool: pool.clone() }, &[])
-                .unwrap();
+        let (bytes, config) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplacePool { pool: pool.clone() },
+            &[],
+        )
+        .unwrap();
         let stored = &config.settings.model_access.unwrap().pools[0];
         assert_eq!(stored.name.as_deref(), Some("Daily work"));
         assert_eq!(stored.id.as_str(), "work");
         for invalid in ["", "   ", "tab\there", &"x".repeat(65)] {
             pool.name = Some(invalid.into());
             let edit = ModelAccessEdit::ReplacePool { pool: pool.clone() };
-            assert_eq!(edit_model_access(&bytes, "", &edit, &[]).unwrap_err().0, "pool_name_bounds");
+            assert_eq!(
+                edit_model_access(&bytes, "", &edit, &[]).unwrap_err().0,
+                "pool_name_bounds"
+            );
         }
         pool.name = Some("é".repeat(64));
         edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool }, &[]).unwrap();
@@ -1119,7 +1192,8 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
 
     #[test]
     fn unassigned_pools_approve_nothing() {
-        let (_, config) = edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&[]), &[]).unwrap();
+        let (_, config) =
+            edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&[]), &[]).unwrap();
         assert!(config.settings.routing.approved_accounts.is_empty());
         assert!(config.settings.allowed_destinations.is_empty());
     }

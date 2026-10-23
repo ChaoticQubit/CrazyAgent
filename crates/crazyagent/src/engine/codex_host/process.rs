@@ -45,7 +45,9 @@ pub(super) struct ProcessShared {
 
 impl ProcessShared {
     pub(super) fn lock(&self) -> Result<MutexGuard<'_, ProcessState>, EngineError> {
-        self.state.lock().map_err(|_| EngineError("codex_host_custody_poisoned".into()))
+        self.state
+            .lock()
+            .map_err(|_| EngineError("codex_host_custody_poisoned".into()))
     }
 
     pub(super) fn fail(&self, code: &'static str) {
@@ -171,10 +173,17 @@ impl CodexHostProcess {
             }
         } else {
             let (done, reply) = oneshot::channel();
-            let request = WriteRequest { bytes: bytes.to_vec(), done };
-            self.input.try_send(request)
+            let request = WriteRequest {
+                bytes: bytes.to_vec(),
+                done,
+            };
+            self.input
+                .try_send(request)
                 .map_err(|_| EngineError("codex_host_input_unavailable".into()))?;
-            self.pending_input = Some(PendingInput { bytes: bytes.to_vec(), reply });
+            self.pending_input = Some(PendingInput {
+                bytes: bytes.to_vec(),
+                reply,
+            });
         }
         assert!(self.pending_input.is_some());
         let remaining = self.deadline.saturating_duration_since(Instant::now());
@@ -217,7 +226,9 @@ impl CodexHostProcess {
                     return Ok(output);
                 }
                 if state.complete {
-                    return state.status.map(CodexHostOutput::Exited)
+                    return state
+                        .status
+                        .map(CodexHostOutput::Exited)
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }
@@ -240,7 +251,8 @@ impl CodexHostProcess {
                     return Err(EngineError(code.into()));
                 }
                 if state.complete {
-                    return state.status
+                    return state
+                        .status
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }

@@ -40,9 +40,9 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
                     count(&ctx.store.accounts, |rows| rows.len().to_string())
                 }
                 SettingsSection::Pools => count(&ctx.store.pools, |pools| pools.len().to_string()),
-                SettingsSection::Harnesses => {
-                    count(&ctx.store.harnesses, |(found, all)| format!("{found} of {all}"))
-                }
+                SettingsSection::Harnesses => count(&ctx.store.harnesses, |(found, all)| {
+                    format!("{found} of {all}")
+                }),
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
                 SettingsSection::Plugins | SettingsSection::Profile => String::new(),
             },

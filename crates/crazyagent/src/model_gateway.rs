@@ -18,9 +18,9 @@ mod persistence;
 mod initial_conversation_tests;
 
 #[cfg(test)]
-mod local_completion_tests;
-#[cfg(test)]
 mod configured_conversation_tests;
+#[cfg(test)]
+mod local_completion_tests;
 
 const OBSERVATION_LIFETIME_MAX_MS: u64 = 86_400_000;
 const SUCCESS_READY_LIFETIME_MS: u64 = 3_600_000;
@@ -516,7 +516,9 @@ fn validate_initial_conversation(
     }
     let method_matches = match &auth.fact.action {
         NativeAuthAction::SignIn {
-            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+            method:
+                NativeAuthMethod::CodexBrowser
+                | NativeAuthMethod::CodexDeviceCode
                 | NativeAuthMethod::CodexExisting,
         } => auth.binding.connection.harness.as_str() == "codex",
         NativeAuthAction::SignIn {
@@ -785,9 +787,7 @@ fn finish_attempt_inner(
     {
         return Err(error("gateway_completion_bounds"));
     }
-    if record_observation
-        && let AttemptOutcome::Failed(kind) = &completion.outcome
-    {
+    if record_observation && let AttemptOutcome::Failed(kind) = &completion.outcome {
         let kind = match kind {
             FailureKind::QuotaExhausted => ObservationKind::QuotaExhausted {
                 retry_at_ms: completion.retry_at_ms,

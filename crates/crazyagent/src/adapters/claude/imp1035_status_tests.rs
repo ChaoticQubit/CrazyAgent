@@ -2,7 +2,10 @@ use crate::adapters::claude::{AuthMethod, decode_auth_status};
 
 #[test]
 fn imp1035_actual_claude_decoder_keeps_each_config_directory_exact() {
-    for home in ["/private/tmp/imp1035-account-a", "/private/tmp/imp1035-account-b"] {
+    for home in [
+        "/private/tmp/imp1035-account-a",
+        "/private/tmp/imp1035-account-b",
+    ] {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "loggedIn": true,
             "authMethod": "claude.ai",
@@ -12,15 +15,20 @@ fn imp1035_actual_claude_decoder_keeps_each_config_directory_exact() {
             "orgId": "synthetic-org",
             "orgName": "synthetic-organization",
             "subscriptionType": "synthetic-subscription"
-        })).unwrap();
+        }))
+        .unwrap();
         let status = decode_auth_status(&bytes).unwrap();
         assert!(status.logged_in);
         assert_eq!(status.auth_method, AuthMethod::ClaudeAi);
         assert_eq!(status.config_directory.as_str(), home);
         let debug = format!("{status:?}");
-        for private in [home, "synthetic-owner@example.invalid", "synthetic-org",
-            "synthetic-organization", "synthetic-subscription"]
-        {
+        for private in [
+            home,
+            "synthetic-owner@example.invalid",
+            "synthetic-org",
+            "synthetic-organization",
+            "synthetic-subscription",
+        ] {
             assert!(!debug.contains(private));
         }
     }

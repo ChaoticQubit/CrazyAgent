@@ -81,10 +81,14 @@ impl CodexHostProtocol {
             }
             match &event {
                 Event::Initialized => {
-                    batch.outbound.push(self.protocol.initialized().map_err(protocol_error)?);
+                    batch
+                        .outbound
+                        .push(self.protocol.initialized().map_err(protocol_error)?);
                 }
                 Event::ApprovalRequired { id, .. } | Event::UnsupportedRequest { id, .. } => {
-                    batch.outbound.push(self.protocol.deny_request(id).map_err(protocol_error)?);
+                    batch
+                        .outbound
+                        .push(self.protocol.deny_request(id).map_err(protocol_error)?);
                 }
                 _ => {}
             }
@@ -114,7 +118,8 @@ impl CodexHostProtocol {
 
     pub fn disconnect(&mut self) -> ObservedEvent {
         let _ = self.protocol.finish();
-        self.bridge.translate_error(ProtocolError::Disconnected, self.request.take())
+        self.bridge
+            .translate_error(ProtocolError::Disconnected, self.request.take())
     }
 }
 
@@ -136,8 +141,17 @@ mod error_code_tests {
 
     #[test]
     fn protocol_errors_become_plain_lowercase_codes() {
-        assert_eq!(protocol_error(ProtocolError::StaleMessage).0, "codex_host_protocol_stale_message");
-        assert_eq!(protocol_error(ProtocolError::InvalidState).0, "codex_host_protocol_invalid_state");
-        assert_eq!(protocol_error(ProtocolError::Disconnected).0, "codex_host_protocol_disconnected");
+        assert_eq!(
+            protocol_error(ProtocolError::StaleMessage).0,
+            "codex_host_protocol_stale_message"
+        );
+        assert_eq!(
+            protocol_error(ProtocolError::InvalidState).0,
+            "codex_host_protocol_invalid_state"
+        );
+        assert_eq!(
+            protocol_error(ProtocolError::Disconnected).0,
+            "codex_host_protocol_disconnected"
+        );
     }
 }

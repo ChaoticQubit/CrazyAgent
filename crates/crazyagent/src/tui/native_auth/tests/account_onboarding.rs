@@ -93,11 +93,17 @@ async fn add_local(ui: &mut Ui, endpoint: &str, model: &str) {
     ui.key(KeyCode::Enter);
     ui.drain().await;
     let profile = views::body(&ui.app);
-    assert!(profile.contains("Press Enter to finish local endpoint setup"), "{profile}");
+    assert!(
+        profile.contains("Press Enter to finish local endpoint setup"),
+        "{profile}"
+    );
     ui.key(KeyCode::Enter);
     ui.drain().await;
     let configured = views::body(&ui.app);
-    assert!(configured.contains("ConfiguredOnly | generation 1"), "{configured}");
+    assert!(
+        configured.contains("ConfiguredOnly | generation 1"),
+        "{configured}"
+    );
     ui.key(KeyCode::Esc);
     let finished = views::body(&ui.app);
     assert!(finished.contains("Private setup closed"), "{finished}");

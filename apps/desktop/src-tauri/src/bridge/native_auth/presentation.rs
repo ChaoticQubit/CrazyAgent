@@ -1,6 +1,8 @@
 use super::{BridgeError, NativeAuthReply, NativeAuthView, bounded, failure};
 use crazyagent::adapters::{claude, codex};
-use crazyagent::engine::owner::{NativeAuthAccount, NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
+use crazyagent::engine::owner::{
+    NativeAuthAccount, NativeAuthAction, NativeAuthMethod, NativeAuthPhase,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -59,7 +61,10 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
         if reply.challenge.is_none()
             && reply.account.is_none()
             && reply.fact.phase == NativeAuthPhase::AwaitingOwner
-            && reply.fact.action == (NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial })
+            && reply.fact.action
+                == (NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::ClaudeOfficial,
+                })
             && reply.fact.binding.connection.harness.as_str() == "claude"
             && safe_claude_url(value.url())
         {
@@ -72,7 +77,10 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
             None
         }
     } else {
-        reply.challenge.as_ref().and_then(|value| challenge(value.codex()))
+        reply
+            .challenge
+            .as_ref()
+            .and_then(|value| challenge(value.codex()))
     };
     let has_challenge = reply.challenge.is_some() || reply.claude_challenge.is_some();
     let mut view = NativeAuthView {
@@ -108,11 +116,14 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
 
 fn safe_claude_url(value: &str) -> bool {
     value.len() <= 8192
-        && value.strip_prefix("https://claude.com/cai/oauth/authorize?").is_some_and(|query| {
-            !query.is_empty() && query.bytes().all(|byte| {
-                byte.is_ascii_graphic() && !matches!(byte, b'#' | b'\\')
+        && value
+            .strip_prefix("https://claude.com/cai/oauth/authorize?")
+            .is_some_and(|query| {
+                !query.is_empty()
+                    && query
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'#' | b'\\'))
             })
-        })
 }
 
 fn exact(value: &str) -> bool {

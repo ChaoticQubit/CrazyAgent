@@ -8,8 +8,8 @@ use crazyagent::engine::owner::{
 use crazyagent::protocol::RequestId;
 use serde::Serialize;
 
-mod presentation;
 mod claude;
+mod presentation;
 
 #[derive(Serialize)]
 pub struct NativeAuthView {
@@ -244,7 +244,9 @@ impl NativeBridge {
             }) = &view.challenge
         {
             operation.claude_prompt = Some((
-                prompt.parse().map_err(|_| failure("native_auth_cannot_display_safely"))?,
+                prompt
+                    .parse()
+                    .map_err(|_| failure("native_auth_cannot_display_safely"))?,
                 view.engine_epoch.clone(),
             ));
         }
@@ -254,7 +256,9 @@ impl NativeBridge {
     fn auth_failure(&mut self, error: BridgeError) -> BridgeError {
         if matches!(
             error.code,
-            "not_connected" | "owner_revoked" | "native_auth_outcome_unknown_read_same_operation"
+            "not_connected"
+                | "owner_revoked"
+                | "native_auth_outcome_unknown_read_same_operation"
                 | "native_auth_claude_input_outcome_unknown"
         ) {
             if let Some(controller) = self.controller.as_mut() {

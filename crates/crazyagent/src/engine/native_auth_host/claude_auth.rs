@@ -9,9 +9,11 @@ mod process;
 mod transcript;
 pub(crate) mod types;
 
-use super::custody::{CustodySession, Retirement};
 use super::RegisteredNativeAuthHost;
-use crate::engine::owner::transport::native_auth_channel::{NativeAuthCustodyChannel, NativeAuthCustodyControl};
+use super::custody::{CustodySession, Retirement};
+use crate::engine::owner::transport::native_auth_channel::{
+    NativeAuthCustodyChannel, NativeAuthCustodyControl,
+};
 use crate::engine::owner::{NativeAuthAction, NativeAuthMethod};
 use process::{ChildOutput, run_child};
 use std::time::{Duration, Instant};
@@ -57,10 +59,7 @@ fn auth_command(
     Ok(command)
 }
 
-fn verified_claude_account(
-    stdout: &[u8],
-    home: &Path,
-) -> Result<Option<AuthStatus>, EngineError> {
+fn verified_claude_account(stdout: &[u8], home: &Path) -> Result<Option<AuthStatus>, EngineError> {
     let expected = home
         .to_str()
         .filter(|_| home.is_absolute())
@@ -77,7 +76,9 @@ fn verified_claude_account(
         || !matches!(account.auth_method, AuthMethod::ClaudeAi)
         || account.api_provider.as_str() != "firstParty"
     {
-        return Err(EngineError("native_auth_claude_subscription_unsupported".into()));
+        return Err(EngineError(
+            "native_auth_claude_subscription_unsupported".into(),
+        ));
     }
     assert!(account.logged_in);
     assert_eq!(account.config_directory.as_str(), expected);
@@ -96,10 +97,16 @@ mod executable_fixture_tests;
 #[cfg(test)]
 mod protocol_tests;
 
-fn verified_status(stdout: &[u8], home: &Path, exit: Option<i32>) -> Result<Option<AuthStatus>, EngineError> {
+fn verified_status(
+    stdout: &[u8],
+    home: &Path,
+    exit: Option<i32>,
+) -> Result<Option<AuthStatus>, EngineError> {
     let account = verified_claude_account(stdout, home)?;
     if (account.is_some() && exit != Some(0)) || (account.is_none() && exit != Some(1)) {
-        return Err(EngineError("native_auth_claude_status_exit_mismatch".into()));
+        return Err(EngineError(
+            "native_auth_claude_status_exit_mismatch".into(),
+        ));
     }
     Ok(account)
 }
@@ -119,20 +126,32 @@ async fn finish_failure(
         let reason = match error.0.as_str() {
             "native_auth_claude_deadline" => ClaudeAuthFailure::Deadline,
             "native_auth_claude_native_exit" => ClaudeAuthFailure::NativeExit,
-            "native_auth_claude_subscription_unsupported" => ClaudeAuthFailure::SubscriptionUnsupported,
+            "native_auth_claude_subscription_unsupported" => {
+                ClaudeAuthFailure::SubscriptionUnsupported
+            }
             "native_auth_claude_profile_mismatch" => ClaudeAuthFailure::ProfileMismatch,
-            "native_auth_claude_launch_failed" | "native_auth_claude_keychain_unavailable" | "native_auth_host_executable_changed"
-                | "native_auth_host_executable_unsafe" => ClaudeAuthFailure::LaunchFailed,
+            "native_auth_claude_launch_failed"
+            | "native_auth_claude_keychain_unavailable"
+            | "native_auth_host_executable_changed"
+            | "native_auth_host_executable_unsafe" => ClaudeAuthFailure::LaunchFailed,
             "native_auth_claude_input_invalid" => ClaudeAuthFailure::InputInvalid,
-            "native_auth_claude_destination_unsupported" => ClaudeAuthFailure::DestinationUnsupported,
-            "native_auth_claude_status_invalid" | "native_auth_claude_status_exit_mismatch"
-                | "native_auth_claude_logout_not_observed" => ClaudeAuthFailure::StatusInvalid,
+            "native_auth_claude_destination_unsupported" => {
+                ClaudeAuthFailure::DestinationUnsupported
+            }
+            "native_auth_claude_status_invalid"
+            | "native_auth_claude_status_exit_mismatch"
+            | "native_auth_claude_logout_not_observed" => ClaudeAuthFailure::StatusInvalid,
             _ => ClaudeAuthFailure::OutputInvalid,
         };
         ClaudeAuthObservation::Failed { reason }
     };
-    if matches!(session.observe_claude(channel, observation).await?, NativeAuthCustodyControl::Cancel) {
-        session.observe_claude(channel, ClaudeAuthObservation::Cancelled).await?;
+    if matches!(
+        session.observe_claude(channel, observation).await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
+        session
+            .observe_claude(channel, ClaudeAuthObservation::Cancelled)
+            .await?;
     }
     session.seal_after_child_reaped()
 }
@@ -143,15 +162,25 @@ pub(in crate::engine) async fn run(
     executable: &RegisteredNativeAuthHost,
 ) -> Result<Retirement, EngineError> {
     let first = match channel.fact().action {
-        NativeAuthAction::SignIn { method: NativeAuthMethod::ClaudeOfficial } => ClaudeAuthCommand::Login,
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::ClaudeOfficial,
+        } => ClaudeAuthCommand::Login,
         NativeAuthAction::Logout => ClaudeAuthCommand::Logout,
         _ => return Err(EngineError("native_auth_claude_method_unsupported".into())),
     };
     if channel.fact().binding.connection.harness.as_str() != "claude" {
         return Err(EngineError("native_auth_method_mismatch".into()));
     }
-    let deadline = Instant::now() + if first == ClaudeAuthCommand::Login { Duration::from_secs(590) } else { Duration::from_secs(9) };
-    if matches!(session.check(channel).await?, NativeAuthCustodyControl::Cancel) {
+    let deadline = Instant::now()
+        + if first == ClaudeAuthCommand::Login {
+            Duration::from_secs(590)
+        } else {
+            Duration::from_secs(9)
+        };
+    if matches!(
+        session.check(channel).await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
         return Err(EngineError("native_auth_cancelled".into()));
     }
     let home = session.profile_path()?;
@@ -161,19 +190,53 @@ pub(in crate::engine) async fn run(
     let first_result = run_child(&mut session, channel, executable, &home, first, deadline).await;
     match first_result {
         Ok(ChildOutput { exit: Some(0), .. }) => {}
-        Ok(_) => return finish_failure(session, channel, EngineError("native_auth_claude_native_exit".into())).await,
+        Ok(_) => {
+            return finish_failure(
+                session,
+                channel,
+                EngineError("native_auth_claude_native_exit".into()),
+            )
+            .await;
+        }
         Err(error) => return finish_failure(session, channel, error).await,
     }
     if let Err(error) = session.prepare_status_child() {
         return finish_failure(session, channel, error).await;
     }
-    if matches!(session.check(channel).await?, NativeAuthCustodyControl::Cancel) {
-        return finish_failure(session, channel, EngineError("native_auth_cancelled".into())).await;
+    if matches!(
+        session.check(channel).await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
+        return finish_failure(
+            session,
+            channel,
+            EngineError("native_auth_cancelled".into()),
+        )
+        .await;
     }
-    if matches!(session.observe_claude(channel, ClaudeAuthObservation::CheckingAccount).await?, NativeAuthCustodyControl::Cancel) {
-        return finish_failure(session, channel, EngineError("native_auth_cancelled".into())).await;
+    if matches!(
+        session
+            .observe_claude(channel, ClaudeAuthObservation::CheckingAccount)
+            .await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
+        return finish_failure(
+            session,
+            channel,
+            EngineError("native_auth_cancelled".into()),
+        )
+        .await;
     }
-    let status = match run_child(&mut session, channel, executable, &home, ClaudeAuthCommand::Status, deadline).await {
+    let status = match run_child(
+        &mut session,
+        channel,
+        executable,
+        &home,
+        ClaudeAuthCommand::Status,
+        deadline,
+    )
+    .await
+    {
         Ok(status) => status,
         Err(error) => return finish_failure(session, channel, error).await,
     };
@@ -182,13 +245,29 @@ pub(in crate::engine) async fn run(
         Err(error) => return finish_failure(session, channel, error).await,
     };
     if first == ClaudeAuthCommand::Logout && account.is_some() {
-        return finish_failure(session, channel, EngineError("native_auth_claude_logout_not_observed".into())).await;
+        return finish_failure(
+            session,
+            channel,
+            EngineError("native_auth_claude_logout_not_observed".into()),
+        )
+        .await;
     }
     let observed = decode_auth_status(&status.stdout)
         .map_err(|_| EngineError("native_auth_claude_status_invalid".into()))?;
-    let observation = ClaudeAuthObservation::status(&observed, status.exit.expect("verified status has a normal exit"));
-    if matches!(session.observe_claude(channel, observation).await?, NativeAuthCustodyControl::Cancel) {
-        return finish_failure(session, channel, EngineError("native_auth_cancelled".into())).await;
+    let observation = ClaudeAuthObservation::status(
+        &observed,
+        status.exit.expect("verified status has a normal exit"),
+    );
+    if matches!(
+        session.observe_claude(channel, observation).await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
+        return finish_failure(
+            session,
+            channel,
+            EngineError("native_auth_cancelled".into()),
+        )
+        .await;
     }
     session.seal_after_child_reaped()
 }

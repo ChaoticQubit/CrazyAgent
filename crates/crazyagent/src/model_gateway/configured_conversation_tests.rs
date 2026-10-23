@@ -200,7 +200,11 @@ async fn configured_initial_scope_excludes_workers_tools_retry_and_foreign_tasks
         case.request = request.clone();
         match field {
             0 => case.request.role = Role::Worker,
-            1 => case.request.route.required_capabilities.push("coding".into()),
+            1 => case
+                .request
+                .route
+                .required_capabilities
+                .push("coding".into()),
             2 => case.request.previous_attempt = Some(RequestId::new("previous-attempt").unwrap()),
             3 => case.request.task_id = TaskId::new("foreign-first-task").unwrap(),
             4 => case.request.target_profile_ref = reference("foreign-profile"),

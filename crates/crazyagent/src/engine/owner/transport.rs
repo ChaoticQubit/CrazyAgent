@@ -1,13 +1,13 @@
 use super::*;
-mod master_runtime;
-mod master_host_launch;
-mod master_dispatch;
-mod master_rcli;
-mod master_rcli_launch;
 #[cfg(test)]
 mod master_auto_dispatch_tests;
+mod master_dispatch;
 #[cfg(test)]
 mod master_dispatch_tests;
+mod master_host_launch;
+mod master_rcli;
+mod master_rcli_launch;
+mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
@@ -41,9 +41,9 @@ use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
 mod native_auth_channel_tests;
 #[cfg(test)]
-mod native_auth_dispatch_lifetime_tests;
-#[cfg(test)]
 mod native_auth_dispatch_diagnostic_tests;
+#[cfg(test)]
+mod native_auth_dispatch_lifetime_tests;
 
 const SOCKET: &str = "owner.sock";
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -1176,7 +1176,10 @@ impl OwnerServer {
         while handshakes.join_next().await.is_some() {}
         while custody.join_next().await.is_some() {}
         while clients.join_next().await.is_some() {}
-        let drained = self.authority.drain_native_auth_dispatch(&self.engine).await;
+        let drained = self
+            .authority
+            .drain_native_auth_dispatch(&self.engine)
+            .await;
         invalidated?;
         drained?;
         let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
@@ -1635,16 +1638,40 @@ async fn serve_authenticated_owner(
         let selector: serde_json::Value =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         if selector.get("claude_auth_input").is_some() {
-            return native_auth_channel::claude::serve_input(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return native_auth_channel::claude::serve_input(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                &frame[4..],
+            )
+            .await;
         }
         if selector.get("accounts").is_some() {
             return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("account_profile").is_some() {
-            return account_profile::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return account_profile::serve(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                &frame[4..],
+            )
+            .await;
         }
         if selector.get("harness_catalog").is_some() {
-            return harness_catalog::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return harness_catalog::serve(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                &frame[4..],
+            )
+            .await;
         }
         if selector.get("plugins").is_some() {
             return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
@@ -1736,7 +1763,12 @@ async fn serve_authenticated_owner(
                 engine: engine.clone(),
                 authority: authority.clone(),
             };
-            if let Err(error) = authority.master_dispatch.lock().await.committed(runtime, &submitted, reply) {
+            if let Err(error) = authority
+                .master_dispatch
+                .lock()
+                .await
+                .committed(runtime, &submitted, reply)
+            {
                 eprintln!("master_dispatch_not_started cause={}", error.0);
             }
         }
@@ -1784,7 +1816,9 @@ fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
     let code = error.0.as_str();
     let plain = !code.is_empty()
         && code.len() <= 192
-        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';'));
+        && code.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
+        });
     let cause = if plain {
         code
     } else {

@@ -8,7 +8,10 @@ impl NativeProfileCustody {
     /// Returns the SDK home this custody generates for a configured RCLI profile reference.
     /// Input: the account setup profile reference. Output: the engine-owned home path,
     /// which may not exist until account setup has configured that profile.
-    pub(crate) fn generated_configured_home(&self, profile_ref: &CredentialRef) -> std::path::PathBuf {
+    pub(crate) fn generated_configured_home(
+        &self,
+        profile_ref: &CredentialRef,
+    ) -> std::path::PathBuf {
         let home = self
             .anchor
             .path
@@ -54,11 +57,14 @@ impl NativeProfileCustody {
         }
         drop(manifest);
         drop(root);
-        let homes = match rustix::fs::statat(&self.anchor.directory, HOMES, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(_) => Directory::open(&self.anchor.directory, OsStr::new(HOMES))?,
-            Err(rustix::io::Errno::NOENT) => Directory::create(&self.anchor.directory, OsStr::new(HOMES))?,
-            Err(error) => return Err(unsafe_custody(error)),
-        };
+        let homes =
+            match rustix::fs::statat(&self.anchor.directory, HOMES, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Directory::open(&self.anchor.directory, OsStr::new(HOMES))?,
+                Err(rustix::io::Errno::NOENT) => {
+                    Directory::create(&self.anchor.directory, OsStr::new(HOMES))?
+                }
+                Err(error) => return Err(unsafe_custody(error)),
+            };
         let home = Directory::create(&homes.file, OsStr::new(&key))?;
         let sdk = Directory::create(&home.file, OsStr::new(".backboard"))?;
         let bytes = serde_json::to_vec(&serde_json::json!({
@@ -68,22 +74,30 @@ impl NativeProfileCustody {
                 "protocol": selection.protocol.as_str(), "baseUrl": url,
                 "auth": { "type": auth }
             }]
-        })).map_err(|_| failure("account_profile_config_invalid"))?;
+        }))
+        .map_err(|_| failure("account_profile_config_invalid"))?;
         if bytes.is_empty() || bytes.len() > 65_536 {
             return Err(failure("account_profile_config_invalid"));
         }
-        let mut config = File::from(rustix::fs::openat(
-            &sdk.file, "config.json",
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        ).map_err(unsafe_custody)?);
+        let mut config = File::from(
+            rustix::fs::openat(
+                &sdk.file,
+                "config.json",
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(unsafe_custody)?,
+        );
         config.write_all(&bytes).map_err(unsafe_custody)?;
         config.sync_all().map_err(unsafe_custody)?;
         sdk.file.sync_all().map_err(unsafe_custody)?;
         home.verify(&homes.file, OsStr::new(&key))?;
         homes.verify(&self.anchor.directory, OsStr::new(HOMES))?;
         self.register_configured_rcli_profile(
-            host, connection, profile_ref, &self.anchor.path.join(HOMES).join(&key),
+            host,
+            connection,
+            profile_ref,
+            &self.anchor.path.join(HOMES).join(&key),
         )
     }
 }
