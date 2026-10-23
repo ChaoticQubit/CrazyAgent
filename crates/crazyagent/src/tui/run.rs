@@ -8,10 +8,12 @@ use super::shell::Shell;
 use super::theme::{self, Appearance, Colors};
 use super::{TerminalGuard, TuiError, bounded_area};
 use crate::engine::Client;
+use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
 };
 use crossterm::execute;
+use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,15 +41,41 @@ impl Drop for Extras {
     }
 }
 
+/// Writes the sequences that hand the terminal back: stop focus and paste
+/// events, show the cursor, leave the alternate screen.
+/// Input: the terminal writer. Output: the write result.
+fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    execute!(
+        out,
+        DisableFocusChange,
+        DisableBracketedPaste,
+        Show,
+        LeaveAlternateScreen
+    )
+}
+
+/// Installs a panic hook that restores the terminal before the panic message
+/// prints, so it lands on the normal screen, then runs the previous hook.
+/// Input: none. Output: none; the hook stays for the rest of the process.
+fn restore_on_panic() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = restore(&mut std::io::stdout());
+        previous(info);
+    }));
+}
+
 /// Builds the shell's context from this process's environment.
 /// Inputs: an environment lookup and the engine socket shown when it is down.
 /// Output: the context, or the one-line refusal for `TERM=dumb`.
 pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<Ctx, TuiError> {
-    let depth = theme::depth(&var).ok_or_else(|| {
-        TuiError("CrazyAgent needs a full terminal. TERM is set to dumb.".into())
-    })?;
+    let depth = theme::depth(&var)
+        .ok_or_else(|| TuiError("CrazyAgent needs a full terminal. TERM is set to dumb.".into()))?;
     let prefs = prefs::default_path(var("HOME").as_deref());
-    let colors = prefs.as_deref().map_or(Colors::default(), prefs::load_colors);
+    let colors = prefs
+        .as_deref()
+        .map_or(Colors::default(), prefs::load_colors);
     let appearance = if colors == Colors::FollowMacos {
         theme::system_appearance()
     } else {
@@ -66,12 +94,17 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
         .map_err(|error| TuiError(error.to_string()))?;
-    let ctx = context(|name| std::env::var(name).ok(), socket.display().to_string())?;
+    let ctx = context(
+        |name| std::env::var(name).ok(),
+        socket.display().to_string(),
+    )?;
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
+    restore_on_panic();
     let _guard = TerminalGuard::enter()?;
     let _extras = Extras::enter()?;
-    let (width, height) = crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
+    let (width, height) =
+        crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(std::io::stdout()),
         TerminalOptions {
@@ -131,6 +164,9 @@ fn drive(
             showing_message = message;
             dirty = true;
         }
+        if shell.pace(now) {
+            dirty = true;
+        }
         if shell.busy() && now.duration_since(tick) >= TICK {
             shell.ctx.tick = shell.ctx.tick.wrapping_add(1);
             tick = now;
@@ -175,7 +211,9 @@ fn drive(
                 if appearance != shell.ctx.appearance {
                     let colors = shell.ctx.colors;
                     shell.ctx.restyle(colors, appearance);
-                    terminal.clear().map_err(|error| TuiError(error.to_string()))?;
+                    terminal
+                        .clear()
+                        .map_err(|error| TuiError(error.to_string()))?;
                     dirty = true;
                 }
             }
@@ -187,14 +225,19 @@ fn drive(
 
 /// Turns one owner worker event into a shell arrival.
 /// Input: the event. Output: the arrival screens react to.
-fn owner_arrival(event: OwnerEvent) -> Arrival {
+pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
     match event {
-        OwnerEvent::Access { ready: true, .. } => Arrival::Connected,
+        OwnerEvent::Access {
+            ready: true,
+            identity,
+            ..
+        } => Arrival::Connected(identity),
         OwnerEvent::Access { problem, .. } => Arrival::Disconnected(problem),
         OwnerEvent::Shell(event) => match *event {
             ShellEvent::Profile(result) => Arrival::Profile(result),
             ShellEvent::ProfileSaved(result) => Arrival::ProfileSaved(result),
             ShellEvent::Pools(result) => Arrival::Pools(result),
+            ShellEvent::PoolProjects(result) => Arrival::PoolProjects(result),
             ShellEvent::Projects(result) => Arrival::Projects(result),
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
@@ -215,6 +258,7 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
             generation: shell.ctx.next_generation(),
         }),
         Request::Pools => connection.shell(ShellRequest::Pools),
+        Request::PoolProjects => connection.shell(ShellRequest::PoolProjects),
         Request::Projects => connection.shell(ShellRequest::Projects),
         Request::EditPool { change } => connection.shell(ShellRequest::EditPool {
             change,
@@ -229,4 +273,23 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_hands_the_terminal_back_in_full() {
+        let mut out = Vec::new();
+        restore(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for sequence in ["\x1b[?1004l", "\x1b[?2004l", "\x1b[?25h", "\x1b[?1049l"] {
+            assert!(text.contains(sequence), "missing {sequence:?} in {text:?}");
+        }
+        assert!(
+            text.ends_with("\x1b[?1049l"),
+            "the alternate screen is left last"
+        );
+    }
 }

@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Review
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   ✓ Pool   ✓ Team   Review
+───────────────────────────────────────────────────────────────━━━━━━───────────
+  Review
+  Tidepool
+  A live dashboard for marine researchers to watch sensor buoys and get alerts
+  when readings look wrong.
+
+  Project folder  Made by CrazyAgent  new
+  Stack           TypeScript, React, Next.js, Postgres, TimescaleDB
+  Platforms       Website
+  Documents       3 files
+  Work to start   Market, Competitor, Front-end design
+  Pool            Main
+  Team            Codex leads. Codex x3. Tools on.
+
+  ⠼ Creating the project folder
+
+
+
+
+
+ Esc Run in background                                                   ? Help

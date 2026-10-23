@@ -35,11 +35,15 @@ pub enum FormKey {
     Submit,
 }
 
+/// The raw values of the form, compared to tell edited from saved.
+type Snapshot = ([String; 4], AnswerDetail, Initiative, Option<Colors>);
+
 /// The profile form shared by the first-run Welcome page and Settings, Profile.
 /// Input: an optional saved profile and, in Settings, the Colors choice.
 /// Output: drawn lines with the cursor, and a validated profile on submit.
 #[derive(Debug)]
 pub struct ProfileForm {
+    baseline: Snapshot,
     name: TextField,
     role: TextField,
     bio: TextField,
@@ -57,6 +61,7 @@ impl ProfileForm {
     /// with Name focused.
     pub fn new(profile: Option<&OwnerProfile>, colors: Option<Colors>) -> Self {
         let mut form = Self {
+            baseline: Default::default(),
             name: TextField::new("Name", NAME_BYTES_MAX).right("Required"),
             role: TextField::new("Role", ROLE_BYTES_MAX)
                 .placeholder("For example: Founder and full-stack developer"),
@@ -79,7 +84,31 @@ impl ProfileForm {
             form.detail = profile.working_style.detail;
             form.initiative = profile.working_style.initiative;
         }
+        form.baseline = form.snapshot();
         form
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        (
+            [&self.name, &self.role, &self.bio, &self.stack].map(|field| field.value().to_owned()),
+            self.detail,
+            self.initiative,
+            self.colors,
+        )
+    }
+
+    /// True when any value differs from the one the form was built or last
+    /// saved with.
+    /// Input: none. Output: whether leaving would lose edits.
+    pub fn edited(&self) -> bool {
+        self.snapshot() != self.baseline
+    }
+
+    /// Takes the current values as saved, after the engine kept them.
+    /// Input: none. Output: none; `edited` is false until the next change.
+    pub fn settle(&mut self) {
+        self.baseline = self.snapshot();
+        assert!(!self.edited());
     }
 
     /// The Tab order of this form.
@@ -142,7 +171,10 @@ impl ProfileForm {
         if let Some(current) = self.focus {
             self.check(current);
         }
-        let next = match self.focus.and_then(|slot| slots.iter().position(|s| *s == slot)) {
+        let next = match self
+            .focus
+            .and_then(|slot| slots.iter().position(|s| *s == slot))
+        {
             Some(index) if forward => slots[(index + 1) % slots.len()],
             Some(index) => slots[(index + slots.len() - 1) % slots.len()],
             None => slots[0],
@@ -295,11 +327,29 @@ impl ProfileForm {
         }
     }
 
-    fn choice_row(&self, label: &str, options: [(bool, &str); 2], focused: bool, ctx: &Ctx) -> Line<'static> {
-        let label_style = if focused { ctx.theme.accent } else { ctx.theme.text };
+    fn choice_row(
+        &self,
+        label: &str,
+        options: [(bool, &str); 2],
+        focused: bool,
+        ctx: &Ctx,
+    ) -> Line<'static> {
+        let label_style = if focused {
+            ctx.theme.accent
+        } else {
+            ctx.theme.text
+        };
         join([
-            pad(Line::from(Span::styled(label.to_owned(), label_style)), CHOICE_LABEL_WIDTH, ctx.glyphs),
-            pad(Line::raw(radio(options[0].0, options[0].1)), CHOICE_WIDTH, ctx.glyphs),
+            pad(
+                Line::from(Span::styled(label.to_owned(), label_style)),
+                CHOICE_LABEL_WIDTH,
+                ctx.glyphs,
+            ),
+            pad(
+                Line::raw(radio(options[0].0, options[0].1)),
+                CHOICE_WIDTH,
+                ctx.glyphs,
+            ),
             Line::raw(radio(options[1].0, options[1].1)),
         ])
     }
@@ -357,7 +407,11 @@ impl ProfileForm {
             let focused = self.focus == Some(Slot::Colors);
             out.push(Line::from(Span::styled(
                 "Colors",
-                if focused { ctx.theme.accent } else { ctx.theme.heading },
+                if focused {
+                    ctx.theme.accent
+                } else {
+                    ctx.theme.heading
+                },
             )));
             out.push(Line::raw(
                 Colors::ALL
@@ -369,10 +423,7 @@ impl ProfileForm {
             out.push(Line::default());
         }
         if self.saving {
-            out.push(Line::from(vec![
-                Span::styled(ctx.spinner(), ctx.theme.running),
-                Span::raw(" Saving your profile"),
-            ]));
+            out.push(ctx.loading("Saving your profile"));
         } else {
             out.push(buttons(
                 &[button],
@@ -400,7 +451,10 @@ mod tests {
         assert!(form.typing());
         assert_eq!(form.key(&Key::Tab), FormKey::Handled);
         assert_eq!(form.focus(), Some(Slot::Role));
-        assert_eq!(form.name.error.as_deref(), Some("Enter your name to continue."));
+        assert_eq!(
+            form.name.error.as_deref(),
+            Some("Enter your name to continue.")
+        );
         for _ in 0..5 {
             form.key(&Key::Tab);
         }
@@ -464,7 +518,12 @@ mod tests {
     fn engine_limits_show_under_the_field() {
         let mut form = ProfileForm::new(None, None);
         typed(&mut form, "Mira");
-        form.stack.set(&(0..13).map(|index| format!("tech{index}")).collect::<Vec<_>>().join(","));
+        form.stack.set(
+            &(0..13)
+                .map(|index| format!("tech{index}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         assert_eq!(form.profile(), Err(Slot::Stack));
         assert_eq!(
             form.stack.error.as_deref(),

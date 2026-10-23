@@ -1,9 +1,11 @@
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{AccountRow, ProjectCard, Request};
+use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
+use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
 const QUEUE_MAX: usize = 32;
@@ -50,6 +52,7 @@ pub struct Store {
     pub profile: Load<Option<OwnerProfile>>,
     pub projects: Load<Vec<ProjectCard>>,
     pub pools: Load<Vec<PoolSummary>>,
+    pub pool_projects: Load<Vec<PoolScope>>,
     pub accounts: Load<Vec<AccountRow>>,
     pub harnesses: Load<(usize, usize)>,
     pub memory: Load<usize>,
@@ -62,6 +65,7 @@ impl Default for Store {
             profile: Load::Idle,
             projects: Load::Idle,
             pools: Load::Idle,
+            pool_projects: Load::Idle,
             accounts: Load::NotReady,
             harnesses: Load::NotReady,
             memory: Load::NotReady,
@@ -71,7 +75,9 @@ impl Default for Store {
 }
 
 /// Everything a screen needs besides its own state: look, size, engine data,
-/// and the queues for requests and messages.
+/// the owner identity of the current trusted connection, whether loading lines
+/// are still in their quiet first 150 ms, and the queues for requests and
+/// messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -83,8 +89,10 @@ pub struct Ctx {
     pub width: u16,
     pub height: u16,
     pub tick: u64,
+    pub quiet: bool,
     pub store: Store,
     pub link: Link,
+    pub identity: Option<OwnerConnectionIdentity>,
     pub socket: String,
     pub home: Option<String>,
     pub prefs: Option<std::path::PathBuf>,
@@ -114,8 +122,10 @@ impl Ctx {
             width: 120,
             height: 36,
             tick: 0,
+            quiet: false,
             store: Store::default(),
             link: Link::Connecting,
+            identity: None,
             socket,
             home: None,
             prefs: None,
@@ -143,7 +153,7 @@ impl Ctx {
         }
         let read = matches!(
             request,
-            Request::Profile | Request::Pools | Request::Projects
+            Request::Profile | Request::Pools | Request::PoolProjects | Request::Projects
         );
         if read
             && self
@@ -162,7 +172,12 @@ impl Ctx {
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
-            Request::Pools if self.store.pools.ready().is_none() => self.store.pools = Load::Loading,
+            Request::Pools if self.store.pools.ready().is_none() => {
+                self.store.pools = Load::Loading
+            }
+            Request::PoolProjects if self.store.pool_projects.ready().is_none() => {
+                self.store.pool_projects = Load::Loading
+            }
             Request::Projects if self.store.projects.ready().is_none() => {
                 self.store.projects = Load::Loading
             }
@@ -221,6 +236,19 @@ impl Ctx {
         self.glyphs.spin(self.tick)
     }
 
+    /// One loading line: the spinner and what is loading, or an empty line
+    /// during the quiet first 150 ms of a busy spell.
+    /// Input: what is loading, such as "Loading projects". Output: the line.
+    pub fn loading(&self, text: &str) -> Line<'static> {
+        if self.quiet {
+            return Line::default();
+        }
+        Line::from(vec![
+            Span::styled(self.spinner(), self.theme.running),
+            Span::raw(format!(" {text}")),
+        ])
+    }
+
     /// Says whether the window uses the wide layouts.
     /// Input: none. Output: true at 100 columns and up.
     pub fn wide(&self) -> bool {
@@ -234,7 +262,13 @@ mod tests {
     use crate::tui::glyphs::UNICODE;
 
     fn ctx() -> Ctx {
-        Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new())
+        Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        )
     }
 
     #[test]
@@ -276,8 +310,15 @@ mod tests {
         assert_eq!(ctx.queued(), QUEUE_MAX);
         ctx.request(Request::Pools);
         assert_eq!(ctx.queued(), QUEUE_MAX);
-        assert_eq!(ctx.message().unwrap().lead, "Too many requests are waiting.");
-        assert_eq!(ctx.store.pools, Load::Idle, "a refused read leaves the data alone");
+        assert_eq!(
+            ctx.message().unwrap().lead,
+            "Too many requests are waiting."
+        );
+        assert_eq!(
+            ctx.store.pools,
+            Load::Idle,
+            "a refused read leaves the data alone"
+        );
     }
 
     #[test]

@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Settings
+────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+───────────────────────────────────────────────────────━━━━━━━━━━───────────────
+  Project settings
+
+  Name      Fieldnotes Mobile
+  Folder    ~/projects/fieldnotes-mobile
+  Pool      No pool yet   Enter Pick a pool
+  Team      Codex leads. Codex x3. Tools on.
+
+  Skills                                      From Settings, plus this project
+    Not ready yet. Project skills come with the plugins and skills update.
+
+  MCP servers
+    Not ready yet. Project MCP servers come with the same update.
+
+
+
+
+
+
+
+ Enter Change pool  o Open folder  Shift-←→ Tabs  Esc Home               ? Help

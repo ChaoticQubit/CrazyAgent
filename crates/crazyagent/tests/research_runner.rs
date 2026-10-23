@@ -1,7 +1,11 @@
+mod research_support;
+
+use crazyagent::protocol::ProjectId;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
-    ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner,
+    ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
+use research_support::{EngineRuntime, claude, codex, managed_home};
 use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
@@ -22,53 +26,29 @@ fn local_model() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct Case {
-    _temp: tempfile::TempDir,
+    runtime: EngineRuntime,
     project: PathBuf,
     state: PathBuf,
     database: PathBuf,
 }
 
-fn codex() -> PathBuf {
-    let path = std::env::var_os("CRAZYAGENT_CODEX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
-        .canonicalize()
-        .expect("real codex binary required");
-    assert!(
-        path.is_file(),
-        "real codex binary required: {}",
-        path.display()
-    );
-    path
-}
-
-fn claude() -> PathBuf {
-    std::env::var_os("CRAZYAGENT_CLAUDE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/claude"))
-        .canonicalize()
-        .expect("real claude binary required")
-}
-
-fn case(brief: &str) -> Case {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    let project = root.join("project");
-    let state = root.join("state");
-    fs::create_dir_all(project.join("context").join("documents")).unwrap();
-    fs::create_dir_all(&state).unwrap();
-    fs::write(project.join("context").join("brief.md"), brief).unwrap();
-    fs::write(
-        project.join("context").join("documents").join("notes.md"),
-        "Customer interview notes.\n",
-    )
-    .unwrap();
-    let database = state.join("research.sqlite3");
+fn case(about: &str) -> Case {
+    let runtime =
+        EngineRuntime::with_projects(&[("project-a", about), ("project-b", "A second project.")]);
+    let project = runtime.folder("project-a");
     Case {
-        _temp: temp,
         project,
-        state,
-        database,
+        state: runtime.state.clone(),
+        database: runtime.database.clone(),
+        runtime,
+    }
+}
+
+fn wait_for_file(path: &Path, deadline: Duration) {
+    let until = Instant::now() + deadline;
+    while !path.is_file() {
+        assert!(Instant::now() < until, "{} never appeared", path.display());
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -141,7 +121,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     let _model = local_model();
     let marker = format!("BRIEF-MARKER-{}", std::process::id());
     let case = case(&format!(
-        "# Pet clinic booking app\n\nA web app for small vet clinics to take bookings. {marker}\n"
+        "A web app for small vet clinics to take bookings. {marker}"
     ));
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
@@ -201,7 +181,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
 
 #[test]
 fn research_without_a_pool_waits_with_a_plain_status() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "design_research", "codex", true)
@@ -218,7 +198,7 @@ fn research_without_a_pool_waits_with_a_plain_status() {
 
 #[test]
 fn research_with_a_harness_that_cannot_run_yet_fails_plainly() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "design_research", "gemini-cli", true)
@@ -240,7 +220,7 @@ fn research_with_a_harness_that_cannot_run_yet_fails_plainly() {
 
 #[test]
 fn research_that_runs_out_of_time_is_stopped_and_retried_then_failed() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "competitor_research", "codex", true)
@@ -279,7 +259,7 @@ fn research_that_runs_out_of_time_is_stopped_and_retried_then_failed() {
 
 #[test]
 fn research_output_beyond_the_limit_stops_the_agent() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
@@ -302,7 +282,7 @@ fn research_output_beyond_the_limit_stops_the_agent() {
 
 #[test]
 fn cancelling_running_research_stops_its_process_group() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
@@ -340,7 +320,7 @@ fn cancelling_running_research_stops_its_process_group() {
 
 #[test]
 fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let ids: Vec<_> = ["market_research", "competitor_research", "design_research"]
         .iter()
@@ -384,15 +364,9 @@ fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
 }
 
 #[test]
-#[ignore = "BLOCKED until a signed-in managed Codex account exists; set CRAZYAGENT_MANAGED_CODEX_HOME to its managed profile directory"]
 fn research_runs_on_a_signed_in_managed_codex_account() {
-    let home = PathBuf::from(
-        std::env::var_os("CRAZYAGENT_MANAGED_CODEX_HOME")
-            .expect("CRAZYAGENT_MANAGED_CODEX_HOME must name a managed profile directory"),
-    )
-    .canonicalize()
-    .unwrap();
-    let case = case("# Habit tracker\n\nA mobile app that tracks daily habits.\n");
+    let home = managed_home("CRAZYAGENT_MANAGED_CODEX_HOME", "Codex");
+    let case = case("A mobile app that tracks daily habits.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "competitor_research", "codex", true)
@@ -425,7 +399,7 @@ fn process_group_alive(group: u32) -> bool {
 #[test]
 fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     let _model = local_model();
-    let case = case("# Recipe box\n\nA mobile app that stores family recipes.\n");
+    let case = case("A mobile app that stores family recipes.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "design_research", "codex", false)
@@ -461,7 +435,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
     let _model = local_model();
     let marker = format!("CLAUDE-BRIEF-{}", std::process::id());
     let case = case(&format!(
-        "# Dog walking app\n\nA mobile app that matches dog owners with local walkers. {marker}\n"
+        "A mobile app that matches dog owners with local walkers. {marker}"
     ));
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
@@ -520,7 +494,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
 
 #[test]
 fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let claude_job = jobs
         .enqueue("project-a", "design_research", "claude-code", true)
@@ -557,7 +531,7 @@ fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
 
 #[test]
 fn a_claude_job_without_claude_installed_fails_plainly() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "design_research", "claude", true)
@@ -578,15 +552,9 @@ fn a_claude_job_without_claude_installed_fails_plainly() {
 }
 
 #[test]
-#[ignore = "BLOCKED: needs a signed-in managed Claude subscription profile; set CRAZYAGENT_MANAGED_CLAUDE_HOME"]
 fn research_runs_on_a_signed_in_managed_claude_account() {
-    let home = PathBuf::from(
-        std::env::var_os("CRAZYAGENT_MANAGED_CLAUDE_HOME")
-            .expect("CRAZYAGENT_MANAGED_CLAUDE_HOME must name a managed profile directory"),
-    )
-    .canonicalize()
-    .unwrap();
-    let case = case("# Habit tracker\n\nA mobile app that tracks daily habits.\n");
+    let home = managed_home("CRAZYAGENT_MANAGED_CLAUDE_HOME", "Claude Code");
+    let case = case("A mobile app that tracks daily habits.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "competitor_research", "claude", true)
@@ -615,7 +583,7 @@ fn research_runs_on_a_signed_in_managed_claude_account() {
 
 #[test]
 fn a_job_interrupted_by_an_engine_stop_runs_again_after_a_restart() {
-    let case = case("# Brief\n");
+    let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
@@ -662,4 +630,169 @@ fn a_job_interrupted_by_an_engine_stop_runs_again_after_a_restart() {
         .unwrap()
         .count();
     assert_eq!(worktrees, 2);
+}
+
+#[test]
+fn each_codex_launch_gets_the_project_context_in_its_home_only_while_it_runs() {
+    let marker = format!("CODEX-CONTEXT-{}", std::process::id());
+    let case = case(&format!("A booking site for a bike repair shop. {marker}"));
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(runner(&case, limits(Duration::from_secs(120))));
+    let handle = {
+        let runner = runner.clone();
+        let root = case.project.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let home = case
+        .state
+        .join("agents")
+        .join(format!("job-{id}-1"))
+        .join("home");
+    wait_for_file(&home.join("config.toml"), Duration::from_secs(30));
+    let config = fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(config.contains("developer_instructions"), "{config}");
+    assert!(config.contains(&marker), "{config}");
+    assert!(home.join("crazyagent").is_dir());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(jobs.request_cancel(id).unwrap());
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Cancelled);
+    assert!(!process_group_alive(run.process_group.unwrap()));
+    assert!(!home.join("config.toml").exists());
+    assert!(!home.join("crazyagent").exists());
+}
+
+#[test]
+fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
+    let marker = format!("CLAUDE-CONTEXT-{}", std::process::id());
+    let case = case(&format!("A site that books piano lessons. {marker}"));
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "design_research", "claude", false)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(
+        runner(&case, limits(Duration::from_secs(120)))
+            .with_claude(&claude())
+            .unwrap(),
+    );
+    let handle = {
+        let runner = runner.clone();
+        let root = case.project.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &root,
+                    account: Some(ResearchAccount::AnthropicEndpoint {
+                        base_url: format!("http://127.0.0.1:{port}"),
+                        model: "hanging-model".into(),
+                    }),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let state = case
+        .state
+        .join("agents")
+        .join(format!("job-{id}-1"))
+        .join("home")
+        .join("crazyagent");
+    wait_for_file(&state.join("instructions.md"), Duration::from_secs(30));
+    let instructions = fs::read_to_string(state.join("instructions.md")).unwrap();
+    assert!(instructions.contains(&marker), "{instructions}");
+    let servers = fs::read_to_string(state.join("mcp.json")).unwrap();
+    assert!(servers.contains("mcpServers"), "{servers}");
+    assert!(!state.join("plugin").exists());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(jobs.request_cancel(id).unwrap());
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Cancelled);
+    assert!(!process_group_alive(run.process_group.unwrap()));
+    assert!(!state.exists());
+}
+
+#[test]
+fn a_managed_home_another_launch_holds_hands_the_job_back_without_spending_an_attempt() {
+    let case = case("A site for a neighbourhood tool library.");
+    let home = case.runtime.private_home("managed-codex-home");
+    let connection = rusqlite::Connection::open(&case.database).unwrap();
+    let context =
+        crazyagent::launch_context::for_project(&connection, &ProjectId::new("project-a").unwrap())
+            .unwrap();
+    let held = context.install("codex", &home, true).unwrap();
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let run = runner(&case, limits(Duration::from_secs(5)))
+        .run_once(&project(
+            &case,
+            Some(ResearchAccount::ManagedCodex {
+                home: home.clone(),
+                model: None,
+            }),
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.job, id);
+    assert_eq!(run.status, ResearchStatus::Queued);
+    assert_eq!(run.process_group, None);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Queued);
+    assert_eq!(job.attempts, 0);
+    assert!(!case.project.join("worktrees").exists());
+    assert!(
+        !case
+            .state
+            .join("agents")
+            .join(format!("job-{id}-1"))
+            .exists()
+    );
+    assert!(home.join("config.toml").is_file());
+    drop(held);
+    assert!(!home.join("config.toml").exists());
+}
+
+#[test]
+fn research_for_a_project_the_engine_does_not_know_fails_without_starting_an_agent() {
+    let case = case("A plain project.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-ghost", "market_research", "codex", true)
+        .unwrap();
+    let result = runner(&case, limits(Duration::from_secs(5))).run_once(&ResearchProject {
+        id: "project-ghost",
+        root: &case.project,
+        account: Some(endpoint(9)),
+    });
+    assert!(
+        matches!(&result, Err(RunError::Context(code)) if code.0 == "plugin_project_unknown"),
+        "{result:?}"
+    );
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Failed);
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Could not give the agent this project's context")
+    );
+    assert!(!case.project.join("worktrees").exists());
+    assert!(
+        !case.state.join("agents").exists()
+            || fs::read_dir(case.state.join("agents")).unwrap().count() == 0
+    );
 }

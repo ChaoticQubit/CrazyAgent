@@ -272,9 +272,7 @@ impl Theme {
             mark: Style::new().fg(Color::Red),
             success: Style::new().fg(Color::Green),
             warning: Style::new().fg(Color::Yellow),
-            error: Style::new()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            error: Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             running: Style::new().fg(Color::Cyan),
             selection: Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             selection_dim: Style::new().add_modifier(Modifier::UNDERLINED),
@@ -317,9 +315,16 @@ mod tests {
 
     #[test]
     fn depth_follows_term_no_color_and_colorterm() {
-        assert_eq!(depth(env(&[("TERM", "dumb"), ("COLORTERM", "truecolor")])), None);
         assert_eq!(
-            depth(env(&[("TERM", "xterm-256color"), ("NO_COLOR", "1"), ("COLORTERM", "truecolor")])),
+            depth(env(&[("TERM", "dumb"), ("COLORTERM", "truecolor")])),
+            None
+        );
+        assert_eq!(
+            depth(env(&[
+                ("TERM", "xterm-256color"),
+                ("NO_COLOR", "1"),
+                ("COLORTERM", "truecolor")
+            ])),
             Some(Depth::NoColor)
         );
         assert_eq!(
@@ -332,10 +337,16 @@ mod tests {
             Some(Depth::TrueColor)
         );
         assert_eq!(
-            depth(env(&[("TERM", "xterm-256color"), ("COLORTERM", "TrueColor")])),
+            depth(env(&[
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "TrueColor")
+            ])),
             Some(Depth::TrueColor)
         );
-        assert_eq!(depth(env(&[("TERM", "screen-256color")])), Some(Depth::Ansi256));
+        assert_eq!(
+            depth(env(&[("TERM", "screen-256color")])),
+            Some(Depth::Ansi256)
+        );
         assert_eq!(depth(env(&[("TERM", "xterm")])), Some(Depth::Ansi16));
         assert_eq!(depth(env(&[])), Some(Depth::Ansi16));
     }
@@ -355,7 +366,10 @@ mod tests {
             light,
             "an explicit choice overrides the system appearance"
         );
-        assert_eq!(Theme::new(Depth::TrueColor, Colors::Dark, Appearance::Light), dark);
+        assert_eq!(
+            Theme::new(Depth::TrueColor, Colors::Dark, Appearance::Light),
+            dark
+        );
     }
 
     #[test]
