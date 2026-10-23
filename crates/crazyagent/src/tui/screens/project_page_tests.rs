@@ -1,3 +1,5 @@
+use super::new_project_frames::check_frames;
+use super::new_project_input::cells;
 use super::new_project_page::{kept_draft, key_event, pool_choices_from};
 use super::project_page::open_path;
 use super::{Flow, Place, ProjectTab, open};
@@ -17,7 +19,8 @@ use crate::tui::shell::Shell;
 use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
+use ratatui::backend::{Backend, TestBackend};
+use ratatui::layout::Position;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -397,4 +400,62 @@ fn leaving_the_wizard_keeps_the_draft_for_next_time() {
     assert!(shown.contains("Fieldnotes"), "{shown}");
     drop(screen);
     assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
+}
+
+fn framed(shell: &mut Shell, width: u16, height: u16) -> String {
+    let away = Position::new(u16::MAX, u16::MAX);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.backend_mut().set_cursor_position(away).unwrap();
+    terminal.draw(|frame| shell.draw(frame)).unwrap();
+    let cursor = terminal
+        .backend_mut()
+        .get_cursor_position()
+        .ok()
+        .filter(|position| *position != away);
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..height {
+        let mut line = String::new();
+        let mut skip = 0;
+        for x in 0..width {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if cursor == Some(Position::new(x, y)) {
+                line.push('\u{2588}');
+                continue;
+            }
+            let symbol = buffer[(x, y)].symbol();
+            line.push_str(symbol);
+            skip = cells(symbol).saturating_sub(1);
+        }
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
+#[test]
+fn shell_draws_the_wizard_like_the_design() {
+    let about = "A live dashboard for marine researchers to watch sensor buoys and get alerts when readings look wrong.";
+    let mut drawn = Vec::new();
+    for (width, height) in [(120u16, 36u16), (80, 24)] {
+        let mut ctx = ctx(width, height);
+        ctx.store.pools = Load::Ready(Vec::new());
+        let screen = open(&Place::NewProject, &mut ctx);
+        let mut shell = Shell::with(ctx, screen);
+        for character in "Tidepool".chars() {
+            shell.key(Key::Char(character));
+        }
+        shell.key(Key::Tab);
+        for character in about.chars() {
+            shell.key(Key::Char(character));
+        }
+        drawn.push((
+            format!("wiz-about-{width}"),
+            framed(&mut shell, width, height),
+        ));
+    }
+    check_frames(&drawn);
 }
