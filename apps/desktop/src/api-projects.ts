@@ -295,6 +295,12 @@ export async function loadResearchLog(id: string, job: number): Promise<Result<s
   return { kind: "ok", value: result.value.lines.slice(-RESEARCH_LOG_LINES_MAX) };
 }
 
+/** Stops one research job: a running agent stops and a waiting one never starts.
+ * Inputs: the project id, the job id and a generation. Output: the engine receipt. */
+export function cancelResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_cancel_research", { id, job, generation });
+}
+
 /** Asks the engine to run one failed research job again.
  * Inputs: the project id, the job id and a draft generation. Output: the engine receipt. */
 export function retryResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {

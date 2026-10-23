@@ -209,14 +209,26 @@ const tabData = (jobs) => ({
   team: { result: undefined, at: 0 }, reloadTeam: () => {},
 });
 
-test("an agent that started offers View log, only a running one offers Stop", async () => {
+test("an agent that started offers View log, a running one Stop and a waiting one Cancel", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const running = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));
   assert.match(running, /<button type="button" class="btn" aria-expanded="false" aria-controls="pj-log-1">View log<\/button>/);
-  assert.match(running, />Stop</);
-  assert.doesNotMatch(running, /id="pj-log-1"/);
+  assert.match(running, /<button type="button" class="btn danger-text">Stop<\/button>/);
+  assert.doesNotMatch(running, /id="pj-log-1"|>Try again<|>Cancel</);
   const queued = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("queued")]) }));
-  assert.doesNotMatch(queued, />View log<|>Stop</);
+  assert.doesNotMatch(queued, />View log<|>Stop<|>Try again</);
+  assert.match(queued, /<button type="button" class="btn danger-text">Cancel<\/button>/);
+});
+
+test("research agents offer Stop while running, Cancel while waiting and Try again once stopped", () => {
+  const actions = (status, extra = {}) => research.researchActions(job(status, extra));
+  assert.deepEqual(actions("running", { started_ms: 1_000 }), { log: true, stop: "Stop", retry: false });
+  assert.deepEqual(actions("running", { started_ms: 1_000, cancel_requested: true }), { log: true, stop: null, retry: false });
+  assert.deepEqual(actions("queued"), { log: false, stop: "Cancel", retry: false });
+  assert.deepEqual(actions("needs_pool"), { log: false, stop: "Cancel", retry: false });
+  assert.deepEqual(actions("done", { started_ms: 1_000 }), { log: true, stop: null, retry: false });
+  assert.deepEqual(actions("failed", { started_ms: 1_000 }), { log: true, stop: null, retry: true });
+  assert.deepEqual(actions("cancelled"), { log: false, stop: null, retry: true });
 });
 
 test("a failed research row shows its plain reason and Try again", async () => {
