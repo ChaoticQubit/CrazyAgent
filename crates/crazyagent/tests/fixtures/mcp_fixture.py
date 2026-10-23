@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import subprocess
@@ -37,7 +38,8 @@ def main():
             if cursor is None:
                 reply(message, {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}], "nextCursor": "page-2"})
             else:
-                name = "authorized" if os.environ.get("FIXTURE_TOKEN") == "dummy-value" else "anonymous"
+                token = os.environ.get("FIXTURE_TOKEN", "").encode()
+                name = "authorized" if hashlib.sha256(token).hexdigest() == "8a2b2f4731c2ed30a53e8145a2d2b4facdf83afa6ed346fc5550bacd2ebc1303" else "anonymous"
                 reply(message, {"tools": [{"name": name, "inputSchema": {"type": "object"}}]})
         else:
             print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "unknown"}}), flush=True)
