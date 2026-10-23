@@ -110,6 +110,7 @@ fn stored(project: &str, sub: Vec<HarnessSlot>) -> StoredSetup {
         documents: vec![],
         folder: "/private/tmp/unused".into(),
         created_ms: 1,
+        revision: 1,
     }
 }
 
