@@ -63,6 +63,7 @@ pub(super) enum Job {
     },
 }
 
+#[derive(Clone)]
 pub(super) enum Event {
     Catalog {
         context: Context,
@@ -80,6 +81,7 @@ pub(super) enum Event {
     },
 }
 
+#[derive(Clone)]
 pub(super) struct Catalog {
     config_id: ConfigId,
     source_hash: String,
@@ -90,6 +92,7 @@ pub(super) struct Catalog {
     capacities: [ResourceBudget; 3],
 }
 
+#[derive(Clone)]
 pub(super) struct View {
     session: Option<MasterSessionView>,
     turns: Vec<MasterTurnView>,
@@ -171,7 +174,10 @@ impl State {
     /// The current master transcript, read-only, for the Project screen.
     /// Input: none. Output: the session, its turns and the latest owner input
     /// once a read arrived; None before the first read.
-    #[expect(dead_code, reason = "the Project screen draws the master transcript")]
+    #[allow(
+        dead_code,
+        reason = "used by the Project screens on feat/v1-tui-projects; drop after integration"
+    )]
     pub fn transcript(
         &self,
     ) -> Option<(
