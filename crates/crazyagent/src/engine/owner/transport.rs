@@ -32,6 +32,7 @@ use tokio::time::Instant;
 mod account_profile;
 mod native_auth;
 pub(crate) mod native_auth_channel;
+pub(crate) mod plugins;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
@@ -1633,6 +1634,9 @@ async fn serve_authenticated_owner(
         }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("plugins").is_some() {
+            return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("native_auth").is_some() {
             return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
