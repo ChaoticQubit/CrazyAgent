@@ -32,7 +32,7 @@ registerHooks({
 });
 
 const { NativeAuthPanel, reduceNativeAuth } = await import("../src/screens/native-auth.tsx");
-const { OwnerView } = await import("../src/app.tsx");
+const { OwnerView } = await import("../src/screens/legacy.tsx");
 const { useOwnerBrowser } = await import("../src/state.ts");
 const { formFromRecord } = await import("../src/model-access.ts");
 
