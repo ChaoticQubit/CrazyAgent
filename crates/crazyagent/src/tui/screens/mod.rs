@@ -4,6 +4,7 @@ pub mod settings;
 pub mod settings_accounts;
 pub mod settings_add_account;
 pub mod settings_harnesses;
+pub mod settings_memory;
 pub mod startup;
 pub mod stub;
 pub mod welcome;

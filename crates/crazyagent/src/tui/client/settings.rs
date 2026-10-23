@@ -8,7 +8,7 @@ use crate::engine::owner::{
     NativeAuthMethod, NativeAuthPhase, NativeAuthStart,
 };
 use crate::harnesses::HarnessEntry;
-use crate::memory::{KnowledgeEntry, ReviewDecision};
+use crate::memory::library::{LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory};
 use crate::protocol::CredentialRef;
 
 const POOL_JOINS_MAX: usize = 64;
@@ -31,12 +31,10 @@ pub(in crate::tui) enum SettingsJob {
         pools: Vec<(CredentialRef, u64)>,
     },
     Memories {
-        project: ProjectId,
+        scopes: Vec<MemoryScope>,
     },
-    RemoveMemory {
-        project: ProjectId,
-        entry: RequestId,
-        version: u64,
+    DeleteMemory {
+        memory: RequestId,
         generation: u64,
     },
 }
@@ -50,7 +48,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
-            Self::RemoveMemory { .. } => "RemoveMemory",
+            Self::DeleteMemory { .. } => "DeleteMemory",
         })
     }
 }
@@ -125,11 +123,8 @@ pub(in crate::tui) enum SettingsEvent {
     Harnesses(Result<Vec<HarnessEntry>, String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
-    Memories {
-        project: ProjectId,
-        result: Result<Vec<KnowledgeEntry>, String>,
-    },
-    MemoryRemoved(Result<(), String>),
+    Memories(Result<Vec<SavedMemory>, String>),
+    MemoryDeleted(Result<(), String>),
 }
 
 impl SettingsEvent {
@@ -143,11 +138,8 @@ impl SettingsEvent {
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
-            SettingsJob::Memories { project } => Self::Memories {
-                project: project.clone(),
-                result: Err(problem),
-            },
-            SettingsJob::RemoveMemory { .. } => Self::MemoryRemoved(Err(problem)),
+            SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
+            SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
         }
     }
 }
@@ -247,36 +239,67 @@ impl NativeOwner {
             SettingsJob::JoinPools { account, pools } => {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
             }
-            SettingsJob::Memories { project } => {
-                let result = match self.settings_controller() {
-                    Ok(controller) => controller
-                        .project_memories(project.clone(), None)
-                        .await
-                        .map_err(|error| problem(&error, lost)),
-                    Err(error) => Err(error),
-                };
-                SettingsEvent::Memories { project, result }
-            }
-            SettingsJob::RemoveMemory {
-                project,
-                entry,
-                version,
-                generation,
-            } => SettingsEvent::MemoryRemoved(match self.settings_controller() {
-                Ok(controller) => {
-                    match controller
-                        .review_memory(project, entry, version, ReviewDecision::Remove, generation)
-                        .await
-                    {
+            SettingsJob::Memories { scopes } => SettingsEvent::Memories(self.all_memories(scopes, lost).await),
+            SettingsJob::DeleteMemory { memory, generation } => {
+                SettingsEvent::MemoryDeleted(match self.settings_controller() {
+                    Ok(controller) => match controller.delete_memory(memory, generation).await {
                         Ok(OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }) => Ok(()),
                         Ok(OwnerResponse::Rejected { code }) => Err(bounded_problem(&code)),
                         Ok(_) => Err("memory_outcome_unknown".into()),
                         Err(error) => Err(problem(&error, lost)),
-                    }
-                }
-                Err(error) => Err(error),
-            }),
+                    },
+                    Err(error) => Err(error),
+                })
+            }
         }
+    }
+
+    /// Reads the saved memories of several scopes, newest first overall.
+    /// Inputs: the scopes and the lost-connection flag. Output: at most the
+    /// library's limit of memories, or the first plain problem code.
+    pub(super) async fn all_memories(
+        &mut self,
+        scopes: Vec<MemoryScope>,
+        lost: &mut bool,
+    ) -> Result<Vec<SavedMemory>, String> {
+        let mut memories: Vec<SavedMemory> = Vec::new();
+        for scope in scopes {
+            if memories.len() >= LIBRARY_ITEMS_MAX {
+                break;
+            }
+            memories.extend(self.saved_memories(scope, lost).await?);
+        }
+        memories.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
+        memories.truncate(LIBRARY_ITEMS_MAX);
+        Ok(memories)
+    }
+
+    /// Reads every saved memory in one scope, newest first, page by page.
+    /// Inputs: the scope and the lost-connection flag. Output: at most one
+    /// scope's worth of memories, or the plain problem code.
+    pub(super) async fn saved_memories(
+        &mut self,
+        scope: MemoryScope,
+        lost: &mut bool,
+    ) -> Result<Vec<SavedMemory>, String> {
+        let controller = self.settings_controller()?;
+        let mut memories: Vec<SavedMemory> = Vec::new();
+        let mut before = None;
+        let pages_max = SCOPE_ITEMS_MAX.div_ceil(usize::from(PAGE_ITEMS_MAX)) + 1;
+        for _ in 0..pages_max {
+            let page = controller
+                .memories(scope.clone(), None, before)
+                .await
+                .map_err(|error| problem(&error, lost))?;
+            let room = SCOPE_ITEMS_MAX - memories.len();
+            memories.extend(page.items.into_iter().take(room));
+            assert!(memories.len() <= SCOPE_ITEMS_MAX);
+            match page.next {
+                Some(next) if memories.len() < SCOPE_ITEMS_MAX => before = Some(next),
+                _ => return Ok(memories),
+            }
+        }
+        Err("memory_pages_unbounded".into())
     }
 
     /// Reads every account page by page, stopping at the load limit.
@@ -494,4 +517,106 @@ fn problem(error: &EngineError, lost: &mut bool) -> String {
         *lost = true;
     }
     bounded_problem(&error.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::{AccountDraft, Provider, SignInMethod};
+    use crate::engine::bootstrap::EngineService;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tset-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut native = NativeOwner::new(root.path().join("e.sock"), Duration::from_secs(5));
+        let _ = native.attach().await;
+        assert!(native.ready);
+
+        for name in ["Laptop", "Mini", "Studio"] {
+            let draft = AccountDraft {
+                provider: Provider::Local,
+                method: SignInMethod::Url,
+                name: name.into(),
+                url: None,
+                model: Some("qwen2.5:0.5b".into()),
+            };
+            let added = native
+                .settings(SettingsJob::Accounts(AccountsRequest::Add { draft, key: None }))
+                .await;
+            assert!(matches!(added, SettingsEvent::Accounts(Ok(AccountsReply::Account(_)))));
+        }
+        let mut lost = false;
+        let accounts = native.all_accounts(2, &mut lost).await.unwrap();
+        assert!(!lost);
+        let mut names: Vec<&str> = accounts.iter().map(|account| account.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Laptop", "Mini", "Studio"]);
+
+        let written = native
+            .controller
+            .as_mut()
+            .unwrap()
+            .add_memory(MemoryScope::Global, "Use metric units in every recipe.".into(), 1)
+            .await
+            .unwrap();
+        assert!(matches!(written, OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }));
+        let SettingsEvent::Memories(Ok(memories)) = native
+            .settings(SettingsJob::Memories {
+                scopes: vec![MemoryScope::Global],
+            })
+            .await
+        else {
+            panic!("memories required")
+        };
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].text, "Use metric units in every recipe.");
+        let memory = memories[0].id.clone();
+        let deleted = native
+            .settings(SettingsJob::DeleteMemory {
+                memory: memory.clone(),
+                generation: 2,
+            })
+            .await;
+        assert!(matches!(deleted, SettingsEvent::MemoryDeleted(Ok(()))));
+        let SettingsEvent::Memories(Ok(memories)) = native
+            .settings(SettingsJob::Memories {
+                scopes: vec![MemoryScope::Global],
+            })
+            .await
+        else {
+            panic!("memories required")
+        };
+        assert!(memories.is_empty());
+        let again = native
+            .settings(SettingsJob::DeleteMemory {
+                memory,
+                generation: 3,
+            })
+            .await;
+        assert!(matches!(again, SettingsEvent::MemoryDeleted(Err(_))));
+
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

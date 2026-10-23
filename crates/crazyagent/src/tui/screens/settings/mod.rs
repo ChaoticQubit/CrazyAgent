@@ -86,6 +86,7 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
         SettingsSection::Pools => Box::new(pools::Pools::new()),
         SettingsSection::Accounts => Box::new(super::settings_accounts::Accounts::new()),
         SettingsSection::Harnesses => Box::new(super::settings_harnesses::Harnesses::new()),
+        SettingsSection::Memory => Box::new(super::settings_memory::Memory::new()),
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
         other => Box::new(Pending::new(other)),
     }
