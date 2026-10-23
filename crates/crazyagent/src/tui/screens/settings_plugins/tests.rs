@@ -325,7 +325,7 @@ fn changed(server: Option<ServerView>) -> Arrival {
 }
 
 #[test]
-fn details_of_an_approved_server_open_its_secrets() {
+fn details_of_an_approved_server_open_its_edit_page() {
     let (skills, servers) = lists();
     let mut ctx = plugin_ctx(80, 24);
     let mut screen = Plugins::with(skills, servers);
@@ -338,10 +338,7 @@ fn details_of_an_approved_server_open_its_secrets() {
     let Flow::Replace(next) = flow else {
         panic!("the secrets page replaces the list");
     };
-    assert_eq!(
-        next.crumbs(),
-        ["Settings", "Plugins and skills", "github secrets"]
-    );
+    assert_eq!(next.crumbs(), ["Settings", "Plugins and skills", "github"]);
     assert!(screen.modal(&ctx).is_none());
     assert_eq!(ctx.queued(), 0);
 }
@@ -350,7 +347,7 @@ fn details_of_an_approved_server_open_its_secrets() {
 fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let mut shell = Shell::with(
         plugin_ctx(80, 24),
-        Box::new(ServerSecrets::new(github_with_token())),
+        Box::new(EditServer::new(github_with_token())),
     );
     let rows = render(&mut shell, 80, 24);
     assert!(
@@ -358,6 +355,7 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
             .any(|row| row.contains("GITHUB_TOKEN") && row.contains("Key saved")),
         "{rows:?}"
     );
+    shell.key(Key::Tab);
     shell.key(Key::Tab);
     for character in "SENTRY_DSN".chars() {
         shell.key(Key::Char(character));
@@ -389,7 +387,9 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
 #[test]
 fn a_saved_reply_updates_the_list_and_says_what_changed() {
     let mut ctx = plugin_ctx(80, 24);
-    let mut screen = ServerSecrets::new(github_with_token());
+    let mut screen = EditServer::new(github_with_token());
+    screen.key(&Key::Tab, &mut ctx);
+    assert!(!screen.typing());
     screen.key(&Key::Enter, &mut ctx);
     assert!(screen.typing(), "Enter on a secret starts replacing it");
     screen.key(&Key::Paste("ghp_rotated".into()), &mut ctx);
@@ -430,7 +430,8 @@ fn a_saved_reply_updates_the_list_and_says_what_changed() {
 #[test]
 fn removing_a_secret_asks_first() {
     let mut ctx = plugin_ctx(80, 24);
-    let mut screen = ServerSecrets::new(github_with_token());
+    let mut screen = EditServer::new(github_with_token());
+    screen.key(&Key::Tab, &mut ctx);
     screen.key(&Key::Char('d'), &mut ctx);
     assert_eq!(screen.modal(&ctx).unwrap().0.title, "Remove secret");
     screen.key(&Key::Enter, &mut ctx);
@@ -459,7 +460,8 @@ fn removing_a_secret_asks_first() {
 #[test]
 fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
     let mut ctx = plugin_ctx(80, 24);
-    let mut screen = ServerSecrets::new(github_with_token());
+    let mut screen = EditServer::new(github_with_token());
+    screen.key(&Key::Tab, &mut ctx);
     screen.key(&Key::Tab, &mut ctx);
     for character in "9 bad".chars() {
         screen.key(&Key::Char(character), &mut ctx);
@@ -471,5 +473,83 @@ fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
     assert_eq!(
         screen.name.error.as_deref(),
         Some("Secret names use letters, digits, _ or -, and start with a letter or _.")
+    );
+}
+
+#[test]
+fn a_command_line_reads_back_as_the_same_command() {
+    let spec = stdio(
+        "/opt/homebrew/bin/uvx",
+        &["mcp-server-postgres", "--name", "it's here", ""],
+    );
+    assert_eq!(command_spec(&spec.runs()), Ok(spec));
+    assert_eq!(
+        words(r"a 'b c'd e\ f"),
+        Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
+    );
+    assert_eq!(words("a 'b"), Err("A quote is not closed."));
+    assert_eq!(words("a \\"), Err("A backslash ends the line."));
+    assert_eq!(words("  "), Ok(Vec::new()));
+}
+
+#[test]
+fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = EditServer::new(github_with_token());
+    assert!(screen.typing(), "the page opens on the command");
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0);
+    assert_eq!(ctx.message().unwrap().lead, "Nothing changed.");
+    screen.key(&Key::Char(' '), &mut ctx);
+    for character in "--read-only".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    screen.key(&Key::Enter, &mut ctx);
+    let wanted = stdio(
+        "/opt/homebrew/bin/npx",
+        &["@modelcontextprotocol/server-github", "--read-only"],
+    );
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => match *job {
+            SettingsJob::Plugin(PluginChange::Update { id, spec }) => {
+                assert_eq!(id, "server-github");
+                assert_eq!(spec, wanted);
+            }
+            other => panic!("update expected, got {other:?}"),
+        },
+        other => panic!("settings request expected, got {other:?}"),
+    }
+    assert!(screen.busy(&ctx));
+    let mut updated = github_with_token();
+    updated.runs = wanted.runs();
+    updated.spec = wanted;
+    updated.status = ServerStatus::WaitingForApproval;
+    screen.arrive(&changed(Some(updated)), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Changed github. Approve it before agents can use it."
+    );
+    let (lines, _) = screen.body(76, &ctx);
+    let first: String = lines[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(first.contains("Needs approval"), "{first}");
+}
+
+#[test]
+fn a_command_without_a_full_path_is_refused_on_the_edit_page() {
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = EditServer::new(github_with_token());
+    screen.key(&Key::Ctrl('u'), &mut ctx);
+    for character in "npx server".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0);
+    assert_eq!(
+        screen.target.error.as_deref(),
+        Some("Use the full path of the command, such as /opt/homebrew/bin/uvx.")
     );
 }

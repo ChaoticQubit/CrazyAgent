@@ -3,9 +3,9 @@ use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::engine::owner::AccountSecret;
 use crate::plugins::{
-    COMMAND_BYTES_MAX, SECRET_NAME_BYTES_MAX, SECRETS_PER_SERVER_MAX, SERVER_NAME_BYTES_MAX,
-    ServerSpec, ServerStatus, ServerView, SkillView, URL_BYTES_MAX, validate_secret_name,
-    validate_server_name,
+    ARG_BYTES_MAX, ARGS_MAX, COMMAND_BYTES_MAX, SECRET_NAME_BYTES_MAX, SECRETS_PER_SERVER_MAX,
+    SERVER_NAME_BYTES_MAX, ServerSpec, ServerStatus, ServerView, SkillView, URL_BYTES_MAX,
+    validate_secret_name, validate_server_name,
 };
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
@@ -29,6 +29,7 @@ const MODAL_WIDTH: u16 = 62;
 const FIELD_WIDTH: usize = 64;
 const SECRET_NAME_BOX: usize = 17;
 const SECRET_VALUE_CHARS_MAX: usize = 4096;
+const RUNS_CHARS_MAX: usize = COMMAND_BYTES_MAX + ARGS_MAX * (ARG_BYTES_MAX * 4 + 3);
 const FOLDER_CHARS_MAX: usize = 1024;
 const SUBTITLE: &str = "Skills teach agents how to do a task. MCP servers give agents new tools. A project can add its own in its settings.";
 
@@ -129,7 +130,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
 /// Splits "command and arguments" as typed into a server spec.
 /// Input: the typed line. Output: the spec, or the plain reason it cannot be used.
 pub fn command_spec(line: &str) -> Result<ServerSpec, &'static str> {
-    let mut words = line.split_whitespace();
+    let mut words = words(line)?.into_iter();
     let command = words
         .next()
         .ok_or("Type the command that starts the server.")?;
@@ -137,11 +138,59 @@ pub fn command_spec(line: &str) -> Result<ServerSpec, &'static str> {
         return Err("Use the full path of the command, such as /opt/homebrew/bin/uvx.");
     }
     let spec = ServerSpec::Stdio {
-        command: command.to_owned(),
-        args: words.map(str::to_owned).collect(),
+        command,
+        args: words.collect(),
     };
     spec.validate().map_err(|error| plugin_plain(&error.0))?;
     Ok(spec)
+}
+
+/// The server spec typed into a command or URL field.
+/// Inputs: whether the field holds a URL, and the typed text. Output: the
+/// spec, or the plain reason it cannot be used.
+pub fn target_spec(url: bool, typed: &str) -> Result<ServerSpec, &'static str> {
+    if !url {
+        return command_spec(typed);
+    }
+    let spec = ServerSpec::Http {
+        url: typed.trim().to_owned(),
+    };
+    spec.validate()
+        .map(|()| spec)
+        .map_err(|error| plugin_plain(&error.0))
+}
+
+/// Splits a typed command line into words. Single quotes keep spaces and a
+/// backslash keeps the next character, so a server's `runs` line reads back
+/// as the same command.
+/// Input: the line. Output: the words, or the plain reason it cannot be read.
+pub fn words(line: &str) -> Result<Vec<String>, &'static str> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\'' => {
+                let text = word.get_or_insert_with(String::new);
+                loop {
+                    match characters.next() {
+                        Some('\'') => break,
+                        Some(inner) => text.push(inner),
+                        None => return Err("A quote is not closed."),
+                    }
+                }
+            }
+            '\\' => {
+                let kept = characters.next().ok_or("A backslash ends the line.")?;
+                word.get_or_insert_with(String::new).push(kept);
+            }
+            space if space.is_whitespace() => words.extend(word.take()),
+            other => word.get_or_insert_with(String::new).push(other),
+        }
+    }
+    words.extend(word);
+    assert!(words.len() <= line.len());
+    Ok(words)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,7 +205,7 @@ enum Action {
     NotNow,
     Toggle,
     Check,
-    Secrets,
+    Edit,
     Remove,
     Close,
 }
@@ -262,7 +311,7 @@ impl Plugins {
                 if matches!(server.spec, ServerSpec::Stdio { .. }) {
                     actions.push(Action::Check);
                 }
-                actions.extend([Action::Secrets, Action::Toggle, Action::Remove]);
+                actions.extend([Action::Edit, Action::Toggle, Action::Remove]);
                 actions
             }
             None => Vec::new(),
@@ -281,7 +330,7 @@ impl Plugins {
             Action::Toggle if on => "Turn off",
             Action::Toggle => "Turn on",
             Action::Check => "Check again",
-            Action::Secrets => "Secrets",
+            Action::Edit => "Edit",
             Action::Remove => "Remove",
             Action::Close => "Close",
         }
@@ -733,11 +782,10 @@ impl Plugins {
                 }
                 Key::Enter => {
                     let action = self.actions().get(focus).copied().unwrap_or(Action::Close);
-                    if let (Action::Secrets, Some(Picked::Server(index))) = (action, self.picked())
-                    {
+                    if let (Action::Edit, Some(Picked::Server(index))) = (action, self.picked()) {
                         self.open = Open::None;
                         let server = self.servers[index].clone();
-                        return Flow::Replace(Box::new(ServerSecrets::new(server)));
+                        return Flow::Replace(Box::new(EditServer::new(server)));
                     }
                     self.run(action, ctx);
                 }
@@ -1073,16 +1121,7 @@ impl AddPlugin {
                     self.focus = Focus::Name;
                     return;
                 }
-                let spec = if self.url {
-                    let spec = ServerSpec::Http {
-                        url: self.target.value().trim().to_owned(),
-                    };
-                    spec.validate()
-                        .map(|()| spec)
-                        .map_err(|error| plugin_plain(&error.0))
-                } else {
-                    command_spec(self.target.value())
-                };
+                let spec = target_spec(self.url, self.target.value());
                 let spec = match spec {
                     Ok(spec) => spec,
                     Err(problem) => {
@@ -1334,39 +1373,44 @@ impl Screen for AddPlugin {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SecretFocus {
+enum EditFocus {
+    Target,
     List,
     Name,
     Value,
 }
 
-/// The secrets of one MCP server: which ones are saved, saving a new or
-/// replacement value, and removing one. Values are never shown.
-/// Input: the server and keys. Output: one secret change at a time.
-pub struct ServerSecrets {
+/// One MCP server's page: what it runs and its secrets. Changing what it runs
+/// needs approval again. Secret values are never shown.
+/// Input: the server and keys. Output: one change at a time.
+pub struct EditServer {
     server: ServerView,
-    focus: SecretFocus,
+    focus: EditFocus,
     selected: usize,
+    target: TextField,
     name: TextField,
     value: TextField,
     confirm: Option<bool>,
     changing: Option<String>,
 }
 
-impl ServerSecrets {
-    /// The secrets page of one server.
-    /// Input: the server as last read. Output: the screen, on the list when the
-    /// server has secrets and on the name field otherwise.
+impl EditServer {
+    /// The page of one server, on its command or URL.
+    /// Input: the server as last read. Output: the screen.
     pub fn new(server: ServerView) -> Self {
-        let focus = if server.secrets.is_empty() {
-            SecretFocus::Name
-        } else {
-            SecretFocus::List
+        assert!(server.runs.chars().count() <= RUNS_CHARS_MAX);
+        let label = match server.spec {
+            ServerSpec::Stdio { .. } => "Command and arguments",
+            ServerSpec::Http { .. } => "URL",
         };
+        let mut target =
+            TextField::new(label, RUNS_CHARS_MAX).right("A change needs approval again");
+        target.set(&server.runs);
         Self {
             server,
-            focus,
+            focus: EditFocus::Target,
             selected: 0,
+            target,
             name: TextField::new("", SECRET_NAME_BYTES_MAX),
             value: TextField::secret("", SECRET_VALUE_CHARS_MAX),
             confirm: None,
@@ -1374,12 +1418,12 @@ impl ServerSecrets {
         }
     }
 
-    fn order(&self) -> Vec<SecretFocus> {
-        let mut order = Vec::new();
+    fn order(&self) -> Vec<EditFocus> {
+        let mut order = vec![EditFocus::Target];
         if !self.server.secrets.is_empty() {
-            order.push(SecretFocus::List);
+            order.push(EditFocus::List);
         }
-        order.extend([SecretFocus::Name, SecretFocus::Value]);
+        order.extend([EditFocus::Name, EditFocus::Value]);
         order
     }
 
@@ -1397,6 +1441,27 @@ impl ServerSecrets {
         self.focus = order[next];
     }
 
+    fn update(&mut self, ctx: &mut Ctx) {
+        if self.changing.is_some() {
+            return;
+        }
+        let url = matches!(self.server.spec, ServerSpec::Http { .. });
+        match target_spec(url, self.target.value()) {
+            Err(reason) => self.target.error = Some(reason.into()),
+            Ok(spec) if spec == self.server.spec => {
+                ctx.say(Message::success("Nothing changed.", ""));
+            }
+            Ok(spec) => {
+                self.changing = Some(format!(
+                    "Changed {}. Approve it before agents can use it.",
+                    self.server.name
+                ));
+                let id = self.server.id.clone();
+                send(ctx, SettingsJob::Plugin(PluginChange::Update { id, spec }));
+            }
+        }
+    }
+
     fn save(&mut self, ctx: &mut Ctx) {
         if self.changing.is_some() {
             return;
@@ -1404,7 +1469,7 @@ impl ServerSecrets {
         let name = self.name.value().trim().to_owned();
         if validate_secret_name(&name).is_err() {
             self.name.error = Some(plugin_plain("server_secret_name_invalid").into());
-            self.focus = SecretFocus::Name;
+            self.focus = EditFocus::Name;
             return;
         }
         let known = self.server.secrets.iter().any(|secret| secret.name == name);
@@ -1413,7 +1478,7 @@ impl ServerSecrets {
             return;
         }
         if self.value.is_empty() {
-            self.focus = SecretFocus::Value;
+            self.focus = EditFocus::Value;
             return;
         }
         match AccountSecret::new(self.value.take_secret()) {
@@ -1421,7 +1486,7 @@ impl ServerSecrets {
                 self.changing = Some(format!("Saved {name}."));
                 self.name.clear();
                 self.name.error = None;
-                self.focus = SecretFocus::Name;
+                self.focus = EditFocus::Name;
                 let id = self.server.id.clone();
                 send(
                     ctx,
@@ -1443,21 +1508,38 @@ impl ServerSecrets {
         let mut lines = vec![
             row(
                 width,
-                styled(format!("{} secrets", self.server.name), Role::Accent, theme),
+                styled(self.server.name.clone(), Role::Accent, theme),
                 status(server_word(self.server.status), theme, glyphs),
                 glyphs,
             ),
             styled(
-                "Values stay hidden. The server gets them when it starts.",
+                "Change what it runs or its secrets. Secret values stay hidden.",
                 Role::Muted,
                 theme,
             ),
             Line::default(),
         ];
-        if self.server.secrets.is_empty() {
-            lines.push(styled("No secrets yet.", Role::Muted, theme));
+        let mut cursor = None;
+        let top = lines.len() as u16;
+        let (target_lines, target_at) =
+            self.target
+                .lines(width, self.focus == EditFocus::Target, theme, glyphs);
+        if let Some(at) = target_at {
+            cursor = Some(Position::new(at.x, top + at.y));
         }
-        let listing = self.focus == SecretFocus::List && self.confirm.is_none();
+        lines.extend(target_lines);
+        lines.push(Line::default());
+        lines.push(row(
+            width,
+            styled(
+                format!("Secrets  {}", self.server.secrets.len()),
+                Role::Heading,
+                theme,
+            ),
+            styled("Same name replaces it", Role::Muted, theme),
+            glyphs,
+        ));
+        let listing = self.focus == EditFocus::List && self.confirm.is_none();
         for (index, secret) in self.server.secrets.iter().enumerate() {
             let state = if secret.saved {
                 status("Key saved", theme, glyphs)
@@ -1481,31 +1563,23 @@ impl ServerSecrets {
                 glyphs,
             ));
         }
-        lines.push(Line::default());
-        lines.push(row(
-            width,
-            styled("Save a secret", Role::Heading, theme),
-            styled("Same name replaces it", Role::Muted, theme),
-            glyphs,
-        ));
         let top = lines.len() as u16;
         let value_width = width.saturating_sub(SECRET_NAME_BOX + 2).max(6);
         let (name_lines, name_at) = self.name.lines(
             SECRET_NAME_BOX,
-            self.focus == SecretFocus::Name,
+            self.focus == EditFocus::Name,
             theme,
             glyphs,
         );
         let (value_lines, value_at) =
             self.value
-                .lines(value_width, self.focus == SecretFocus::Value, theme, glyphs);
+                .lines(value_width, self.focus == EditFocus::Value, theme, glyphs);
         let boxed = |field: &[Line<'static>]| field.get(1).cloned().unwrap_or_default();
         lines.push(join([
             boxed(&name_lines),
             Line::raw("  "),
             boxed(&value_lines),
         ]));
-        let mut cursor = None;
         if let Some(at) = name_at {
             cursor = Some(Position::new(at.x, top + at.y - 1));
         }
@@ -1518,7 +1592,7 @@ impl ServerSecrets {
         match &self.name.error {
             Some(error) => lines.push(styled(error.clone(), Role::Error, theme)),
             None => lines.push(styled(
-                "Type the name, then the value, then press Enter.",
+                "Type a secret name, then its value, then press Enter.",
                 Role::Muted,
                 theme,
             )),
@@ -1527,36 +1601,43 @@ impl ServerSecrets {
     }
 }
 
-impl Screen for ServerSecrets {
+impl Screen for EditServer {
     fn crumbs(&self) -> Vec<String> {
         vec![
             "Settings".into(),
             "Plugins and skills".into(),
-            format!("{} secrets", self.server.name),
+            self.server.name.clone(),
         ]
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if self.focus == SecretFocus::List {
-            let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-            return vec![
-                hint(&arrows, "Move"),
-                hint("Enter", "Replace"),
-                hint("d", "Remove"),
+        match self.focus {
+            EditFocus::List => {
+                let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+                vec![
+                    hint(&arrows, "Move"),
+                    hint("Enter", "Replace"),
+                    hint("d", "Remove"),
+                    hint("Tab", "Next field"),
+                    hint("Esc", "Back"),
+                ]
+            }
+            EditFocus::Target => vec![
                 hint("Tab", "Next field"),
+                hint("Enter", "Save change"),
                 hint("Esc", "Back"),
-            ];
+            ],
+            EditFocus::Name | EditFocus::Value => vec![
+                hint("Tab", "Next field"),
+                hint("Enter", "Save secret"),
+                hint("Ctrl-U", "Clear"),
+                hint("Esc", "Back"),
+            ],
         }
-        vec![
-            hint("Tab", "Next field"),
-            hint("Enter", "Save secret"),
-            hint("Ctrl-U", "Clear"),
-            hint("Esc", "Back"),
-        ]
     }
 
     fn typing(&self) -> bool {
-        self.focus != SecretFocus::List && self.confirm.is_none()
+        self.focus != EditFocus::List && self.confirm.is_none()
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1588,27 +1669,32 @@ impl Screen for ServerSecrets {
             (_, Key::Esc) => return Flow::Replace(Box::new(Plugins::new())),
             (_, Key::Tab) => self.move_focus(true),
             (_, Key::BackTab) => self.move_focus(false),
-            (SecretFocus::List, Key::Up) => self.selected = self.selected.saturating_sub(1),
-            (SecretFocus::List, Key::Down) => {
+            (EditFocus::List, Key::Up) => self.selected = self.selected.saturating_sub(1),
+            (EditFocus::List, Key::Down) => {
                 self.selected = (self.selected + 1).min(count.saturating_sub(1))
             }
-            (SecretFocus::List, Key::Char('d')) if count > 0 && self.changing.is_none() => {
+            (EditFocus::List, Key::Char('d')) if count > 0 && self.changing.is_none() => {
                 self.confirm = Some(false)
             }
-            (SecretFocus::List, Key::Enter) => {
+            (EditFocus::List, Key::Enter) => {
                 if let Some(secret) = self.server.secrets.get(self.selected) {
                     self.name.set(&secret.name);
                     self.name.error = None;
-                    self.focus = SecretFocus::Value;
+                    self.focus = EditFocus::Value;
                 }
             }
-            (SecretFocus::List, _) => return Flow::Ignored,
+            (EditFocus::List, _) => return Flow::Ignored,
+            (EditFocus::Target, Key::Enter) => self.update(ctx),
+            (EditFocus::Target, other) => {
+                self.target.error = None;
+                self.target.key(other);
+            }
             (_, Key::Enter) => self.save(ctx),
-            (SecretFocus::Name, other) => {
+            (EditFocus::Name, other) => {
                 self.name.error = None;
                 self.name.key(other);
             }
-            (SecretFocus::Value, other) => {
+            (EditFocus::Value, other) => {
                 self.value.key(other);
             }
         }
@@ -1624,12 +1710,15 @@ impl Screen for ServerSecrets {
         };
         match result {
             Ok(Some(server)) => {
+                if server.spec != self.server.spec {
+                    self.target.set(&server.runs);
+                }
                 self.server = server.clone();
                 self.selected = self
                     .selected
                     .min(self.server.secrets.len().saturating_sub(1));
-                if self.server.secrets.is_empty() && self.focus == SecretFocus::List {
-                    self.focus = SecretFocus::Name;
+                if self.server.secrets.is_empty() && self.focus == EditFocus::List {
+                    self.focus = EditFocus::Name;
                 }
                 ctx.say(Message::success(&done, ""));
             }

@@ -77,6 +77,10 @@ pub(in crate::tui) enum PluginChange {
     CheckServer {
         id: String,
     },
+    Update {
+        id: String,
+        spec: ServerSpec,
+    },
     SetSecret {
         id: String,
         name: String,
@@ -380,6 +384,9 @@ impl NativeOwner {
                 controller.remove_mcp_server(id).await.map(|()| None)
             }
             PluginChange::CheckServer { id } => controller.check_mcp_server(id).await.map(Some),
+            PluginChange::Update { id, spec } => {
+                controller.update_mcp_server(id, spec).await.map(Some)
+            }
             PluginChange::SetSecret { id, name, value } => {
                 controller.set_mcp_secret(id, name, value).await.map(Some)
             }
