@@ -21,7 +21,10 @@ use std::time::Duration;
 const MASTER_READ_ATTEMPTS: u32 = 4;
 
 mod account_profile;
+pub(super) mod accounts;
 mod claude_code;
+mod project_setup;
+pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {
     #[cfg(test)]
@@ -33,6 +36,7 @@ enum WorkerMode {
 }
 
 enum Job {
+    Accounts(Box<accounts::AccountsRequest>),
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect,
@@ -40,6 +44,7 @@ enum Job {
     Master(Box<master_session::Job>),
     ModelAccess(Box<model_access::Job>),
     Dispatch(Box<dispatch::Query>),
+    Setup(Box<SetupQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -81,6 +86,7 @@ pub(super) struct CreationSubmission {
     pub navigation: u64,
     pub project_id: ProjectId,
     pub spec: ProjectSpec,
+    pub setup: Option<crate::project_setup::ProjectSetup>,
 }
 
 #[derive(Clone)]
@@ -141,10 +147,12 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
+    Accounts(Box<accounts::AccountsEvent>),
     Master(Box<master_session::Event>),
     Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
     Dispatch(Box<dispatch::Event>),
+    Setup(Box<SetupEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -299,6 +307,21 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Accounts(request) => {
+                            let native = native
+                                .as_mut()
+                                .expect("accounts require paired configuration");
+                            let event = runtime.block_on(native.accounts(*request));
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Accounts(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::ModelAccess(job) => {
                             let native = native
                                 .as_mut()
@@ -405,6 +428,24 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Dispatch(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Setup(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => runtime.block_on(native.project_setup(*query)),
+                                None => SetupEvent {
+                                    query: *query,
+                                    result: Err("trusted_connection_unavailable".into()),
+                                },
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Setup(Box::new(event)),
                                 })
                                 .is_err()
                             {
@@ -1415,7 +1456,9 @@ impl NativeOwner {
             return Err("creation_pending_or_connection_changed".into());
         }
         submission.spec.validate().map_err(|e| e.to_string())?;
-        if submission.spec.repositories.is_empty()
+        if let Some(setup) = &submission.setup {
+            setup.validate().map_err(|e| bounded_problem(&e.0))?;
+        } else if submission.spec.repositories.is_empty()
             || submission
                 .spec
                 .repositories
@@ -1440,14 +1483,19 @@ impl NativeOwner {
             })
             .await
             .map_err(|e| bounded_problem(&e.0))?;
+        let mutation = match &submission.setup {
+            Some(setup) => OwnerMutation::SetupProject {
+                project_id: submission.project_id.clone(),
+                spec: submission.spec.clone(),
+                setup: setup.clone(),
+            },
+            None => OwnerMutation::CreateProject {
+                project_id: submission.project_id.clone(),
+                spec: submission.spec.clone(),
+            },
+        };
         let pending = controller
-            .begin_mutation(
-                OwnerMutation::CreateProject {
-                    project_id: submission.project_id.clone(),
-                    spec: submission.spec.clone(),
-                },
-                submission.generation,
-            )
+            .begin_mutation(mutation, submission.generation)
             .map_err(|e| bounded_problem(&e.0))?;
         self.creation_operation = Some((
             pending.request().request_id.clone(),
@@ -1721,6 +1769,7 @@ mod creation_recovery_tests {
                     name: "Native target".into(),
                     repositories: vec!["/absent/native target".into()],
                 },
+                setup: None,
             }
         }
 

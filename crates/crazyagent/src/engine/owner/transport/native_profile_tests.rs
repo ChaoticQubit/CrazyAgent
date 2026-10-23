@@ -2,7 +2,7 @@ use super::*;
 use crate::config::{
     EffectiveConfig, ModelAccessEdit, ModelAuthentication, ModelConnection, resolve_config,
 };
-use crate::engine::bootstrap::EngineService;
+use crate::engine::bootstrap::{EngineService, MAX_PROFILES};
 use crate::engine::owner::PreparedNativeProfile;
 use crate::model_gateway::{Health, Quota};
 use rusqlite::{Connection, OpenFlags};
@@ -403,7 +403,7 @@ fn slot_count(context: &ProfileCase) -> usize {
         .unwrap()
         .map(Result::unwrap)
         .filter(|entry| entry.file_name().as_os_str() != std::ffi::OsStr::new("identity.json"))
-        .take(66)
+        .take(MAX_PROFILES + 2)
         .count()
 }
 
@@ -1155,21 +1155,27 @@ async fn another_real_database_host_cannot_prepare_in_this_actor() {
 }
 
 #[tokio::test]
-async fn retained_profile_capacity_refuses_the_sixty_fifth_but_reuses_the_first() {
+async fn retained_profile_capacity_refuses_one_more_but_reuses_the_first() {
     run_case(true, |context| async move {
-        let mut first = None;
-        for index in 0..64 {
-            let mut connection = context.basis("connection-z").await.connection;
-            connection.auth = ModelAuthentication::NativeManaged {
-                profile_ref: reference(&format!("retained-{index:02}")),
-            };
-            context.replace(connection).await;
-            let prepared = context.prepare("connection-z").await;
-            if index == 0 {
-                first = Some(prepared.binding().custody_id.clone());
-            }
+        let mut original = context.basis("connection-z").await.connection;
+        original.auth = ModelAuthentication::NativeManaged {
+            profile_ref: reference("retained-first"),
+        };
+        context.replace(original.clone()).await;
+        let first = context
+            .prepare("connection-z")
+            .await
+            .binding()
+            .custody_id
+            .clone();
+        for index in 0..MAX_PROFILES - 1 {
+            let key = format!(
+                "{:x}",
+                Sha256::digest(format!("retained-{index}").as_bytes())
+            );
+            private_directory(&context.custody().join(key));
         }
-        assert_eq!(slot_count(&context), 64);
+        assert_eq!(slot_count(&context), MAX_PROFILES);
         let mut overflow = context.basis("connection-z").await.connection;
         overflow.auth = ModelAuthentication::NativeManaged {
             profile_ref: reference("retained-overflow"),
@@ -1177,15 +1183,11 @@ async fn retained_profile_capacity_refuses_the_sixty_fifth_but_reuses_the_first(
         context.replace(overflow).await;
         let basis = context.basis("connection-z").await;
         assert_rejected(context.prepare_at(&basis).await, &context.state);
-        assert_eq!(slot_count(&context), 64);
-        let mut original = context.basis("connection-z").await.connection;
-        original.auth = ModelAuthentication::NativeManaged {
-            profile_ref: reference("retained-00"),
-        };
+        assert_eq!(slot_count(&context), MAX_PROFILES);
         context.replace(original).await;
         let reused = context.prepare("connection-z").await;
-        assert_eq!(Some(reused.binding().custody_id.clone()), first);
-        assert_eq!(slot_count(&context), 64);
+        assert_eq!(reused.binding().custody_id, first);
+        assert_eq!(slot_count(&context), MAX_PROFILES);
     })
     .await;
 }
@@ -1194,17 +1196,17 @@ async fn retained_profile_capacity_refuses_the_sixty_fifth_but_reuses_the_first(
 async fn incomplete_retained_slots_are_not_evicted_to_admit_another_profile() {
     run_case(true, |context| async move {
         context.prepare("connection-a").await;
-        for index in 0..63 {
+        for index in 0..MAX_PROFILES - 1 {
             let key = format!(
                 "{:x}",
                 Sha256::digest(format!("incomplete-{index}").as_bytes())
             );
             private_directory(&context.custody().join(key));
         }
-        assert_eq!(slot_count(&context), 64);
+        assert_eq!(slot_count(&context), MAX_PROFILES);
         let basis = context.basis("connection-z").await;
         assert_rejected(context.prepare_at(&basis).await, &context.state);
-        assert_eq!(slot_count(&context), 64);
+        assert_eq!(slot_count(&context), MAX_PROFILES);
         assert!(!context.profile_z().exists());
     })
     .await;

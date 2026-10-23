@@ -1509,6 +1509,21 @@ impl Catalog {
     /// that is not a signed-in connection; None when policy allows no such target.
     fn target(&self, form: &Form) -> Option<CredentialRef> {
         if form.backend == MasterBackend::Rcli {
+            let pool = self.models.pools.iter().find(|pool| Some(&pool.id) == form.pool.as_ref());
+            let own = self
+                .models
+                .connections
+                .iter()
+                .filter(|connection| {
+                    pool.is_some_and(|pool| pool.members.contains(&connection.id))
+                        && Some(&connection.account_ref) == form.account.as_ref()
+                        && backend_matches(form.backend, connection)
+                })
+                .filter_map(crate::config::configured_profile_ref)
+                .find(|profile| self.targets.contains(profile));
+            if own.is_some() {
+                return own;
+            }
             return self
                 .targets
                 .iter()
@@ -1644,7 +1659,7 @@ fn backend_matches(backend: MasterBackend, connection: &ModelConnection) -> bool
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
         MasterBackend::Claude => {
-            connection.harness.as_str() == "claude-code"
+            matches!(connection.harness.as_str(), "claude" | "claude-code")
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
@@ -2208,6 +2223,48 @@ pools = [
         form.pool = Some(reference("local-pool"));
         form.account = Some(reference("local-account"));
         assert_eq!(catalog.target(&form), Some(reference("local")));
+    }
+
+    #[test]
+    fn each_rcli_account_targets_its_own_approved_profile() {
+        let reference = |value: &str| CredentialRef::new(value).unwrap();
+        let models: ModelAccess = toml::from_str(r#"accounts = ["key-account", "local-account"]
+connections = [
+  { id = "key-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "key-account", endpoint = { kind = "http", url = "http://127.0.0.1:9/v1" }, model = { id = "m", author = "openai-compatible" }, auth = { method = "api_key", credential_ref = "key-ref" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [
+  { id = "key-pool", members = ["key-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
+  { id = "local-pool", members = ["local-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
+]"#).unwrap();
+        let local_profile =
+            crate::config::configured_profile_ref(&models.connections[1]).unwrap();
+        let catalog = Catalog {
+            config_id: ConfigId::new("0".repeat(64)).unwrap(),
+            source_hash: "0".repeat(64),
+            revision: Cursor::new(1),
+            models,
+            approved: vec![reference("key-account"), reference("local-account")],
+            targets: vec![reference("local"), reference("key-ref"), local_profile.clone()],
+            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+        };
+        let mut form = Form {
+            database: None,
+            project: ProjectId::new("demo").unwrap(),
+            backend: MasterBackend::Rcli,
+            pool: Some(reference("key-pool")),
+            account: Some(reference("key-account")),
+            target: None,
+            values: budget_values(&ResourceBudget::unit()).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+        };
+        assert_eq!(catalog.target(&form), Some(reference("key-ref")));
+        form.pool = Some(reference("local-pool"));
+        form.account = Some(reference("local-account"));
+        assert_eq!(catalog.target(&form), Some(local_profile));
     }
 
     #[test]

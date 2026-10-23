@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod master_bootstrap;
 pub(crate) mod account_profile;
+pub(crate) mod accounts;
 mod master_session;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
@@ -21,6 +22,7 @@ pub(crate) use master_session::{
 mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
+pub(crate) mod plugins;
 #[cfg(test)]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
@@ -30,6 +32,11 @@ mod settings;
 pub(crate) mod worker_dispatch;
 
 pub(crate) enum Job {
+    Accounts(
+        Admission,
+        accounts::Command,
+        oneshot::Sender<Result<accounts::ResultValue, EngineError>>,
+    ),
     AccountProfile(
         Admission,
         account_profile::Command,
@@ -119,6 +126,10 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    Plugins(
+        plugins::Command,
+        oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
+    ),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
 }
@@ -187,6 +198,14 @@ impl Storage {
                 let mut owner_runtime = None;
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
+                        Job::Accounts(admission, command, reply) => {
+                            let result = if readonly {
+                                Err(error("accounts_readonly"))
+                            } else {
+                                accounts::execute(&mut connection, &mut config, sources.as_ref(), &admission, command)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::AccountProfile(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("account_profile_readonly"))
@@ -524,6 +543,17 @@ impl Storage {
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
+                        Job::Plugins(command, reply) => {
+                            let result = if readonly {
+                                Err(error("plugins_readonly"))
+                            } else {
+                                match path.parent() {
+                                    Some(root) => plugins::execute(&mut connection, root, command),
+                                    None => Err(error("plugin_store_unavailable")),
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Config(next, reply) => {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 if sources.is_some() {
@@ -645,6 +675,8 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
+    crate::project_setup::initialize(connection)?;
+    plugins::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
@@ -859,8 +891,20 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS configs (id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL CHECK(length(body)<=262144));")
+            CREATE TABLE IF NOT EXISTS settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL);")
         .map_err(error)?;
+    let journal: Option<String> = connection
+        .query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='settings_publication'", [], |row| row.get(0))
+        .optional()
+        .map_err(error)?;
+    let empty: i64 = connection
+        .query_row("SELECT count(*) FROM settings_publication", [], |row| row.get(0))
+        .map_err(error)?;
+    if journal.is_some_and(|sql| sql.contains("262144")) && empty == 0 {
+        connection
+            .execute_batch("DROP TABLE settings_publication; CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB NOT NULL);")
+            .map_err(error)?;
+    }
     assert!(connection.is_autocommit());
     Ok(())
 }
@@ -876,7 +920,9 @@ fn apply(
 ) -> Result<WireReply, EngineError> {
     if matches!(
         request.command,
-        Command::OwnerConversation { .. } | Command::OwnerModelAccess { .. }
+        Command::OwnerConversation { .. }
+            | Command::OwnerModelAccess { .. }
+            | Command::OwnerProfile { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1041,12 +1087,16 @@ fn execute(
         Command::OwnerConversation { mutation } => {
             crate::conversation::apply(tx, mutation, revision)
         }
+        Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
             crate::verification::execute(tx, config, command)
         }
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
+        Command::ProjectSetup { action } => {
+            crate::project_setup::execute(tx, config, path, action, revision)
+        }
         Command::Snapshot => {
             let mut outcome = snapshot(tx)?;
             if let Outcome::Snapshot { tasks, .. } = &mut outcome {
@@ -1112,7 +1162,7 @@ fn execute(
     }
 }
 
-fn create_project(
+pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
@@ -1445,6 +1495,7 @@ fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
         }
     }
     crate::conversation::initialize(&tx)?;
+    crate::owner_profile::initialize(&tx)?;
     let count: i64 = tx
         .query_row("SELECT COUNT(*) FROM owner_meta", [], |r| r.get(0))
         .map_err(error)?;
@@ -1887,6 +1938,41 @@ fn owner_read(
         OwnerRead::CurrentBrief { project_id } => {
             crate::conversation::current_brief(&tx, project_id)?
         }
+        OwnerRead::ProjectCatalog { pool, research } => OwnerData::ProjectCatalog {
+            catalog: Box::new(
+                crate::project_setup::catalog(
+                    config,
+                    pool.as_ref(),
+                    research,
+                    &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                )
+                .map_err(error)?,
+            ),
+        },
+        OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {
+            project_id: project_id.clone(),
+            setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
+        },
+        OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
+            project_id: project_id.clone(),
+            jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
+        },
+        OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
+            context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
+        },
+        OwnerRead::ProjectContextItem {
+            project_id,
+            path,
+            offset,
+        } => OwnerData::ProjectContextItem {
+            chunk: crate::project_setup::read_context(
+                &stored_setup(&tx, project_id)?,
+                path,
+                *offset,
+            )?,
+        },
+        OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
         OwnerRead::Page {
             view,
             cursor,
@@ -1919,6 +2005,70 @@ fn owner_read(
         return Err(error("owner_response_bounds"));
     }
     Ok(reply)
+}
+
+fn stored_setup(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<crate::project_setup::StoredSetup, EngineError> {
+    crate::project_setup::load_setup(tx, project_id)?
+        .ok_or_else(|| error("project_setup_missing"))
+}
+
+/// Reads one page of the plain pool list with each member's sign-in status.
+/// Input: the read transaction, current config and the index of the first pool.
+/// Output: pools from that index while the reply stays within 30000 bytes, and
+/// the index of the next unread pool when any remain.
+fn pool_summaries(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    offset: u8,
+) -> Result<OwnerData, EngineError> {
+    let catalog = config.settings.model_access.clone().unwrap_or_default();
+    let mut signed_in = std::collections::BTreeSet::new();
+    for connection in &catalog.connections {
+        let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
+        else {
+            continue;
+        };
+        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+        let fact: Option<Option<Vec<u8>>> = tx
+            .query_row(
+                "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(bytes) = fact {
+            let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
+            let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+            if fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
+                && matches!(fact.action, crate::engine::owner::NativeAuthAction::SignIn { .. })
+            {
+                signed_in.insert(connection.id.clone());
+            }
+        }
+    }
+    let all = crate::pools::summarize(&catalog, |connection| signed_in.contains(&connection.id));
+    let start = usize::from(offset).min(all.len());
+    let mut pools = Vec::new();
+    for summary in &all[start..] {
+        pools.push(summary.clone());
+        if serde_json::to_vec(&pools).map_err(error)?.len() > 30000 {
+            pools.pop();
+            break;
+        }
+    }
+    if pools.is_empty() && start < all.len() {
+        return Err(error("pool_summary_bounds"));
+    }
+    let end = start + pools.len();
+    let next_offset = (end < all.len())
+        .then(|| u8::try_from(end).map_err(error))
+        .transpose()?;
+    assert!(end <= all.len());
+    Ok(OwnerData::PoolSummaries { pools, next_offset })
 }
 
 fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {

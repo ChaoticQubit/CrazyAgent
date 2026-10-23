@@ -9,10 +9,22 @@ use bridge::{
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
 };
+use bridge::picker::Pick;
+use bridge::project_setup::MemoryItem;
+use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::config::ModelAccessEdit;
+use crazyagent::harnesses::HarnessEntry;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
+    NativeAuthMethod,
 };
+use crazyagent::memory::ReviewDecision;
+use crazyagent::project_setup::{
+    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+};
+use crazyagent::owner_profile::OwnerProfile;
+use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::pools::PoolSummary;
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -49,6 +61,15 @@ fn desktop_status(
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
     Ok(lock(&state)?.status())
+}
+
+#[tauri::command]
+async fn desktop_harness_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<HarnessEntry>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.harness_catalog().await
 }
 
 #[tauri::command]
@@ -128,6 +149,143 @@ async fn desktop_create_project(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)?.create_project(spec, generation).await
+}
+
+#[tauri::command]
+async fn desktop_project_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    pool: Option<String>,
+    research: Vec<ResearchKind>,
+) -> Result<ProjectCatalog, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_catalog(pool, research).await
+}
+
+#[tauri::command]
+async fn desktop_setup_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    setup: ProjectSetup,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.setup_project(spec, setup, generation).await
+}
+
+#[tauri::command]
+async fn desktop_project_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Option<StoredSetup>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_setup(&id).await
+}
+
+#[tauri::command]
+async fn desktop_research_jobs(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bridge::project_setup::ResearchJobs, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.research_jobs(&id).await
+}
+
+#[tauri::command]
+async fn desktop_project_context(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ProjectContext, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_context(&id).await
+}
+
+#[tauri::command]
+async fn desktop_project_context_item(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+    offset: u64,
+) -> Result<ContextChunk, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_context_item(&id, path, offset).await
+}
+
+#[tauri::command]
+async fn desktop_save_research_to_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    research: ResearchKind,
+    section: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .save_research_to_memory(&id, research, section, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_add_project_documents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    documents: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_project_documents(&id, documents, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_project_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    after: Option<String>,
+) -> Result<Vec<MemoryItem>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .project_memories(&id, after.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn desktop_review_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    memory: String,
+    version: u64,
+    decision: ReviewDecision,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .review_memory(&id, &memory, version, decision, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_delete_project_context(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .delete_project_context(&id, path, generation)
+        .await
 }
 
 #[tauri::command]
@@ -341,6 +499,291 @@ async fn desktop_read_account_profile(
 }
 
 #[tauri::command]
+async fn desktop_owner_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Option<OwnerProfile>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.owner_profile().await
+}
+
+#[tauri::command]
+async fn desktop_save_owner_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    profile: OwnerProfile,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.save_owner_profile(profile, generation).await
+}
+
+#[tauri::command]
+async fn desktop_pool_summaries(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<PoolSummary>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.pool_summaries().await
+}
+
+#[tauri::command]
+async fn desktop_account_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<ProviderEntry>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.account_catalog().await
+}
+
+#[tauri::command]
+async fn desktop_list_accounts(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    after: Option<String>,
+    limit: u16,
+) -> Result<AccountPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.list_accounts(after, limit).await
+}
+
+#[tauri::command]
+async fn desktop_add_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    draft: AccountDraft,
+    key: Option<String>,
+) -> Result<AccountView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_account(draft, key).await
+}
+
+#[tauri::command]
+async fn desktop_rename_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<AccountView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.rename_account(&id, name).await
+}
+
+#[tauri::command]
+async fn desktop_remove_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_account(&id).await
+}
+
+#[tauri::command]
+async fn desktop_check_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AccountCheck, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.check_account(&id).await
+}
+
+#[tauri::command]
+async fn desktop_local_models(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    url: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.local_models(url).await
+}
+
+#[tauri::command]
+async fn desktop_plugin_skills(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<SkillView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_skills(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_plugin_servers(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<ServerView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_servers(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_add_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    folder: String,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_skill(scope, folder).await
+}
+
+#[tauri::command]
+async fn desktop_set_skill_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_skill_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_skill(id).await
+}
+
+#[tauri::command]
+async fn desktop_add_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    name: String,
+    spec: ServerSpec,
+    secrets: Vec<(String, String)>,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_mcp_server(scope, name, spec, secrets).await
+}
+
+#[tauri::command]
+async fn desktop_update_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.update_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_approve_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.approve_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_server_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_server_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_switch_plugin(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    on: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.switch_plugin(project_id, id, on).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+    value: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_secret(id, name, value).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_secret(id, name).await
+}
+
+#[tauri::command]
+async fn desktop_check_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.check_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_project_plugins(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<EffectivePlugins, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_plugins(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
+        Pick::Canceled => None,
+        Pick::Paths(mut paths) => {
+            assert!(!paths.is_empty());
+            Some(paths.swap_remove(0))
+        }
+    })
+}
+
+#[tauri::command]
+async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(match bridge::picker::choose(bridge::picker::DOCUMENTS_SCRIPT).await? {
+        Pick::Canceled => Vec::new(),
+        Pick::Paths(paths) => paths,
+    })
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -443,6 +886,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
+            desktop_harness_catalog,
             desktop_baselines,
             desktop_inspect_baseline,
             desktop_approve_baseline,
@@ -451,6 +895,17 @@ pub fn run() {
             desktop_retry,
             desktop_projects,
             desktop_create_project,
+            desktop_project_catalog,
+            desktop_setup_project,
+            desktop_project_setup,
+            desktop_research_jobs,
+            desktop_project_context,
+            desktop_project_context_item,
+            desktop_save_research_to_memory,
+            desktop_add_project_documents,
+            desktop_delete_project_context,
+            desktop_project_memories,
+            desktop_review_memory,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
@@ -476,6 +931,33 @@ pub fn run() {
             desktop_cancel_native_auth,
             desktop_logout_native_auth,
             desktop_submit_claude_auth_code,
+            desktop_owner_profile,
+            desktop_save_owner_profile,
+            desktop_pool_summaries,
+            desktop_account_catalog,
+            desktop_list_accounts,
+            desktop_add_account,
+            desktop_rename_account,
+            desktop_remove_account,
+            desktop_check_account,
+            desktop_local_models,
+            desktop_plugin_skills,
+            desktop_plugin_servers,
+            desktop_add_skill,
+            desktop_set_skill_enabled,
+            desktop_remove_skill,
+            desktop_add_mcp_server,
+            desktop_update_mcp_server,
+            desktop_approve_mcp_server,
+            desktop_set_mcp_server_enabled,
+            desktop_remove_mcp_server,
+            desktop_switch_plugin,
+            desktop_set_mcp_secret,
+            desktop_remove_mcp_secret,
+            desktop_check_mcp_server,
+            desktop_project_plugins,
+            desktop_pick_folder,
+            desktop_pick_documents,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

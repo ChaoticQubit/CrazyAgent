@@ -91,6 +91,31 @@ export function status(): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("desktop_status");
 }
 
+export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+
+export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
+
+export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
+
+export interface HarnessEntry {
+  id: string;
+  name: string;
+  status: HarnessStatus;
+  status_label: string;
+  executable: string | null;
+  headless: string;
+  tools: ToolControl;
+  model_selection: boolean;
+  account_kinds: AccountKind[];
+}
+
+/** Lists every harness the engine knows, in owner order, with its status on this machine.
+ * Input: none. Output: entries whose status_label reads "Ready", "Not installed" or
+ * "Limited control: <reason>". */
+export function harnessCatalog(): Promise<HarnessEntry[]> {
+  return invoke<HarnessEntry[]>("desktop_harness_catalog");
+}
+
 export function baselines(next = false): Promise<BaselinePage> {
   return invoke<BaselinePage>("desktop_baselines", { next });
 }
@@ -129,6 +154,59 @@ export function errorMessage(error: unknown): string {
     account_not_found: "That account reference no longer exists. Refresh the metadata.",
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
+    pool_member_limit: "A pool can hold up to 15 accounts",
+    pool_in_use: "This pool is used by a project. Remove it from the project first.",
+    pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
+    owner_profile_name: "Enter your name, up to 100 characters.",
+    skill_folder_not_found: "That folder was not found.",
+    skill_not_a_folder: "Pick a folder, not a file.",
+    skill_missing_skill_md: "This folder has no SKILL.md file.",
+    skill_frontmatter_missing: "SKILL.md needs a name and description at the top.",
+    skill_name_invalid: "The skill name in SKILL.md must be 1 to 64 lowercase letters, digits or hyphens.",
+    skill_description_invalid: "The description in SKILL.md must be 1 to 1024 characters.",
+    skill_too_many_files: "A skill folder can hold up to 200 files.",
+    skill_too_large: "A skill folder can be up to 8 MB.",
+    skill_too_deep: "A skill folder can be up to 8 folders deep.",
+    skill_link_outside: "This folder links to files outside it.",
+    skill_file_unsupported: "This folder holds something that is not a file or folder.",
+    skill_unreadable: "Some files in this folder can't be read.",
+    skill_name_taken: "A skill with this name already exists here.",
+    skill_limit: "You can add up to 100 skills here.",
+    skill_not_found: "This skill was removed.",
+    server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
+    server_name_taken: "An MCP server with this name already exists here.",
+    server_limit: "You can add up to 50 MCP servers here.",
+    server_not_found: "This MCP server was removed.",
+    server_command_invalid: "Enter the full path to the command, starting with /.",
+    server_args_invalid: "Use up to 32 arguments, each on one line.",
+    server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+    server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
+    server_secret_limit: "A server can have up to 16 secrets.",
+    server_secret_duplicate: "Each secret needs its own name.",
+    server_secret_not_found: "This secret was removed.",
+    server_secret_invalid: "Enter the secret on one line, up to 8192 characters.",
+    server_changed: "This server changed. Review it again before approving.",
+    server_check_command_only: "Only command servers can be checked from here.",
+    server_check_busy: "Other checks are running. Try again in a moment.",
+    server_command_not_found: "Can't start: command not found.",
+    server_command_not_runnable: "Can't start: this file can't be run.",
+    server_cant_start: "The server can't start.",
+    server_exited: "The server stopped before answering.",
+    server_check_timeout: "The server did not answer within 10 seconds.",
+    server_output_too_large: "The server sent too much output.",
+    server_refused: "The server refused the request.",
+    server_reply_invalid: "The server's answer was not valid MCP.",
+    plugin_project_unknown: "This project was not found.",
+    plugin_not_found: "This item was removed.",
+    plugin_switch_global_only: "Only items from global settings can be switched here.",
+    plugin_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
+    plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    plugins_failed: "The plugins request failed. Refresh before continuing.",
+    owner_profile_role: "Keep the role on one line, up to 100 characters.",
+    owner_profile_bio: "Keep the bio under 1000 characters.",
+    owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
+    owner_profile_bounds: "The profile is too large. Shorten it and save again.",
     model_access_record_not_found: "That metadata identity was not found. Refresh the collection and choose a current record.",
     owner_revoked: "Desktop owner authority was revoked. The engine host must restore it before reconnecting.",
     stale_revision: "The engine revision changed. Refresh and review retained values before saving.",
@@ -207,7 +285,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "master";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "master" | "owner_profile";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -233,6 +311,170 @@ export interface ProjectSpec {
 
 export function createProject(spec: ProjectSpec, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_create_project", { spec, generation });
+}
+
+export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
+export type ResearchKind =
+  | "market_research"
+  | "competitor_research"
+  | "design_research"
+  | "front_end_design"
+  | "tech_stack_research";
+export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+
+export interface HarnessSlot {
+  harness: string;
+  agents: number;
+  tools: boolean;
+}
+
+export interface TeamPlan {
+  master: string;
+  master_tools: boolean;
+  sub_harnesses: HarnessSlot[];
+  min_agents: number;
+  max_agents: number;
+}
+
+export interface ProjectSetup {
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan | null;
+  documents: string[];
+}
+
+export interface ProjectCatalog {
+  tech_stack: { id: string; label: string; group: "language" | "framework" | "database" }[];
+  platforms: { kind: Platform; label: string }[];
+  research: { kind: ResearchKind; label: string }[];
+  document_extensions: string[];
+  documents_max: number;
+  document_bytes_max: number;
+  project_document_bytes_max: number;
+  default_team: TeamPlan;
+}
+
+export interface StoredSetup {
+  project_id: string;
+  name: string;
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan;
+  documents: { name: string; bytes: number }[];
+  folder: string;
+  created_ms: number;
+}
+
+export interface ResearchJob {
+  id: number;
+  project_id: string;
+  kind: ResearchKind;
+  kind_label: string;
+  status: ResearchStatus;
+  status_label: string;
+  report_path: string;
+  harness: string;
+  tools: boolean;
+  attempts: number;
+  claimer: string | null;
+  error: string | null;
+  cancel_requested: boolean;
+  output_bytes: number;
+  created_ms: number;
+  started_ms: number | null;
+  heartbeat_ms: number | null;
+  finished_ms: number | null;
+}
+
+export interface ProjectContext {
+  project_id: string;
+  folder: string;
+  items: { path: string; kind: "brief" | "document" | "research"; bytes: number }[];
+}
+
+export interface ContextChunk {
+  path: string;
+  bytes: number;
+  offset: number;
+  text: string | null;
+  next_offset: number | null;
+}
+
+export function projectCatalog(pool: string | null, research: ResearchKind[]): Promise<ProjectCatalog> {
+  return invoke<ProjectCatalog>("desktop_project_catalog", { pool, research });
+}
+
+export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
+}
+
+export function projectSetup(id: string): Promise<StoredSetup | null> {
+  return invoke<StoredSetup | null>("desktop_project_setup", { id });
+}
+
+export function researchJobs(id: string): Promise<{ project_id: string; jobs: ResearchJob[] }> {
+  return invoke<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
+}
+
+export function projectContext(id: string): Promise<ProjectContext> {
+  return invoke<ProjectContext>("desktop_project_context", { id });
+}
+
+export function projectContextItem(id: string, path: string, offset = 0): Promise<ContextChunk> {
+  return invoke<ContextChunk>("desktop_project_context_item", { id, path, offset });
+}
+
+export function saveResearchToMemory(
+  id: string,
+  research: ResearchKind,
+  section: string | null,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
+}
+
+export function addProjectDocuments(id: string, documents: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_project_documents", { id, documents, generation });
+}
+
+export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
+
+export type MemoryItem = {
+  id: string;
+  version: number;
+  text: string;
+  status: MemoryStatus;
+  human_reviewed: boolean;
+};
+
+export type MemoryDecision =
+  | { decision: "Keep" }
+  | { decision: "Edit"; text: string }
+  | { decision: "Reject" }
+  | { decision: "Remove" };
+
+export function projectMemories(id: string, after: string | null = null): Promise<MemoryItem[]> {
+  return invoke<MemoryItem[]>("desktop_project_memories", { id, after });
+}
+
+export function reviewMemory(
+  id: string,
+  memory: string,
+  version: number,
+  decision: MemoryDecision,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
+}
+
+export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
@@ -280,6 +522,7 @@ export interface ModelConnection {
 
 export interface AccountPool {
   id: string;
+  name?: string;
   members: string[];
   projects: string[];
   roles: string[];
@@ -388,6 +631,160 @@ export function editModelAccess(ticket: string, edit: ModelAccessEdit, generatio
   return invoke<IntentReceipt>("desktop_edit_model_access", { ticket, edit, generation });
 }
 
+export interface OwnerProfile {
+  name: string;
+  role: string;
+  bio: string;
+  preferred_stack: string[];
+  working_style: { detail: "terse" | "detailed"; initiative: "ask_first" | "act_first" };
+}
+
+export interface PoolMember {
+  id: string;
+  kind: "chatgpt" | "claude" | "api_key" | "url" | "local" | "other";
+  provider: string;
+  status: "signed_in" | "not_signed_in" | "set_up";
+  status_label: string;
+}
+
+export interface PoolSummary {
+  id: string;
+  name: string;
+  summary: string;
+  members: PoolMember[];
+  project_count: number;
+}
+
+/** Reads the owner's first-run profile. Output: null on first run, which shows the first-run page. */
+export function ownerProfile(): Promise<OwnerProfile | null> {
+  return invoke<OwnerProfile | null>("desktop_owner_profile");
+}
+
+/** Saves or updates the owner profile. Inputs: the full profile and a fresh draft generation. */
+export function saveOwnerProfile(profile: OwnerProfile, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_save_owner_profile", { profile, generation });
+}
+
+/** Reads every pool with plain counts such as "2 ChatGPT, 1 Claude" and member status words. */
+export function poolSummaries(): Promise<PoolSummary[]> {
+  return invoke<PoolSummary[]>("desktop_pool_summaries");
+}
+
+export type PluginScope = { kind: "global" } | { kind: "project"; project_id: string };
+
+export type McpServerSpec = { kind: "stdio"; command: string; args: string[] } | { kind: "http"; url: string };
+
+export type McpServerStatus = "waiting_for_approval" | "approved" | "off" | "cant_start";
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string;
+  scope: PluginScope;
+  scope_label: string;
+  enabled: boolean;
+  on_here: boolean | null;
+  source: string;
+  folder: string;
+}
+
+export interface McpServerView {
+  id: string;
+  name: string;
+  scope: PluginScope;
+  scope_label: string;
+  spec: McpServerSpec;
+  runs: string;
+  enabled: boolean;
+  status: McpServerStatus;
+  status_label: string;
+  problem: string | null;
+  tools: string[];
+  checks: number;
+  secrets: { name: string; saved: boolean }[];
+  on_here: boolean | null;
+}
+
+export interface EffectivePlugins {
+  skills: { name: string; folder: string }[];
+  servers: { name: string; spec: McpServerSpec; secrets: { name: string; reference: string }[] }[];
+}
+
+/** Lists skills for global settings (no project) or for one project's settings. */
+export function pluginSkills(projectId?: string): Promise<SkillView[]> {
+  return invoke<SkillView[]>("desktop_plugin_skills", { projectId: projectId ?? null });
+}
+
+/** Lists MCP servers with plain status words for global settings or one project. */
+export function pluginServers(projectId?: string): Promise<McpServerView[]> {
+  return invoke<McpServerView[]>("desktop_plugin_servers", { projectId: projectId ?? null });
+}
+
+/** Adds a skill from a picked folder that holds SKILL.md; the engine keeps its own copy. */
+export function addSkill(scope: PluginScope, folder: string): Promise<SkillView> {
+  return invoke<SkillView>("desktop_add_skill", { scope, folder });
+}
+
+/** Turns a skill on or off where it was added. */
+export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView> {
+  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled });
+}
+
+/** Removes a skill and the engine's copy of its folder. */
+export function removeSkill(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_skill", { id });
+}
+
+/** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */
+export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSpec, secrets: [string, string][]): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_add_mcp_server", { scope, name, spec, secrets });
+}
+
+/** Changes how an MCP server runs; it then waits for approval again. */
+export function updateMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec });
+}
+
+/** Approves an MCP server exactly as shown; a server that changed since is refused. */
+export function approveMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_approve_mcp_server", { id, spec });
+}
+
+/** Turns an MCP server on or off where it was added. */
+export function setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+}
+
+/** Removes an MCP server and its saved secrets. */
+export function removeMcpServer(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_mcp_server", { id });
+}
+
+/** Switches a global skill or MCP server on or off for one project. */
+export function switchPlugin(projectId: string, id: string, on: boolean): Promise<void> {
+  return invoke<void>("desktop_switch_plugin", { projectId, id, on });
+}
+
+/** Saves or replaces one MCP server secret. */
+export function setMcpSecret(id: string, name: string, value: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_secret", { id, name, value });
+}
+
+/** Deletes one MCP server secret. */
+export function removeMcpSecret(id: string, name: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_remove_mcp_secret", { id, name });
+}
+
+/** Starts a command MCP server, lists its tools and stops it. */
+export function checkMcpServer(id: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_check_mcp_server", { id });
+}
+
+/** Reads what agents launched for a project receive: skill folders and approved MCP servers. */
+export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
+  return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
+}
+
 export interface MasterTurn {
   id: string;
   ordinal: number;
@@ -425,4 +822,92 @@ export function closeMaster(ticket: string, sessionId: string, generation: numbe
 
 export function submitMaster(ticket: string, sessionId: string, text: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_submit_master", { ticket, sessionId, text, generation });
+}
+
+export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
+
+export type SignInMethod = "subscription" | "api_key" | "url";
+
+export type AccountField = "hidden" | "optional" | "required";
+
+export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";
+
+export interface SignInMethodEntry {
+  method: SignInMethod;
+  label: string;
+  url: AccountField;
+  url_preset: string | null;
+  key: AccountField;
+  model: AccountField;
+}
+
+export interface ProviderEntry {
+  provider: AccountProvider;
+  name: string;
+  methods: SignInMethodEntry[];
+}
+
+export interface AccountDraft {
+  provider: AccountProvider;
+  method: SignInMethod;
+  name: string;
+  url?: string | null;
+  model?: string | null;
+}
+
+export interface AccountView {
+  id: string;
+  name: string;
+  provider: AccountProvider;
+  provider_name: string;
+  method: SignInMethod;
+  method_label: string;
+  url: string | null;
+  model: string | null;
+  status: AccountStatus;
+  status_label: string;
+}
+
+export interface AccountPage {
+  accounts: AccountView[];
+  next: string | null;
+}
+
+export interface AccountCheck {
+  account: AccountView;
+  models: string[];
+}
+
+/** Reads the provider catalog the add-account menu renders: providers in display order,
+ * each with its plain sign-in methods. Output: the catalog from the engine. */
+export function accountCatalog(): Promise<ProviderEntry[]> {
+  return invoke<ProviderEntry[]>("desktop_account_catalog");
+}
+
+/** Reads one page of accounts with plain statuses. Inputs: the previous page's `next`
+ * (or null) and a page size of 1 to 200. Output: accounts and the next cursor. */
+export function listAccounts(after: string | null = null, limit = 200): Promise<AccountPage> {
+  return invoke<AccountPage>("desktop_list_accounts", { after, limit });
+}
+
+/** Adds one account from a catalog choice. The key, when given, goes to the engine once
+ * and is never kept by the page. Output: the new account. */
+export function addAccount(draft: AccountDraft, key?: string): Promise<AccountView> {
+  return invoke<AccountView>("desktop_add_account", { draft, key: key || null });
+}
+
+export function renameAccount(id: string, name: string): Promise<AccountView> {
+  return invoke<AccountView>("desktop_rename_account", { id, name });
+}
+
+export function removeAccount(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_account", { id });
+}
+
+export function checkAccount(id: string): Promise<AccountCheck> {
+  return invoke<AccountCheck>("desktop_check_account", { id });
+}
+
+export function localModels(url: string): Promise<string[]> {
+  return invoke<string[]>("desktop_local_models", { url });
 }

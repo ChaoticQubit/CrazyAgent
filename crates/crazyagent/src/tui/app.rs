@@ -1,7 +1,7 @@
 use super::client::{
     ConversationContext, ConversationEvent, ConversationJob, ConversationQuery,
     ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
-    MutationDelivery, OwnerEvent, OwnerProgress,
+    MutationDelivery, OwnerEvent, OwnerProgress, SetupQuery, SetupView,
 };
 use super::{dispatch, master_session, model_access};
 use crate::config::EffectiveConfig;
@@ -193,6 +193,7 @@ pub struct App {
     declaration_pending: Option<CreationPending>,
     creation_job: Option<CreationJob>,
     snapshot_revision: Option<Cursor>,
+    pub(super) accounts: Option<super::client::accounts::AccountsEvent>,
     pub(super) model_access: model_access::State,
     pub(super) dispatch: dispatch::State,
     pub(super) master: master_session::State,
@@ -235,6 +236,9 @@ pub struct App {
     conversation_job: Option<ConversationJob>,
     edit_requested: Option<(OwnerConnectionIdentity, ProjectId)>,
     brief_completion: Option<(String, ProjectId)>,
+    setup_query: Option<SetupQuery>,
+    pub(super) setup_view: Option<(SetupQuery, SetupView)>,
+    pub(super) setup_problem: Option<String>,
 }
 
 impl Default for App {
@@ -251,6 +255,7 @@ impl App {
             declaration_pending: None,
             creation_job: None,
             snapshot_revision: None,
+            accounts: None,
             model_access: model_access::State::default(),
             dispatch: dispatch::State::default(),
             master: master_session::State::default(),
@@ -293,6 +298,9 @@ impl App {
             conversation_job: None,
             edit_requested: None,
             brief_completion: None,
+            setup_query: None,
+            setup_view: None,
+            setup_problem: None,
         }
     }
 
@@ -854,7 +862,18 @@ impl App {
                     ));
                 }
             }
+            OwnerEvent::Accounts(event) => self.accounts = Some(*event),
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
+            OwnerEvent::Setup(event) => match event.result {
+                Ok(view) => {
+                    self.setup_view = Some((event.query, view));
+                    self.setup_problem = None;
+                }
+                Err(problem) => {
+                    self.notice(&format!("Project setup read unavailable. {problem}"));
+                    self.setup_problem = Some(problem);
+                }
+            },
             OwnerEvent::ModelAccess(event) => {
                 self.model_access.apply(*event)?;
                 if self.model_access.disconnected() {
@@ -1622,6 +1641,95 @@ impl App {
 
     pub(super) fn queue_creation(&mut self) -> Result<(), String> {
         let spec = self.declaration.spec()?;
+        self.submit_creation(spec, None)?;
+        self.notice("Submitting declared project; first brief remains a separate Ctrl-B action");
+        Ok(())
+    }
+
+    /// Queues a New Project creation with its folder, documents, team plan and research toggles.
+    /// Takes the name spec and the full setup collected by the client.
+    /// Returns an error while another owner intent is unresolved.
+    pub fn queue_project_setup(
+        &mut self,
+        spec: ProjectSpec,
+        setup: crate::project_setup::ProjectSetup,
+    ) -> Result<(), String> {
+        spec.validate().map_err(|e| e.to_string())?;
+        setup.validate().map_err(|e| e.0)?;
+        self.submit_creation(spec, Some(setup))?;
+        self.notice("Creating project, its folder and research jobs");
+        Ok(())
+    }
+
+    /// Queues one New Project read for the owner worker.
+    /// Takes the catalog, setup, jobs, context or context item query.
+    /// Returns an error while another read is waiting.
+    pub fn request_project_setup(&mut self, query: SetupQuery) -> Result<(), String> {
+        if self.setup_query.is_some() {
+            return Err("A project setup read is already waiting".into());
+        }
+        self.setup_query = Some(query);
+        Ok(())
+    }
+
+    /// Queues one change to an existing project's setup: save research to memory, add documents or delete a context item.
+    /// Takes the setup action; project creation stays on queue_project_setup.
+    /// Returns an error in limited mode, for an invalid action or while another setup request waits.
+    pub fn request_setup_change(
+        &mut self,
+        action: crate::project_setup::SetupAction,
+    ) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Project changes disabled in limited mode".into());
+        }
+        if matches!(action, crate::project_setup::SetupAction::Create { .. }) {
+            return Err("Create projects with queue_project_setup".into());
+        }
+        action.validate().map_err(|e| e.0)?;
+        self.request_project_setup(SetupQuery::Change {
+            action,
+            generation: self.declaration.generation,
+        })
+    }
+
+    /// Queues one memory review; Keep is the one-click approval of saved research.
+    /// Takes the project, memory entry id, the version shown and the decision.
+    /// Returns an error in limited mode or while another setup request waits.
+    pub fn request_memory_review(
+        &mut self,
+        project: ProjectId,
+        entry_id: RequestId,
+        version: u64,
+        decision: crate::memory::ReviewDecision,
+    ) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Memory review disabled in limited mode".into());
+        }
+        self.request_project_setup(SetupQuery::ReviewMemory {
+            project,
+            entry_id,
+            version,
+            decision,
+            generation: self.declaration.generation,
+        })
+    }
+
+    pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {
+        self.setup_query.take()
+    }
+
+    /// Gives the latest New Project read with the query that produced it.
+    /// Takes the app state.
+    /// Returns the query and view, or none before the first read.
+    pub fn setup_view(&self) -> Option<&(SetupQuery, SetupView)> {
+        self.setup_view.as_ref()
+    }
+
+    fn submit_creation(
+        &mut self,
+        spec: ProjectSpec,
+        setup: Option<crate::project_setup::ProjectSetup>,
+    ) -> Result<(), String> {
         if !self.owner_ready {
             return Err("Owner creation disabled in limited mode; declaration retained".into());
         }
@@ -1648,6 +1756,7 @@ impl App {
             ))
             .map_err(|e| e.to_string())?,
             spec,
+            setup,
         };
         self.creation_job = Some(CreationJob {
             submission: submission.clone(),
@@ -1659,7 +1768,6 @@ impl App {
             retry_allowed: false,
             committed: None,
         });
-        self.notice("Submitting declared project; first brief remains a separate Ctrl-B action");
         Ok(())
     }
 

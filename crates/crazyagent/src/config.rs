@@ -51,6 +51,9 @@ pub struct ModelAccess {
     pub pools: Vec<AccountPool>,
 }
 
+pub const ACCOUNTS_MAX: usize = 4096;
+pub const CONFIG_BYTES_MAX: usize = 8 << 20;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelAccessEdit {
@@ -62,6 +65,8 @@ pub enum ModelAccessEdit {
     CreatePool { pool: AccountPool },
     ReplacePool { pool: AccountPool },
     RemovePool { id: CredentialRef },
+    AddConnectedAccount { connection: ModelConnection },
+    RemoveConnectedAccount { id: CredentialRef },
 }
 
 impl ModelAccessEdit {
@@ -117,6 +122,8 @@ pub enum ModelAuthentication {
 #[serde(deny_unknown_fields)]
 pub struct AccountPool {
     pub id: CredentialRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub members: Vec<CredentialRef>,
     pub projects: Vec<CredentialRef>,
     pub roles: Vec<CredentialRef>,
@@ -141,8 +148,10 @@ impl ProviderQuotaPolicy {
 
 impl ModelAccess {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if !bounded_unique_refs(&self.accounts, false)
-            || self.connections.len() > 64
+        let accounts: BTreeSet<_> = self.accounts.iter().collect();
+        if accounts.len() != self.accounts.len()
+            || self.accounts.len() > ACCOUNTS_MAX
+            || self.connections.len() > ACCOUNTS_MAX
             || self.pools.len() > 64
         {
             return Err(ConfigError("invalid_model_access".into()));
@@ -152,7 +161,7 @@ impl ModelAccess {
         if connections.len() != self.connections.len()
             || pools.len() != self.pools.len()
             || self.connections.iter().any(|connection| {
-                !self.accounts.contains(&connection.account_ref)
+                !accounts.contains(&connection.account_ref)
                     || connection.model.id.is_empty()
                     || connection.model.id.len() > 256
                     || !connection
@@ -428,39 +437,53 @@ fn read_config(path: &Path) -> Result<ConfigFile, ConfigError> {
         return Err(ConfigError("configuration must be a regular file".into()));
     }
     let mut bytes = String::new();
-    file.take(65537)
+    file.take(CONFIG_BYTES_MAX as u64 + 1)
         .read_to_string(&mut bytes)
         .map_err(|e| ConfigError(e.to_string()))?;
-    if bytes.len() > 65536 {
-        return Err(ConfigError("configuration exceeds 64 KiB".into()));
+    if bytes.len() > CONFIG_BYTES_MAX {
+        return Err(ConfigError("configuration exceeds 8 MiB".into()));
     }
     parse_config(&bytes)
 }
 
 fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
-    if bytes.len() > 65536 {
-        return Err(ConfigError("configuration exceeds 64 KiB".into()));
+    if bytes.len() > CONFIG_BYTES_MAX {
+        return Err(ConfigError("configuration exceeds 8 MiB".into()));
     }
     let config: ConfigFile =
         toml::from_str(bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
     if config.version.is_some_and(|v| v != 1) {
         return Err(ConfigError("unsupported config version".into()));
     }
-    assert!(bytes.len() <= 65536);
+    assert!(bytes.len() <= CONFIG_BYTES_MAX);
     assert!(config.version.is_none_or(|v| v == 1));
     Ok(config)
 }
 
+/// Applies one owner edit to the global settings text. `registered` carries saved accounts
+/// that the edit's pool uses but the config does not hold yet; they are added first, in the
+/// same publication. Inputs: global and project text, the edit and those accounts.
+/// Output: the new global text and its resolved config, or the rejection code.
 pub(crate) fn edit_model_access(
     global: &str,
     project: &str,
     edit: &ModelAccessEdit,
+    registered: &[ModelConnection],
 ) -> Result<(String, EffectiveConfig), ConfigError> {
     edit.validate()?;
     let mut catalog = resolve_config_bytes(global, project)?
         .settings
         .model_access
         .unwrap_or_default();
+    for connection in registered {
+        if catalog.connections.iter().any(|c| c.id == connection.id) {
+            continue;
+        }
+        if !catalog.accounts.contains(&connection.account_ref) {
+            catalog.accounts.push(connection.account_ref.clone());
+        }
+        catalog.connections.push(connection.clone());
+    }
     match edit {
         ModelAccessEdit::AddAccount { account_ref } => {
             if catalog.accounts.contains(account_ref) {
@@ -499,12 +522,14 @@ pub(crate) fn edit_model_access(
             catalog.connections.remove(index);
         }
         ModelAccessEdit::CreatePool { pool } => {
+            validate_pool_edit(pool)?;
             if catalog.pools.iter().any(|p| p.id == pool.id) {
                 return Err(ConfigError("pool_exists".into()));
             }
             catalog.pools.push(pool.clone());
         }
         ModelAccessEdit::ReplacePool { pool } => {
+            validate_pool_edit(pool)?;
             let value = catalog
                 .pools
                 .iter_mut()
@@ -518,7 +543,34 @@ pub(crate) fn edit_model_access(
                 .iter()
                 .position(|p| p.id == *id)
                 .ok_or_else(|| ConfigError("pool_not_found".into()))?;
+            if !catalog.pools[index].projects.is_empty() {
+                return Err(ConfigError("pool_in_use".into()));
+            }
             catalog.pools.remove(index);
+        }
+        ModelAccessEdit::AddConnectedAccount { connection } => {
+            if catalog.accounts.contains(&connection.account_ref) {
+                return Err(ConfigError("account_exists".into()));
+            }
+            if catalog.connections.iter().any(|c| c.id == connection.id) {
+                return Err(ConfigError("connection_exists".into()));
+            }
+            catalog.accounts.push(connection.account_ref.clone());
+            catalog.connections.push(connection.clone());
+        }
+        ModelAccessEdit::RemoveConnectedAccount { id } => {
+            let index = catalog
+                .connections
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or_else(|| ConfigError("account_not_found".into()))?;
+            if catalog.pools.iter().any(|pool| pool.members.contains(id)) {
+                return Err(ConfigError("account_in_pool".into()));
+            }
+            let removed = catalog.connections.remove(index);
+            if !catalog.connections.iter().any(|c| c.account_ref == removed.account_ref) {
+                catalog.accounts.retain(|account| *account != removed.account_ref);
+            }
         }
     }
     catalog.validate()?;
@@ -535,13 +587,65 @@ pub(crate) fn edit_model_access(
     Ok((bytes, config))
 }
 
+/// The most accounts one pool may hold when it is created or changed.
+pub const POOL_MEMBERS_MAX: usize = 15;
+/// The most characters of a pool display name.
+pub const POOL_NAME_CHARS_MAX: usize = 64;
+
+/// Checks the owner-facing limits of a pool being created or changed.
+/// Input: the proposed pool. Output: `pool_member_limit` above 15 members,
+/// `pool_name_bounds` for a blank, overlong or control-character name, else Ok.
+fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
+    if pool.members.len() > POOL_MEMBERS_MAX {
+        return Err(ConfigError("pool_member_limit".into()));
+    }
+    if let Some(name) = &pool.name
+        && (name.trim().is_empty()
+            || name.chars().count() > POOL_NAME_CHARS_MAX
+            || name.chars().any(char::is_control))
+    {
+        return Err(ConfigError("pool_name_bounds".into()));
+    }
+    assert!(pool.members.len() <= POOL_MEMBERS_MAX);
+    Ok(())
+}
+
+/// Turns a pool refusal code into the sentence shown to the owner.
+/// Input: an engine rejection code. Output: the plain sentence for a pool
+/// refusal, or None for any other code.
+pub fn plain_problem(code: &str) -> Option<&'static str> {
+    match code {
+        "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
+        "pool_in_use" => Some("This pool is used by a project. Remove it from the project first."),
+        "pool_name_bounds" => Some("Use a pool name of 1 to 64 characters, without control characters."),
+        "pool_exists" => Some("A pool with this id already exists."),
+        "pool_not_found" => Some("This pool no longer exists. Refresh and try again."),
+        _ => None,
+    }
+}
+
 const LOCAL_DESTINATION: &str = "local";
+
+/// Returns the profile reference that harness setup generates for an RCLI HTTP connection,
+/// which is also its own master target. Input: the connection. Output: its API-key
+/// credential reference, a digest-derived reference for a keyless endpoint, or none otherwise.
+pub fn configured_profile_ref(connection: &ModelConnection) -> Option<CredentialRef> {
+    match &connection.auth {
+        ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+        ModelAuthentication::None {} => {
+            let bytes = serde_json::to_vec(connection).ok()?;
+            CredentialRef::new(format!("configured-{:x}", Sha256::digest(bytes))).ok()
+        }
+        _ => None,
+    }
+}
 
 /// Treats an explicit pool-to-project assignment as owner approval of the pool's accounts.
 /// Input: the edited global document and the validated catalog it now holds.
 /// Output: `routing.approved_accounts` gains every account of an assigned pool, an empty
 /// `allowed_destinations` gains the local execution target and every signed-in connection
-/// of an assigned pool becomes an allowed master target; nothing is ever removed.
+/// or RCLI HTTP connection of an assigned pool gets its own allowed master target; nothing
+/// is ever removed.
 fn approve_assigned_accounts(
     document: &mut toml_edit::DocumentMut,
     catalog: &ModelAccess,
@@ -561,7 +665,7 @@ fn approve_assigned_accounts(
     if assigned.is_empty() {
         return Ok(());
     }
-    let signed_in: Vec<&CredentialRef> = catalog
+    let signed_in: Vec<CredentialRef> = catalog
         .pools
         .iter()
         .filter(|pool| !pool.projects.is_empty())
@@ -571,7 +675,21 @@ fn approve_assigned_accounts(
                     && matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
             })
         })
-        .map(|connection| &connection.id)
+        .map(|connection| connection.id.clone())
+        .chain(
+            catalog
+                .pools
+                .iter()
+                .filter(|pool| !pool.projects.is_empty())
+                .flat_map(|pool| {
+                    catalog.connections.iter().filter(|connection| {
+                        pool.members.contains(&connection.id)
+                            && connection.harness.as_str() == "rcli"
+                            && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+                    })
+                })
+                .filter_map(configured_profile_ref),
+        )
         .collect();
     let shape = || ConfigError("routing_approval_shape".into());
     let routing = document
@@ -780,6 +898,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         ModelAccessEdit::ReplacePool {
             pool: AccountPool {
                 id: CredentialRef::new("local-pool").unwrap(),
+                name: None,
                 members: vec![CredentialRef::new("local-connection").unwrap()],
                 projects: projects.iter().map(|p| CredentialRef::new(*p).unwrap()).collect(),
                 roles: vec![CredentialRef::new("project_leader").unwrap()],
@@ -790,18 +909,68 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     }
 
     #[test]
+    fn assigning_pools_approves_each_rcli_account_its_own_profile_destination() {
+        let global = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["key-account", "local-account"]
+connections = [
+  { id = "key-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "key-account", endpoint = { kind = "http", url = "http://127.0.0.1:9/v1" }, model = { id = "m", author = "openai-compatible" }, auth = { method = "api_key", credential_ref = "key-ref" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [{ id = "pool", members = ["key-connection", "local-connection"], projects = [], roles = [], fallback_allowed = false }]
+"#;
+        let edit = ModelAccessEdit::ReplacePool {
+            pool: AccountPool {
+                id: CredentialRef::new("pool").unwrap(),
+                name: None,
+                members: vec![
+                    CredentialRef::new("key-connection").unwrap(),
+                    CredentialRef::new("local-connection").unwrap(),
+                ],
+                projects: vec![CredentialRef::new("demo").unwrap()],
+                roles: vec![CredentialRef::new("project_leader").unwrap()],
+                fallback_allowed: false,
+                provider_quota_policy: ProviderQuotaPolicy::default(),
+            },
+        };
+        let (_, config) = edit_model_access(global, "", &edit, &[]).unwrap();
+        let access = config.settings.model_access.as_ref().unwrap();
+        let destinations = &config.settings.allowed_destinations;
+        assert!(destinations.contains(&CredentialRef::new("local").unwrap()));
+        for connection in &access.connections {
+            let profile = configured_profile_ref(connection).unwrap();
+            assert!(destinations.contains(&profile), "{profile:?}");
+        }
+        assert_eq!(
+            configured_profile_ref(&access.connections[0]),
+            Some(CredentialRef::new("key-ref").unwrap())
+        );
+        assert_ne!(
+            configured_profile_ref(&access.connections[0]),
+            configured_profile_ref(&access.connections[1])
+        );
+    }
+
+    #[test]
     fn assigning_a_pool_to_a_project_approves_its_accounts_and_a_local_destination() {
         let (bytes, config) =
-            edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&["demo"])).unwrap();
+            edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&["demo"]), &[]).unwrap();
         let account = CredentialRef::new("local-account").unwrap();
         assert_eq!(config.settings.routing.approved_accounts, vec![account]);
+        let connection = &config.settings.model_access.as_ref().unwrap().connections[0];
         assert_eq!(
             config.settings.allowed_destinations,
-            vec![CredentialRef::new("local").unwrap()]
+            vec![
+                CredentialRef::new("local").unwrap(),
+                configured_profile_ref(connection).unwrap()
+            ]
         );
-        let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"])).unwrap();
+        let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"]), &[]).unwrap();
         assert_eq!(again.settings.routing.approved_accounts.len(), 1);
-        assert_eq!(again.settings.allowed_destinations.len(), 1);
+        assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
     }
 
     #[test]
@@ -818,6 +987,7 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
         let edit = ModelAccessEdit::ReplacePool {
             pool: AccountPool {
                 id: CredentialRef::new("codex-pool").unwrap(),
+                name: None,
                 members: vec![CredentialRef::new("codex-connection").unwrap()],
                 projects: vec![CredentialRef::new("demo").unwrap()],
                 roles: vec![CredentialRef::new("project_leader").unwrap()],
@@ -825,16 +995,131 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
                 provider_quota_policy: ProviderQuotaPolicy::default(),
             },
         };
-        let (bytes, config) = edit_model_access(global, "", &edit).unwrap();
+        let (bytes, config) = edit_model_access(global, "", &edit, &[]).unwrap();
         let connection = CredentialRef::new("codex-connection").unwrap();
         assert!(config.settings.allowed_destinations.contains(&connection));
-        let (_, again) = edit_model_access(&bytes, "", &edit).unwrap();
+        let (_, again) = edit_model_access(&bytes, "", &edit, &[]).unwrap();
         assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
+    }
+
+    fn many_connections_global(count: usize) -> String {
+        let connections: Vec<String> = (0..count)
+            .map(|index| format!(r#"{{ id = "c{index}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:11434/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}"#))
+            .collect();
+        format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{}]\npools = []\n",
+            connections.join(", ")
+        )
+    }
+
+    fn sized_pool(id: &str, members: usize, projects: &[&str]) -> AccountPool {
+        AccountPool {
+            id: CredentialRef::new(id).unwrap(),
+            name: None,
+            members: (0..members)
+                .map(|index| CredentialRef::new(format!("c{index}")).unwrap())
+                .collect(),
+            projects: projects.iter().map(|p| CredentialRef::new(*p).unwrap()).collect(),
+            roles: vec![CredentialRef::new("project_leader").unwrap()],
+            fallback_allowed: false,
+            provider_quota_policy: ProviderQuotaPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn a_pool_holds_at_most_fifteen_accounts() {
+        let global = many_connections_global(16);
+        let full = sized_pool("work", 15, &[]);
+        let (bytes, config) =
+            edit_model_access(&global, "", &ModelAccessEdit::CreatePool { pool: full }, &[]).unwrap();
+        assert_eq!(config.settings.model_access.unwrap().pools[0].members.len(), 15);
+        let grown = ModelAccessEdit::ReplacePool { pool: sized_pool("work", 16, &[]) };
+        assert_eq!(edit_model_access(&bytes, "", &grown, &[]).unwrap_err().0, "pool_member_limit");
+        let created = ModelAccessEdit::CreatePool { pool: sized_pool("other", 16, &[]) };
+        assert_eq!(edit_model_access(&bytes, "", &created, &[]).unwrap_err().0, "pool_member_limit");
+        assert_eq!(
+            plain_problem("pool_member_limit"),
+            Some("A pool can hold up to 15 accounts")
+        );
+    }
+
+    #[test]
+    fn the_same_account_may_belong_to_many_pools() {
+        let global = many_connections_global(2);
+        let (bytes, _) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool { pool: sized_pool("first", 2, &[]) },
+            &[],
+        )
+        .unwrap();
+        let (_, config) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::CreatePool { pool: sized_pool("second", 1, &["demo"]) },
+            &[],
+        )
+        .unwrap();
+        let pools = config.settings.model_access.unwrap().pools;
+        assert_eq!(pools.len(), 2);
+        assert!(pools.iter().all(|pool| pool.members.contains(&CredentialRef::new("c0").unwrap())));
+    }
+
+    #[test]
+    fn a_pool_used_by_a_project_cannot_be_deleted() {
+        let global = many_connections_global(1);
+        let (bytes, _) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool { pool: sized_pool("work", 1, &["demo"]) },
+            &[],
+        )
+        .unwrap();
+        let remove = ModelAccessEdit::RemovePool { id: CredentialRef::new("work").unwrap() };
+        assert_eq!(edit_model_access(&bytes, "", &remove, &[]).unwrap_err().0, "pool_in_use");
+        assert_eq!(
+            plain_problem("pool_in_use"),
+            Some("This pool is used by a project. Remove it from the project first.")
+        );
+        let (bytes, _) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplacePool { pool: sized_pool("work", 1, &[]) },
+            &[],
+        )
+        .unwrap();
+        let (_, config) = edit_model_access(&bytes, "", &remove, &[]).unwrap();
+        assert!(config.settings.model_access.unwrap().pools.is_empty());
+    }
+
+    #[test]
+    fn a_pool_name_is_optional_bounded_and_renamable() {
+        let global = many_connections_global(1);
+        let mut pool = sized_pool("work", 1, &[]);
+        let (bytes, config) =
+            edit_model_access(&global, "", &ModelAccessEdit::CreatePool { pool: pool.clone() }, &[])
+                .unwrap();
+        assert_eq!(config.settings.model_access.unwrap().pools[0].name, None);
+        assert!(!bytes.contains("name ="));
+        pool.name = Some("Daily work".into());
+        let (bytes, config) =
+            edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool: pool.clone() }, &[])
+                .unwrap();
+        let stored = &config.settings.model_access.unwrap().pools[0];
+        assert_eq!(stored.name.as_deref(), Some("Daily work"));
+        assert_eq!(stored.id.as_str(), "work");
+        for invalid in ["", "   ", "tab\there", &"x".repeat(65)] {
+            pool.name = Some(invalid.into());
+            let edit = ModelAccessEdit::ReplacePool { pool: pool.clone() };
+            assert_eq!(edit_model_access(&bytes, "", &edit, &[]).unwrap_err().0, "pool_name_bounds");
+        }
+        pool.name = Some("é".repeat(64));
+        edit_model_access(&bytes, "", &ModelAccessEdit::ReplacePool { pool }, &[]).unwrap();
     }
 
     #[test]
     fn unassigned_pools_approve_nothing() {
-        let (_, config) = edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&[])).unwrap();
+        let (_, config) = edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&[]), &[]).unwrap();
         assert!(config.settings.routing.approved_accounts.is_empty());
         assert!(config.settings.allowed_destinations.is_empty());
     }

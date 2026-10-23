@@ -4,6 +4,7 @@ use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome}
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::config::ModelAuthentication;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::engine::claude_host::ClaudeHost;
 use crate::engine::codex_host::CodexHost;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
@@ -38,12 +39,47 @@ pub(super) struct Capture {
     limit: u64,
 }
 
+enum MasterHost {
+    Codex(Box<CodexHost>),
+    Claude(Box<ClaudeHost>),
+}
+
 struct ActiveMaster {
-    host: CodexHost,
+    host: MasterHost,
     capture: Capture,
     runtime: MasterRuntimeView,
     capture_ref: RequestId,
     provenance: Provenance,
+}
+
+impl MasterHost {
+    async fn start_turn(&mut self, turn_id: RequestId, text: &str) -> Result<(), EngineError> {
+        match self {
+            Self::Codex(host) => host.start_turn(turn_id, text).await,
+            Self::Claude(host) => host.start_turn(turn_id, text).await,
+        }
+    }
+
+    async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
+        match self {
+            Self::Codex(host) => host.next_event().await,
+            Self::Claude(host) => host.next_event().await,
+        }
+    }
+
+    async fn cancel(&mut self) -> Result<(), EngineError> {
+        match self {
+            Self::Codex(host) => host.cancel().await,
+            Self::Claude(host) => host.cancel().await,
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), EngineError> {
+        match self {
+            Self::Codex(host) => host.close().await,
+            Self::Claude(host) => host.close().await,
+        }
+    }
 }
 
 impl Capture {
@@ -300,9 +336,11 @@ impl OwnerRuntimeHandle {
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
     ) -> Result<MasterTurnView, EngineError> {
-        if prepared.session.selection.backend != MasterBackend::Codex {
-            return Err(failure("master_runtime_backend_unsupported"));
-        }
+        let harness = match prepared.session.selection.backend {
+            MasterBackend::Codex => NativeHarness::Codex,
+            MasterBackend::Claude => NativeHarness::Claude,
+            MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        };
         let profile_ref = match &prepared.profile.binding().connection.auth {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
             _ => return Err(failure("gateway_invalid_authentication")),
@@ -323,19 +361,23 @@ impl OwnerRuntimeHandle {
             artifact_sha256: launch.artifact_sha256,
             native_session_id: None,
         };
-        let host = CodexHost::spawn(
-            launch.command,
-            profile,
-            NativeAction::Launch {
-                session_id: prepared.session.session_id.clone(),
-                harness: NativeHarness::Codex,
-                profile_ref: profile_ref.clone(),
-                worktree_lease: prepared.worktree_lease.clone(),
-            },
-            prepared.profile.binding().connection.account_ref.clone(),
-            prepared.attempt.request.route.resources.clone(),
-        )
-        .await?;
+        let action = NativeAction::Launch {
+            session_id: prepared.session.session_id.clone(),
+            harness: harness.clone(),
+            profile_ref: profile_ref.clone(),
+            worktree_lease: prepared.worktree_lease.clone(),
+        };
+        let account_ref = prepared.profile.binding().connection.account_ref.clone();
+        let resources = prepared.attempt.request.route.resources.clone();
+        let host = if harness == NativeHarness::Claude {
+            MasterHost::Claude(Box::new(
+                ClaudeHost::spawn(launch.command, profile, action, account_ref, resources).await?,
+            ))
+        } else {
+            MasterHost::Codex(Box::new(
+                CodexHost::spawn(launch.command, profile, action, account_ref, resources).await?,
+            ))
+        };
         let mut active = ActiveMaster {
             host,
             capture,
@@ -343,7 +385,7 @@ impl OwnerRuntimeHandle {
             capture_ref: launch.capture_ref,
             provenance: Provenance {
                 session_id: prepared.session.session_id.clone(),
-                harness: NativeHarness::Codex,
+                harness,
                 account_ref: prepared.profile.binding().connection.account_ref.clone(),
                 profile_ref,
                 worktree_lease: prepared.worktree_lease.clone(),
@@ -393,12 +435,14 @@ impl OwnerRuntimeHandle {
         {
             return Ok(MasterRuntimeObservation::Cancelled);
         }
-        match active.host.observe_account().await? {
-            AuthControl::AccountRead {
-                account: Some(AuthAccount::Chatgpt { .. }),
-                ..
-            } => {}
-            _ => return Err(failure("gateway_invalid_authentication")),
+        if let MasterHost::Codex(host) = &mut active.host {
+            match host.observe_account().await? {
+                AuthControl::AccountRead {
+                    account: Some(AuthAccount::Chatgpt { .. }),
+                    ..
+                } => {}
+                _ => return Err(failure("gateway_invalid_authentication")),
+            }
         }
         if self
             .inspect_master_turn(
@@ -466,7 +510,8 @@ impl OwnerRuntimeHandle {
                 }
             }
             match event.kind {
-                EventKind::AssistantDelta { text: delta, .. } => {
+                EventKind::AssistantDelta { text: delta, .. }
+                | EventKind::AssistantText { text: delta, .. } => {
                     if text
                         .len()
                         .checked_add(delta.len())
@@ -506,8 +551,15 @@ impl OwnerRuntimeHandle {
                 EventKind::ApprovalRequired { .. }
                 | EventKind::UnsupportedRequest { .. }
                 | EventKind::Unsupported { .. } => {}
+                EventKind::AssistantError { code } => {
+                    return Err(failure(match code.as_str() {
+                        "authentication_failed" => "gateway_invalid_authentication",
+                        "rate_limit" => "gateway_rate_limited",
+                        "billing_error" => "gateway_quota_exhausted",
+                        _ => "codex_host_turn_failed",
+                    }));
+                }
                 EventKind::RequestFailed { .. }
-                | EventKind::AssistantError { .. }
                 | EventKind::TurnError {
                     will_retry: false, ..
                 } => return Err(failure("codex_host_turn_failed")),
@@ -530,7 +582,9 @@ fn validate_event(
             .is_some_and(|request| request != turn_id)
         || (matches!(
             &event.kind,
-            EventKind::AssistantDelta { .. } | EventKind::TurnFinished { .. }
+            EventKind::AssistantDelta { .. }
+                | EventKind::AssistantText { .. }
+                | EventKind::TurnFinished { .. }
         ) && event.request_id.as_ref() != Some(turn_id))
     {
         return Err(failure("master_capture_identity"));

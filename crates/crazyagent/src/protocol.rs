@@ -156,6 +156,10 @@ pub enum Command {
         mutation: crate::conversation::ConversationMutation,
     },
     #[serde(skip_deserializing)]
+    OwnerProfile {
+        profile: crate::owner_profile::OwnerProfile,
+    },
+    #[serde(skip_deserializing)]
     ProposeBaseline {
         draft: crate::verification::BaselineDraft,
     },
@@ -170,6 +174,10 @@ pub enum Command {
     #[serde(skip_deserializing)]
     Assets {
         action: crate::assets::AssetAction,
+    },
+    #[serde(skip_deserializing)]
+    ProjectSetup {
+        action: crate::project_setup::SetupAction,
     },
     ProposePlan {
         plan: crate::coordination::WorkPlan,

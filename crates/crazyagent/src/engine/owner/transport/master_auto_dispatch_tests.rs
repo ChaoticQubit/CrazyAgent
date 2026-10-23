@@ -303,7 +303,7 @@ fn assert_blocked(turn: &MasterTurnView, submit: &OwnerRequest, session: &Master
     assert_eq!(turn.id, submit.request_id);
     assert_eq!(turn.session_id, session.session_id);
     assert_eq!(turn.phase, MasterTurnPhase::Blocked);
-    assert_eq!(turn.reason, Some(MasterReason::UnsupportedCapability));
+    assert_eq!(turn.reason, Some(MasterReason::ConnectionChanged));
     assert!(turn.attempt.is_none());
     assert!(turn.runtime.is_none());
     assert!(turn.reply.is_none());

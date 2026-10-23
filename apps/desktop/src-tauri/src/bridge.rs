@@ -17,9 +17,15 @@ use std::time::Duration;
 
 mod account_profile;
 mod account_setup;
+mod accounts;
+mod harnesses;
 pub mod master;
 mod model_access;
 mod native_auth;
+pub mod project_setup;
+mod owner_setup;
+mod plugins;
+pub mod picker;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -434,9 +440,25 @@ impl NativeBridge {
                 mutation: ConversationMutation::ReplaceBrief { project_id, .. },
             } => ("brief", Some(project_id.as_str().to_owned()), None),
             OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
+            OwnerMutation::SaveOwnerProfile { .. } => ("owner_profile", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::SetupProject { project_id, .. } => {
+                ("setup_project", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::SaveResearchToMemory { project_id, .. } => {
+                ("research_memory", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::AddProjectDocuments { project_id, .. } => {
+                ("project_documents", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::DeleteProjectContext { project_id, .. } => {
+                ("project_context_delete", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::Knowledge {
+                review: crazyagent::memory::HumanReview::Review { .. },
+            } => ("memory_review", None, None),
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
@@ -460,7 +482,8 @@ impl NativeBridge {
                 _ => None,
             },
             project_spec: match mutation {
-                OwnerMutation::CreateProject { spec, .. } => Some(spec.clone()),
+                OwnerMutation::CreateProject { spec, .. }
+                | OwnerMutation::SetupProject { spec, .. } => Some(spec.clone()),
                 _ => None,
             },
             operation_id: pending.request().request_id.as_str().to_owned(),
@@ -832,11 +855,43 @@ fn rejection_code(code: &str) -> &'static str {
         "model_access_missing" => "model_access_missing",
         "model_access_referenced" => "model_access_referenced",
         "model_access_edit_bounds" => "model_access_edit_bounds",
+        "pool_member_limit" => "pool_member_limit",
+        "pool_in_use" => "pool_in_use",
+        "pool_name_bounds" => "pool_name_bounds",
+        "owner_profile_name" => "owner_profile_name",
+        "owner_profile_role" => "owner_profile_role",
+        "owner_profile_bio" => "owner_profile_bio",
+        "owner_profile_stack" => "owner_profile_stack",
+        "owner_profile_bounds" => "owner_profile_bounds",
         "stale_brief_version" => "stale_brief_version",
         "conversation_capacity" => "conversation_capacity",
         "project_missing" => "project_missing",
         "stale_revision" => "stale_revision",
         "owner_revoked" => "owner_revoked",
+        "project_exists" => "project_exists",
+        "project_folder_exists" => "project_folder_exists",
+        "project_folder_unwritable" => "project_folder_unwritable",
+        "pool_missing" => "pool_missing",
+        "document_not_found" => "document_not_found",
+        "document_not_a_regular_file" => "document_not_a_regular_file",
+        "document_type_not_allowed" => "document_type_not_allowed",
+        "document_too_large" => "document_too_large",
+        "document_name_duplicate" => "document_name_duplicate",
+        "document_name_invalid" => "document_name_invalid",
+        "document_unreadable" => "document_unreadable",
+        "document_changed_while_copying" => "document_changed_while_copying",
+        "documents_too_many" => "documents_too_many",
+        "project_documents_too_large" => "project_documents_too_large",
+        "project_setup_missing" => "project_setup_missing",
+        "research_report_missing" => "research_report_missing",
+        "research_section_missing" => "research_section_missing",
+        "memory_text_too_long" => "memory_text_too_long",
+        "memory_entry_exists" => "memory_entry_exists",
+        "project_folder_missing" => "project_folder_missing",
+        "context_item_protected" => "context_item_protected",
+        "context_item_missing" => "context_item_missing",
+        "knowledge_entry_missing" => "knowledge_entry_missing",
+        "knowledge_version_conflict" => "knowledge_version_conflict",
         _ => "owner_rejected",
     }
 }
