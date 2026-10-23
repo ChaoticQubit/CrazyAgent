@@ -5,7 +5,9 @@ use super::new_project::{
 use super::new_project_input::{TextInput, cells, char_cells};
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
-use ratatui::style::{Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 /// The style of every design color role, built once from the color depth and theme.
