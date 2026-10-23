@@ -254,7 +254,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .success { display: grid; gap: var(--space-2); justify-items: start; }
 .success > .icon { color: var(--ok); }
 
-.pool-row { display: grid; grid-template-columns: minmax(160px, 1.4fr) minmax(160px, 1.6fr) 72px minmax(140px, 1fr) auto; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); }
+.pool-row { display: grid; grid-template-columns: minmax(140px, 1.4fr) minmax(140px, 1.6fr) 72px minmax(120px, 1fr) minmax(110px, auto) auto; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); }
 .pool-row .name { font-weight: 600; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; color: var(--text); }
 .pool-editor { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .pick { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 10px; align-items: center; height: 100%; padding: 0 var(--space-3); border-bottom: 1px solid var(--border); cursor: pointer; }
