@@ -112,7 +112,10 @@ impl Input {
     }
 
     pub(super) fn reduce(&mut self, event: &UiEvent) -> Result<bool, String> {
-        if matches!(event, UiEvent::Cancel | UiEvent::FocusNext | UiEvent::FocusPrevious) {
+        if matches!(
+            event,
+            UiEvent::Cancel | UiEvent::FocusNext | UiEvent::FocusPrevious
+        ) {
             let observed = self.observation.is_some();
             self.clear();
             return Ok(observed);
@@ -167,7 +170,10 @@ impl Input {
         result: Result<(), String>,
     ) -> bool {
         if !self.pending
-            || self.submitted.as_ref().is_none_or(|sent| !same_request(sent, request))
+            || self
+                .submitted
+                .as_ref()
+                .is_none_or(|sent| !same_request(sent, request))
         {
             return false;
         }
@@ -189,7 +195,9 @@ impl Input {
     }
 
     pub(super) fn accepts_code(&self) -> bool {
-        self.observation.as_ref().is_some_and(|observed| observed.challenge.accepts_code())
+        self.observation
+            .as_ref()
+            .is_some_and(|observed| observed.challenge.accepts_code())
     }
 
     pub(super) fn loading(&self) -> bool {
@@ -198,7 +206,9 @@ impl Input {
 
     fn spent(&self) -> bool {
         self.observation.as_ref().is_some_and(|observed| {
-            self.submitted.as_ref().is_some_and(|sent| same_prompt(sent, &observed.request))
+            self.submitted
+                .as_ref()
+                .is_some_and(|sent| same_prompt(sent, &observed.request))
         })
     }
 
@@ -243,7 +253,10 @@ impl State {
             return None;
         }
         let context = self.context.as_ref()?.clone();
-        self.claude_code.request().map(|submission| Job { context, submission })
+        self.claude_code.request().map(|submission| Job {
+            context,
+            submission,
+        })
     }
 
     pub(in crate::tui) fn apply_code(&mut self, event: Event) -> Result<(), String> {
@@ -262,20 +275,29 @@ impl State {
             return;
         };
         if reply.fact.phase != super::NativeAuthPhase::AwaitingOwner
-            || reply.fact.action != (super::NativeAuthAction::SignIn {
-                method: super::NativeAuthMethod::ClaudeOfficial,
-            })
+            || reply.fact.action
+                != (super::NativeAuthAction::SignIn {
+                    method: super::NativeAuthMethod::ClaudeOfficial,
+                })
         {
             self.claude_code.clear();
             return;
         }
         let query = NativeAuthQuery {
             request_id: reply.request_id.clone(),
-            scope: self.context.as_ref().expect("open authentication has context").scope(),
+            scope: self
+                .context
+                .as_ref()
+                .expect("open authentication has context")
+                .scope(),
             operation_id: reply.fact.operation_id.clone(),
         };
         let had_prompt = self.claude_code.accepts_code();
-        if self.claude_code.observe(query, reply.fact.generation, challenge.clone()).is_err() {
+        if self
+            .claude_code
+            .observe(query, reply.fact.generation, challenge.clone())
+            .is_err()
+        {
             self.notice = "Claude challenge changed; close and read the original operation";
         } else if !had_prompt && self.claude_code.accepts_code() {
             self.selected = 0;

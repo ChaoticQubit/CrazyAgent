@@ -100,10 +100,11 @@ impl AutoDispatchCase {
         )
         .await
         .unwrap();
-        let owner = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
-            .await
-            .unwrap()
-            .0;
+        let owner =
+            OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+                .await
+                .unwrap()
+                .0;
         Self {
             root,
             service,
@@ -263,8 +264,10 @@ impl AutoDispatchCase {
     fn counts(&self) -> (i64, i64, i64) {
         let db = self.database();
         let count = |table: &str| {
-            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-                .unwrap()
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
         };
         (
             count("master_turns"),

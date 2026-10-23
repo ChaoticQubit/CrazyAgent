@@ -19,7 +19,10 @@ impl NativeOwner {
         {
             return Err("account_profile_pending_intent".into());
         }
-        let controller = self.controller.as_mut().ok_or("account_profile_owner_changed")?;
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("account_profile_owner_changed")?;
         if controller.identity().database_instance()
             != submission.basis.identity.database_instance()
             || (!reconcile && controller.identity() != &submission.basis.identity)
@@ -52,9 +55,15 @@ impl NativeOwner {
         secret: Option<AccountSecret>,
     ) -> model_access::Event {
         let result = self.configure_profile(&submission, secret).await;
-        let retained = self.controller.as_ref()
+        let retained = self
+            .controller
+            .as_ref()
             .is_some_and(|controller| controller.pending_account_profile().is_some());
-        model_access::Event::AccountProfile { submission, result, retained }
+        model_access::Event::AccountProfile {
+            submission,
+            result,
+            retained,
+        }
     }
 
     async fn configure_profile(
@@ -64,10 +73,13 @@ impl NativeOwner {
     ) -> Result<Box<AccountProfileReply>, String> {
         validate_connection(&submission.connection)?;
         let controller = self.profile_controller(submission, false)?;
-        let fresh = controller.read(OwnerRead::ModelAccessRecord {
-            collection: crate::engine::owner::ModelAccessCollection::Connections,
-            id: submission.connection.id.clone(),
-        }).await.map_err(|error| public_problem(&error.0))?;
+        let fresh = controller
+            .read(OwnerRead::ModelAccessRecord {
+                collection: crate::engine::owner::ModelAccessCollection::Connections,
+                id: submission.connection.id.clone(),
+            })
+            .await
+            .map_err(|error| public_problem(&error.0))?;
         if !submission.basis.writable
             || fresh.revision != submission.basis.revision
             || fresh.config_id != submission.basis.config_id
@@ -79,9 +91,11 @@ impl NativeOwner {
         {
             return Err("account_profile_stale_connection".into());
         }
-        controller.configure_account_profile(
-            submission.request.clone(), secret, submission.generation,
-        ).await.map(Box::new).map_err(|error| public_problem(&error.0).into())
+        controller
+            .configure_account_profile(submission.request.clone(), secret, submission.generation)
+            .await
+            .map(Box::new)
+            .map_err(|error| public_problem(&error.0).into())
     }
 
     pub(super) async fn account_profile_read(
@@ -91,8 +105,11 @@ impl NativeOwner {
         let (result, retained) = match self.profile_controller(&submission, true) {
             Ok(controller) => {
                 let was_pending = controller.pending_account_profile().is_some();
-                let result = controller.read_account_profile(submission.request.clone())
-                    .await.map(Box::new).map_err(|error| public_problem(&error.0).into());
+                let result = controller
+                    .read_account_profile(submission.request.clone())
+                    .await
+                    .map(Box::new)
+                    .map_err(|error| public_problem(&error.0).into());
                 let still_pending = controller.pending_account_profile().is_some();
                 let retained = match &result {
                     Err(_) => true,
@@ -105,7 +122,11 @@ impl NativeOwner {
             }
             Err(problem) => (Err(problem), true),
         };
-        model_access::Event::AccountProfile { submission, result, retained }
+        model_access::Event::AccountProfile {
+            submission,
+            result,
+            retained,
+        }
     }
 
     pub(super) async fn account_profile_capabilities(
@@ -113,8 +134,11 @@ impl NativeOwner {
         submission: model_access::ProfileSubmission,
     ) -> model_access::Event {
         let result = match self.profile_controller(&submission, false) {
-            Ok(controller) => controller.read_account_auth_capabilities(submission.request.clone())
-                .await.map(Box::new).map_err(|error| public_problem(&error.0).into()),
+            Ok(controller) => controller
+                .read_account_auth_capabilities(submission.request.clone())
+                .await
+                .map(Box::new)
+                .map_err(|error| public_problem(&error.0).into()),
             Err(problem) => Err(problem),
         };
         model_access::Event::AccountProfileCapabilities { submission, result }

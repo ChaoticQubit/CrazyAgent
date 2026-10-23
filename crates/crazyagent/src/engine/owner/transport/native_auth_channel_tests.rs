@@ -425,8 +425,7 @@ where
 async fn retirement_write_started<F: Future>(
     future: &mut Pin<Box<F>>,
     checkpoint: &mut NativeAuthRetirementCheckpoint,
-)
-where
+) where
     F::Output: std::fmt::Debug,
 {
     tokio::time::timeout(Duration::from_secs(2), async {

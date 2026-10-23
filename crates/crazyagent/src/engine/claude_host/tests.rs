@@ -59,18 +59,24 @@ fn claude_launch_uses_official_stream_input_and_output_without_prompt_in_argv() 
     let command = directories.command("claude-sonnet-4-6").unwrap();
     let args: Vec<_> = command.get_args().collect();
     assert_eq!(command.get_program(), OsStr::new("/approved/claude"));
-    assert_eq!(command.get_current_dir(), Some(directories.project.as_path()));
+    assert_eq!(
+        command.get_current_dir(),
+        Some(directories.project.as_path())
+    );
     assert!(args.contains(&OsStr::new("--print")));
     assert!(args.contains(&OsStr::new("--verbose")));
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--input-format"), OsStr::new("stream-json")]
-    }));
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--output-format"), OsStr::new("stream-json")]
-    }));
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--model"), OsStr::new("claude-sonnet-4-6")]
-    }));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--input-format"), OsStr::new("stream-json")] })
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--output-format"), OsStr::new("stream-json")] })
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--model"), OsStr::new("claude-sonnet-4-6")] })
+    );
     assert!(!args.contains(&OsStr::new("--dangerously-skip-permissions")));
     assert!(!args.contains(&OsStr::new("--allow-dangerously-skip-permissions")));
     assert!(!args.contains(&OsStr::new("bypassPermissions")));
@@ -81,16 +87,21 @@ fn claude_conversation_disables_native_tools_and_ambient_mcp_and_settings() {
     let directories = Directories::new();
     let command = directories.command("claude-sonnet-4-6").unwrap();
     let args: Vec<_> = command.get_args().collect();
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--tools"), OsStr::new("")]
-    }));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--tools"), OsStr::new("")] })
+    );
     assert!(args.contains(&OsStr::new("--strict-mcp-config")));
     assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--mcp-config"), OsStr::new("{\"mcpServers\":{}}")]
+        pair == [
+            OsStr::new("--mcp-config"),
+            OsStr::new("{\"mcpServers\":{}}"),
+        ]
     }));
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--setting-sources"), OsStr::new("")]
-    }));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--setting-sources"), OsStr::new("")] })
+    );
     assert!(args.contains(&OsStr::new("--disable-slash-commands")));
     assert!(args.contains(&OsStr::new("--no-session-persistence")));
 }
@@ -100,10 +111,7 @@ fn claude_launch_sets_only_selected_profile_environment() {
     let directories = Directories::new();
     let command = directories.command("claude-sonnet-4-6").unwrap();
     let environment: Vec<_> = command.get_envs().collect();
-    assert!(environment.contains(&(
-        OsStr::new("HOME"),
-        Some(directories.home.as_os_str())
-    )));
+    assert!(environment.contains(&(OsStr::new("HOME"), Some(directories.home.as_os_str()))));
     assert!(environment.contains(&(
         OsStr::new("CLAUDE_CONFIG_DIR"),
         Some(directories.home.as_os_str())
@@ -127,9 +135,10 @@ fn claude_launch_lets_the_signed_in_account_choose_its_default_model() {
     let args: Vec<_> = command.get_args().collect();
     assert!(!args.contains(&OsStr::new("--model")));
     assert!(!args.contains(&OsStr::new("native-default")));
-    assert!(args.windows(2).any(|pair| {
-        pair == [OsStr::new("--tools"), OsStr::new("")]
-    }));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair == [OsStr::new("--tools"), OsStr::new("")] })
+    );
 }
 
 #[test]
@@ -144,30 +153,36 @@ fn claude_launch_rejects_empty_option_like_and_unbounded_model_selection() {
 #[test]
 fn claude_launch_rejects_relative_paths_and_shared_profile_home() {
     let directories = Directories::new();
-    assert!(launch_command(
-        Path::new("claude"),
-        &directories.project,
-        &directories.home,
-        "claude-sonnet-4-6",
-        None
-    )
-    .is_err());
-    assert!(launch_command(
-        Path::new("/approved/claude"),
-        Path::new("project"),
-        &directories.home,
-        "claude-sonnet-4-6",
-        None
-    )
-    .is_err());
-    assert!(launch_command(
-        Path::new("/approved/claude"),
-        &directories.project,
-        Path::new("home"),
-        "claude-sonnet-4-6",
-        None
-    )
-    .is_err());
+    assert!(
+        launch_command(
+            Path::new("claude"),
+            &directories.project,
+            &directories.home,
+            "claude-sonnet-4-6",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        launch_command(
+            Path::new("/approved/claude"),
+            Path::new("project"),
+            &directories.home,
+            "claude-sonnet-4-6",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            Path::new("home"),
+            "claude-sonnet-4-6",
+            None
+        )
+        .is_err()
+    );
     fs::set_permissions(&directories.home, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(directories.command("claude-sonnet-4-6").is_err());
 }
@@ -177,14 +192,16 @@ fn claude_launch_rejects_symlinked_profile_and_missing_project() {
     let directories = Directories::new();
     let alias = directories.root.join("profile-alias");
     std::os::unix::fs::symlink(&directories.home, &alias).unwrap();
-    assert!(launch_command(
-        Path::new("/approved/claude"),
-        &directories.project,
-        &alias,
-        "claude-sonnet-4-6",
-        None
-    )
-    .is_err());
+    assert!(
+        launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &alias,
+            "claude-sonnet-4-6",
+            None
+        )
+        .is_err()
+    );
     fs::remove_dir(&directories.project).unwrap();
     assert!(directories.command("claude-sonnet-4-6").is_err());
 }
@@ -254,16 +271,43 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     };
     assert!(valid.validate().is_ok());
     for limits in [
-        ClaudeHostLimits { run_time: Duration::ZERO, ..valid },
-        ClaudeHostLimits { run_time: Duration::from_secs(601), ..valid },
-        ClaudeHostLimits { cleanup_time: Duration::ZERO, ..valid },
-        ClaudeHostLimits { cleanup_time: Duration::from_secs(6), ..valid },
-        ClaudeHostLimits { stdout_bytes: 0, ..valid },
-        ClaudeHostLimits { stdout_bytes: 1_048_577, ..valid },
-        ClaudeHostLimits { stderr_bytes: 0, ..valid },
-        ClaudeHostLimits { stderr_bytes: 262_145, ..valid },
+        ClaudeHostLimits {
+            run_time: Duration::ZERO,
+            ..valid
+        },
+        ClaudeHostLimits {
+            run_time: Duration::from_secs(601),
+            ..valid
+        },
+        ClaudeHostLimits {
+            cleanup_time: Duration::ZERO,
+            ..valid
+        },
+        ClaudeHostLimits {
+            cleanup_time: Duration::from_secs(6),
+            ..valid
+        },
+        ClaudeHostLimits {
+            stdout_bytes: 0,
+            ..valid
+        },
+        ClaudeHostLimits {
+            stdout_bytes: 1_048_577,
+            ..valid
+        },
+        ClaudeHostLimits {
+            stderr_bytes: 0,
+            ..valid
+        },
+        ClaudeHostLimits {
+            stderr_bytes: 262_145,
+            ..valid
+        },
         ClaudeHostLimits { events: 0, ..valid },
-        ClaudeHostLimits { events: 4097, ..valid },
+        ClaudeHostLimits {
+            events: 4097,
+            ..valid
+        },
     ] {
         assert!(limits.validate().is_err());
     }
@@ -333,10 +377,17 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
     };
     let turn = RequestId::new("claude-master-turn").unwrap();
     let profile = custody
-        .acquire_use(&host, &binding, &turn, 1, NativeProfileUsePurpose::Execution)
+        .acquire_use(
+            &host,
+            &binding,
+            &turn,
+            1,
+            NativeProfileUsePurpose::Execution,
+        )
         .unwrap();
     let home = profile.profile_path().unwrap();
-    let command = launch_command(&installed_claude(), &project, &home, "native-default", None).unwrap();
+    let command =
+        launch_command(&installed_claude(), &project, &home, "native-default", None).unwrap();
     let tmp = root.path().join("agent-tmp");
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
@@ -371,7 +422,10 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
     )
     .await
     .unwrap();
-    claude.start_turn(turn.clone(), "Reply with one word.").await.unwrap();
+    claude
+        .start_turn(turn.clone(), "Reply with one word.")
+        .await
+        .unwrap();
     let mut errors = Vec::new();
     let outcome = loop {
         let event = claude.next_event().await.unwrap();

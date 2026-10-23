@@ -10,20 +10,22 @@ use std::path::Path;
 use std::time::Duration;
 
 mod account_profile;
-mod project_setup;
-mod team;
-mod owner_setup;
 mod accounts;
 mod agents;
-mod plugins;
 mod memory;
+mod owner_setup;
+mod plugins;
+mod project_setup;
+mod team;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
     /// Lists the engine's harness catalog for the master, sub-agent and research pickers.
     /// Input: none; uses the attached owner connection. Output: entries in owner
     /// priority order, or `controller_disconnected` without a connection.
-    pub async fn harness_catalog(&self) -> Result<Vec<crate::harnesses::HarnessEntry>, EngineError> {
+    pub async fn harness_catalog(
+        &self,
+    ) -> Result<Vec<crate::harnesses::HarnessEntry>, EngineError> {
         let client = self
             .client
             .as_ref()
@@ -263,8 +265,13 @@ impl OwnerController {
         {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
-        if self.pending_account_profile.as_ref().is_some_and(|pending|
-            pending.identity.database_instance() != identity.database_instance()) {
+        if self
+            .pending_account_profile
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.identity.database_instance() != identity.database_instance()
+            })
+        {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
         if self.identity.database_instance() != identity.database_instance() {

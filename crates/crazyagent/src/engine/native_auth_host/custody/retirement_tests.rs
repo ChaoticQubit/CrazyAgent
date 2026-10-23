@@ -127,14 +127,21 @@ impl Case {
                 assert!(status.success());
                 break;
             }
-            assert!(Instant::now() < deadline, "real cat child exceeded its bound");
+            assert!(
+                Instant::now() < deadline,
+                "real cat child exceeded its bound"
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(
             rustix::process::test_kill_process_group(direct),
             Err(rustix::io::Errno::SRCH)
         );
-        self.session.take().unwrap().seal_after_child_reaped().unwrap()
+        self.session
+            .take()
+            .unwrap()
+            .seal_after_child_reaped()
+            .unwrap()
     }
 
     fn validate(&self, retirement: &Retirement, after_child: bool) -> Result<(), EngineError> {
@@ -178,7 +185,8 @@ fn assert_released(probe: &File) {
         match flock(probe, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => break,
             Err(error)
-                if (error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN)
+                if (error == rustix::io::Errno::WOULDBLOCK
+                    || error == rustix::io::Errno::AGAIN)
                     && std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(10));

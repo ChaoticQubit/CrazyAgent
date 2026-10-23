@@ -118,24 +118,54 @@ fn rcli_failures_keep_capture_budget_and_approval_reasons() {
     for (code, expected) in [
         ("rcli_master_output_limit", MasterReason::OutputLimit),
         ("rcli_master_stderr_limit", MasterReason::OutputLimit),
-        ("rcli_master_capture_incomplete", MasterReason::CaptureIncomplete),
+        (
+            "rcli_master_capture_incomplete",
+            MasterReason::CaptureIncomplete,
+        ),
         ("rcli_master_empty_reply", MasterReason::CaptureIncomplete),
         ("rcli_master_message_order", MasterReason::CaptureIncomplete),
         ("rcli_master_turn_scope", MasterReason::CaptureIncomplete),
-        ("rcli_master_truncated_event", MasterReason::CaptureIncomplete),
+        (
+            "rcli_master_truncated_event",
+            MasterReason::CaptureIncomplete,
+        ),
         ("rcli_master_input_required", MasterReason::ApprovalRequired),
         ("rcli_master_turn_deadline", MasterReason::BudgetExhausted),
-        ("master_runtime_budget_exhausted", MasterReason::BudgetExhausted),
-        ("rcli_master_startup_deadline", MasterReason::RuntimeUnavailable),
+        (
+            "master_runtime_budget_exhausted",
+            MasterReason::BudgetExhausted,
+        ),
+        (
+            "rcli_master_startup_deadline",
+            MasterReason::RuntimeUnavailable,
+        ),
         ("rcli_master_spawn_failed", MasterReason::RuntimeUnavailable),
-        ("rcli_master_artifact_changed", MasterReason::RuntimeUnavailable),
-        ("rcli_master_profile_changed", MasterReason::ConnectionChanged),
-        ("rcli_master_profile_mismatch", MasterReason::ConnectionChanged),
-        ("native_profile_binding_conflict", MasterReason::ConnectionChanged),
-        ("native_profile_identity_changed", MasterReason::ConnectionChanged),
+        (
+            "rcli_master_artifact_changed",
+            MasterReason::RuntimeUnavailable,
+        ),
+        (
+            "rcli_master_profile_changed",
+            MasterReason::ConnectionChanged,
+        ),
+        (
+            "rcli_master_profile_mismatch",
+            MasterReason::ConnectionChanged,
+        ),
+        (
+            "native_profile_binding_conflict",
+            MasterReason::ConnectionChanged,
+        ),
+        (
+            "native_profile_identity_changed",
+            MasterReason::ConnectionChanged,
+        ),
         ("owner_runtime_stale", MasterReason::ScopeRevoked),
         ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
-        ("master_runtime_backend_unsupported", MasterReason::UnsupportedCapability),
+        (
+            "master_runtime_backend_unsupported",
+            MasterReason::UnsupportedCapability,
+        ),
     ] {
         assert_eq!(reason(code), expected, "{code}");
     }

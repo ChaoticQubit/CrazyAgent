@@ -37,7 +37,10 @@ async fn provider_first_managed_accounts_publish_real_distinct_configuration_wit
         let _ = body.await;
     }
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
-    assert!(matches!(cleanup, Ok(Ok(()))), "actual owner cleanup required");
+    assert!(
+        matches!(cleanup, Ok(Ok(()))),
+        "actual owner cleanup required"
+    );
     result
         .expect("managed account flow exceeded 20 seconds")
         .expect("managed account assertion failed after cleanup")
@@ -85,12 +88,24 @@ async fn managed_accounts(root: &Path) -> Result<(), String> {
     assert_eq!(claude.connection.harness.as_str(), "claude");
     assert_eq!(codex.connection.protocol.as_str(), "native");
     assert_eq!(claude.connection.protocol.as_str(), "native");
-    assert!(matches!(codex.connection.endpoint, ModelEndpoint::Native {}));
-    assert!(matches!(claude.connection.endpoint, ModelEndpoint::Native {}));
-    let ModelAuthentication::NativeManaged { profile_ref: codex_profile } = &codex.connection.auth else {
+    assert!(matches!(
+        codex.connection.endpoint,
+        ModelEndpoint::Native {}
+    ));
+    assert!(matches!(
+        claude.connection.endpoint,
+        ModelEndpoint::Native {}
+    ));
+    let ModelAuthentication::NativeManaged {
+        profile_ref: codex_profile,
+    } = &codex.connection.auth
+    else {
         panic!("Codex setup requires a generated managed profile reference");
     };
-    let ModelAuthentication::NativeManaged { profile_ref: claude_profile } = &claude.connection.auth else {
+    let ModelAuthentication::NativeManaged {
+        profile_ref: claude_profile,
+    } = &claude.connection.auth
+    else {
         panic!("Claude setup requires a generated managed profile reference");
     };
     assert_ne!(codex_profile, claude_profile);
@@ -115,58 +130,101 @@ async fn managed_accounts(root: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     assert_eq!(before.revision, after.revision);
     assert!(matches!(&after.data, OwnerData::ModelAccessPage { items, .. } if items.is_empty()));
-    assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+    assert!(
+        bridge
+            .pending_intent()
+            .map_err(|error| error.code)?
+            .is_none()
+    );
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Account { account_ref: codex.connection.account_ref.clone() },
-        ModelAccessEdit::AddAccount { account_ref: codex.connection.account_ref.clone() },
+        ModelAccessRecord::Account {
+            account_ref: codex.connection.account_ref.clone(),
+        },
+        ModelAccessEdit::AddAccount {
+            account_ref: codex.connection.account_ref.clone(),
+        },
         1,
-    ).await?;
+    )
+    .await?;
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Connection { connection: codex.connection.clone() },
-        ModelAccessEdit::CreateConnection { connection: codex.connection.clone() },
+        ModelAccessRecord::Connection {
+            connection: codex.connection.clone(),
+        },
+        ModelAccessEdit::CreateConnection {
+            connection: codex.connection.clone(),
+        },
         2,
-    ).await?;
+    )
+    .await?;
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Pool { pool: codex.pool.clone() },
-        ModelAccessEdit::CreatePool { pool: codex.pool.clone() },
+        ModelAccessRecord::Pool {
+            pool: codex.pool.clone(),
+        },
+        ModelAccessEdit::CreatePool {
+            pool: codex.pool.clone(),
+        },
         3,
-    ).await?;
+    )
+    .await?;
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Account { account_ref: claude.connection.account_ref.clone() },
-        ModelAccessEdit::AddAccount { account_ref: claude.connection.account_ref.clone() },
+        ModelAccessRecord::Account {
+            account_ref: claude.connection.account_ref.clone(),
+        },
+        ModelAccessEdit::AddAccount {
+            account_ref: claude.connection.account_ref.clone(),
+        },
         4,
-    ).await?;
+    )
+    .await?;
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Connection { connection: claude.connection.clone() },
-        ModelAccessEdit::CreateConnection { connection: claude.connection.clone() },
+        ModelAccessRecord::Connection {
+            connection: claude.connection.clone(),
+        },
+        ModelAccessEdit::CreateConnection {
+            connection: claude.connection.clone(),
+        },
         5,
-    ).await?;
+    )
+    .await?;
     publish_record(
         &mut bridge,
         &mut observer,
-        ModelAccessRecord::Pool { pool: claude.pool.clone() },
-        ModelAccessEdit::CreatePool { pool: claude.pool.clone() },
+        ModelAccessRecord::Pool {
+            pool: claude.pool.clone(),
+        },
+        ModelAccessEdit::CreatePool {
+            pool: claude.pool.clone(),
+        },
         6,
-    ).await?;
-    let pools = bridge.model_access_page(ModelAccessCollection::Pools, false)
-        .await.map_err(|error| error.code)?;
+    )
+    .await?;
+    let pools = bridge
+        .model_access_page(ModelAccessCollection::Pools, false)
+        .await
+        .map_err(|error| error.code)?;
     assert_eq!(pools.items.len(), 2);
     assert!(!pools.has_more);
-    let persisted = std::fs::read_to_string(root.join("g.toml")).map_err(|error| error.to_string())?;
+    let persisted =
+        std::fs::read_to_string(root.join("g.toml")).map_err(|error| error.to_string())?;
     assert!(persisted.contains(codex.connection.account_ref.as_str()));
     assert!(persisted.contains(claude.connection.account_ref.as_str()));
     assert!(!root.join("p.toml").exists());
-    assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+    assert!(
+        bridge
+            .pending_intent()
+            .map_err(|error| error.code)?
+            .is_none()
+    );
     Ok(())
 }
 
@@ -182,25 +240,38 @@ async fn publish_record(
         ModelAccessRecord::Connection { .. } => ModelAccessCollection::Connections,
         ModelAccessRecord::Pool { .. } => ModelAccessCollection::Pools,
     };
-    let page = bridge.model_access_page(collection, false).await.map_err(|error| error.code)?;
+    let page = bridge
+        .model_access_page(collection, false)
+        .await
+        .map_err(|error| error.code)?;
     assert!(page.fresh);
     assert!(page.writable);
-    let receipt = bridge.edit_model_access(&page.ticket, edit, generation)
-        .await.map_err(|error| error.code)?;
+    let receipt = bridge
+        .edit_model_access(&page.ticket, edit, generation)
+        .await
+        .map_err(|error| error.code)?;
     assert_eq!(receipt.outcome, ActionOutcome::Applied);
     assert_eq!(receipt.intent.generation, generation.to_string());
     assert!(!receipt.pending);
-    let reply = observer.read(OwnerRead::ModelAccessRecord {
-        collection,
-        id: expected.id().clone(),
-    }).await.map_err(|error| error.to_string())?;
-    let OwnerData::ModelAccessRecord { record, writable, .. } = reply.data else {
+    let reply = observer
+        .read(OwnerRead::ModelAccessRecord {
+            collection,
+            id: expected.id().clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let OwnerData::ModelAccessRecord {
+        record, writable, ..
+    } = reply.data
+    else {
         return Err("actual independent owner record required".into());
     };
     assert!(writable);
     assert_eq!(record, expected);
-    let inspected = bridge.inspect_model_access(collection, expected.id().as_str())
-        .await.map_err(|error| error.code)?;
+    let inspected = bridge
+        .inspect_model_access(collection, expected.id().as_str())
+        .await
+        .map_err(|error| error.code)?;
     assert!(inspected.fresh);
     assert!(inspected.writable);
     assert_eq!(inspected.record, expected);

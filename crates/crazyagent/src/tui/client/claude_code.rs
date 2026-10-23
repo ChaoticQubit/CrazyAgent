@@ -3,7 +3,10 @@ use super::NativeOwner;
 
 impl NativeOwner {
     pub(super) async fn claude_code(&mut self, job: Job) -> Event {
-        let Job { context, submission } = job;
+        let Job {
+            context,
+            submission,
+        } = job;
         let request = submission.request;
         let result = if !self.ready {
             Err("native_auth_owner_unavailable".into())
@@ -21,6 +24,10 @@ impl NativeOwner {
         } else {
             Err("native_auth_owner_unavailable".into())
         };
-        Event { context, request, result }
+        Event {
+            context,
+            request,
+            result,
+        }
     }
 }

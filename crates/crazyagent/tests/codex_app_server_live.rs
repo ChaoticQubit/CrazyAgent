@@ -30,10 +30,19 @@ struct AppServer {
 
 impl AppServer {
     fn start() -> Self {
-        let home = tempfile::Builder::new().prefix("ca-codex-live").tempdir().unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("ca-codex-live")
+            .tempdir()
+            .unwrap();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = Command::new(codex_executable())
-            .args(["-c", "cli_auth_credentials_store=\"file\"", "app-server", "--listen", "stdio://"])
+            .args([
+                "-c",
+                "cli_auth_credentials_store=\"file\"",
+                "app-server",
+                "--listen",
+                "stdio://",
+            ])
             .env_clear()
             .env("HOME", home.path())
             .env("CODEX_HOME", home.path())
@@ -64,7 +73,12 @@ impl AppServer {
                 }
             }
         });
-        Self { child, input, lines, _home: home }
+        Self {
+            child,
+            input,
+            lines,
+            _home: home,
+        }
     }
 
     fn send(&mut self, frame: Vec<u8>) {
@@ -76,7 +90,10 @@ impl AppServer {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let line = self.lines.recv_timeout(remaining).expect("codex app-server replied in time");
+            let line = self
+                .lines
+                .recv_timeout(remaining)
+                .expect("codex app-server replied in time");
             for event in protocol.receive(&line).expect("real codex frame decodes") {
                 if wanted(&event) {
                     return event;
@@ -107,7 +124,9 @@ fn real_codex_app_server_frames_decode_through_initialization_and_account_read()
     let mut server = AppServer::start();
     let mut protocol = initialized(&mut server);
     server.send(protocol.read_account(false).unwrap());
-    match server.until(&mut protocol, |event| matches!(event, Event::AuthControl(_))) {
+    match server.until(&mut protocol, |event| {
+        matches!(event, Event::AuthControl(_))
+    }) {
         Event::AuthControl(AuthControl::AccountRead { account, .. }) => assert!(account.is_none()),
         event => panic!("unexpected event {event:?}"),
     }
@@ -118,9 +137,16 @@ fn real_codex_device_code_sign_in_yields_verification_url_and_user_code() {
     let mut server = AppServer::start();
     let mut protocol = initialized(&mut server);
     server.send(protocol.start_device_code_login().unwrap());
-    match server.until(&mut protocol, |event| matches!(event, Event::AuthControl(_))) {
+    match server.until(&mut protocol, |event| {
+        matches!(event, Event::AuthControl(_))
+    }) {
         Event::AuthControl(AuthControl::LoginStarted {
-            challenge: LoginChallenge::DeviceCode { login_id, user_code, verification_url },
+            challenge:
+                LoginChallenge::DeviceCode {
+                    login_id,
+                    user_code,
+                    verification_url,
+                },
             ..
         }) => {
             assert!(!login_id.is_empty());

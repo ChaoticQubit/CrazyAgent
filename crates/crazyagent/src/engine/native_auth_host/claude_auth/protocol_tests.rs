@@ -6,11 +6,25 @@ use std::path::Path;
 #[test]
 fn claude_login_transcript_requires_an_actual_complete_official_url() {
     let mut transcript = Transcript::default();
-    assert!(transcript.push(b"If the browser didn't open, visit: https://claude.com/cai/").unwrap().is_none());
-    let challenge = transcript.push(b"oauth/authorize?state=synthetic-parser-data\n").unwrap().unwrap();
-    assert_eq!(challenge.url(), "https://claude.com/cai/oauth/authorize?state=synthetic-parser-data");
+    assert!(
+        transcript
+            .push(b"If the browser didn't open, visit: https://claude.com/cai/")
+            .unwrap()
+            .is_none()
+    );
+    let challenge = transcript
+        .push(b"oauth/authorize?state=synthetic-parser-data\n")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        challenge.url(),
+        "https://claude.com/cai/oauth/authorize?state=synthetic-parser-data"
+    );
     assert!(!challenge.accepts_code());
-    let challenge = transcript.push(b"Paste code here if prompted > ").unwrap().unwrap();
+    let challenge = transcript
+        .push(b"Paste code here if prompted > ")
+        .unwrap()
+        .unwrap();
     assert!(challenge.accepts_code());
     assert!(transcript.push(b"Login successful.\n").unwrap().is_none());
 }
@@ -37,7 +51,10 @@ fn claude_login_transcript_is_bounded_and_strips_only_terminal_presentation() {
             found = Some(challenge);
         }
     }
-    assert_eq!(found.unwrap().url(), "https://claude.com/cai/oauth/authorize?state=synthetic");
+    assert_eq!(
+        found.unwrap().url(),
+        "https://claude.com/cai/oauth/authorize?state=synthetic"
+    );
     assert!(transcript.push(&vec![b'x'; 65537]).is_err());
 }
 
@@ -55,12 +72,20 @@ fn claude_status_exit_must_agree_with_real_decoder_fields() {
 
 #[test]
 fn claude_fallback_input_is_move_only_bounded_and_requires_full_code_and_state() {
-    use crate::engine::owner::AccountSecret;
     use super::types::completion_bytes;
-    for value in ["code-only", "#state", "code#", "code#state#extra", "code with space#state"] {
+    use crate::engine::owner::AccountSecret;
+    for value in [
+        "code-only",
+        "#state",
+        "code#",
+        "code#state#extra",
+        "code with space#state",
+    ] {
         assert!(completion_bytes(AccountSecret::new(value.as_bytes().to_vec()).unwrap()).is_err());
     }
-    let mut bytes = completion_bytes(AccountSecret::new(b"synthetic-code#synthetic-state".to_vec()).unwrap()).unwrap();
+    let mut bytes =
+        completion_bytes(AccountSecret::new(b"synthetic-code#synthetic-state".to_vec()).unwrap())
+            .unwrap();
     assert_eq!(bytes.as_slice(), b"synthetic-code#synthetic-state\n");
     bytes.fill(0);
     assert!(bytes.iter().all(|byte| *byte == 0));

@@ -116,12 +116,17 @@ impl Case {
         assert_eq!(rustix::process::getpgid(Some(group)).unwrap(), group);
         if let Err((error, mut child)) = self.session().retain_child(child) {
             drop(input);
-            assert!(
-                cleanup_owned_group(&mut child, group, Instant::now() + CHILD_TIME).unwrap()
-            );
+            assert!(cleanup_owned_group(&mut child, group, Instant::now() + CHILD_TIME).unwrap());
             panic!("real process fixture could not be retained: {error}");
         }
-        assert!(self.session().child_mut().unwrap().try_wait().unwrap().is_none());
+        assert!(
+            self.session()
+                .child_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
         (input, group)
     }
 
@@ -137,7 +142,10 @@ impl Case {
                 assert!(status.success());
                 break;
             }
-            assert!(Instant::now() < deadline, "real child exceeded its retirement bound");
+            assert!(
+                Instant::now() < deadline,
+                "real child exceeded its retirement bound"
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(
@@ -160,7 +168,11 @@ impl Case {
         self.session().prepare_status_child().unwrap();
         let (input, group) = self.cat();
         self.reap(input, group);
-        self.session.take().unwrap().seal_after_child_reaped().unwrap()
+        self.session
+            .take()
+            .unwrap()
+            .seal_after_child_reaped()
+            .unwrap()
     }
 }
 
@@ -184,7 +196,12 @@ fn claude_auth_lifecycle_retains_one_physical_guard_across_two_real_children() {
     assert!(matches!(competing, Err(error) if error.0 == "native_profile_in_use"));
     let (input, group) = case.cat();
     case.reap(input, group);
-    let retirement = case.session.take().unwrap().seal_after_child_reaped().unwrap();
+    let retirement = case
+        .session
+        .take()
+        .unwrap()
+        .seal_after_child_reaped()
+        .unwrap();
     retirement
         .revalidate_after_child_reaped(
             &case.host,
@@ -227,7 +244,14 @@ fn claude_auth_lifecycle_refuses_status_handoff_while_first_child_is_alive() {
     let mut case = Case::new();
     let (input, group) = case.cat();
     assert!(case.session().prepare_status_child().is_err());
-    assert!(case.session().child_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(
+        case.session()
+            .child_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
     case.locked();
     case.reap(input, group);
     case.session().prepare_status_child().unwrap();
@@ -275,16 +299,23 @@ fn claude_auth_lifecycle_admits_only_one_final_status_child() {
     let (input, group) = case.cat();
     case.reap(input, group);
     assert!(case.session().prepare_status_child().is_err());
-    let retirement = case.session.take().unwrap().seal_after_child_reaped().unwrap();
-    assert!(retirement
-        .revalidate(
-            &case.host,
-            &case.binding,
-            &case.operation,
-            7,
-            NativeProfileUsePurpose::Authentication,
-        )
-        .is_err());
+    let retirement = case
+        .session
+        .take()
+        .unwrap()
+        .seal_after_child_reaped()
+        .unwrap();
+    assert!(
+        retirement
+            .revalidate(
+                &case.host,
+                &case.binding,
+                &case.operation,
+                7,
+                NativeProfileUsePurpose::Authentication,
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -308,8 +339,20 @@ fn claude_auth_lifecycle_can_retire_first_child_when_cancelled_before_status_spa
     case.reap(input, group);
     case.session().prepare_status_child().unwrap();
     assert_eq!(case.session().child_mut().unwrap().id(), original_id);
-    assert!(case.session().child_mut().unwrap().try_wait().unwrap().is_some());
-    let retirement = case.session.take().unwrap().seal_after_child_reaped().unwrap();
+    assert!(
+        case.session()
+            .child_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_some()
+    );
+    let retirement = case
+        .session
+        .take()
+        .unwrap()
+        .seal_after_child_reaped()
+        .unwrap();
     retirement
         .revalidate_after_child_reaped(
             &case.host,
@@ -340,7 +383,11 @@ fn claude_auth_lifecycle_retirement_keeps_account_operation_and_generation_bindi
     let mut case = Case::new();
     let retirement = case.two_children();
     for (operation, generation, binding) in [
-        (RequestId::new("other-operation").unwrap(), 7, case.binding.clone()),
+        (
+            RequestId::new("other-operation").unwrap(),
+            7,
+            case.binding.clone(),
+        ),
         (case.operation.clone(), 8, case.binding.clone()),
         (case.operation.clone(), 7, {
             let mut other = case.binding.clone();
@@ -348,15 +395,17 @@ fn claude_auth_lifecycle_retirement_keeps_account_operation_and_generation_bindi
             other
         }),
     ] {
-        assert!(retirement
-            .revalidate_after_child_reaped(
-                &case.host,
-                &binding,
-                &operation,
-                generation,
-                NativeProfileUsePurpose::Authentication,
-            )
-            .is_err());
+        assert!(
+            retirement
+                .revalidate_after_child_reaped(
+                    &case.host,
+                    &binding,
+                    &operation,
+                    generation,
+                    NativeProfileUsePurpose::Authentication,
+                )
+                .is_err()
+        );
     }
     case.locked();
 }
@@ -374,11 +423,22 @@ fn claude_auth_lifecycle_retained_executable_rejects_replacement_before_status_c
     case.reap(input, group);
     case.session().prepare_status_child().unwrap();
     assert_eq!(registered.verified_sha256().unwrap(), digest);
-    fs::rename(&executable, case.root.path().join("original-registered-cat")).unwrap();
+    fs::rename(
+        &executable,
+        case.root.path().join("original-registered-cat"),
+    )
+    .unwrap();
     fs::write(&executable, b"#!/bin/sh\nexec /bin/cat\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(registered.verified_path().is_err());
     assert_eq!(case.session().child_mut().unwrap().id(), original_id);
-    assert!(case.session().child_mut().unwrap().try_wait().unwrap().is_some());
+    assert!(
+        case.session()
+            .child_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_some()
+    );
     case.locked();
 }

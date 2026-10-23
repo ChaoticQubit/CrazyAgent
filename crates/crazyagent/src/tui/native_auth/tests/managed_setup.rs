@@ -170,7 +170,11 @@ async fn managed_setup_local_endpoint_opens_private_profile_setup_without_a_hidd
         let body = views::body(&ui.app);
         assert!(body.contains("Private profile setup"), "{body}");
         assert!(body.contains("qwen2.5:0.5b"), "{body}");
-        assert!(ui.app.model_access.notice.contains("Enter"), "{}", ui.app.model_access.notice);
+        assert!(
+            ui.app.model_access.notice.contains("Enter"),
+            "{}",
+            ui.app.model_access.notice
+        );
         assert_no_auth_start(&case);
     })
     .await;
