@@ -12,6 +12,7 @@ use std::time::Duration;
 mod account_profile;
 mod project_setup;
 mod owner_setup;
+mod accounts;
 pub use account_profile::PendingAccountProfile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

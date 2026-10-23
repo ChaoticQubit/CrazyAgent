@@ -220,7 +220,7 @@ fn settings_source_access_unsafe_files_and_parents_are_rejected() {
                     Some("settings_metadata_invalid")
                 }
                 "size" => {
-                    private_file(path, &vec![b' '; 65_537]);
+                    private_file(path, &vec![b' '; crate::config::CONFIG_BYTES_MAX + 1]);
                     Some("settings_file_bounds")
                 }
                 "utf8" => {

@@ -49,6 +49,13 @@ fn main() {
         "desktop_owner_profile",
         "desktop_save_owner_profile",
         "desktop_pool_summaries",
+        "desktop_account_catalog",
+        "desktop_list_accounts",
+        "desktop_add_account",
+        "desktop_rename_account",
+        "desktop_remove_account",
+        "desktop_check_account",
+        "desktop_local_models",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

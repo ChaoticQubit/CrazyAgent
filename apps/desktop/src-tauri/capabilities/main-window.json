@@ -53,6 +53,13 @@
     "allow-desktop-close-master",
     "allow-desktop-owner-profile",
     "allow-desktop-save-owner-profile",
-    "allow-desktop-pool-summaries"
+    "allow-desktop-pool-summaries",
+    "allow-desktop-account-catalog",
+    "allow-desktop-list-accounts",
+    "allow-desktop-add-account",
+    "allow-desktop-rename-account",
+    "allow-desktop-remove-account",
+    "allow-desktop-check-account",
+    "allow-desktop-local-models"
   ]
 }

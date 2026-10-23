@@ -1,0 +1,666 @@
+use crazyagent::accounts::{AccountDraft, AccountStatus, AccountView, Provider, SignInMethod};
+use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
+use crazyagent::engine::bootstrap::EngineService;
+use crazyagent::engine::owner::*;
+use crazyagent::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, RequestId};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+
+struct Fixture {
+    root: tempfile::TempDir,
+    service: EngineService,
+    _shutdown: watch::Sender<bool>,
+    global: PathBuf,
+}
+
+impl Fixture {
+    async fn start() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("ca-acct-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (shutdown, stopped) = watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        Self {
+            root,
+            service,
+            _shutdown: shutdown,
+            global,
+        }
+    }
+
+    async fn restart(&mut self) {
+        tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = self._shutdown.subscribe();
+        self.service = EngineService::start_with_settings_sources(
+            self.root.path(),
+            "e.sock",
+            &self.global,
+            &self.root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn client(&self) -> OwnerClient {
+        OwnerClient::discover(
+            self.root.path(),
+            OwnerClientKind::Tui,
+            Duration::from_secs(20),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    async fn stop(mut self) {
+        tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+fn draft(
+    provider: Provider,
+    method: SignInMethod,
+    name: &str,
+    url: Option<String>,
+    model: Option<&str>,
+) -> AccountDraft {
+    AccountDraft {
+        provider,
+        method,
+        name: name.into(),
+        url,
+        model: model.map(str::to_owned),
+    }
+}
+
+fn key(value: &str) -> Option<AccountSecret> {
+    Some(AccountSecret::new(value.as_bytes().to_vec()).unwrap())
+}
+
+async fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+async fn all_accounts(client: &OwnerClient) -> Vec<AccountView> {
+    let mut accounts = Vec::new();
+    let mut after = None;
+    loop {
+        let page = client.list_accounts(after, 200).await.unwrap();
+        accounts.extend(page.accounts);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return accounts,
+        }
+    }
+}
+
+fn files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        if metadata.is_dir() {
+            found.extend(files(&path));
+        } else if metadata.is_file() {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn holders(root: &Path, secret: &[u8]) -> Vec<PathBuf> {
+    files(root)
+        .into_iter()
+        .filter(|path| {
+            std::fs::read(path)
+                .is_ok_and(|bytes| bytes.windows(secret.len()).any(|window| window == secret))
+        })
+        .collect()
+}
+
+async fn serve_once(listener: &TcpListener, status: &str, body: &str) -> String {
+    let (mut stream, request) = loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let size = stream.read(&mut buffer).await.unwrap();
+            if size == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..size]);
+        }
+        if !request.is_empty() {
+            break (stream, request);
+        }
+    };
+    let reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(reply.as_bytes()).await.unwrap();
+    stream.shutdown().await.unwrap();
+    String::from_utf8(request).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let catalog = client.account_catalog().await.unwrap();
+    assert_eq!(catalog.len(), 7);
+    assert_eq!(catalog[0].methods[0].label, "Sign in with ChatGPT");
+    assert!(all_accounts(&client).await.is_empty());
+
+    let up = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_url = format!("http://127.0.0.1:{}/v1", up.local_addr().unwrap().port());
+    let down_url = format!("http://127.0.0.1:{}/v1", closed_port().await);
+
+    let chatgpt = client
+        .add_account(
+            draft(
+                Provider::Chatgpt,
+                SignInMethod::Subscription,
+                "Work ChatGPT",
+                None,
+                None,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (chatgpt.name.as_str(), chatgpt.status_label.as_str()),
+        ("Work ChatGPT", "Not signed in")
+    );
+    assert_eq!(chatgpt.method_label, "Sign in with ChatGPT");
+    assert_eq!(
+        (chatgpt.url.as_deref(), chatgpt.model.as_deref()),
+        (None, None)
+    );
+    let claude = client
+        .add_account(
+            draft(Provider::Claude, SignInMethod::Subscription, "", None, None),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (claude.name.as_str(), claude.status),
+        ("Claude", AccountStatus::NotSignedIn)
+    );
+    let local = client
+        .add_account(
+            draft(
+                Provider::Local,
+                SignInMethod::Url,
+                "Ollama",
+                Some(up_url.clone()),
+                Some("qwen2.5:0.5b"),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(local.status_label, "Signed in");
+    assert_eq!(local.url.as_deref(), Some(up_url.as_str()));
+    let gone = client
+        .add_account(
+            draft(
+                Provider::Local,
+                SignInMethod::Url,
+                "Old box",
+                Some(down_url),
+                Some("m"),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(gone.status_label, "Can't reach this URL");
+    let router = client
+        .add_account(
+            draft(
+                Provider::Openrouter,
+                SignInMethod::ApiKey,
+                "Router",
+                None,
+                Some("openai/gpt-4o"),
+            ),
+            key("sk-or-placeholder-1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(router.status_label, "Key saved");
+    assert_eq!(router.url.as_deref(), Some("https://openrouter.ai/api/v1"));
+    assert_eq!(
+        client
+            .add_account(
+                draft(
+                    Provider::Openrouter,
+                    SignInMethod::ApiKey,
+                    "No key",
+                    None,
+                    Some("m")
+                ),
+                None
+            )
+            .await
+            .unwrap_err()
+            .0,
+        "account_key_required"
+    );
+    assert_eq!(
+        client
+            .add_account(
+                draft(
+                    Provider::Local,
+                    SignInMethod::Url,
+                    "",
+                    Some("http://10.0.0.1:11434/v1".into()),
+                    Some("m")
+                ),
+                None
+            )
+            .await
+            .unwrap_err()
+            .0,
+        "account_local_url_required"
+    );
+
+    let listed = all_accounts(&client).await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|account| (account.name.as_str(), account.status_label.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Work ChatGPT", "Not signed in"),
+            ("Claude", "Not signed in"),
+            ("Ollama", "Signed in"),
+            ("Old box", "Can't reach this URL"),
+            ("Router", "Key saved"),
+        ]
+    );
+    let renamed = client
+        .rename_account(local.id.clone(), "  Home Ollama ".into())
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "Home Ollama");
+    assert_eq!(
+        client
+            .rename_account(local.id.clone(), "bad\u{202e}name".into())
+            .await
+            .unwrap_err()
+            .0,
+        "account_name_invalid"
+    );
+    client.remove_account(gone.id.clone()).await.unwrap();
+    assert_eq!(
+        client.remove_account(gone.id.clone()).await.unwrap_err().0,
+        "account_not_found"
+    );
+
+    let page = match client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("pool-read").unwrap(),
+            expected_revision: crazyagent::protocol::Cursor::new(0),
+            operation: OwnerOperation::Read {
+                query: OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 16,
+                },
+            },
+        })
+        .await
+        .unwrap()
+        .response
+    {
+        OwnerResponse::Read { state } => state,
+        other => panic!("owner read required: {other:?}"),
+    };
+    let OwnerData::ModelAccessPage { source_hash, .. } = page.data else {
+        panic!("model access page required")
+    };
+    let pooled = client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("pool-create").unwrap(),
+            expected_revision: page.revision,
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ModelAccess {
+                    expected_config_id: page.config_id,
+                    expected_source_hash: source_hash,
+                    edit: ModelAccessEdit::CreatePool {
+                        pool: AccountPool {
+                            id: CredentialRef::new("pool-one").unwrap(),
+                            members: vec![router.id.clone()],
+                            projects: vec![],
+                            roles: vec![],
+                            fallback_allowed: false,
+                            provider_quota_policy: ProviderQuotaPolicy::default(),
+                        },
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(pooled.response, OwnerResponse::Applied { ref operation } if operation.result == OwnerResult::Applied),
+        "{pooled:?}"
+    );
+    assert_eq!(
+        client
+            .remove_account(router.id.clone())
+            .await
+            .unwrap_err()
+            .0,
+        "account_in_pool"
+    );
+
+    let listed = all_accounts(&client).await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|account| account.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Work ChatGPT", "Claude", "Home Ollama", "Router"]
+    );
+    let saved = std::fs::read_to_string(&fixture.global).unwrap();
+    assert!(
+        saved.contains(chatgpt.id.as_str()),
+        "subscription accounts are routable for sign-in"
+    );
+    assert!(
+        saved.contains(router.id.as_str()),
+        "pooled accounts are routable"
+    );
+    assert!(!saved.contains(local.id.as_str()) && !saved.contains(gone.id.as_str()));
+    assert!(
+        !saved.contains("Home Ollama"),
+        "names stay in the account registry"
+    );
+    drop(up);
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let secret = format!("sk-local-{}", std::process::id());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Lab server",
+                Some(url.clone()),
+                Some("lab-model"),
+            ),
+            key(&secret),
+        )
+        .await
+        .unwrap();
+    assert_eq!(account.status_label, "Key saved");
+    assert!(!format!("{account:?}").contains(&secret));
+
+    let (request, checked) = tokio::join!(
+        serve_once(
+            &listener,
+            "200 OK",
+            r#"{"data":[{"id":"lab-model"},{"id":"other"}]}"#
+        ),
+        client.check_account(account.id.clone()),
+    );
+    let checked = checked.unwrap();
+    assert!(
+        request.starts_with("GET /v1/models HTTP/1.1\r\n"),
+        "{request}"
+    );
+    assert!(
+        request.contains(&format!("\r\nAuthorization: Bearer {secret}\r\n")),
+        "key must reach the request"
+    );
+    assert_eq!(checked.models, ["lab-model", "other"]);
+    assert_eq!(checked.account.status_label, "Key saved");
+    assert!(!format!("{checked:?}").contains(&secret));
+
+    let (_, rejected) = tokio::join!(
+        serve_once(&listener, "401 Unauthorized", r#"{"error":"bad key"}"#),
+        client.check_account(account.id.clone()),
+    );
+    assert_eq!(rejected.unwrap().account.status_label, "Not signed in");
+
+    let mut fixture = fixture;
+    fixture.restart().await;
+    let client = fixture.client().await;
+    let after = all_accounts(&client).await;
+    assert_eq!(
+        after[0].status_label, "Key saved",
+        "the saved key survives an engine restart"
+    );
+    let held = holders(fixture.root.path(), secret.as_bytes());
+    assert_eq!(
+        held.len(),
+        1,
+        "only the private key file may hold the key: {held:?}"
+    );
+    assert!(held[0].parent().unwrap().ends_with("account-keys"));
+    assert_eq!(
+        std::fs::metadata(&held[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(held[0].parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(
+        !std::fs::read_to_string(&fixture.global)
+            .unwrap()
+            .contains(&secret)
+    );
+
+    drop(listener);
+    let (_, unreachable) = tokio::join!(async {}, client.check_account(account.id.clone()));
+    assert_eq!(
+        unreachable.unwrap().account.status_label,
+        "Can't reach this URL"
+    );
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert!(
+        holders(fixture.root.path(), secret.as_bytes()).is_empty(),
+        "removing the account removes its key"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_model_discovery_reads_the_real_ollama() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let models = client
+        .local_models("http://127.0.0.1:11434/v1".into())
+        .await
+        .unwrap();
+    assert!(
+        models.iter().any(|model| model == "qwen2.5:0.5b"),
+        "real local ollama models: {models:?}"
+    );
+    assert_eq!(
+        client
+            .local_models("http://example.com:11434/v1".into())
+            .await
+            .unwrap_err()
+            .0,
+        "account_local_url_required"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_thousand_accounts_are_created_and_listed_within_bounds() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let url = format!("http://127.0.0.1:{}/v1", closed_port().await);
+    let created = Instant::now();
+    for index in 0..1000 {
+        client
+            .add_account(
+                draft(
+                    Provider::Local,
+                    SignInMethod::Url,
+                    &format!("Account {index}"),
+                    Some(url.clone()),
+                    Some("m"),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let creation = created.elapsed();
+    let listed = Instant::now();
+    let accounts = all_accounts(&client).await;
+    let listing = listed.elapsed();
+    eprintln!("created 1000 accounts in {creation:?}; listed them in {listing:?}");
+    assert_eq!(accounts.len(), 1000);
+    assert_eq!(accounts[0].name, "Account 0");
+    assert_eq!(accounts[999].name, "Account 999");
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| &account.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1000
+    );
+    assert!(
+        listing < Duration::from_secs(5),
+        "listing 1000 accounts took {listing:?}"
+    );
+    assert!(
+        creation < Duration::from_secs(120),
+        "creating 1000 accounts took {creation:?}"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_accounts_start_the_managed_sign_in_and_follow_its_phase() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let (_, identity) = OwnerClient::discover(
+        fixture.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    for (provider, method, name) in [
+        (
+            Provider::Claude,
+            NativeAuthMethod::ClaudeOfficial,
+            "Work Claude",
+        ),
+        (
+            Provider::Chatgpt,
+            NativeAuthMethod::CodexDeviceCode,
+            "Work ChatGPT",
+        ),
+    ] {
+        let account = client
+            .add_account(
+                draft(provider, SignInMethod::Subscription, name, None, None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status_label, "Not signed in");
+        let read = client
+            .request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: RequestId::new(format!("read-{}", account.id.as_str())).unwrap(),
+                expected_revision: Cursor::new(0),
+                operation: OwnerOperation::Read {
+                    query: OwnerRead::ModelAccessRecord {
+                        collection: ModelAccessCollection::Connections,
+                        id: account.id.clone(),
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let OwnerResponse::Read { state } = read.response else {
+            panic!("connection read required")
+        };
+        let OwnerData::ModelAccessRecord {
+            source_hash,
+            record: ModelAccessRecord::Connection { connection },
+            ..
+        } = state.data
+        else {
+            panic!("the account must be a config connection the sign-in can bind to")
+        };
+        let reply = client
+            .start_native_auth(NativeAuthStart {
+                request_id: RequestId::new(format!("start-{}", account.id.as_str())).unwrap(),
+                scope: NativeAuthScope {
+                    expected_database_instance: identity.database_instance().to_owned(),
+                    connection: account.id.clone(),
+                    expected_config_id: state.config_id,
+                    expected_source_hash: source_hash,
+                },
+                method,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.fact.binding.connection, connection);
+        assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
+        let listed = all_accounts(&client).await;
+        let shown = listed
+            .iter()
+            .find(|listed| listed.id == account.id)
+            .unwrap();
+        assert_eq!(shown.name, name);
+        assert_eq!(shown.status_label, "Not signed in");
+    }
+    fixture.stop().await;
+}
