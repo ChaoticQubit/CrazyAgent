@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
 import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
-import { failureCopy, loadProjectMemories, receiptState, retryResearch } from "../../api-projects";
+import { failureCopy, loadProjectMemories, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -11,7 +11,7 @@ import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, changeOutcome, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -51,13 +51,10 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
-    const result = await retryResearch(data.id, job.id, nextGeneration());
+    const outcome = changeOutcome(await retryResearch(data.id, job.id, nextGeneration()), `${displayText(job.kind_label)} is queued again.`, "trying research again");
     setRetrying(null);
-    if (result.kind === "not_ready") return data.notify("Not ready yet: trying research again isn't in this build.");
-    if (result.kind === "error") return data.notify(failureCopy(result.code));
-    const state = receiptState(result.value);
-    if (state.kind === "rejected") return data.notify(failureCopy(state.code));
-    data.reload();
+    data.notify(outcome.toast || outcome.note);
+    if (outcome.reload) data.reload();
   }
   return <div className="pj-overview">
     <div className="pj-stack">
