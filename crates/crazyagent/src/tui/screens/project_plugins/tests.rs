@@ -405,6 +405,95 @@ fn a_and_m_ask_the_host_for_the_project_add_forms() {
 }
 
 #[test]
+fn only_this_projects_own_items_are_removed_here_after_asking() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Char('d')));
+    assert_eq!(view.removing, None);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "frontend-design is for every project. Switch it off here, or remove it in Settings."
+        ))
+    );
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+    }
+    assert!(frame(&view, 120, 36).last().unwrap().contains("d Remove"));
+    view.key(press(KeyCode::Char('d')));
+    assert_eq!(view.removing.as_deref(), Some("pl0xtidepool-style"));
+    let narrow = frame(&view, 80, 24);
+    assert!(find(&narrow, "Remove tidepool-style?").contains("y Remove"));
+    assert!(narrow.iter().any(|row| row.contains("Your folder stays.")));
+    assert!(narrow.last().unwrap().contains("n Keep"));
+    assert!(matches!(
+        view.key(press(KeyCode::Char(' '))),
+        PluginsReply::Handled
+    ));
+    assert!(!view.busy(), "the question keeps every key");
+    view.key(press(KeyCode::Char('n')));
+    assert_eq!(view.removing, None);
+    view.key(press(KeyCode::Char('d')));
+    let change = sent(view.key(press(KeyCode::Char('y'))));
+    assert!(matches!(
+        change,
+        PluginChange::RemoveSkill { ref id } if id == "pl0xtidepool-style"
+    ));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(view.notice, Some(Notice::plain("Removed tidepool-style.")));
+
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Char('d')));
+    assert!(
+        frame(&view, 80, 24)
+            .iter()
+            .any(|row| row.contains("Its saved secrets are deleted."))
+    );
+    let change = sent(view.key(press(KeyCode::Char('y'))));
+    assert!(matches!(
+        change,
+        PluginChange::RemoveServer { ref id } if id == "pl0xpostgres"
+    ));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Removed postgres and its secrets."))
+    );
+}
+
+#[test]
+fn e_edits_only_this_projects_own_servers() {
+    let mut view = loaded();
+    assert!(
+        matches!(view.key(press(KeyCode::Char('e'))), PluginsReply::Ignored),
+        "a skill has no edit page"
+    );
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    assert!(matches!(
+        view.key(press(KeyCode::Char('e'))),
+        PluginsReply::Handled
+    ));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "github is for every project. Change it in Settings, Plugins and skills."
+        ))
+    );
+    view.key(press(KeyCode::Down));
+    match view.key(press(KeyCode::Char('e'))) {
+        PluginsReply::Edit(server) => {
+            assert_eq!(server.id, "pl0xpostgres");
+            assert_eq!(server.runs, LONG_RUNS);
+        }
+        other => panic!("the edit page expected, got {other:?}"),
+    }
+}
+
+#[test]
 fn long_lists_scroll_with_the_cursor() {
     let mut view = ProjectPlugins::new(project());
     view.next_job();

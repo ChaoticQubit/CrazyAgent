@@ -16,8 +16,9 @@ const PANEL_TEXT_LINES: usize = 2;
 
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
-/// to queue, whose reply comes back through `apply`; AddSkill and AddServer
-/// ask the host to open the add form for this project.
+/// to queue, whose reply comes back through `apply`; AddSkill, AddServer and
+/// Edit ask the host to open the add form or the server's edit page for this
+/// project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -25,6 +26,7 @@ pub(in crate::tui) enum PluginsReply {
     Send(SettingsJob),
     AddSkill,
     AddServer,
+    Edit(Box<ServerView>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub(in crate::tui) struct ProjectPlugins {
     pub loaded: bool,
     pub cursor: usize,
     pub confirm: Option<String>,
+    pub removing: Option<String>,
     pub notice: Option<Notice>,
     waiting: bool,
     stale: bool,
@@ -61,6 +64,7 @@ impl ProjectPlugins {
             loaded: false,
             cursor: 0,
             confirm: None,
+            removing: None,
             notice: None,
             waiting: false,
             stale: true,
@@ -171,18 +175,67 @@ impl ProjectPlugins {
             .find(|server| server.id == id && server.status == ServerStatus::WaitingForApproval)
     }
 
+    fn chosen(&self) -> Option<(String, String, bool)> {
+        let (id, name, scope) = match self.item()? {
+            Item::Skill(index) => {
+                let skill = &self.skills[index];
+                (&skill.id, &skill.name, &skill.scope)
+            }
+            Item::Server(index) => {
+                let server = &self.servers[index];
+                (&server.id, &server.name, &server.scope)
+            }
+        };
+        Some((id.clone(), name.clone(), *scope == Scope::Global))
+    }
+
+    fn removed(&self) -> Option<(&str, bool)> {
+        self.local(self.removing.as_deref()?)
+    }
+
+    fn local(&self, id: &str) -> Option<(&str, bool)> {
+        let local = |scope: &Scope| *scope != Scope::Global;
+        self.skills
+            .iter()
+            .find(|skill| skill.id == id && local(&skill.scope))
+            .map(|skill| (skill.name.as_str(), true))
+            .or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|server| server.id == id && local(&server.scope))
+                    .map(|server| (server.name.as_str(), false))
+            })
+    }
+
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.count().saturating_sub(1));
         if self.confirm.is_some() && self.asking().is_none() {
             self.confirm = None;
         }
+        if self.removing.is_some() && self.removed().is_none() {
+            self.removing = None;
+        }
     }
 
     /// Handles one key: move, switch the chosen item on or off for this project,
-    /// or approve a server after showing exactly what it runs.
+    /// approve a server after showing exactly what it runs, or edit or remove
+    /// one of this project's own items.
     /// Takes the key event. Returns what the host should do next; Enter on an
     /// item that needs no approval is left to the host.
     pub fn key(&mut self, key: KeyEvent) -> PluginsReply {
+        if let Some(id) = self.removing.clone() {
+            return match key.code {
+                KeyCode::Char('y') => {
+                    self.removing = None;
+                    self.remove(&id)
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.removing = None;
+                    PluginsReply::Handled
+                }
+                _ => PluginsReply::Handled,
+            };
+        }
         if let Some(id) = self.confirm.clone() {
             return match key.code {
                 KeyCode::Char('y') => {
@@ -208,6 +261,8 @@ impl ProjectPlugins {
             KeyCode::Char(' ') => self.toggle(),
             KeyCode::Char('a') => PluginsReply::AddSkill,
             KeyCode::Char('m') => PluginsReply::AddServer,
+            KeyCode::Char('d') => self.ask_remove(),
+            KeyCode::Char('e') => self.edit(),
             KeyCode::Enter => match self.item() {
                 Some(Item::Server(index))
                     if self.servers[index].status == ServerStatus::WaitingForApproval =>
@@ -295,6 +350,56 @@ impl ProjectPlugins {
         };
         self.changing = Some(done);
         PluginsReply::Send(SettingsJob::Plugin(change))
+    }
+
+    fn ask_remove(&mut self) -> PluginsReply {
+        let Some((id, name, global)) = self.chosen() else {
+            return PluginsReply::Handled;
+        };
+        if global {
+            self.notice = Some(Notice::plain(format!(
+                "{name} is for every project. Switch it off here, or remove it in Settings."
+            )));
+        } else {
+            self.removing = Some(id);
+        }
+        PluginsReply::Handled
+    }
+
+    fn remove(&mut self, id: &str) -> PluginsReply {
+        if self.still_saving() {
+            return PluginsReply::Handled;
+        }
+        let Some((name, skill)) = self.local(id).map(|(name, skill)| (name.to_owned(), skill))
+        else {
+            return PluginsReply::Handled;
+        };
+        let id = id.to_owned();
+        let (change, done) = if skill {
+            (PluginChange::RemoveSkill { id }, format!("Removed {name}."))
+        } else {
+            (
+                PluginChange::RemoveServer { id },
+                format!("Removed {name} and its secrets."),
+            )
+        };
+        self.changing = Some(done);
+        PluginsReply::Send(SettingsJob::Plugin(change))
+    }
+
+    fn edit(&mut self) -> PluginsReply {
+        let Some(Item::Server(index)) = self.item() else {
+            return PluginsReply::Ignored;
+        };
+        let server = &self.servers[index];
+        if server.scope == Scope::Global {
+            self.notice = Some(Notice::plain(format!(
+                "{} is for every project. Change it in Settings, Plugins and skills.",
+                server.name
+            )));
+            return PluginsReply::Handled;
+        }
+        PluginsReply::Edit(Box::new(server.clone()))
     }
 
     fn approve(&mut self, id: &str) -> PluginsReply {
@@ -487,6 +592,23 @@ impl ProjectPlugins {
     }
 
     fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
+        if let Some((name, skill)) = self.removed() {
+            return vec![
+                Row::of(format!("Remove {name}?"), look.warning)
+                    .push("   y", look.heading)
+                    .push(" Remove   ", look.fg)
+                    .push("n", look.heading)
+                    .push(" Keep", look.fg),
+                Row::of(
+                    if skill {
+                        "Agents in this project stop getting it. Your folder stays."
+                    } else {
+                        "Agents in this project lose its tools. Its saved secrets are deleted."
+                    },
+                    look.muted,
+                ),
+            ];
+        }
         let Some(server) = self.asking() else {
             return self.notice.iter().map(|notice| notice.row(look)).collect();
         };
@@ -513,18 +635,27 @@ impl ProjectPlugins {
         if self.confirm.is_some() {
             return vec![("y", "Approve"), ("n", "Not now")];
         }
-        let mut help = vec![
-            ("\u{2191}\u{2193}", "Move"),
-            ("Space", "On or off here"),
-            ("a", "Add skill"),
-            ("m", "Add MCP server"),
-        ];
+        if self.removing.is_some() {
+            return vec![("y", "Remove"), ("n", "Keep")];
+        }
+        let mut help = vec![("\u{2191}\u{2193}", "Move"), ("Space", "On or off here")];
         if let Some(Item::Server(index)) = self.item()
             && self.servers[index].status == ServerStatus::WaitingForApproval
         {
             help.push(("Enter", "Approve"));
         }
-        help.extend([TABS, ("Esc", "Home")]);
+        if let Some((_, _, false)) = self.chosen() {
+            if matches!(self.item(), Some(Item::Server(_))) {
+                help.push(("e", "Edit"));
+            }
+            help.push(("d", "Remove"));
+        }
+        help.extend([
+            ("a", "Add skill"),
+            ("m", "Add MCP server"),
+            TABS,
+            ("Esc", "Home"),
+        ]);
         help
     }
 }
