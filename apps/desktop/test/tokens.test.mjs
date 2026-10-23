@@ -39,6 +39,7 @@ const graphics = [
   ["border-input", ["bg", "surface", "surface-2"]],
   ["focus", ["bg", "surface", "surface-2"]],
   ["accent", ["bg", "surface", "surface-2"]],
+  ["brand", ["bg", "surface", "surface-2"]],
 ];
 
 for (const [theme, selector] of [["light", ":root"], ["dark", ':root[data-theme="dark"]']]) {
@@ -72,6 +73,8 @@ test("brand colors and fonts live in tokens: the brand vermilion, bone and charc
   assert.equal(block(":root").accent, "#e5482d");
   assert.equal(block(':root[data-theme="dark"]').bg, "#161513");
   assert.equal(block(':root[data-theme="dark"]').accent, "#ff6a45");
+  assert.equal(block(":root").brand, "#e5482d", "the mark squares use the exact brand vermilion");
+  assert.equal(block(':root[data-theme="dark"]').brand, "#ff6a45");
   assert.match(block(":root").font, /^"Instrument Sans"/);
   assert.match(block(":root").mono, /^"JetBrains Mono"/);
   const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
