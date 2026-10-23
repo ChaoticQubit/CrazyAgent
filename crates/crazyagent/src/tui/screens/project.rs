@@ -131,16 +131,26 @@ pub(in crate::tui) struct Message {
 
 /// The master's status word in the conversation header.
 /// Uses the status words of DESIGN.md section 2.
-/// NotReady is shown until the engine reports the master.
+/// NotReady is shown until the engine reports the master; Thinking carries the start time when the engine knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum MasterStatus {
     Ready,
-    Thinking { since_ms: i64 },
+    Thinking { since_ms: Option<i64> },
     Replied,
+    NeedsYou,
     NeedsPool,
     NotSignedIn,
     Stopped,
     NotReady,
+}
+
+impl MasterStatus {
+    /// Says whether the last turn stopped and r can try it again.
+    /// Takes the status.
+    /// Returns true for Stopped and Not signed in.
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Stopped | Self::NotSignedIn)
+    }
 }
 
 /// The master conversation the Conversation tab draws.
@@ -668,7 +678,7 @@ impl ProjectScreen {
                 if self
                     .transcript
                     .as_ref()
-                    .is_some_and(|t| t.status == MasterStatus::Stopped) =>
+                    .is_some_and(|t| t.status.retryable()) =>
             {
                 ProjectReply::Retry
             }

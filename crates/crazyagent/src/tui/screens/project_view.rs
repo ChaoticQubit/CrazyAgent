@@ -544,7 +544,12 @@ fn transcript_lines(transcript: &Transcript, content: usize, now_ms: i64, look: 
         lines.push(
             Row::of(SPINNER, look.running)
                 .push(" Thinking...", look.fg)
-                .push(format!("  {}", duration(now_ms - since_ms)), look.muted),
+                .push(
+                    since_ms
+                        .map(|since| format!("  {}", duration(now_ms - since)))
+                        .unwrap_or_default(),
+                    look.muted,
+                ),
         );
     } else if lines.last().is_some_and(|line| line.width() == 0) {
         lines.pop();
@@ -579,6 +584,7 @@ fn master_status(status: &MasterStatus, look: &Look) -> Row {
         MasterStatus::Replied => {
             Row::of(format!("{} Replied", look.glyph("\u{2713}")), look.success)
         }
+        MasterStatus::NeedsYou => Row::of("! Needs you", look.warning),
         MasterStatus::NeedsPool => Row::of("! Needs a pool", look.warning),
         MasterStatus::NotSignedIn => Row::of("! Not signed in", look.warning),
         MasterStatus::Stopped => Row::of(format!("{} Stopped", look.glyph("\u{2298}")), look.error),
@@ -654,7 +660,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
             transcript_lines(transcript, content, screen.now_ms, look)
         };
         let empty = transcript.messages.is_empty();
-        let help = if transcript.status == MasterStatus::Stopped {
+        let help = if transcript.status.retryable() {
             vec![
                 ("r", "Try again"),
                 ("Tab", "To input"),
