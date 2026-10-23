@@ -6,7 +6,7 @@ import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { activity, ago, memoryGroups, researchRow, suggestedLine, tildePath } from "./research";
+import { activity, ago, memoryGroups, researchRow, suggestedLine, tildePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -39,7 +39,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   return <div className="pj-overview">
     <div className="pj-stack">
       {(waiting || suggested > 0) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
-        {waiting && <div className="pj-need"><span>Research is waiting for a pool.</span>
+        {waiting && <div className="pj-need"><span>{displayText(waitingLine(jobs))}</span>
           <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>}
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}

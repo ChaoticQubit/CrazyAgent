@@ -50,7 +50,7 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
     case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
-    case "needs_pool": return { ...base, status: "Needs a pool", tone: "warn", progress: "Waiting for a pool" };
+    case "needs_pool": return { ...base, status: "Needs a pool", tone: "warn", progress: job.error?.trim() || "Waiting for a pool" };
     case "running": return {
       ...base, status: "Running", tone: "info", elapsed: ran, active: true,
       progress: job.cancel_requested ? "Stopping" : job.output_bytes > 0 ? `Writing report, ${formatBytes(job.output_bytes)} so far` : "Working",
@@ -61,10 +61,19 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   }
 }
 
-/** Tells whether research can still change on its own, so the page keeps polling.
- * Input: the jobs. Output: true while one is queued or running. */
+/** Tells whether research can still change on its own, so the page keeps polling. A job
+ * waiting for a pool resumes once the engine finds a usable account.
+ * Input: the jobs. Output: true while one is queued, running or waiting for a pool. */
 export function shouldPoll(jobs: ResearchJob[]): boolean {
-  return jobs.some((job) => job.status === "queued" || job.status === "running");
+  return jobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "needs_pool");
+}
+
+/** Builds the Needs you line for research that waits on its pool, using the engine's reason
+ * when a waiting job carries one. Input: the jobs. Output: one sentence. */
+export function waitingLine(jobs: ResearchJob[]): string {
+  const reason = jobs.find((job) => job.status === "needs_pool" && job.error?.trim())?.error?.trim();
+  if (!reason) return "Research is waiting for a pool.";
+  return `Research is waiting: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
 }
 
 /** Builds the Recent activity list from real job times.

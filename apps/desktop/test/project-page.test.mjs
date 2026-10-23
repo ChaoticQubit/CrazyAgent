@@ -25,6 +25,9 @@ test("research rows use the fixed status words and only real progress", () => {
   const now = 1_000 + 18 * 60_000;
   assert.deepEqual(research.researchRow(job("queued"), now), { title: "Market research", status: "Queued", tone: "neutral", progress: "Waiting to start", elapsed: "", report: false, active: true });
   assert.deepEqual(research.researchRow(job("needs_pool"), now), { title: "Market research", status: "Needs a pool", tone: "warn", progress: "Waiting for a pool", elapsed: "", report: false, active: false });
+  assert.deepEqual(research.researchRow(job("needs_pool", { error: "No account in this project's pool can run this research" }), now),
+    { title: "Market research", status: "Needs a pool", tone: "warn", progress: "No account in this project's pool can run this research", elapsed: "", report: false, active: false });
+  assert.equal(research.researchRow(job("needs_pool", { error: "  " }), now).progress, "Waiting for a pool");
   assert.deepEqual(research.researchRow(job("running", { started_ms: 1_000, output_bytes: 2048 }), now),
     { title: "Market research", status: "Running", tone: "info", progress: "Writing report, 2 KB so far", elapsed: "18 min", report: false, active: true });
   assert.equal(research.researchRow(job("running", { started_ms: 1_000 }), now).progress, "Working");
@@ -41,7 +44,8 @@ test("research polling continues only while something can still change", () => {
   assert.equal(research.shouldPoll([job("done"), job("failed")]), false);
   assert.equal(research.shouldPoll([job("done"), job("running")]), true);
   assert.equal(research.shouldPoll([job("queued")]), true);
-  assert.equal(research.shouldPoll([job("needs_pool")]), false);
+  assert.equal(research.shouldPoll([job("needs_pool")]), true);
+  assert.equal(research.shouldPoll([job("cancelled"), job("done")]), false);
   assert.equal(research.shouldPoll([]), false);
 });
 
@@ -180,4 +184,12 @@ test("deleting a context file uses the engine path and never the brief", () => {
 test("the Needs you line for suggested memories counts them in plain words", () => {
   assert.equal(research.suggestedLine(1), "1 suggested memory waits for you to save or dismiss it.");
   assert.equal(research.suggestedLine(3), "3 suggested memories wait for you to save or dismiss them.");
+});
+
+test("the Needs you line for waiting research uses the engine's reason when it gives one", () => {
+  assert.equal(research.waitingLine([job("needs_pool")]), "Research is waiting for a pool.");
+  assert.equal(research.waitingLine([]), "Research is waiting for a pool.");
+  assert.equal(research.waitingLine([job("done"), job("needs_pool", { error: "No account in this project's pool can run this research" })]),
+    "Research is waiting: No account in this project's pool can run this research.");
+  assert.equal(research.waitingLine([job("needs_pool", { error: "Needs a pool." })]), "Research is waiting: Needs a pool.");
 });
