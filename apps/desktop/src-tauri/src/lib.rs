@@ -13,6 +13,7 @@ use bridge::picker::Pick;
 use bridge::project_setup::MemoryItem;
 use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
+use crazyagent::agents::AgentView;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::engine::owner::{
@@ -868,6 +869,46 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_agents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<AgentView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.agents(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_stop_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AgentView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.stop_agent(id).await
+}
+
+#[tauri::command]
+async fn desktop_interrupt_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.interrupt_agent(id).await
+}
+
+#[tauri::command]
+async fn desktop_restart_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AgentView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.restart_agent(id).await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
     Ok(match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
@@ -1096,6 +1137,10 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_agents,
+            desktop_stop_agent,
+            desktop_interrupt_agent,
+            desktop_restart_agent,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,
