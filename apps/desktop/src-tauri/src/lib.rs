@@ -10,6 +10,7 @@ use bridge::{
     ProjectPage,
 };
 use bridge::project_setup::MemoryItem;
+use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::harnesses::HarnessEntry;
@@ -18,10 +19,12 @@ use crazyagent::engine::owner::{
     NativeAuthMethod,
 };
 use crazyagent::memory::ReviewDecision;
+use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::owner_profile::OwnerProfile;
+use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
@@ -269,6 +272,109 @@ async fn desktop_review_memory(
     main_window(&window)?;
     lock(&state)?
         .review_memory(&id, &memory, version, decision, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: Option<String>,
+    search: Option<String>,
+    before: Option<u64>,
+) -> Result<MemoryList, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .memories(project.as_deref(), search.as_deref(), before)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Option<MemoryNote>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.memory(&id).await
+}
+
+#[tauri::command]
+async fn desktop_approved_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<ApprovedMemories, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.approved_memories(&project).await
+}
+
+#[tauri::command]
+async fn desktop_add_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: Option<String>,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_memory(project.as_deref(), text, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_promote_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    memory: String,
+    version: u64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .promote_memory(&project, &memory, version, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_delete_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.delete_memory(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_forget_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    memory: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .forget_memory(&project, &memory, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_remember_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    research: ResearchKind,
+    section: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .remember_research(&project, research, section, generation)
         .await
 }
 
@@ -598,6 +704,169 @@ async fn desktop_local_models(
 }
 
 #[tauri::command]
+async fn desktop_plugin_skills(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<SkillView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_skills(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_plugin_servers(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<ServerView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_servers(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_add_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    folder: String,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_skill(scope, folder).await
+}
+
+#[tauri::command]
+async fn desktop_set_skill_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_skill_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_skill(id).await
+}
+
+#[tauri::command]
+async fn desktop_add_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    name: String,
+    spec: ServerSpec,
+    secrets: Vec<(String, String)>,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_mcp_server(scope, name, spec, secrets).await
+}
+
+#[tauri::command]
+async fn desktop_update_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.update_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_approve_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.approve_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_server_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_server_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_switch_plugin(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    on: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.switch_plugin(project_id, id, on).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+    value: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_secret(id, name, value).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_secret(id, name).await
+}
+
+#[tauri::command]
+async fn desktop_check_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.check_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_project_plugins(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<EffectivePlugins, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_plugins(project_id).await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -720,6 +989,14 @@ pub fn run() {
             desktop_delete_project_context,
             desktop_project_memories,
             desktop_review_memory,
+            desktop_memories,
+            desktop_memory,
+            desktop_approved_memories,
+            desktop_add_memory,
+            desktop_promote_memory,
+            desktop_delete_memory,
+            desktop_forget_memory,
+            desktop_remember_research,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
@@ -755,6 +1032,21 @@ pub fn run() {
             desktop_remove_account,
             desktop_check_account,
             desktop_local_models,
+            desktop_plugin_skills,
+            desktop_plugin_servers,
+            desktop_add_skill,
+            desktop_set_skill_enabled,
+            desktop_remove_skill,
+            desktop_add_mcp_server,
+            desktop_update_mcp_server,
+            desktop_approve_mcp_server,
+            desktop_set_mcp_server_enabled,
+            desktop_remove_mcp_server,
+            desktop_switch_plugin,
+            desktop_set_mcp_secret,
+            desktop_remove_mcp_secret,
+            desktop_check_mcp_server,
+            desktop_project_plugins,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
