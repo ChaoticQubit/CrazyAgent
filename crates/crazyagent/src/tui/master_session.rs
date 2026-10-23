@@ -1644,7 +1644,7 @@ fn backend_matches(backend: MasterBackend, connection: &ModelConnection) -> bool
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
         MasterBackend::Claude => {
-            connection.harness.as_str() == "claude-code"
+            matches!(connection.harness.as_str(), "claude" | "claude-code")
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }

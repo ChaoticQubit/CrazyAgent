@@ -395,7 +395,7 @@ pub(crate) fn validate_selection(
                         && matches!(connection.endpoint, ModelEndpoint::Native {})
                 }
                 MasterBackend::Claude => {
-                    connection.harness.as_str() == "claude-code"
+                    matches!(connection.harness.as_str(), "claude" | "claude-code")
                         && connection.protocol.as_str() == "native"
                         && matches!(connection.endpoint, ModelEndpoint::Native {})
                 }
