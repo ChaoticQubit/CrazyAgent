@@ -21,6 +21,7 @@ use std::time::Duration;
 const MASTER_READ_ATTEMPTS: u32 = 4;
 
 mod account_profile;
+pub(super) mod accounts;
 mod claude_code;
 mod project_setup;
 mod shell;
@@ -36,6 +37,7 @@ enum WorkerMode {
 }
 
 enum Job {
+    Accounts(Box<accounts::AccountsRequest>),
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect,
@@ -147,6 +149,7 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
+    Accounts(Box<accounts::AccountsEvent>),
     Master(Box<master_session::Event>),
     Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
@@ -301,6 +304,21 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Accounts(request) => {
+                            let native = native
+                                .as_mut()
+                                .expect("accounts require paired configuration");
+                            let event = runtime.block_on(native.accounts(*request));
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Accounts(Box::new(event)),
                                 })
                                 .is_err()
                             {

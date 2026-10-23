@@ -35,6 +35,7 @@ impl CodexHost {
         action: NativeAction,
         account_ref: CredentialRef,
         budget: ResourceBudget,
+        instructions: &str,
     ) -> Result<Self, EngineError> {
         let protocol = CodexHostProtocol::new(action, account_ref)?;
         let (command, cwd) = prepare_command(command, &profile)?;
@@ -50,7 +51,7 @@ impl CodexHost {
         let bytes = host.protocol.initialize()?;
         host.process.send(&bytes).await?;
         host.wait_for(State::Ready).await?;
-        let bytes = host.protocol.start_thread(&cwd)?;
+        let bytes = host.protocol.start_instructed_thread(&cwd, instructions)?;
         host.process.send(&bytes).await?;
         host.wait_for(State::Idle).await?;
         Ok(host)

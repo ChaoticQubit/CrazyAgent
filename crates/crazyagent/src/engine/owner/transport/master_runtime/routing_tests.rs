@@ -576,7 +576,7 @@ fn unallocated(turn: &MasterTurnView, phase: MasterTurnPhase, reason: Option<Mas
 }
 
 #[tokio::test]
-async fn claude_drive_persists_unsupported_without_preparation_attempt_or_runtime() {
+async fn claude_drive_runs_the_native_readiness_checks_without_preparation_attempt_or_runtime() {
     let case = Fixture::new(MasterBackend::Claude, false).await;
     let before = case.snapshot();
     assert!(!case.repository.exists());
@@ -585,7 +585,7 @@ async fn claude_drive_persists_unsupported_without_preparation_attempt_or_runtim
     unallocated(
         &returned,
         MasterTurnPhase::Blocked,
-        Some(MasterReason::UnsupportedCapability),
+        Some(MasterReason::ConnectionChanged),
     );
     assert_eq!(returned.id, case.turn.id);
     assert_eq!(returned.session_id, case.turn.session_id);
@@ -630,13 +630,13 @@ async fn codex_subscription_master_is_not_blocked_as_an_unsupported_backend() {
 }
 
 #[tokio::test]
-async fn unsupported_drive_replay_returns_the_same_persisted_view_without_new_work() {
+async fn blocked_drive_replay_returns_the_same_persisted_view_without_new_work() {
     let case = Fixture::new(MasterBackend::Claude, false).await;
     let blocked = case.drive().await.unwrap();
     unallocated(
         &blocked,
         MasterTurnPhase::Blocked,
-        Some(MasterReason::UnsupportedCapability),
+        Some(MasterReason::ConnectionChanged),
     );
     let before = case.snapshot();
     assert_eq!(case.drive().await.unwrap(), blocked);
@@ -875,5 +875,51 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     drop(custody);
     drop(prepared);
     case.cancel().await;
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    case.cancel().await;
+    let revision = Fixture::read_owner(&case.owner, OwnerRead::Capabilities)
+        .await
+        .revision
+        .value();
+    let second = request(
+        "routing-second-turn",
+        revision,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: case.session.project_id.clone(),
+                    session_id: case.session.session_id.clone(),
+                    text: "Describe this project again without using tools.".into(),
+                },
+            },
+        },
+    );
+    applied(&Fixture::commit_owner(&case.service, &case.owner, &second).await);
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: second.request_id.clone(),
+        })
+        .await
+        .unwrap();
+    match result {
+        MasterRuntimeResult::Prepared(prepared) => {
+            assert_eq!(prepared.session.current_turn.as_ref(), Some(&second.request_id));
+            assert!(prepared.attempt.request.previous_attempt.is_none());
+            assert_eq!(prepared.attempt.connection.account_ref, reference("local-account"));
+        }
+        MasterRuntimeResult::Turn(turn) => {
+            panic!("second RCLI turn was not admitted: {:?} {:?}", turn.phase, turn.reason)
+        }
+        _ => panic!("actual RCLI preparation returned an unexpected result"),
+    }
     case.finish().await;
 }

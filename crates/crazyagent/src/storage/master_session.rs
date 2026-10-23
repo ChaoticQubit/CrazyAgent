@@ -56,6 +56,7 @@ pub(crate) enum MasterRuntimeObservation {
 
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
+    pub(crate) instructions: String,
     pub(crate) session: MasterSessionView,
     pub(crate) attempt: Attempt,
     pub(crate) profile: PreparedNativeProfile,
@@ -545,8 +546,9 @@ fn preparation(
     let attempt = turn.attempt.as_ref().ok_or_else(|| error("master_attempt_missing"))?;
     if record.attempt_id != attempt.request.id
         || record.auth.binding().connection != attempt.connection
-        || record.auth.binding().config_id != session.config_id
-        || record.auth.binding().source_hash != session.source_hash
+        || matches!(record.auth, MasterBootstrapAuth::RcliConfigured(_))
+            && (record.auth.binding().config_id != session.config_id
+                || record.auth.binding().source_hash != session.source_hash)
         || record.lease.project_id != session.project_id
         || record.lease.task_id != session.bootstrap_task_id
         || record.lease.owner_session != session.session_id
@@ -943,7 +945,6 @@ pub(super) fn validate_bootstrap_auth(
                 | NativeAuthPhase::Uncertain => return Err(error("master_bootstrap_authentication_stale")),
             }
             if !matches!(fact.action, NativeAuthAction::SignIn { .. })
-                || fact.binding.config_id != session.config_id || fact.binding.source_hash != session.source_hash
                 || fact.binding.engine_epoch != session.owner.engine_epoch
                 || fact.binding.at_revision.value() > owner_revision(tx)?
                 || fact.binding.connection.account_ref != session.selection.route.account_ref
@@ -999,9 +1000,7 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
     {
         return Err(error("gateway_initial_authentication_stale"));
     }
-    let first: Option<String> = tx.query_row("SELECT id FROM master_turns WHERE session=?1 AND ordinal=1",
-        [session.session_id.as_str()], |row| row.get(0)).optional().map_err(error)?;
-    let turn_id = RequestId::new(first.ok_or_else(|| error("master_turn_missing"))?).map_err(error)?;
+    let turn_id = session.current_turn.clone().ok_or_else(|| error("master_turn_missing"))?;
     let turn = load_turn(tx, &session, &turn_id, owner_revision(tx)?)?.ok_or_else(|| error("master_turn_missing"))?;
     let replay = model_gateway::read_attempt(tx, &request.id)?;
     let valid = match replay {
@@ -1012,7 +1011,7 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         None => turn.phase == MasterTurnPhase::Queued && turn.attempt.is_none()
             && session.current_turn.as_ref() == Some(&turn.id),
     };
-    if turn.ordinal != 1 || !valid {
+    if !valid {
         return Err(error("gateway_initial_authentication_stale"));
     }
     let prior: bool = tx.query_row(
@@ -1100,13 +1099,10 @@ fn current_auth(
         || start.request_id != fact.operation_id
         || start.scope.expected_database_instance != host.db_instance
         || start.scope.connection != connection.id
-        || start.scope.expected_config_id != session.config_id
-        || start.scope.expected_source_hash != session.source_hash
         || fact.binding.database_instance != host.db_instance
         || fact.binding.engine_epoch != host.engine_epoch
         || fact.binding.connection != *connection
-        || fact.binding.config_id != session.config_id
-        || fact.binding.source_hash != session.source_hash
+        || fact.binding.connection.account_ref != session.selection.route.account_ref
         || fact.binding.at_revision.value() > owner_revision(tx)?
     {
         return Err(error("master_authentication_stale"));
@@ -1235,8 +1231,16 @@ fn bundle(
 ) -> Result<MasterRuntimeResult, EngineError> {
     let record = preparation(tx, &session, turn)?;
     let attempt = turn.attempt.clone().ok_or_else(|| error("master_attempt_missing"))?;
+    let instructions = match session.selection.backend {
+        MasterBackend::Rcli => String::new(),
+        MasterBackend::Codex | MasterBackend::Claude => {
+            crate::launch_context::for_master(tx, &session.project_id)
+                .map_err(|problem| EngineError(problem.0))?
+        }
+    };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
+        instructions,
         session,
         attempt,
         profile: PreparedNativeProfile::from_binding(record.auth.binding()),
@@ -1283,24 +1287,6 @@ fn verify_preparation(
     Ok(record)
 }
 
-fn block_unsupported_backend(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    session: &mut MasterSessionView,
-    turn: &mut MasterTurnView,
-) -> Result<bool, EngineError> {
-    if session.selection.backend != MasterBackend::Claude || !turn.phase.outstanding() {
-        return Ok(false);
-    }
-    if turn.phase != MasterTurnPhase::Queued {
-        return Err(error("master_runtime_backend_unsupported"));
-    }
-    turn.phase = MasterTurnPhase::Blocked;
-    turn.reason = Some(MasterReason::UnsupportedCapability);
-    persist_runtime(tx, config, session, turn)?;
-    Ok(true)
-}
-
 /// Blocks a queued turn that cannot run until the owner acts: no current
 /// sign-in, or a master opened before the settings or engine changed.
 /// Input: the failure that stopped the turn. Output: true when the turn was
@@ -1337,9 +1323,6 @@ fn prepare_turn(
     turn: &mut MasterTurnView,
 ) -> Result<MasterRuntimeResult, EngineError> {
     current_scope(tx, config, sources, host, session, turn)?;
-    if block_unsupported_backend(tx, config, session, turn)? {
-        return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
-    }
     if turn.phase == MasterTurnPhase::Prepared {
         verify_preparation(tx, config, host, session, turn)?;
         if !preflight_turn(tx, config, session, turn)? {
@@ -1373,8 +1356,9 @@ fn prepare_turn(
         route: session.selection.route.clone(),
         previous_attempt: None,
     };
+    let first_admission = !gateway_attempted(tx, session)?;
     tx.execute_batch("SAVEPOINT master_admission").map_err(error)?;
-    let admitted = if turn.ordinal == 1 && request.route.required_capabilities.is_empty() {
+    let admitted = if first_admission && request.route.required_capabilities.is_empty() {
         match &auth {
             MasterBootstrapAuth::NativeSignIn(fact) => model_gateway::begin_initial_conversation_attempt(
                 tx, config, config, &request,
@@ -1410,6 +1394,16 @@ fn prepare_turn(
     persist_runtime(tx, config, session, turn)?;
     current_scope(tx, config, sources, host, session, turn)?;
     bundle(tx, session.clone(), turn)
+}
+
+/// Tells whether any gateway attempt exists for the session's bootstrap task.
+/// Input: the session. Output: false until a turn first reaches gateway admission,
+/// so the initial conversation admission applies to that turn whatever its ordinal.
+fn gateway_attempted(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_gateway_attempts WHERE task_id=?1)",
+        [session.bootstrap_task_id.as_str()], |row| row.get(0),
+    ).map_err(error)
 }
 
 fn observe_turn(
@@ -1531,7 +1525,7 @@ fn provision_bootstrap(
     let tx = db.transaction().map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
-    if turn.phase != MasterTurnPhase::Queued || session.selection.backend == MasterBackend::Claude {
+    if turn.phase != MasterTurnPhase::Queued {
         return Ok(());
     }
     if !preflight_turn(&tx, config, &mut session, &mut turn)? {
@@ -2026,7 +2020,6 @@ pub(super) fn runtime(
                 tx.commit().map_err(error)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
             }
-            block_unsupported_backend(&tx, config, &mut session, &mut turn)?;
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
@@ -2050,9 +2043,6 @@ pub(super) fn runtime(
             if turn.phase != MasterTurnPhase::Prepared {
                 tx.commit().map_err(error)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
-            }
-            if session.selection.backend == MasterBackend::Claude {
-                return Err(error("master_runtime_backend_unsupported"));
             }
             current_scope(&tx, config, sources, host, &session, &turn)?;
             let record = verify_preparation(&tx, config, host, &session, &turn)?;

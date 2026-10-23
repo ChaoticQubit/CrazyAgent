@@ -30,8 +30,11 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 mod account_profile;
+pub(crate) mod accounts;
+mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
+pub(crate) mod plugins;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
@@ -1269,11 +1272,13 @@ impl Engine {
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
+        let job = build(send);
+        let deadline = job.reply_deadline(self.timeout);
         self.storage
             .sender
-            .try_send(build(send))
+            .try_send(job)
             .map_err(|_| failure("owner_queue_not_submitted"))?;
-        tokio::time::timeout(self.timeout, receive)
+        tokio::time::timeout(deadline, receive)
             .await
             .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
@@ -1631,8 +1636,17 @@ async fn serve_authenticated_owner(
         if selector.get("claude_auth_input").is_some() {
             return native_auth_channel::claude::serve_input(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
+        if selector.get("accounts").is_some() {
+            return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("harness_catalog").is_some() {
+            return harness_catalog::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("plugins").is_some() {
+            return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("native_auth").is_some() {
             return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])

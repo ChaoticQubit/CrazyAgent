@@ -251,18 +251,37 @@ fn stale_binding_identity_source_profile_model_or_account_rejects() {
 }
 
 #[test]
-fn binding_must_also_match_the_selected_live_connection_and_config() {
-    for index in 0..3 {
+fn binding_must_also_match_the_selected_live_connection() {
+    for index in 0..2 {
         let mut fixture = Fixture::new(CATALOG);
         match index {
-            0 => fixture.binding.config_id = ConfigId::new("e".repeat(64)).unwrap(),
-            1 => fixture.binding.connection.model.id = "different-model".into(),
-            2 => fixture.binding.connection.auth = ModelAuthentication::None {},
+            0 => fixture.binding.connection.model.id = "different-model".into(),
+            1 => fixture.binding.connection.auth = ModelAuthentication::None {},
             _ => unreachable!(),
         }
         fixture.fact.binding = fixture.binding.clone();
         fixture.reject(100, "gateway_initial_authentication_stale");
     }
+}
+
+#[test]
+fn a_sign_in_from_an_earlier_config_with_the_same_connection_is_admitted() {
+    let mut fixture = Fixture::new(CATALOG);
+    let earlier = fixture.config.id.clone();
+    let settings = fixture.directory.path().join("global.toml");
+    let edited = CATALOG.replace(
+        "roles = [\"project_leader\", \"worker\"]",
+        "name = \"Daily work\"\nroles = [\"project_leader\", \"worker\"]",
+    );
+    assert_ne!(edited, CATALOG);
+    std::fs::write(&settings, edited).unwrap();
+    fixture.config = resolve_config(&settings, &fixture.directory.path().join("project.toml")).unwrap();
+    assert_ne!(fixture.config.id, earlier);
+    assert_eq!(fixture.binding.config_id, earlier);
+    let started = fixture.begin(100).unwrap();
+    assert!(!started.replayed);
+    assert_eq!(started.attempt.connection, fixture.binding.connection);
+    assert_eq!(started.attempt.config_id, fixture.config.id);
 }
 
 #[test]

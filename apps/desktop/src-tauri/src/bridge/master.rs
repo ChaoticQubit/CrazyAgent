@@ -3,7 +3,7 @@ use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
 };
-use crazyagent::protocol::{ProjectId, SessionId};
+use crazyagent::protocol::{ProjectId, RequestId, SessionId};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -173,6 +173,28 @@ impl NativeBridge {
         self.apply_master(ticket, action, generation).await
     }
 
+    /// Stops the master's reply in progress for the selected project, the same engine
+    /// cancel the TUI sends on F3. Inputs: selection ticket, the session and turn ids read
+    /// from master state, and a fresh draft generation. Output: the owner intent receipt;
+    /// a turn that already finished is a plain rejection.
+    pub async fn cancel_master_turn(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        turn_id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        let turn_id = RequestId::new(turn_id).map_err(|_| failure("invalid_turn"))?;
+        let action = MasterOwnerAction::Cancel {
+            project_id,
+            session_id,
+            turn_id,
+        };
+        self.apply_master(ticket, action, generation).await
+    }
+
     /// Closes the selected project's open master session so a fresh one can be started.
     /// Inputs: selection ticket, the session id read from master state and a fresh draft
     /// generation. Output: the owner intent receipt for the close request.
@@ -201,7 +223,7 @@ mod tests {
     use crazyagent::master_session::{
         MasterBackend, MasterReason, MasterSelection, MasterSessionPhase, MasterTurnPhase,
     };
-    use crazyagent::protocol::{CredentialRef, ProjectSpec, RequestId};
+    use crazyagent::protocol::{CredentialRef, ProjectSpec};
     use crazyagent::routing::{ResourceBudget, RouteRequest};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -428,20 +450,37 @@ fallback_allowed = false
         assert!(page.turns[0].attempt.is_none());
         assert!(page.turns[0].runtime.is_none());
         assert!(page.turns[0].reply.is_none());
+        assert_eq!(
+            bridge
+                .cancel_master_turn(&selected.ticket, session.session_id.as_str(), "bad turn", 3)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_turn"
+        );
         let cancelled = bridge
-            .apply_master(
+            .cancel_master_turn(
                 &selected.ticket,
-                MasterOwnerAction::Cancel {
-                    project_id: project_id.clone(),
-                    session_id: session.session_id.clone(),
-                    turn_id: RequestId::new(submitted.intent.operation_id).unwrap(),
-                },
+                session.session_id.as_str(),
+                &submitted.intent.operation_id,
                 3,
             )
             .await
             .map_err(|error| error.code)?;
         assert_eq!(cancelled.outcome, ActionOutcome::Applied);
+        assert_eq!(cancelled.intent.kind, "master");
         assert!(!cancelled.pending);
+        let again = bridge
+            .cancel_master_turn(
+                &selected.ticket,
+                session.session_id.as_str(),
+                &submitted.intent.operation_id,
+                5,
+            )
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(again.outcome, ActionOutcome::Rejected);
+        assert_eq!(again.rejection, Some("master_turn_not_current"));
         let actual = observer
             .read(OwnerRead::ProjectMasterTurns {
                 project_id,

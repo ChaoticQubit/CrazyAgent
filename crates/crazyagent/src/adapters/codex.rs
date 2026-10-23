@@ -9,6 +9,7 @@ const APPROVALS_MAX: usize = 16;
 const SERVER_IDS_MAX: usize = 1024;
 const TURNS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
+pub const DEVELOPER_INSTRUCTIONS_BYTES_MAX: usize = 48 * 1024;
 const LOGINS_MAX: usize = 16;
 const AUTH_URL_BYTES_MAX: usize = 2048;
 const AUTH_ERROR_BYTES_MAX: usize = 4096;
@@ -206,6 +207,7 @@ enum Operation {
     AccountLogout,
     ThreadStart {
         cwd: String,
+        tools: bool,
     },
     TurnStart,
     Interrupt {
@@ -388,17 +390,60 @@ impl CodexProtocol {
     }
 
     pub fn start_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "on-request", "read-only", None)
+    }
+
+    /// Starts the same read-only thread as `start_thread` with `instructions` as the
+    /// thread's developer instructions, so they travel on stdin, not on the command line.
+    /// Input: absolute working directory and non-blank text without NUL, at most
+    /// `DEVELOPER_INSTRUCTIONS_BYTES_MAX` bytes. Output: the encoded `thread/start` request.
+    pub fn start_instructed_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        if instructions.trim().is_empty()
+            || instructions.contains('\0')
+            || instructions.len() > DEVELOPER_INSTRUCTIONS_BYTES_MAX
+        {
+            return Err(ProtocolError::InvalidInput);
+        }
+        self.start_thread_with(cwd, "on-request", "read-only", Some(instructions))
+    }
+
+    /// Starts a thread whose tools run without approval prompts and without Codex's
+    /// own sandbox, for a process the caller already confines in an OS sandbox.
+    /// Input: absolute working directory. Output: the encoded `thread/start` request.
+    pub fn start_tool_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "never", "danger-full-access", None)
+    }
+
+    fn start_thread_with(
+        &mut self,
+        cwd: &Path,
+        approval: &'static str,
+        sandbox: &'static str,
+        instructions: Option<&str>,
+    ) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Ready)?;
         if self.has_pending_login() {
             return Err(ProtocolError::InvalidState);
         }
         let cwd = valid_path(cwd).ok_or(ProtocolError::InvalidInput)?;
+        let mut params = json!({
+            "cwd":cwd,"approvalPolicy":approval,
+            "approvalsReviewer":"user","sandbox":sandbox
+        });
+        if let Some(instructions) = instructions {
+            assert!(instructions.len() <= DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+            params["developerInstructions"] = Value::String(instructions.into());
+        }
         let bytes = self.request(
-            Operation::ThreadStart { cwd: cwd.into() },
-            json!({
-                "cwd":cwd,"approvalPolicy":"on-request",
-                "approvalsReviewer":"user","sandbox":"read-only"
-            }),
+            Operation::ThreadStart {
+                cwd: cwd.into(),
+                tools: sandbox == "danger-full-access",
+            },
+            params,
         )?;
         self.phase = State::ThreadStarting;
         self.assert_consistent();
@@ -795,14 +840,20 @@ impl CodexProtocol {
                 self.phase = State::Initialized;
                 Ok(Some(Event::Initialized))
             }
-            Operation::ThreadStart { cwd } => {
+            Operation::ThreadStart { cwd, tools } => {
+                let (approval, sandbox) = if *tools {
+                    ("never", "dangerFullAccess")
+                } else {
+                    ("on-request", "readOnly")
+                };
                 if result["cwd"] != *cwd
-                    || result["approvalPolicy"] != "on-request"
+                    || result["approvalPolicy"] != approval
                     || result["approvalsReviewer"] != "user"
-                    || result["sandbox"]["type"] != "readOnly"
-                    || result["sandbox"]
-                        .get("networkAccess")
-                        .is_some_and(|v| v != false)
+                    || result["sandbox"]["type"] != sandbox
+                    || (!*tools
+                        && result["sandbox"]
+                            .get("networkAccess")
+                            .is_some_and(|v| v != false))
                 {
                     return Err(ProtocolError::InvalidMessage);
                 }
@@ -1039,7 +1090,7 @@ impl CodexProtocol {
                 .login_completed(&params)
                 .map(|control| Some(Event::AuthControl(control))),
             "thread/started" => {
-                if let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() {
+                if let Some((_, Operation::ThreadStart { cwd, .. })) = self.pending.clone() {
                     return self.observe_thread(&params["thread"], &cwd);
                 }
                 let id = identifier(&params["thread"]["id"])?;

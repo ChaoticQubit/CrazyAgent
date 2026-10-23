@@ -17,6 +17,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 mod process;
 
+const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
+const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
+const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
+
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) run_time: Duration,
@@ -59,11 +63,16 @@ impl ClaudeHostLimits {
     }
 }
 
+/// Builds the tools-off Claude Code master command for one turn.
+/// Input: the registered executable, the leased project directory, the private profile
+/// home, the model and, when given, the engine's 0600 startup instruction file.
+/// Output: the command, or a plain refusal for an unsafe path, model or file.
 pub(in crate::engine) fn launch_command(
     executable: &Path,
     project_root: &Path,
     profile_home: &Path,
     model: &str,
+    instructions: Option<&Path>,
 ) -> Result<Command, EngineError> {
     if !executable.is_absolute()
         || !project_root.is_absolute()
@@ -86,17 +95,35 @@ pub(in crate::engine) fn launch_command(
     {
         return Err(failure("claude_host_unsafe_directory"));
     }
+    if let Some(file) = instructions {
+        if !file.is_absolute() {
+            return Err(failure("claude_host_unsafe_instructions"));
+        }
+        let metadata = std::fs::symlink_metadata(file)
+            .map_err(|_| failure("claude_host_instructions_unavailable"))?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.len() > INSTRUCTIONS_BYTES_MAX
+        {
+            return Err(failure("claude_host_unsafe_instructions"));
+        }
+    }
     let mut command = Command::new(executable);
+    command.args([
+        "--print",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]);
+    if model != ACCOUNT_DEFAULT_MODEL {
+        command.args(["--model", model]);
+    }
     command
         .args([
-            "--print",
-            "--verbose",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--model",
-            model,
             "--tools",
             "",
             "--strict-mcp-config",
@@ -110,11 +137,16 @@ pub(in crate::engine) fn launch_command(
             "--no-session-persistence",
             "--max-turns",
             "1",
-        ])
+        ]);
+    if let Some(file) = instructions {
+        command.arg(INSTRUCTIONS_FLAG).arg(file);
+    }
+    command
         .current_dir(project_root)
         .env_clear()
         .env("HOME", profile_home)
         .env("CLAUDE_CONFIG_DIR", profile_home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
@@ -221,10 +253,6 @@ impl ClaudeHost {
                 .map_err(|_| failure("claude_host_startup_timeout"))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
-    }
-
-    pub(in crate::engine) async fn observe_account(&mut self) -> Result<(), EngineError> {
-        Err(failure("claude_host_account_observation_unsupported"))
     }
 
     pub(in crate::engine) async fn start_turn(
@@ -335,12 +363,31 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
     let directory = command.get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
     let args: Vec<_> = command.get_args().collect();
-    let model = args.windows(2)
-        .find(|pair| pair[0] == OsStr::new("--model"))
-        .and_then(|pair| pair[1].to_str())
-        .ok_or(Fault::Host("claude_host_model_unavailable"))?;
-    let expected = launch_command(Path::new(command.get_program()), directory, &home, model)
-        .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
+    let model = match args.iter().position(|arg| *arg == OsStr::new("--model")) {
+        Some(index) => args
+            .get(index + 1)
+            .and_then(|model| model.to_str())
+            .ok_or(Fault::Host("claude_host_model_unavailable"))?,
+        None => ACCOUNT_DEFAULT_MODEL,
+    };
+    let instructions = match args
+        .iter()
+        .position(|arg| *arg == OsStr::new(INSTRUCTIONS_FLAG))
+    {
+        Some(index) => Some(Path::new(
+            args.get(index + 1)
+                .ok_or(Fault::Host("claude_host_instructions_unavailable"))?,
+        )),
+        None => None,
+    };
+    let expected = launch_command(
+        Path::new(command.get_program()),
+        directory,
+        &home,
+        model,
+        instructions,
+    )
+    .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if command.get_args().ne(expected.get_args())
         || command.get_envs().ne(expected.get_envs())
     {

@@ -1,40 +1,11 @@
+import "./load-source.mjs";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
-import { registerHooks } from "node:module";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { transformSync } from "rolldown/utils";
 
-const sourceRoot = new URL("../src/", import.meta.url).href;
-
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith(".") && context.parentURL?.startsWith(sourceRoot)) {
-      for (const extension of [".ts", ".tsx"]) {
-        const candidate = new URL(specifier + extension, context.parentURL);
-        if (existsSync(candidate)) return nextResolve(candidate.href, context);
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (!url.startsWith(sourceRoot) || !/\.tsx?$/.test(url)) return nextLoad(url, context);
-    const transformed = transformSync(fileURLToPath(url), readFileSync(new URL(url), "utf8"), {
-      target: "es2022",
-      sourceType: "module",
-      jsx: { runtime: "automatic" },
-    });
-    assert.deepEqual(transformed.errors, [], "production module must transform");
-    return { format: "module", source: transformed.code, shortCircuit: true };
-  },
-});
-
-const { NativeAuthPanel, reduceNativeAuth } = await import("../src/screens/native-auth.tsx");
-const { OwnerView } = await import("../src/app.tsx");
-const { useOwnerBrowser } = await import("../src/state.ts");
-const { formFromRecord } = await import("../src/model-access.ts");
+const { reduceNativeAuth } = await import("../src/native-auth.ts");
+const { SignInPanel } = await import("../src/screens/settings/sign-in.tsx");
 
 function syntheticDetail() {
   return {
@@ -97,26 +68,12 @@ function forbiddenEffect() {
   throw new Error("static rendering must not invoke an owner operation");
 }
 
-function markup(state) {
-  return renderToStaticMarkup(createElement(NativeAuthPanel, {
-    state, onAction: forbiddenEffect, onClose: forbiddenEffect,
+function markup(state, props = {}) {
+  const harness = state?.context.harness;
+  return renderToStaticMarkup(createElement(SignInPanel, {
+    provider: harness === "claude" ? "claude" : "chatgpt", method: harness === "claude" ? "claude_official" : "codex_device_code",
+    state, onStart: forbiddenEffect, onCancel: forbiddenEffect, onCheck: forbiddenEffect, onClaudeCode: forbiddenEffect, ...props,
   }));
-}
-
-function ownerMarkup(auth, view = "settings", overrides = {}) {
-  function SyntheticOwnerView() {
-    const real = useOwnerBrowser();
-    return createElement(OwnerView, { state: {
-      ...real,
-      view,
-      connected: true,
-      modelCollection: "connections",
-      modelDetail: syntheticDetail(),
-      nativeAuth: auth,
-      ...overrides,
-    } });
-  }
-  return renderToStaticMarkup(createElement(SyntheticOwnerView));
 }
 
 test("synthetic typed selection opens inspectable auth without starting or editing metadata", () => {
@@ -139,7 +96,8 @@ test("synthetic typed selection opens inspectable auth without starting or editi
   assert.equal(state.in_flight, undefined);
   const existing = reduceNativeAuth(state, { kind: "begin", action: "codex_existing", request: 1 });
   assert.deepEqual(existing.in_flight, { action: "codex_existing", request: 1 });
-  assert.match(markup(state), /Use the existing Codex sign-in/);
+  assert.match(markup(state, { method: "codex_existing" }), /Codex itself is not changed\.[\s\S]*>Use this sign-in<\/button>/);
+  assert.match(markup(state), />Get sign-in code<\/button>/);
   const wrong = reduceNativeAuth(state, { kind: "begin", action: "claude_official", request: 1 });
   assert.equal(wrong.in_flight, undefined);
   const claude = structuredClone(detail);
@@ -159,7 +117,8 @@ test("synthetic typed selection opens inspectable auth without starting or editi
     assert.equal(blocked.open, true);
     assert.ok(blocked.error);
     assert.equal(reduceNativeAuth(blocked, { kind: "begin", action: "codex_browser", request: 1 }).in_flight, undefined);
-    assert.match(markup(blocked), /Refresh|Settings/i);
+    assert.match(markup(blocked), /role="alert"/);
+    assert.doesNotMatch(markup(blocked), /Get sign-in code|Use this sign-in/);
   }
 });
 
@@ -233,11 +192,9 @@ test("synthetic close and owner invalidation drop presentation without inventing
 
 test("synthetic browser and device challenges render exact safe text only in their panel", () => {
   const browser = markup(presented());
-  assert.match(browser, /data-testid="native-auth-panel"/);
-  assert.match(browser, /role="dialog"/);
-  assert.match(browser, /https:\/\/auth\.example\.invalid\/login\?state=SYNTHETIC_STATE&amp;client=codex/);
-  assert.match(browser, /awaiting_owner/);
-  assert.match(browser, /does not[^<]*(?:delivery|execution)/i);
+  assert.match(browser, /Waiting for you to finish signing in\.\.\./);
+  assert.match(browser, /<p class="mono small sign-in-url">https:\/\/auth\.example\.invalid\/login\?state=SYNTHETIC_STATE&amp;client=codex<\/p>/);
+  assert.doesNotMatch(browser, /awaiting_owner|operation|generation|epoch/i);
   assert.doesNotMatch(browser, /href=|<input\b|<textarea\b|<iframe\b|<script\b|login_id/);
   const device = syntheticReply({
     action: { kind: "sign_in", method: "codex_device_code" },
@@ -254,31 +211,27 @@ test("synthetic browser and device challenges render exact safe text only in the
   ]) {
     const unsafe = markup(presented({ ...device, challenge }, syntheticDetail(), "codex_device_code"));
     assert.doesNotMatch(unsafe, /[\u001b\u202e\u2066]|SYNTHETIC.*_CODE|auth\.example\.invalid\/.*CODE/u);
-    assert.match(unsafe, /cannot[^<]*(?:display|safely)|unsafe/i);
+    assert.match(unsafe, /can&#x27;t show safely/i);
   }
 });
 
 test("synthetic account observations preserve distinct kinds and bounded escaped fields", () => {
   for (const [account, expected] of [
-    [{ kind: "codex_api_key" }, /API.?key/i],
-    [{ kind: "codex_chatgpt", email: "SYNTHETIC_EMAIL@example.invalid", plan_type: "plus" }, /ChatGPT/i],
-    [{ kind: "codex_amazon_bedrock", uses_codex_managed_credentials: false }, /Bedrock/i],
+    [{ kind: "codex_api_key" }, /Signed in with an OpenAI API key\./],
+    [{ kind: "codex_chatgpt", email: "SYNTHETIC_EMAIL@example.invalid", plan_type: "plus" }, /Signed in as SYNTHETIC_EMAIL@example\.invalid \(ChatGPT Plus\)\./],
+    [{ kind: "codex_amazon_bedrock", uses_codex_managed_credentials: false }, /Signed in with Amazon Bedrock\./],
   ]) {
     const reply = syntheticReply({ phase: "authenticated_observed", challenge: null, account });
     const rendered = markup(presented(reply));
     assert.match(rendered, expected);
-    assert.match(rendered, /authenticated_observed/);
-    assert.match(rendered, /does not[^<]*(?:delivery|execution)/i);
-    assert.doesNotMatch(rendered, /data-testid="(?:model-ready|native-ready)"|<script\b/);
-    if (account.kind === "codex_chatgpt") assert.match(rendered, /SYNTHETIC_EMAIL@example\.invalid/);
-    if (account.kind === "codex_amazon_bedrock") assert.match(rendered, /false/);
+    assert.doesNotMatch(rendered, /authenticated_observed|data-testid="(?:model-ready|native-ready)"|<script\b/);
   }
   const claude = syntheticDetail();
   claude.record.connection.harness = "claude";
   const account = {
     kind: "claude", logged_in: true, auth_method: "future_method", api_provider: "synthetic-provider",
-    config_directory: "/SYNTHETIC_PROFILE", email: { state: "missing" }, org_id: { state: "null" },
-    org_name: { state: "value", text: "<script>synthetic</script>\u001b\n\u202e" },
+    config_directory: "/SYNTHETIC_PROFILE", email: { state: "value", text: "<script>synthetic</script>\u001b\n\u202e" }, org_id: { state: "null" },
+    org_name: { state: "missing" },
     subscription_type: { state: "value", text: "synthetic-plan" },
   };
   const reply = syntheticReply({
@@ -286,11 +239,9 @@ test("synthetic account observations preserve distinct kinds and bounded escaped
     phase: "authenticated_observed", challenge: null, account,
   });
   const rendered = markup(presented(reply, claude, "claude_official"));
-  assert.match(rendered, /future_method/);
-  assert.match(rendered, /missing/i);
-  assert.match(rendered, /null/i);
-  assert.match(rendered, /synthetic-plan/);
-  assert.match(rendered, /&lt;script&gt;synthetic&lt;\/script&gt;/);
+  assert.match(rendered, /\(Claude Synthetic-plan\)\./);
+  assert.match(rendered, /Signed in as &lt;script&gt;synthetic&lt;\/script&gt;/);
+  assert.doesNotMatch(rendered, /future_method|synthetic-provider|SYNTHETIC_PROFILE/);
   assert.doesNotMatch(rendered, /[\u001b\u202e]|<script\b/u);
   const oversized = { ...reply, account: { ...account, config_directory: "é".repeat(65536) } };
   const bounded = presented(oversized, claude, "claude_official");
@@ -299,7 +250,7 @@ test("synthetic account observations preserve distinct kinds and bounded escaped
   assert.ok(Buffer.byteLength(markup(bounded)) <= 65536);
 });
 
-test("production Settings mounts transient auth and blocks missing operations and unconfirmed logout", () => {
+test("the sign-in panel offers no read or cancel without an operation, and the reducer blocks unconfirmed logout", () => {
   const initial = opened();
   for (const action of ["read", "cancel", "logout"]) {
     const blocked = reduceNativeAuth(initial, { kind: "begin", action, request: 1 });
@@ -307,39 +258,22 @@ test("production Settings mounts transient auth and blocks missing operations an
     assert.equal(blocked.operation, undefined);
   }
   const idle = markup(initial);
-  assert.match(idle, /<button\b[^>]*disabled=""[^>]*data-testid="native-auth-read"/);
-  assert.match(idle, /<button\b[^>]*disabled=""[^>]*data-testid="native-auth-cancel"/);
+  assert.doesNotMatch(idle, /Cancel sign-in|Check now|Sign out|logout/i);
   const confirmation = reduceNativeAuth(initial, { kind: "confirm_logout" });
   assert.equal(confirmation.confirming_logout, true);
   assert.equal(confirmation.in_flight, undefined);
-  assert.match(markup(confirmation), /Confirm logout/i);
   assert.deepEqual(
     reduceNativeAuth(confirmation, { kind: "begin", action: "logout", request: 1 }).in_flight,
     { action: "logout", request: 1 },
   );
-  const displayed = presented();
-  const settings = ownerMarkup(displayed);
-  assert.match(settings, /data-testid="native-auth-open"/);
-  const panel = settings.match(/<section\b[^>]*data-testid="native-auth-panel"[\s\S]*?<\/section>/)?.[0];
-  assert.ok(panel);
-  assert.match(panel, /SYNTHETIC_STATE/);
-  assert.doesNotMatch(settings.replace(panel, ""), /SYNTHETIC_STATE|auth_url|user_code/);
-  for (const view of ["conversation", "projects", "approvals"]) {
-    assert.doesNotMatch(ownerMarkup(displayed, view), /SYNTHETIC_STATE|native-auth-panel|auth_url|user_code/);
-  }
-  const modelForm = { value: formFromRecord(syntheticDetail().record, "17"), generation: 4 };
-  const retainedForm = structuredClone(modelForm);
-  for (const overrides of [
-    { connected: false }, { busy: true }, { pending: true }, { modelForm },
-  ]) {
-    const disabled = ownerMarkup(undefined, "settings", overrides);
-    assert.match(disabled, /<button\b[^>]*disabled=""[^>]*data-testid="native-auth-open"/);
-  }
-  assert.deepEqual(modelForm, retainedForm);
+  const displayed = markup(presented());
+  assert.match(displayed, />Cancel sign-in<\/button>/);
+  assert.match(displayed, />Check now<\/button>/);
   const unavailable = presented(syntheticReply({
     phase: "unavailable", code: "native_auth_host_unavailable", challenge: null,
   }));
   assert.equal(unavailable.presentation.phase, "unavailable");
-  assert.match(markup(unavailable), /native_auth_host_unavailable/);
+  assert.match(markup(unavailable), /Codex isn&#x27;t installed on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
+  assert.doesNotMatch(markup(unavailable), /native_auth_host_unavailable/);
   assert.doesNotMatch(markup(unavailable), /SYNTHETIC_STATE|SYNTHETIC_EMAIL/);
 });

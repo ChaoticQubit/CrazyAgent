@@ -373,6 +373,14 @@ impl ClaudeProtocol {
         if self.seen_events.len() == NATIVE_IDS_MAX {
             return Err(ProtocolError::Capacity);
         }
+        if message_type == "system"
+            && subtype.as_deref() != Some("init")
+            && self.native_session_id.is_none()
+        {
+            self.seen_events.insert(uuid.to_owned());
+            assert_eq!(self.phase, State::AwaitingInit);
+            return Ok(Vec::new());
+        }
         let kinds = if message_type == "system" && subtype.as_deref() == Some("init") {
             if self.native_session_id.is_some() {
                 return Err(ProtocolError::StaleMessage);

@@ -121,12 +121,14 @@ pub(super) async fn serve(
         authenticate(engine, authority, packet, admission).await?;
         match envelope.account_profile {
             Action::Configure => {
-                let reserved = actor(engine, admission, Command::Reserve(request.clone(), envelope.secret_present)).await?;
+                let saved = if envelope.secret_present { None } else { saved_key(engine, authority, admission, &request).await? };
+                let secret_present = envelope.secret_present || saved.is_some();
+                let reserved = actor(engine, admission, Command::Reserve(request.clone(), secret_present)).await?;
                 if let ResultValue::Profile(reply, settled) = reserved {
                     return Ok(WireReply::Profile { reply, settled });
                 }
                 if !matches!(reserved, ResultValue::Accepted) { return Err(unknown()); }
-                if envelope.secret_present {
+                if secret_present {
                     let runtime = OwnerRuntimeHandle { engine: engine.clone(), authority: authority.clone() };
                     if runtime.registered_rcli_private_key_executable().is_err() {
                         let _ = actor(engine, admission, Command::Abandon(request.clone())).await;
@@ -141,7 +143,7 @@ pub(super) async fn serve(
                     receive_secret(stream, envelope.secret_present).await
                 }.await;
                 let secret = match secret {
-                    Ok(secret) => secret,
+                    Ok(secret) => secret.or(saved),
                     Err(error) => {
                         let _ = actor(engine, admission, Command::Abandon(request.clone())).await;
                         return Err(error);
@@ -207,6 +209,19 @@ pub(super) async fn serve(
         Err(error) => WireReply::Rejected { request_id: request.request_id, code: public_code(error) },
     };
     write_wire(stream, &reply).await
+}
+
+/// Finds the key saved with a registry account when a client configures its harness profile
+/// without sending one, so the key is read only from the engine's account key store.
+/// Inputs: engine, authority, admission and request. Output: the saved key, if any.
+async fn saved_key(engine: &Engine, authority: &Authority, admission: &Admission, request: &AccountProfileRequest)
+    -> Result<Option<AccountSecret>, EngineError> {
+    let Ok(ResultValue::Capabilities(reply)) = actor(engine, admission, Command::Capabilities(request.clone())).await
+        else { return Ok(None); };
+    match &reply.connection.auth {
+        ModelAuthentication::ApiKey { credential_ref } => super::accounts::saved_key(&authority.root, credential_ref),
+        _ => Ok(None),
+    }
 }
 
 async fn actor(engine: &Engine, admission: &Admission, command: Command) -> Result<ResultValue, EngineError> {
