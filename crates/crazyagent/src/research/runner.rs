@@ -20,6 +20,7 @@ const HEARTBEAT: Duration = Duration::from_millis(250);
 const MODEL_BYTES_MAX: usize = 256;
 const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// Bounds every research run obeys.
 #[derive(Debug, Clone)]
@@ -475,6 +476,7 @@ impl ResearchRunner {
         };
         stop_group(group);
         let _ = child.wait();
+        await_group_exit(group);
         let _ = jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
@@ -639,6 +641,7 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
         if started.elapsed() >= limit {
             stop_group(group);
             let _ = child.wait();
+            await_group_exit(group);
             return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -654,6 +657,26 @@ fn stop_group(group: u32) {
     };
     assert!(pid.as_raw_nonzero().get() > 1);
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+/// Waits until no process of a killed agent's group is left, killing again
+/// any member that is still there. Takes the group id; returns once the group
+/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
+/// stopped while one of its processes still lingers unnoticed.
+fn await_group_exit(group: u32) {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return;
+    };
+    let started = Instant::now();
+    while rustix::process::test_kill_process_group(pid).is_ok()
+        && started.elapsed() < GROUP_EXIT_WAIT
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn drain(mut stream: Box<dyn Read + Send>, counted: &AtomicU64, mut log: File, log_max: u64) {
