@@ -191,7 +191,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     <div className="pj-reader">
       {chosen === MEMORY && <ProjectMemory data={data} />}
       {chosen !== MEMORY && !item && context && <div className="pj-empty"><h3>{items.length ? "Pick a file" : "Nothing here yet"}</h3>
-        <p className="pj-secondary">Research reports appear here as agents finish.</p></div>}
+        <p className="pj-secondary">{items.length ? "Pick a file on the left to read it." : "Research reports appear here as agents finish."}</p></div>}
       {chosen !== MEMORY && item && <>
         <div className="pj-reader-tb">
           <h2 className="pj-mono">{displayText(item.path)}</h2>
