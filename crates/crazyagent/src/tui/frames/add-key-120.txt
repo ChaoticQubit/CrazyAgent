@@ -1,4 +1,4 @@
- CrazyAgent  /  Settings  /  Accounts  /  Add account  /  OpenAI API                                                    
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  OpenAI API                                             
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
 ──━━━━━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────

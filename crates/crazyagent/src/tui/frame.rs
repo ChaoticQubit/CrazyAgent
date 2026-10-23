@@ -1,3 +1,4 @@
+use super::brand;
 use super::glyphs::{Glyphs, Section};
 use super::text::{join, pad, row, width};
 use super::theme::Theme;
@@ -110,8 +111,8 @@ impl Message {
     }
 }
 
-/// The header line: breadcrumbs on the left, one status on the right.
-/// Inputs: width, crumbs after "CrazyAgent", the status line, theme and glyphs.
+/// The header line: the brand badge and breadcrumbs on the left, one status on the right.
+/// Inputs: width, crumbs after the badge, the status line, theme and glyphs.
 /// Output: one line; crumbs shorten from the left to "… / last two" and then
 /// "… / last one" when they do not fit.
 pub fn header(
@@ -141,7 +142,8 @@ pub fn header(
         ]);
     }
     let build = |crumbs: &[String]| {
-        let mut spans = vec![Span::raw(" "), Span::styled("CrazyAgent", theme.heading)];
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(brand::badge(theme, glyphs));
         for crumb in crumbs {
             spans.push(Span::raw("  "));
             spans.push(Span::styled("/", theme.muted));
@@ -422,12 +424,17 @@ mod tests {
         let wide = header(120, &deep, Line::default(), &theme(), &UNICODE);
         assert_eq!(
             plain(&wide).trim_end(),
-            " CrazyAgent  /  Settings  /  Accounts  /  Add account  /  ChatGPT / Codex  /  Sign in with ChatGPT"
+            " [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  ChatGPT / Codex  /  Sign in with ChatGPT"
         );
         let narrow = header(80, &deep, Line::default(), &theme(), &UNICODE);
         assert_eq!(
             plain(&narrow).trim_end(),
-            " CrazyAgent  /  …  /  ChatGPT / Codex  /  Sign in with ChatGPT"
+            " [◆▪◆▪] CrazyAgent  /  …  /  ChatGPT / Codex  /  Sign in with ChatGPT"
+        );
+        let added = header(80, &deep[..4], Line::default(), &theme(), &UNICODE);
+        assert_eq!(
+            plain(&added).trim_end(),
+            " [◆▪◆▪] CrazyAgent  /  …  /  Add account  /  ChatGPT / Codex"
         );
         assert_eq!(narrow.width(), 80);
         let status = header(
@@ -439,7 +446,10 @@ mod tests {
         );
         assert_eq!(
             plain(&status),
-            format!(" CrazyAgent  /  Home{}2 agents running ", " ".repeat(43))
+            format!(
+                " [#.#.] CrazyAgent  /  Home{}2 agents running ",
+                " ".repeat(36)
+            )
         );
         let tight = header(
             30,
@@ -449,6 +459,24 @@ mod tests {
             &UNICODE,
         );
         assert_eq!(tight.width(), 30);
+    }
+
+    #[test]
+    fn header_opens_with_the_brand_badge_in_its_theme_roles() {
+        let theme = Theme::new(Depth::TrueColor, Colors::Dark, Appearance::Dark);
+        let line = header(80, &crumbs(&["Home"]), Line::default(), &theme, &UNICODE);
+        assert!(plain(&line).starts_with(" [◆▪◆▪] CrazyAgent  /  Home"));
+        assert_eq!(line.width(), 80);
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.content == "◆▪◆▪" && span.style == theme.mark)
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.content == "CrazyAgent" && span.style == theme.heading)
+        );
     }
 
     #[test]

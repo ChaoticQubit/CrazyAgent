@@ -1,4 +1,4 @@
- CrazyAgent                                                                                          Engine not running 
+ [◆▪◆▪] CrazyAgent                                                                                   Engine not running 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
                                                                                                                         
   CrazyAgent's engine isn't running                                                                                     

@@ -1,4 +1,5 @@
 use super::{Flow, Place, Screen, open};
+use crate::tui::brand;
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
@@ -11,9 +12,9 @@ use ratatui::text::{Line, Span};
 
 /// The first screen: connects to the engine, then reads the profile and
 /// replaces itself with Welcome on first run or Home afterwards.
-/// Input: connection and profile arrivals. Output: "Connecting" with a spinner,
-/// the full "Engine not running" screen with r and c, or "Could not read your
-/// profile" when the engine answered with a refusal.
+/// Input: connection and profile arrivals. Output: the brand mark over "Connecting"
+/// with a spinner, the full "Engine not running" screen with r and c, or "Could not
+/// read your profile" when the engine answered with a refusal.
 #[derive(Default)]
 pub struct Startup {
     profile_failed: bool,
@@ -193,13 +194,18 @@ impl Screen for Startup {
                 Line::raw("  Press r to try again."),
             ]
         } else {
-            vec![
-                Line::default(),
-                Line::from(vec![
-                    Span::raw("  Connecting to CrazyAgent "),
-                    Span::styled(ctx.spinner(), theme.running),
-                ]),
-            ]
+            let mut lines = vec![Line::default()];
+            lines.extend(brand::mark(theme, ctx.glyphs).into_iter().map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }));
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::raw("  Connecting to CrazyAgent "),
+                Span::styled(ctx.spinner(), theme.running),
+            ]));
+            lines
         };
         draw_lines(frame.buffer_mut(), area, &lines);
         None
