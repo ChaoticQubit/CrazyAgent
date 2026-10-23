@@ -53,7 +53,7 @@ pub struct AccountProfileReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AccountProfileOutcome {
     ConfiguredOnly {
-        receipt: AccountProfileReceipt,
+        receipt: Box<AccountProfileReceipt>,
         historical_replay: bool,
     },
     NotRecorded,

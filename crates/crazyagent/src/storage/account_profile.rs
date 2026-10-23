@@ -102,7 +102,7 @@ pub(crate) fn execute(
                 admission,
                 request,
                 AccountProfileOutcome::ConfiguredOnly {
-                    receipt,
+                    receipt: Box::new(receipt),
                     historical_replay: true,
                 },
             );
@@ -200,7 +200,7 @@ pub(crate) fn execute(
                     admission,
                     &work.request,
                     AccountProfileOutcome::ConfiguredOnly {
-                        receipt: work.receipt,
+                        receipt: Box::new(work.receipt),
                         historical_replay: false,
                     },
                 ),

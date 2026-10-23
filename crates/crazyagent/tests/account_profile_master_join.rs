@@ -352,12 +352,12 @@ impl Fixture {
         assert!(!receipt.custody_id.is_empty());
         assert_eq!(receipt.profile_config_sha256.len(), 64);
         assert!(receipt.profile_generation > 0);
-        let receipt = receipt.clone();
+        let receipt = (**receipt).clone();
         let replay = client.read_account_profile(request.clone()).await.unwrap();
         assert!(
             matches!(replay.outcome, AccountProfileOutcome::ConfiguredOnly {
             receipt: actual, historical_replay: true,
-        } if actual == receipt)
+        } if *actual == receipt)
         );
         self.assert_no_projects().await;
         self.assert_no_execution();

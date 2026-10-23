@@ -308,7 +308,7 @@ impl State {
                 match &reply.outcome {
                     AccountProfileOutcome::ConfiguredOnly { receipt, .. } => {
                         if let Some(panel) = &mut self.profile.panel {
-                            panel.receipt = Some(receipt.clone());
+                            panel.receipt = Some((**receipt).clone());
                         }
                         self.notice =
                             "ConfiguredOnly; authentication and model availability unknown".into();
