@@ -1,4 +1,5 @@
 use super::new_project::harness_name;
+use super::new_project_input::TextInput;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
@@ -6,8 +7,8 @@ use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{
-    AgentRole, AgentStatus, DelegationPath, TaskSource, TaskStatus, TeamAction, TeamAgent,
-    TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, DelegationPath, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
+    TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -19,6 +20,7 @@ pub(in crate::tui) type Help = Vec<(&'static str, &'static str)>;
 pub(in crate::tui) const TABS: (&str, &str) = ("Shift-\u{2190}\u{2192}", "Tabs");
 const WIDE: usize = 96;
 const PANEL_TEXT_LINES: usize = 2;
+const DRAFT_LINES: usize = 3;
 
 /// One short line under a live view after a change, a hint or a failed read.
 /// Holds the plain text and whether it reports a problem.
@@ -80,6 +82,15 @@ pub(in crate::tui) enum TeamReply {
     Change(TeamAction),
 }
 
+/// A task the owner is writing for a sub-agent.
+/// Holds the text and the chosen sub-agent harness; none lets the engine pick
+/// the least busy one. Stays open until the engine takes the task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct Draft {
+    pub input: TextInput,
+    pub harness: Option<String>,
+}
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -90,6 +101,7 @@ pub(in crate::tui) struct TeamView {
     pub agent_cursor: usize,
     pub task_cursor: usize,
     pub confirm: Option<i64>,
+    pub draft: Option<Draft>,
     pub notice: Option<Notice>,
     pub now_ms: i64,
     pub offset: i64,
@@ -110,6 +122,7 @@ impl TeamView {
             agent_cursor: 0,
             task_cursor: 0,
             confirm: None,
+            draft: None,
             notice: None,
             now_ms: 0,
             offset: 0,
@@ -161,6 +174,9 @@ impl TeamView {
                 let done = self.changing.take();
                 match result {
                     Ok(SetupView::Changed(OwnerResult::Applied)) => {
+                        if matches!(action, TeamAction::Delegate { .. }) {
+                            self.draft = None;
+                        }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
                     }
@@ -180,6 +196,26 @@ impl TeamView {
     /// Returns true until the change result arrives.
     pub fn busy(&self) -> bool {
         self.changing.is_some()
+    }
+
+    /// Says whether the owner is writing a new task, so the host sends pastes
+    /// here, keeps its own letter keys off and shows the cursor.
+    /// Takes the view. Returns true while the task composer is open.
+    pub fn typing(&self) -> bool {
+        self.draft.is_some()
+    }
+
+    /// Adds pasted text to the task being written.
+    /// Takes untrusted pasted text; control characters are dropped.
+    /// Returns true when the composer took it.
+    pub fn paste(&mut self, text: &str) -> bool {
+        match &mut self.draft {
+            Some(draft) => {
+                draft.input.insert_str(text);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Lists the agents in display order: live agents first with the master on
@@ -242,6 +278,9 @@ impl TeamView {
     /// keep-warm switch.
     /// Takes the key event. Returns what the host should do next.
     pub fn key(&mut self, key: KeyEvent) -> TeamReply {
+        if self.draft.is_some() {
+            return self.draft_key(key);
+        }
         if let Some(task) = self.confirm {
             return match key.code {
                 KeyCode::Char('y') => {
@@ -276,6 +315,10 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('w') => self.keep_warm(),
+            KeyCode::Char('n') => {
+                self.open_draft();
+                TeamReply::Handled
+            }
             _ => TeamReply::Ignored,
         };
         self.clamp();
@@ -334,6 +377,103 @@ impl TeamView {
         })
     }
 
+    fn sub_harnesses(&self) -> Vec<String> {
+        self.status
+            .iter()
+            .flat_map(|status| status.harnesses.iter())
+            .filter(|harness| harness.role == AgentRole::Sub && harness.runnable)
+            .map(|harness| harness.harness.clone())
+            .collect()
+    }
+
+    fn open_draft(&mut self) {
+        if self.status.is_none() {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return;
+        }
+        if self.sub_harnesses().is_empty() {
+            self.notice = Some(Notice::plain(
+                "This team has no sub-agent that can run yet.",
+            ));
+            return;
+        }
+        self.notice = None;
+        self.draft = Some(Draft {
+            input: TextInput::multi(TASK_PROMPT_BYTES_MAX),
+            harness: None,
+        });
+    }
+
+    fn draft_key(&mut self, key: KeyEvent) -> TeamReply {
+        match key.code {
+            KeyCode::Esc => {
+                self.draft = None;
+                TeamReply::Handled
+            }
+            KeyCode::Enter => self.send_draft(),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.pick_harness(key.code == KeyCode::Tab);
+                TeamReply::Handled
+            }
+            _ => {
+                if let Some(draft) = &mut self.draft {
+                    draft.input.handle(key);
+                }
+                TeamReply::Handled
+            }
+        }
+    }
+
+    fn pick_harness(&mut self, forward: bool) {
+        let choices: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.sub_harnesses().into_iter().map(Some))
+            .collect();
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        let at = choices
+            .iter()
+            .position(|choice| choice == &draft.harness)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % choices.len()
+        } else {
+            (at + choices.len() - 1) % choices.len()
+        };
+        draft.harness = choices[next].clone();
+    }
+
+    fn send_draft(&mut self) -> TeamReply {
+        let Some(draft) = &self.draft else {
+            return TeamReply::Ignored;
+        };
+        let prompt = draft.input.value().trim().to_owned();
+        let harness = draft.harness.clone();
+        if prompt.is_empty() {
+            self.notice = Some(Notice::plain("Write what the sub-agent should do first."));
+            return TeamReply::Handled;
+        }
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        self.notice = None;
+        self.changing = Some(format!(
+            "Handed \"{}\" to {}.",
+            title(&prompt),
+            harness
+                .as_deref()
+                .map_or_else(|| "a sub-agent".to_owned(), |name| harness_name(name, None))
+        ));
+        TeamReply::Change(TeamAction::Delegate {
+            project_id: self.project.clone(),
+            harness,
+            prompt,
+        })
+    }
+
     fn keep_warm(&mut self) -> TeamReply {
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
@@ -374,12 +514,27 @@ impl TeamView {
         accounts: &[AccountRow],
         look: &Look,
     ) -> (Vec<Row>, Help) {
+        let (lines, help, _) = self.draw(content, room, accounts, look);
+        (lines, help)
+    }
+
+    /// Draws the Team view like `rows` and also places the typing cursor.
+    /// Takes the content width, the rows available, the accounts and the look.
+    /// Returns the body rows, the help keys and, while the owner writes a task,
+    /// the cursor as a body row and a column inside that row.
+    pub fn draw(
+        &self,
+        content: usize,
+        room: usize,
+        accounts: &[AccountRow],
+        look: &Look,
+    ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
         let mut lines = vec![self.summary(content, look)];
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
-            return (lines, self.help());
+            return (lines, self.help(), None);
         };
         lines.push(Row::of(plan_line(status), look.muted));
         if let Some(label) = status
@@ -398,7 +553,13 @@ impl TeamView {
         }
         let agents = self.agents();
         let tasks = self.tasks();
-        let panel = self.panel(content, accounts, look);
+        let (panel, caret) = match &self.draft {
+            Some(draft) => {
+                let (rows, at) = draft_rows(draft, content, look);
+                (rows, Some(at))
+            }
+            None => (self.panel(content, accounts, look), None),
+        };
         let footer = self.footer(look);
         let fixed = lines.len() + 5 + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(2);
@@ -489,9 +650,10 @@ impl TeamView {
             ));
         }
         lines.push(Row::default());
+        let cursor = caret.map(|(row, column)| (lines.len() + row, column));
         lines.extend(panel);
         lines.extend(footer);
-        (lines, self.help())
+        (lines, self.help(), cursor)
     }
 
     fn summary(&self, content: usize, look: &Look) -> Row {
@@ -652,12 +814,21 @@ impl TeamView {
     }
 
     fn help(&self) -> Help {
+        if self.draft.is_some() {
+            return vec![
+                ("Enter", "Hand over"),
+                ("Ctrl-J", "New line"),
+                ("Tab", "Sub-agent"),
+                ("Esc", "Close"),
+            ];
+        }
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
         vec![
             ("\u{2191}\u{2193}", "Move"),
             ("Tab", "Agents or tasks"),
+            ("n", "New task"),
             ("x", "Cancel task"),
             ("w", "Keep warm"),
             TABS,
@@ -678,6 +849,14 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_account_left_pool" => "That account left the pool. Another one takes over.".into(),
         "team_harness_cannot_run" => "This harness cannot run yet.".into(),
+        "team_has_no_sub_agents" => "This team has no sub-agents to hand work to.".into(),
+        "team_harness_not_in_plan" => "That harness is no longer part of this team.".into(),
+        "team_harness_invalid" => "That harness name is not valid.".into(),
+        "team_task_invalid" => "The task is empty or too long.".into(),
+        "team_queue_full" => {
+            "Too much work is waiting already. Try again when some finishes.".into()
+        }
+        "team_task_limit" => "This project has reached its task limit.".into(),
         other => plain_problem(other),
     }
 }
@@ -700,6 +879,39 @@ pub(in crate::tui) fn title(text: &str) -> String {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map_or_else(|| "Untitled task".to_owned(), str::to_owned)
+}
+
+fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    let who = draft.harness.as_deref().map_or_else(
+        || "Any sub-agent".to_owned(),
+        |name| harness_name(name, None),
+    );
+    let mut rows = vec![spread(
+        content,
+        Row::of("New task from you", look.heading),
+        Row::of("For  ", look.muted).push(format!("< {who} >"), look.accent),
+    )];
+    let inner = content.saturating_sub(4).max(2);
+    let (lines, (line, column)) = draft.input.wrap(inner - 1);
+    let first = (line + 1).saturating_sub(DRAFT_LINES);
+    let cursor = (rows.len() + line - first, 2 + column);
+    let empty = draft.input.value().is_empty();
+    for text in lines.iter().skip(first).take(DRAFT_LINES) {
+        let text = if empty {
+            Row::of("What should the sub-agent do?", look.muted)
+        } else {
+            Row::of(text.clone(), look.fg)
+        };
+        rows.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(text.pad(inner))
+                .push(" ", Style::new())
+                .push("]", look.accent),
+        );
+    }
+    assert!(cursor.0 < rows.len());
+    (rows, cursor)
 }
 
 fn heads(widths: &[usize], names: &[&str], look: &Look) -> Row {

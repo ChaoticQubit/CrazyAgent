@@ -3,7 +3,7 @@ use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
-use crate::project_setup::{Platform, ProjectSetup};
+use crate::project_setup::{HarnessSlot, Platform, ProjectSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectSpec};
 use crate::tui::screens::new_project_frames::compose;
 use crate::tui::screens::new_project_view::{Screen, tab_strip};
@@ -206,6 +206,25 @@ fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
     rows.iter()
         .find(|row| row.contains(needle))
         .unwrap_or_else(|| panic!("no row has {needle:?}:\n{}", rows.join("\n")))
+}
+
+fn typed(view: &mut TeamView, text: &str) {
+    for character in text.chars() {
+        assert_eq!(
+            view.key(press(KeyCode::Char(character))),
+            TeamReply::Handled
+        );
+    }
+}
+
+async fn read_team(controller: &mut OwnerController, view: &mut TeamView, now: i64) {
+    let query = view.next_query(now).unwrap();
+    let read = controller
+        .team_status(project())
+        .await
+        .map(|status| SetupView::Team(Box::new(status)))
+        .map_err(|error| error.0);
+    view.apply(&query, read);
 }
 
 #[test]
@@ -613,4 +632,318 @@ async fn a_real_engine_team_draws_and_keeps_warm() {
     view.apply(&query, read);
     assert!(view.status.as_ref().unwrap().keep_warm);
     assert!(find(&frame(&view, 80, 24), "Team").contains("Keep warm  On"));
+}
+
+#[test]
+fn a_new_task_goes_to_the_chosen_sub_agent() {
+    let mut view = loaded();
+    assert!(!view.typing());
+    assert_eq!(view.key(press(KeyCode::Char('n'))), TeamReply::Handled);
+    assert!(view.typing());
+    let wide = frame(&view, 120, 36);
+    assert!(find(&wide, "New task from you").contains("For  < Any sub-agent >"));
+    assert!(
+        wide.iter()
+            .any(|row| row.contains("[ What should the sub-agent do?"))
+    );
+    assert!(wide.last().unwrap().contains("Enter Hand over"));
+    assert!(wide.last().unwrap().contains("Tab Sub-agent"));
+
+    view.key(press(KeyCode::Tab));
+    assert_eq!(
+        view.draft.as_ref().unwrap().harness.as_deref(),
+        Some("claude-code")
+    );
+    assert!(find(&frame(&view, 120, 36), "New task from you").contains("< Claude Code >"));
+    view.key(press(KeyCode::Tab));
+    assert_eq!(
+        view.draft.as_ref().unwrap().harness,
+        None,
+        "Tab comes back round to any sub-agent"
+    );
+    view.key(press(KeyCode::BackTab));
+    assert_eq!(
+        view.draft.as_ref().unwrap().harness.as_deref(),
+        Some("claude-code")
+    );
+
+    typed(&mut view, "Fix the chart legend");
+    assert_eq!(
+        view.draft.as_ref().unwrap().input.value(),
+        "Fix the chart legend"
+    );
+    assert_eq!(view.confirm, None, "x types a letter while writing");
+    assert!(!view.busy(), "letters never send a change while writing");
+    view.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert!(view.paste("Keep the colours\tthe same."));
+    let (lines, _, cursor) = view.draw(116, 30, &accounts(), &Look::plain());
+    let (row, column) = cursor.expect("the composer places the cursor");
+    assert!(
+        lines[row]
+            .text()
+            .starts_with("[ Keep the colours the same."),
+        "{:?}",
+        lines[row].text()
+    );
+    assert_eq!(column, 2 + "Keep the colours the same.".len());
+
+    let narrow = frame(&view, 80, 24);
+    assert!(
+        narrow
+            .iter()
+            .any(|row| row.contains("[ Fix the chart legend"))
+    );
+    assert!(
+        narrow
+            .iter()
+            .any(|row| row.contains("[ Keep the colours the same."))
+    );
+    assert!(narrow.iter().all(|row| row.chars().count() <= 80));
+
+    let reply = view.key(press(KeyCode::Enter));
+    let TeamReply::Change(action) = reply else {
+        panic!("a delegate change expected, got {reply:?}");
+    };
+    assert_eq!(
+        action,
+        TeamAction::Delegate {
+            project_id: project(),
+            harness: Some("claude-code".into()),
+            prompt: "Fix the chart legend\nKeep the colours the same.".into(),
+        }
+    );
+    assert!(view.busy());
+    assert!(view.typing(), "the text stays until the engine takes it");
+    assert_eq!(
+        view.key(press(KeyCode::Enter)),
+        TeamReply::Handled,
+        "one change at a time"
+    );
+    assert!(view.notice.as_ref().unwrap().error);
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert!(!view.typing());
+    assert!(!view.busy());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Handed \"Fix the chart legend\" to Claude Code."
+        ))
+    );
+    assert!(
+        view.next_query(NOW + 1).is_some(),
+        "a new task reads the team again at once"
+    );
+}
+
+#[test]
+fn an_empty_task_is_not_sent_and_esc_closes_the_composer() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Char('n')));
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Write what the sub-agent should do first."))
+    );
+    typed(&mut view, "   ");
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(!view.busy());
+    assert!(
+        frame(&view, 80, 24)
+            .iter()
+            .any(|row| row.contains("Write what the sub-agent should do first."))
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(!view.typing());
+    assert!(!view.paste("ignored"), "no composer takes no paste");
+    let rows = frame(&view, 120, 36);
+    assert!(rows.iter().all(|row| !row.contains("New task from you")));
+    assert!(rows.last().unwrap().contains("n New task"));
+}
+
+#[test]
+fn a_refused_task_keeps_its_text_and_shows_why() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Char('n')));
+    assert!(view.paste("Write the alerts page"));
+    let TeamReply::Change(action) = view.key(press(KeyCode::Enter)) else {
+        panic!("a delegate change expected");
+    };
+    assert_eq!(
+        action,
+        TeamAction::Delegate {
+            project_id: project(),
+            harness: None,
+            prompt: "Write the alerts page".into(),
+        }
+    );
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 10,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "team_queue_full".into(),
+        })),
+    );
+    assert!(view.typing());
+    assert!(!view.busy());
+    assert_eq!(
+        view.draft.as_ref().unwrap().input.value(),
+        "Write the alerts page"
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Too much work is waiting already. Try again when some finishes."
+        ))
+    );
+    let rows = frame(&view, 80, 24);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("[ Write the alerts page"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Too much work is waiting already."))
+    );
+    assert_eq!(
+        team_plain("team_has_no_sub_agents"),
+        "This team has no sub-agents to hand work to."
+    );
+    assert_eq!(
+        team_plain("team_harness_not_in_plan"),
+        "That harness is no longer part of this team."
+    );
+}
+
+#[test]
+fn a_team_without_a_runnable_sub_agent_opens_no_composer() {
+    let mut view = TeamView::new(project());
+    view.key(press(KeyCode::Char('n')));
+    assert!(!view.typing());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut status = team();
+    status.harnesses[1].runnable = false;
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Char('n')));
+    assert!(!view.typing());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "This team has no sub-agent that can run yet."
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_real_engine_takes_a_task_from_the_owner() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-team-task-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let created = controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: Some(TeamPlan {
+                    master: "codex".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![HarnessSlot {
+                        harness: "claude-code".into(),
+                        agents: 1,
+                        tools: true,
+                    }],
+                    min_agents: 1,
+                    max_agents: 2,
+                }),
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+
+    let mut view = TeamView::new(project());
+    read_team(&mut controller, &mut view, NOW).await;
+    assert!(
+        frame(&view, 120, 36)
+            .iter()
+            .any(|row| row.contains("Codex leads. Claude Code x1."))
+    );
+    view.key(press(KeyCode::Char('n')));
+    assert!(view.typing(), "{:?}", view.notice);
+    assert!(view.paste("Write the readings API"));
+    view.key(press(KeyCode::Tab));
+    let TeamReply::Change(action) = view.key(press(KeyCode::Enter)) else {
+        panic!("a delegate change expected");
+    };
+    let response = controller.team_action(action.clone(), 2).await.unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("team change not applied: {other:?}"),
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 2,
+        },
+        Ok(result),
+    );
+    assert!(!view.typing(), "{:?}", view.notice);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Handed \"Write the readings API\" to Claude Code."
+        ))
+    );
+
+    read_team(&mut controller, &mut view, NOW + 1).await;
+    let tasks = view.tasks();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].source, TaskSource::Owner);
+    assert_eq!(tasks[0].harness, "claude-code");
+    assert_eq!(
+        tasks[0].status,
+        TaskStatus::NeedsPool,
+        "without a pool the task waits and nothing starts"
+    );
+    let row = find(&frame(&view, 120, 36), "Needs a pool").to_owned();
+    assert!(row.contains("Write the readings API") && row.contains("You"));
+    assert!(find(&frame(&view, 80, 24), "Needs a pool").contains("Write the readings API"));
 }
