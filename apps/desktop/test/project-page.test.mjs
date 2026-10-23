@@ -253,3 +253,10 @@ test("Recent activity shows eight rows and Show all for the rest", async () => {
   assert.equal(few.match(/class="pj-activity-row"/g)?.length, 4);
   assert.doesNotMatch(few, />Show all/);
 });
+
+test("Thinking shows the seconds since this window sent the message", () => {
+  assert.equal(research.thinkingLine(undefined, 50_000), "Thinking...");
+  assert.equal(research.thinkingLine(38_000, 50_000), "Thinking... 12 s");
+  assert.equal(research.thinkingLine(50_000, 49_000), "Thinking... 0 s");
+  assert.equal(research.thinkingLine(0, 3 * 60_000 + 5_000), "Thinking... 3 min");
+});

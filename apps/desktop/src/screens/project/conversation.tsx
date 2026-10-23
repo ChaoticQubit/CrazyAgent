@@ -6,13 +6,14 @@ import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { MarkdownView } from "./markdown";
-import { masterStatus, nearBottom, resendText, sendFailureLine, turnLine, turnSettled } from "./research";
+import { masterStatus, nearBottom, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import type { Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
 const sentByProject = new Map<string, Record<number, string>>();
+const sentAtByProject = new Map<string, Record<number, number>>();
 const MESSAGE_BYTES_MAX = 8192;
 
 const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", Replied: "ok", "Not signed in": "warn", Stopped: "neutral", "Needs a pool": "warn" };
@@ -37,6 +38,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [turns, setTurns] = useState<MasterTurn[]>([]);
   const [sent, setSentState] = useState<Record<number, string>>(() => sentByProject.get(data.id) ?? {});
   const [text, setText] = useState("");
+  const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState("");
   const [needsPool, setNeedsPool] = useState(false);
@@ -102,7 +104,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
 
   useEffect(() => {
     if (!waiting && !unseen) return;
-    const timer = window.setInterval(() => { void refresh().catch(() => setProblem(failureCopy("owner_read_failed"))); }, 2000);
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+      void refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+    }, 2000);
     return () => window.clearInterval(timer);
   }, [waiting, unseen, ticket, session?.session_id]);
 
@@ -113,6 +118,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
 
   const send = (again?: string) => act(async () => {
     const message = (again ?? text).trim();
+    const at = Date.now();
     if (!message || !ticket) return;
     let live = session;
     if (!active) {
@@ -126,6 +132,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     }
     const ordinal = (active ? turns : []).reduce((most, turn) => Math.max(most, turn.ordinal), 0) + 1;
     confirm(unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration())));
+    sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [ordinal]: at });
     setSent({ ...(active ? sent : {}), [ordinal]: message });
     if (again === undefined) setText("");
     await refresh();
@@ -159,11 +166,11 @@ export function ConversationTab({ data }: { data: ProjectData }) {
           ? <div className="pj-msg-owner"><p>{displayText(sent[turn.ordinal])}</p></div>
           : <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>}
         {turn.reply ? <div className="pj-msg-master" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div>
-          : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turnLine(turn)}</p>}
+          : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.ordinal], now) : turnLine(turn)}</p>}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}
       {Object.entries(sent).filter(([ordinal]) => !turns.some((turn) => turn.ordinal === Number(ordinal))).map(([ordinal, message]) =>
-        <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">Thinking...</p></div>)}
+        <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[Number(ordinal)], now)}</p></div>)}
     </div>
     {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}

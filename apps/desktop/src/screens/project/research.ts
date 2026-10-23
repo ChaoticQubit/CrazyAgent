@@ -130,6 +130,12 @@ export function turnLine(turn: MasterTurn): string {
   }
 }
 
+/** The Thinking line for a master turn, with the time since this window sent the message.
+ * Inputs: when it was sent in milliseconds, if this window sent it, and now. Output: the line. */
+export function thinkingLine(sentAt: number | undefined, now: number): string {
+  return sentAt === undefined ? "Thinking..." : `Thinking... ${elapsed(now - sentAt)}`;
+}
+
 const FOLLOW_SLACK_PX = 120;
 
 /** Tells whether a scrolled list sits close enough to its bottom to keep following new lines.
