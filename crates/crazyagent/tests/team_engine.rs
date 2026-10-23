@@ -323,12 +323,18 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
             "{worktree} is a git worktree"
         );
     }
-    assert!(
-        team.agents
-            .iter()
-            .any(|a| a.role == AgentRole::Master && a.worktree.is_none() && a.turns >= 2),
-        "{team:#?}"
+    let master = team
+        .agents
+        .iter()
+        .find(|a| a.role == AgentRole::Master && a.turns >= 2)
+        .unwrap_or_else(|| panic!("the master took both turns: {team:#?}"));
+    let worktree = master.worktree.as_deref().unwrap();
+    assert_eq!(
+        worktree,
+        format!("worktrees/agent-{}", master.id),
+        "the master works in its own worktree too"
     );
+    assert!(folder.join(worktree).join(".git").is_file());
 
     assert_eq!(
         owner.act(TeamAction::Delegate {

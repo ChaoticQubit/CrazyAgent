@@ -1265,15 +1265,13 @@ impl TeamRuntime {
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
         sandbox.install(&profile).map_err(|e| plain(&e))?;
         ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
-        let working_dir = match role {
-            AgentRole::Master => root.clone(),
-            AgentRole::Sub => {
-                let worktree = root.join("worktrees").join(format!("agent-{id}"));
-                add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
-                worktree.canonicalize().map_err(|e| plain(&e))?
-            }
-        };
-        assert!(working_dir.starts_with(&root));
+        let worktree = root.join("worktrees").join(format!("agent-{id}"));
+        add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
+        let working_dir = worktree.canonicalize().map_err(|e| plain(&e))?;
+        if working_dir != worktree {
+            return Err("the agent worktree is not a plain folder in the project".into());
+        }
+        assert!(working_dir.starts_with(&root) && working_dir != root);
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),

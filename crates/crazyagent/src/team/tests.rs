@@ -1219,6 +1219,11 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         .iter()
         .find(|a| a.role == AgentRole::Master)
         .unwrap();
+    assert_eq!(
+        master.worktree,
+        Some(format!("worktrees/agent-{}", master.id)),
+        "the master works in its own git worktree like every agent"
+    );
     let config: toml::Table = std::fs::read_to_string(&seen)
         .unwrap_or_else(|e| panic!("the probe harness saw no config ({e}): {team_now:#?}"))
         .parse()
