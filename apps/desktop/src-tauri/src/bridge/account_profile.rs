@@ -328,7 +328,7 @@ fn validate_profile_connection(
     }
     let local = match &connection.auth {
         ModelAuthentication::None {} if !keyed => true,
-        ModelAuthentication::ApiKey { .. } if keyed => false,
+        ModelAuthentication::ApiKey { .. } => false,
         _ => return Err(failure("account_profile_auth_unsupported")),
     };
     let ModelEndpoint::Http { url } = &connection.endpoint else {
