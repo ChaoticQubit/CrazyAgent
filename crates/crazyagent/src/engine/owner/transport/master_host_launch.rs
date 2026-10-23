@@ -115,8 +115,6 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
         || prepared.attempt.request.project_id != prepared.session.project_id
         || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
         || prepared.attempt.config_id != prepared.session.config_id
-        || binding.config_id != prepared.session.config_id
-        || binding.source_hash != prepared.session.source_hash
         || binding.connection != prepared.attempt.connection
         || lease.state != LeaseState::Ready
         || lease.project_id != prepared.session.project_id
