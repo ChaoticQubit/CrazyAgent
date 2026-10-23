@@ -6,7 +6,7 @@ import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { MarkdownView } from "./markdown";
-import { masterStatus, turnLine, turnSettled } from "./research";
+import { masterStatus, resendText, sendFailureLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import type { Tone } from "../../ui";
@@ -70,7 +70,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     } else setTurns([]);
   }
 
-  async function act(action: () => Promise<void>) {
+  async function act(action: () => Promise<void>, describe: (code: string) => string = failureCopy) {
     if (working) return;
     setWorking(true);
     setProblem("");
@@ -80,7 +80,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       const code = typeof failure === "object" && failure !== null && "code" in failure ? String(failure.code) : "unknown";
       if (code === "not_ready") setNotReady(true);
       else if (code === "master_open_unavailable") setNeedsPool(true);
-      else setProblem(failureCopy(code));
+      else setProblem(describe(code));
     }
     setWorking(false);
   }
@@ -111,8 +111,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 120) element.scrollTop = element.scrollHeight;
   }, [turns.length, Object.keys(sent).length]);
 
-  const send = () => act(async () => {
-    const message = text.trim();
+  const send = (again?: string) => act(async () => {
+    const message = (again ?? text).trim();
     if (!message || !ticket) return;
     let live = session;
     if (!active) {
@@ -127,9 +127,9 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     const ordinal = (active ? turns : []).reduce((most, turn) => Math.max(most, turn.ordinal), 0) + 1;
     confirm(unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration())));
     setSent({ ...(active ? sent : {}), [ordinal]: message });
-    setText("");
+    if (again === undefined) setText("");
     await refresh();
-  });
+  }, sendFailureLine);
 
   const end = () => act(async () => {
     if (!session) return;
@@ -139,6 +139,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
 
   const bytes = new TextEncoder().encode(text).length;
   const blocked = working || !ticket || waiting || notReady;
+  const again = resendText(turns, sent);
+  const latest = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0);
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
 
@@ -158,6 +160,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
           : <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>}
         {turn.reply ? <div className="pj-msg-master" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turnLine(turn)}</p>}
+        {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}
       {Object.entries(sent).filter(([ordinal]) => !turns.some((turn) => turn.ordinal === Number(ordinal))).map(([ordinal, message]) =>
         <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">Thinking...</p></div>)}

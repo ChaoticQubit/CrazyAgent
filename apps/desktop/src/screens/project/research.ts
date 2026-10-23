@@ -1,4 +1,5 @@
 import type { IconName, Tone } from "../../ui";
+import { failureCopy } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
@@ -125,6 +126,26 @@ export function turnLine(turn: MasterTurn): string {
     case "cancelled": return "Stopped";
     case "failed": case "blocked": case "uncertain": return `The master stopped${reason ? `: ${reason}` : ""}.`;
   }
+}
+
+const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
+
+/** Finds the owner's message to offer again when the latest master turn stopped or failed.
+ * Inputs: the turns and the messages this window sent, by ordinal. Output: the message, or
+ * null when the latest turn replied, is still going or its text is not in this window. */
+export function resendText(turns: MasterTurn[], sent: Record<number, string>): string | null {
+  const latest = turns.reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
+  if (latest === null || !RESENDABLE.has(latest.phase)) return null;
+  return sent[latest.ordinal] ?? null;
+}
+
+const SEND_FALLBACK = "Couldn't send. Try again.";
+
+/** The inline line under the composer when a message could not be sent; the message stays
+ * in the composer. Input: the failure code. Output: the plain line. */
+export function sendFailureLine(code: string): string {
+  const copy = failureCopy(code);
+  return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
 const FILE_ICONS: Record<string, IconName> = {
