@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::fmt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -118,9 +118,23 @@ pub struct ResearchJobs {
 }
 
 impl ResearchJobs {
-    /// Opens or creates the queue database at `path`.
+    /// Opens or creates the queue database at `path`, refusing a symlink.
+    /// The table matches the engine's own `research_jobs`, so `path` may be
+    /// the engine database that project creation queues jobs in.
     pub fn open(path: &Path) -> Result<Self, JobError> {
-        let connection = Connection::open(path)?;
+        let parent = path
+            .parent()
+            .ok_or(JobError::Invalid("database path"))?
+            .canonicalize()
+            .map_err(|_| JobError::Invalid("database folder"))?;
+        let name = path.file_name().ok_or(JobError::Invalid("database path"))?;
+        let connection = Connection::open_with_flags(
+            parent.join(name),
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;

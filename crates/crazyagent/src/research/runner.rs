@@ -753,7 +753,7 @@ pub fn kind_label(kind: &str) -> String {
         "market_research" => "Market research".into(),
         "competitor_research" => "Competitor research".into(),
         "design_research" => "Design research".into(),
-        "frontend_design" => "Front-end design".into(),
+        "front_end_design" => "Front-end design".into(),
         "tech_stack_research" => "Tech stack research".into(),
         other => {
             let words = other.replace(['_', '-'], " ");
@@ -771,7 +771,7 @@ fn kind_task(kind: &str, label: &str) -> String {
         "market_research" => "Describe the market: target users and their needs, market size signals, pricing norms and trends that matter for this project.".into(),
         "competitor_research" => "Find the main competitors and alternatives, compare their features, pricing and positioning, and point out gaps this project can use.".into(),
         "design_research" => "Collect design patterns, reference products and user experience conventions that fit this project and its users.".into(),
-        "frontend_design" => "Propose the front-end: key screens, navigation, main components and a visual direction, with reasons.".into(),
+        "front_end_design" => "Propose the front-end: key screens, navigation, main components and a visual direction, with reasons.".into(),
         "tech_stack_research" => "Compare technologies that suit this project and recommend a stack with clear reasons and tradeoffs.".into(),
         _ => format!("Research this topic for the project: {label}."),
     }
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn kind_labels_are_plain() {
         assert_eq!(kind_label("market_research"), "Market research");
-        assert_eq!(kind_label("frontend_design"), "Front-end design");
+        assert_eq!(kind_label("front_end_design"), "Front-end design");
         assert_eq!(kind_label("pricing-study"), "Pricing study");
     }
 

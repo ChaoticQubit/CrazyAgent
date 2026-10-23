@@ -296,34 +296,36 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     Ok(())
                 })
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
-                .and_then(|()| {
+                .and_then(|()| match codex.as_deref().filter(|_| writable) {
+                    None => Ok(None),
+                    Some(executable) => crazyagent::research::service::start_for_engine(
+                        runtime_dir,
+                        Path::new(&args[2]),
+                        Path::new(&args[3]),
+                        executable,
+                    )
+                    .map(Some),
+                })
+                .and_then(|research| {
                     let mut output = io::stdout().lock();
-                    writeln!(output, "ready")
-                        .and_then(|()| output.flush())
-                        .map_err(|e| e.to_string())
-                });
-            if let Err(error) = ready {
-                return match service.shutdown().await {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
-                };
-            }
-            let research = match codex.as_deref().filter(|_| writable) {
-                None => None,
-                Some(executable) => match crazyagent::research::service::start_for_engine(
-                    runtime_dir,
-                    Path::new(&args[2]),
-                    Path::new(&args[3]),
-                    executable,
-                ) {
-                    Ok(research) => Some(research),
-                    Err(error) => {
-                        return match service.shutdown().await {
-                            Ok(()) => Err(error),
-                            Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
-                        };
+                    match writeln!(output, "ready").and_then(|()| output.flush()) {
+                        Ok(()) => Ok(research),
+                        Err(error) => {
+                            if let Some(research) = research {
+                                research.stop();
+                            }
+                            Err(error.to_string())
+                        }
                     }
-                },
+                });
+            let research = match ready {
+                Ok(research) => research,
+                Err(error) => {
+                    return match service.shutdown().await {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                    };
+                }
             };
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(research) = research {

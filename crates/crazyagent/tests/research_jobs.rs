@@ -241,3 +241,36 @@ fn an_interrupted_job_returns_to_the_queue_without_spending_an_attempt() {
     );
     assert!(jobs.projects_with_work().unwrap().is_empty());
 }
+
+#[test]
+fn the_queue_refuses_a_database_reached_through_a_symlink() {
+    let (temp, path) = store();
+    let link = temp.path().join("linked.sqlite3");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert!(ResearchJobs::open(&link).is_err());
+    assert!(ResearchJobs::open(&path).is_ok());
+}
+
+#[test]
+fn jobs_queued_with_the_engine_report_path_keep_it_until_done() {
+    let (_temp, path) = store();
+    let database = rusqlite::Connection::open(&path).unwrap();
+    let id: i64 = database
+        .query_row(
+            "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+            VALUES ('project-a','tech_stack_research','codex',0,'queued','context/research/tech_stack_research.md',5)
+            RETURNING id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let job = jobs.claim("project-a", "runner-a", 3).unwrap().unwrap();
+    assert_eq!(job.id, id);
+    assert!(!job.tools);
+    assert_eq!(
+        job.report_path.as_deref(),
+        Some("context/research/tech_stack_research.md")
+    );
+    assert_eq!(job.status, ResearchStatus::Running);
+}

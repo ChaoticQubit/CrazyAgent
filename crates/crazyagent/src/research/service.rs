@@ -1,7 +1,7 @@
 use super::accounts::{AccountPick, SettingsResolver};
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 use super::runner::{ResearchLimits, ResearchRun, ResearchRunner, RunError, kind_label};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -151,9 +151,10 @@ where
     }
 }
 
-/// Starts research for a running engine: job store and agent state in
-/// `<runtime>/research`, one folder per project in `<runtime>/projects`, pool
-/// assignment read live from the engine's settings files.
+/// Starts research for a running engine: jobs claimed from the engine
+/// database's `research_jobs` table that project creation fills, agent state
+/// in `<runtime>/research`, one folder per project in `<runtime>/projects`
+/// and pool assignment read live from the engine's settings files.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -179,13 +180,14 @@ pub fn start_for_engine(
             return Err("research folder is not a directory".into());
         }
     }
-    let runner = ResearchRunner::new(
-        &state.join("research.sqlite3"),
-        &state,
-        codex,
-        ResearchLimits::default(),
-    )
-    .map_err(|error| error.to_string())?;
+    let database = runtime.join("engine.db");
+    let metadata = std::fs::symlink_metadata(&database)
+        .map_err(|error| format!("engine database: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err("engine database must be a private file".into());
+    }
+    let runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
+        .map_err(|error| error.to_string())?;
     let resolver = SettingsResolver::new(global, project, &projects)?;
     Ok(ResearchService::start(
         Arc::new(runner),

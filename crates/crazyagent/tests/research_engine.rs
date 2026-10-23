@@ -12,7 +12,9 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 fn codex() -> PathBuf {
     let path = std::env::var_os("CRAZYAGENT_CODEX")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/Caskroom/codex/0.163.0/bin/codex"));
+        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
+        .canonicalize()
+        .expect("real codex binary required");
     assert!(
         path.is_file(),
         "real codex binary required: {}",
@@ -135,7 +137,7 @@ fn runtime() -> PathBuf {
 }
 
 #[test]
-fn the_engine_runs_queued_research_for_a_project_with_an_assigned_pool() {
+fn the_engine_runs_research_that_project_creation_queued_in_the_engine_database() {
     let runtime = runtime();
     let engine = Engine::start(&runtime);
     let projects = runtime.join("projects");
@@ -149,13 +151,22 @@ fn the_engine_runs_queued_research_for_a_project_with_an_assigned_pool() {
         "# Corner cafe\n\nA website for a corner cafe with a menu and table booking.\n",
     )
     .unwrap();
-    let jobs = ResearchJobs::open(&research.join("research.sqlite3")).unwrap();
-    let id = jobs
-        .enqueue("project-cafe", "market_research", "codex", true)
-        .unwrap();
-    let waiting = jobs
-        .enqueue("project-unassigned", "design_research", "codex", true)
-        .unwrap();
+    let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let queue = |project: &str, kind: &str| -> i64 {
+        database
+            .query_row(
+                "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+                VALUES (?1,?2,'codex',1,'queued',?3,1) RETURNING id",
+                rusqlite::params![project, kind, format!("context/research/{kind}.md")],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let id = queue("project-cafe", "front_end_design");
+    let waiting = queue("project-unassigned", "design_research");
+    drop(database);
+    let jobs = ResearchJobs::open(&runtime.join("engine.db")).unwrap();
     fs::create_dir_all(projects.join("project-unassigned")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
@@ -177,10 +188,14 @@ fn the_engine_runs_queued_research_for_a_project_with_an_assigned_pool() {
         project
             .join("context")
             .join("research")
-            .join("market_research.md"),
+            .join("front_end_design.md"),
     )
     .unwrap();
-    assert!(report.starts_with("# Market research\n"), "{report}");
+    assert!(report.starts_with("# Front-end design\n"), "{report}");
+    assert_eq!(
+        jobs.get(id).unwrap().unwrap().report_path.as_deref(),
+        Some("context/research/front_end_design.md")
+    );
     assert!(project.join("worktrees").is_dir());
     fs::remove_dir_all(&runtime).unwrap();
 }
