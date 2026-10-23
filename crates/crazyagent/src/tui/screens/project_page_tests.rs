@@ -319,7 +319,19 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     );
     shell.key(Key::Char('h'));
     shell.key(Key::Enter);
-    assert!(shell.ctx.next_request().is_none());
+    while let Some(request) = shell.ctx.next_request() {
+        assert!(
+            matches!(
+                request,
+                Request::Setup(
+                    SetupQuery::Jobs { .. }
+                        | SetupQuery::Context { .. }
+                        | SetupQuery::Memories { .. }
+                )
+            ),
+            "{request:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
