@@ -11,6 +11,7 @@ use std::time::Duration;
 
 mod account_profile;
 mod project_setup;
+mod team;
 mod owner_setup;
 pub use account_profile::PendingAccountProfile;
 

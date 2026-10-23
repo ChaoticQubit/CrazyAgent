@@ -138,6 +138,9 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         path: String,
     },
+    Team {
+        action: crate::team::TeamAction,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -246,6 +249,12 @@ impl OwnerMutation {
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
+            }
+            Self::Team { action } => {
+                action.validate()?;
+                Command::Team {
+                    action: action.clone(),
+                }
             }
             Self::ModelAccess {
                 expected_config_id,
@@ -399,6 +408,9 @@ pub enum OwnerRead {
     ResearchJobs {
         project_id: ProjectId,
     },
+    TeamStatus {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -467,6 +479,7 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ResearchJobs { .. }
+            | Self::TeamStatus { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::PoolSummaries { .. } => return Ok(None),
@@ -779,6 +792,9 @@ pub enum OwnerData {
     ResearchJobs {
         project_id: ProjectId,
         jobs: Vec<crate::project_setup::ResearchJob>,
+    },
+    TeamStatus {
+        status: Box<crate::team::TeamStatus>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

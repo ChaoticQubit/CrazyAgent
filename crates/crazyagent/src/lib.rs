@@ -22,6 +22,7 @@ pub mod rcli_host;
 pub mod routing;
 pub mod sandbox;
 pub mod storage;
+pub mod team;
 pub mod tui;
 pub mod verification;
 pub mod worker_dispatch;

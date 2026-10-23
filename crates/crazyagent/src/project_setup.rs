@@ -474,6 +474,13 @@ pub enum SetupQuery {
         decision: crate::memory::ReviewDecision,
         generation: u64,
     },
+    Team {
+        project: ProjectId,
+    },
+    TeamChange {
+        action: crate::team::TeamAction,
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -485,6 +492,7 @@ pub enum SetupView {
     Item(ContextChunk),
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
+    Team(Box<crate::team::TeamStatus>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
