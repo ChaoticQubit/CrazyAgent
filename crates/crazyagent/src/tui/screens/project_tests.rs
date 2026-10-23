@@ -1,5 +1,7 @@
 use super::new_project_view::{Look, Row};
-use super::project::{PoolInfo, ProjectReply, ProjectScreen, Tab, plain_problem, research_kind};
+use super::project::{
+    PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
+};
 use super::project_markdown::line_width;
 use super::project_view::project_screen;
 use crate::client_controller::OwnerController;
@@ -380,11 +382,37 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.open(Tab::Overview);
     settle(&mut screen, &mut controller, start + 9_000).await;
     assert_eq!(screen.suggested().len(), 1);
+    assert_eq!(
+        memory_source(screen.suggested()[0]),
+        Some(ResearchKind::CompetitorResearch)
+    );
     let drawn = project_screen(&mut screen, 120, 36, &look);
     let shown = text(&drawn.rows);
     assert!(shown.contains("Needs you  1"), "{shown}");
     assert!(shown.contains("Save to memory?"));
+    assert!(
+        shown.contains("\"BuoyWatch charges per seat. red\""),
+        "{shown}"
+    );
+    assert!(shown.contains("From Competitor research"), "{shown}");
     assert!(drawn.help.contains(&("y", "Save to memory")));
+
+    screen.width = 80;
+    screen.read(&research);
+    assert!(screen.report_suggestion().is_some());
+    screen.preview.as_mut().unwrap().scroll = usize::MAX / 2;
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("Suggested memory"), "{shown}");
+    assert!(shown.contains("y Save to memory   n Dismiss   e Edit first"));
+    assert_eq!(drawn.help.first(), Some(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(screen.edit.is_some());
+    screen.edit = None;
+    screen.preview = None;
+    screen.reading = false;
+    screen.open(Tab::Overview);
+    screen.width = 120;
 
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
@@ -547,4 +575,15 @@ fn report_paths_map_back_to_their_research() {
         plain_problem("anything_else"),
         "That didn't work. Try again."
     );
+}
+
+#[test]
+fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
+    use super::project_view::memory_quote;
+    assert_eq!(
+        memory_quote("# Competitors\n\nBuoyWatch charges per seat.\nMore."),
+        "BuoyWatch charges per seat."
+    );
+    assert_eq!(memory_quote("## Only a heading\n"), "Only a heading");
+    assert_eq!(memory_quote("  \n"), "");
 }

@@ -3,7 +3,9 @@ use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
-use super::project::{MasterStatus, ProjectScreen, Speaker, Tab, Transcript, research_kind};
+use super::project::{
+    MasterStatus, ProjectScreen, Speaker, Tab, Transcript, memory_source, research_kind,
+};
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
 use crate::project_setup::{ContextItem, ContextKind, ResearchJob, ResearchStatus};
@@ -258,6 +260,20 @@ fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> 
         .collect()
 }
 
+/// Picks the line that stands for a memory in one-line lists.
+/// Takes the memory text, which may be a whole Markdown report.
+/// Returns its first line of prose, else its first heading without the marks.
+pub(in crate::tui) fn memory_quote(text: &str) -> String {
+    let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty());
+    lines()
+        .find(|line| !line.starts_with('#'))
+        .or_else(|| lines().next())
+        .unwrap_or("")
+        .trim_start_matches('#')
+        .trim()
+        .to_owned()
+}
+
 fn needs_you(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
     let suggested = screen.suggested();
     if suggested.is_empty() {
@@ -266,13 +282,15 @@ fn needs_you(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
     let index = screen.overview_cursor.min(suggested.len() - 1);
     let memory = suggested[index];
     let bar = Row::of(look.glyph("\u{258c}"), look.accent).push(" ", Style::new());
-    let quote = memory.text.lines().next().unwrap_or("").trim();
+    let from = memory_source(memory).map_or("From research".to_owned(), |kind| {
+        format!("From {}", kind.label())
+    });
     vec![
         Row::of("Needs you", look.accent).push(format!("  {}", suggested.len()), look.muted),
         bar.clone().push("Save to memory?", look.heading),
         bar.clone()
-            .cat(Row::of(format!("\"{quote}\""), look.fg).pad(70)),
-        bar.push("From research", look.muted)
+            .cat(Row::of(format!("\"{}\"", memory_quote(&memory.text)), look.fg).pad(70)),
+        bar.push(from, look.muted)
             .push("   ", Style::new())
             .push("y", look.heading)
             .push(" Save   ", look.fg)
@@ -978,6 +996,9 @@ fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Lo
             .unwrap_or_default();
         spread(width, Row::of(relative, look.heading), origin)
     });
+    let suggestion = screen
+        .report_suggestion()
+        .map(|memory| memory_quote(&memory.text));
     let Some(preview) = screen.preview.as_mut() else {
         return vec![Row::of(
             "Pick a file and press Enter to read it.",
@@ -996,9 +1017,10 @@ fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Lo
         rows.push(Row::of("Loading...", look.muted));
         return rows;
     }
-    let available = room.saturating_sub(2);
+    let available = room.saturating_sub(if suggestion.is_some() { 6 } else { 2 });
     let wanted = preview.scroll;
     let lines = preview.lines(width);
+    let lines_count = lines.len();
     let scroll = wanted.min(lines.len().saturating_sub(available));
     let shown: Vec<Row> = lines
         .iter()
@@ -1008,6 +1030,20 @@ fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Lo
         .collect();
     preview.scroll = scroll;
     rows.extend(shown);
+    let at_end = scroll + available >= lines_count;
+    if let Some(quote) = suggestion.filter(|_| at_end) {
+        rows.extend([
+            Row::default(),
+            Row::of("Suggested memory", look.heading),
+            Row::of(format!("\"{quote}\""), look.fg).pad(width),
+            Row::of("y", look.heading)
+                .push(" Save to memory   ", look.fg)
+                .push("n", look.heading)
+                .push(" Dismiss   ", look.fg)
+                .push("e", look.heading)
+                .push(" Edit first", look.fg),
+        ]);
+    }
     rows
 }
 
@@ -1020,12 +1056,22 @@ fn context(
 ) -> Drawn {
     let wide = width >= 100;
     if screen.reading && !wide {
-        let help = vec![
-            ("m", "Save to memory"),
-            ("o", "Open in editor"),
-            ("PgDn", "Scroll"),
-            ("Esc", "Back to files"),
-        ];
+        let help = if screen.report_suggestion().is_some() {
+            vec![
+                ("y", "Save to memory"),
+                ("n", "Dismiss"),
+                ("o", "Open in editor"),
+                ("PgDn", "Scroll"),
+                ("Esc", "Back to files"),
+            ]
+        } else {
+            vec![
+                ("m", "Save to memory"),
+                ("o", "Open in editor"),
+                ("PgDn", "Scroll"),
+                ("Esc", "Back to files"),
+            ]
+        };
         return (preview_rows(screen, content, room, look), None, help);
     }
     let help = vec![

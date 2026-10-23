@@ -694,6 +694,41 @@ impl ProjectScreen {
         }
     }
 
+    /// Finds the suggested memory that came from the report being read.
+    /// Takes the screen; only research reports have one.
+    /// Returns the memory, when the report being read suggested one.
+    pub fn report_suggestion(&self) -> Option<&KnowledgeEntry> {
+        let kind = research_kind(&self.preview.as_ref()?.path)?;
+        self.suggested()
+            .into_iter()
+            .find(|memory| memory_source(memory) == Some(kind))
+    }
+
+    fn decide(&mut self, memory: Option<(RequestId, u64, String)>, code: KeyCode) -> ProjectReply {
+        let Some((entry, version, text)) = memory else {
+            return ProjectReply::Handled;
+        };
+        let decision = match code {
+            KeyCode::Char('y') => ReviewDecision::Keep,
+            KeyCode::Char('n') => ReviewDecision::Reject,
+            _ => {
+                let mut input = TextInput::multi(MEMORY_BYTES_MAX);
+                input.set(&super::project_markdown::sanitize(&text));
+                self.edit = Some(MemoryEdit {
+                    entry,
+                    version,
+                    input,
+                });
+                return ProjectReply::Handled;
+            }
+        };
+        ProjectReply::Review {
+            entry,
+            version,
+            decision,
+        }
+    }
+
     fn overview_key(&mut self, key: KeyEvent) -> ProjectReply {
         let suggested: Vec<(RequestId, u64, String)> = self
             .suggested()
@@ -703,35 +738,12 @@ impl ProjectScreen {
         let work = self.setup.as_ref().map_or(0, |s| s.research.len());
         let rows = suggested.len() + work;
         let focused = suggested.get(self.overview_cursor).cloned();
-        let decide = |decision| {
-            focused
-                .clone()
-                .map_or(ProjectReply::Handled, |(entry, version, _)| {
-                    ProjectReply::Review {
-                        entry,
-                        version,
-                        decision,
-                    }
-                })
-        };
         match key.code {
             KeyCode::Up => self.overview_cursor = self.overview_cursor.saturating_sub(1),
             KeyCode::Down => {
                 self.overview_cursor = (self.overview_cursor + 1).min(rows.saturating_sub(1));
             }
-            KeyCode::Char('y') => return decide(ReviewDecision::Keep),
-            KeyCode::Char('n') => return decide(ReviewDecision::Reject),
-            KeyCode::Char('e') => {
-                if let Some((entry, version, text)) = focused {
-                    let mut input = TextInput::multi(MEMORY_BYTES_MAX);
-                    input.set(&text);
-                    self.edit = Some(MemoryEdit {
-                        entry,
-                        version,
-                        input,
-                    });
-                }
-            }
+            KeyCode::Char('y' | 'n' | 'e') => return self.decide(focused, key.code),
             KeyCode::Char('o') => {
                 return self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
                     ProjectReply::Open(s.folder.clone())
@@ -845,6 +857,14 @@ impl ProjectScreen {
                     }
                     return ProjectReply::Handled;
                 }
+                KeyCode::Char('y' | 'n' | 'e') => {
+                    let memory = self
+                        .report_suggestion()
+                        .map(|m| (m.id.clone(), m.version, m.text.clone()));
+                    if memory.is_some() {
+                        return self.decide(memory, key.code);
+                    }
+                }
                 _ => {}
             }
         }
@@ -945,6 +965,25 @@ impl ProjectScreen {
             assert!(preview.path.starts_with(CONTEXT_DIRECTORY));
         }
     }
+}
+
+/// Finds which research report suggested a memory.
+/// Takes a suggested memory; the engine names research suggestions by a digest of project, research and text.
+/// Returns the research kind, or none for a memory from anywhere else.
+pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchKind> {
+    let digest = memory.id.as_str().strip_prefix("research-")?;
+    ResearchKind::ALL.into_iter().find(|kind| {
+        let expected = crate::memory::hash(
+            format!(
+                "{}\n{}\n{}",
+                memory.project_id.as_str(),
+                kind.name(),
+                memory.text
+            )
+            .as_bytes(),
+        );
+        expected.get(..32) == Some(digest)
+    })
 }
 
 /// Finds the research kind of a report path.
