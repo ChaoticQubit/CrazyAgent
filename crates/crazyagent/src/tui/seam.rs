@@ -25,9 +25,9 @@ pub enum PoolChange {
     Remove {
         id: CredentialRef,
     },
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Project screen assigns pools")
+    #[allow(
+        dead_code,
+        reason = "used by the Project screens on feat/v1-tui-projects; drop after integration"
     )]
     Assign {
         pool: CredentialRef,
