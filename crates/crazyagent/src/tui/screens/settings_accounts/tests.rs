@@ -134,7 +134,7 @@ const NAMED: [(&str, Provider, SignInMethod, AccountStatus, &[&str]); 24] = [
     ("Claude Team - seat 11", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
 ];
 
-fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary>) {
+pub(crate) fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary>) {
     let mut accounts: Vec<AccountView> = NAMED
         .iter()
         .enumerate()
@@ -177,7 +177,7 @@ fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary>) {
     (accounts, pools)
 }
 
-fn list_ctx(width: u16, height: u16, pools: Vec<PoolSummary>) -> Ctx {
+pub(crate) fn list_ctx(width: u16, height: u16, pools: Vec<PoolSummary>) -> Ctx {
     let mut ctx = ctx(width, height);
     ctx.store.accounts = Load::Ready(dataset(None).0.iter().map(account_row).collect());
     ctx.store.pools = Load::Ready(pools);

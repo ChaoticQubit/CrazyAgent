@@ -1014,4 +1014,4 @@ impl Screen for AccountDetails {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

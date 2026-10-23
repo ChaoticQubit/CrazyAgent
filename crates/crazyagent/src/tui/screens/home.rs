@@ -128,7 +128,7 @@ impl Home {
     fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 3] {
         let setup = Self::setup(ctx).unwrap_or_default();
         let harness = match &ctx.store.harnesses {
-            Load::Ready(count) => vec![format!("{count} harnesses ready"), "on this Mac.".into()],
+            Load::Ready((ready, all)) => vec![format!("{ready} of {all} harnesses ready"), "on this Mac.".into()],
             _ => vec!["Harness checks are not".into(), "ready yet.".into()],
         };
         [
@@ -149,7 +149,7 @@ impl Home {
                 Place::Settings(SettingsSection::Pools),
             ),
             (
-                matches!(ctx.store.harnesses, Load::Ready(count) if count > 0),
+                matches!(ctx.store.harnesses, Load::Ready((ready, _)) if ready > 0),
                 "Check your harnesses",
                 harness,
                 Place::Settings(SettingsSection::Harnesses),

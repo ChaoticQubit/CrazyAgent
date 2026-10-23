@@ -40,7 +40,9 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
             count: match section {
                 SettingsSection::Accounts => count(&ctx.store.accounts, |rows| rows.len().to_string()),
                 SettingsSection::Pools => count(&ctx.store.pools, |pools| pools.len().to_string()),
-                SettingsSection::Harnesses => count(&ctx.store.harnesses, ToString::to_string),
+                SettingsSection::Harnesses => {
+                    count(&ctx.store.harnesses, |(found, all)| format!("{found} of {all}"))
+                }
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
                 SettingsSection::Plugins | SettingsSection::Profile => String::new(),
             },
@@ -83,6 +85,7 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
     match section {
         SettingsSection::Pools => Box::new(pools::Pools::new()),
         SettingsSection::Accounts => Box::new(super::settings_accounts::Accounts::new()),
+        SettingsSection::Harnesses => Box::new(super::settings_harnesses::Harnesses::new()),
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
         other => Box::new(Pending::new(other)),
     }
