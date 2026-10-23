@@ -338,6 +338,12 @@ impl NewProjectPage {
             .as_mut()
             .expect("only a finished creation opens its project");
         assert!(!creation.assigning);
+        if !creation.finished {
+            ctx.say(Message::success(
+                &format!("{} is ready.", creation.submission.spec.name),
+                "",
+            ));
+        }
         creation.finished = true;
         Flow::Replace(Box::new(ProjectPage::new(
             creation.submission.project_id.clone(),

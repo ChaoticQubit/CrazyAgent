@@ -517,6 +517,8 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert_eq!((name.as_str(), tab), ("Tidepool", ProjectTab::Overview));
     assert!(id.as_str().starts_with("project-"));
     assert_eq!(kept_draft(), None);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Tidepool is ready."), "{shown}");
     pump(&mut shell, &mut connection).await;
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Home  /  Tidepool"), "{shown}");
