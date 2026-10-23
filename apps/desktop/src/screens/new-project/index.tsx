@@ -7,6 +7,7 @@ import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
+import { homePath } from "../project/research";
 import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
 import { RESEARCH_ICONS, RESEARCH_LABELS, TeamEditor } from "./team-editor";
@@ -289,7 +290,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           </div>}
           {docErrors.map((error) => <p className="pj-error" role="alert" key={error}>{displayText(error)}</p>)}
           {draft.documents.length > 0 ? <ul className="pj-files" aria-label="Attached documents">{draft.documents.map((document) => <li key={document.path}>
-            <span>{displayText(document.name)}</span><span className="pj-small pj-secondary">{documentType(document.name)}</span><span className="pj-small pj-muted pj-mono">{displayText(document.path)}</span>
+            <span>{displayText(document.name)}</span><span className="pj-small pj-secondary">{documentType(document.name)}</span><span className="pj-small pj-muted pj-mono" title={document.path}>{displayText(homePath(document.path))}</span>
             <button type="button" className="btn quiet" aria-label={`Remove ${document.name}`} onClick={() => setDraft({ ...draft, documents: draft.documents.filter((item) => item.path !== document.path) })}>Remove</button>
           </li>)}</ul> : <p className="pj-muted">No documents yet. Documents are optional.</p>}
         </div>}

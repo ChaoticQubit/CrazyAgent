@@ -9,7 +9,7 @@ import { poolName, poolReadiness, poolSummary } from "../new-project/wizard";
 import { onFact, useList } from "./plugins";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, signInLine, suggestedLine, tildePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, signInLine, suggestedLine, homePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -19,7 +19,7 @@ const PLATFORM_LABELS: Record<string, string> = {
  * cut to eight characters. Input: the absolute path. Output: the display path. */
 export function folderLabel(path: string): string {
   const short = path.split("/").map((part) => part.replace(/^(.*?[^0-9a-f]|)([0-9a-f]{8})[0-9a-f]{8,}$/u, "$1$2...")).join("/");
-  return tildePath(short, /^\/Users\/[^/]+/u.exec(short)?.[0] ?? "");
+  return homePath(short);
 }
 
 /** Overview tab: what needs the owner, research progress, recent activity and project facts.

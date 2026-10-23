@@ -84,6 +84,9 @@ test("home folder paths are shown with a tilde", () => {
   assert.equal(research.tildePath("/Users/mira/CrazyAgent/projects/x", "/Users/mira"), "~/CrazyAgent/projects/x");
   assert.equal(research.tildePath("/opt/x", "/Users/mira"), "/opt/x");
   assert.equal(research.tildePath("/Users/mirage/x", "/Users/mira"), "/Users/mirage/x");
+  assert.equal(research.homePath("/Users/mira/Docs/field-interviews.md"), "~/Docs/field-interviews.md");
+  assert.equal(research.homePath("/Users/mira"), "~");
+  assert.equal(research.homePath("/Volumes/Work/notes.md"), "/Volumes/Work/notes.md");
 });
 
 test("master status words follow the design's fixed set", () => {

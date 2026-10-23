@@ -35,6 +35,12 @@ export function tildePath(path: string, home: string): string {
   return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
 }
 
+/** Shows a path under the macOS user folder it starts with as "~", so the owner sees
+ * where a file is without their account name. Input: an absolute path. Output: the shortened path. */
+export function homePath(path: string): string {
+  return tildePath(path, /^\/Users\/[^/]+/u.exec(path)?.[0] ?? "");
+}
+
 export interface ResearchRow {
   title: string;
   status: string;
