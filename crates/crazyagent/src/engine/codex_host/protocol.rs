@@ -38,6 +38,19 @@ impl CodexHostProtocol {
         self.protocol.start_thread(cwd).map_err(protocol_error)
     }
 
+    /// Starts the read-only master thread with the project's startup instructions as its
+    /// developer instructions. Input: absolute project directory and the instruction text.
+    /// Output: the encoded `thread/start` request, or a plain protocol code.
+    pub fn start_instructed_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.protocol
+            .start_instructed_thread(cwd, instructions)
+            .map_err(protocol_error)
+    }
+
     pub fn start_turn(
         &mut self,
         request_id: RequestId,

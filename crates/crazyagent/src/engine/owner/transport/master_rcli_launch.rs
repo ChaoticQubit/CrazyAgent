@@ -476,6 +476,7 @@ fallback_allowed = false
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
+            instructions: prepared.instructions.clone(),
             session: prepared.session.clone(),
             attempt: prepared.attempt.clone(),
             profile: PreparedNativeProfile::from_binding(prepared.profile.binding().clone()),

@@ -9,12 +9,14 @@ use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
+const MASTER_INSTRUCTIONS: &str = "instructions.md";
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const MASTER_CONFIG: [&str; 14] = [
     "model_provider=\"openai\"",
@@ -56,24 +58,12 @@ impl OwnerRuntimeHandle {
         self.authority.root.verify()?;
         let home = profile.profile_path()?;
         let model = &prepared.attempt.connection.model.id;
-        let (command, executable) = match prepared.session.selection.backend {
+        let executable = match prepared.session.selection.backend {
             MasterBackend::Codex => {
                 require_master_tool_policy()?;
-                let executable = self.registered_codex_executable()?;
-                let command =
-                    master_command(executable.verified_path()?, &home, &prepared.cwd, model)?;
-                (command, executable)
+                self.registered_codex_executable()?
             }
-            MasterBackend::Claude => {
-                let executable = self.registered_claude_executable()?;
-                let command = crate::engine::claude_host::launch_command(
-                    executable.verified_path()?,
-                    &prepared.cwd,
-                    &home,
-                    model,
-                )?;
-                (command, executable)
-            }
+            MasterBackend::Claude => self.registered_claude_executable()?,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
         };
         let artifact_sha256 = executable.verified_sha256()?;
@@ -84,6 +74,22 @@ impl OwnerRuntimeHandle {
             return Err(failure("master_runtime_binding"));
         }
         let (runtime_ref, capture_ref, capture) = allocate_master_capture(&self.authority.root)?;
+        let command = if prepared.session.selection.backend == MasterBackend::Claude {
+            let instructions = write_master_instructions(
+                &self.authority.root,
+                &runtime_ref,
+                &prepared.instructions,
+            )?;
+            crate::engine::claude_host::launch_command(
+                executable.verified_path()?,
+                &prepared.cwd,
+                &home,
+                model,
+                Some(instructions.as_path()),
+            )?
+        } else {
+            master_command(executable.verified_path()?, &home, &prepared.cwd, model)?
+        };
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
         Ok(MasterHostLaunch {
@@ -231,6 +237,46 @@ pub(super) fn allocate_master_capture(root: &Root) -> Result<(RequestId, Request
         return Ok((runtime_ref, capture_ref, capture));
     }
     Err(failure("master_capture_unavailable"))
+}
+
+/// Writes the master's startup instruction into its private turn directory as the 0600
+/// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
+/// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
+/// file's absolute path, or a plain refusal when the directory or file is not the engine's.
+fn write_master_instructions(
+    root: &Root,
+    runtime_ref: &RequestId,
+    text: &str,
+) -> Result<PathBuf, EngineError> {
+    if text.len() > crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX {
+        return Err(failure("master_instructions_too_large"));
+    }
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let mut file = runtime.open_key(MASTER_INSTRUCTIONS, true)?;
+    file.write_all(text.as_bytes()).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    runtime.directory.sync_all().map_err(io_error)?;
+    let named = rustix::fs::statat(
+        &runtime.directory,
+        MASTER_INSTRUCTIONS,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(io_error)?;
+    let held = file.metadata().map_err(io_error)?;
+    if !held.is_file()
+        || held.uid() != rustix::process::geteuid().as_raw()
+        || held.mode() & 0o7777 != 0o600
+        || held.nlink() != 1
+        || held.len() != text.len() as u64
+        || named.st_ino != held.ino()
+        || named.st_dev as u64 != held.dev()
+    {
+        return Err(failure("master_instructions_identity"));
+    }
+    verify_master_runtime(root, &runtime, &name)?;
+    Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
 fn verify_master_runtime(root: &Root, runtime: &Root, name: &str) -> Result<(), EngineError> {
@@ -400,6 +446,40 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn master_instructions_are_one_private_file_in_the_turn_directory() {
+        let temporary = private_root();
+        let root = Root::open(temporary.path()).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let text = "# Project context from CrazyAgent\n\nThe codename is BLUE-HERON-77.\n";
+        let path = write_master_instructions(&root, &runtime_ref, text).unwrap();
+        assert_eq!(
+            path,
+            temporary
+                .path()
+                .join(format!("master-runtime-{}", runtime_ref.as_str()))
+                .join("instructions.md")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert!(write_master_instructions(&root, &runtime_ref, "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let (other, _, _) = allocate_master_capture(&root).unwrap();
+        let oversized = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1);
+        assert!(write_master_instructions(&root, &other, &oversized).is_err());
+        assert!(
+            !temporary
+                .path()
+                .join(format!("master-runtime-{}", other.as_str()))
+                .join("instructions.md")
+                .exists()
+        );
     }
 
     #[test]

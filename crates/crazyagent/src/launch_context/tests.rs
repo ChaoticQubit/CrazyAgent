@@ -1,4 +1,5 @@
 use super::*;
+use crate::plugins::{EffectiveSecret, EffectiveServer};
 use crate::project_setup::TeamPlan;
 
 fn stored(folder: &Path) -> StoredSetup {
@@ -69,4 +70,92 @@ fn clip_never_splits_a_character() {
     assert_eq!(clip("aé", 2), "a");
     assert_eq!(clip("aé", 3), "aé");
     assert_eq!(clip("", 5), "");
+}
+
+#[test]
+fn the_master_hears_skill_and_server_names_but_no_server_detail() {
+    let store = tempfile::tempdir().unwrap();
+    let skill = store.path().join("meal-tips");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: meal-tips\ndescription: Gives meal planning tips.\n---\n\nSay tips.\n",
+    )
+    .unwrap();
+    let plugins = EffectivePlugins {
+        skills: vec![EffectiveSkill {
+            name: "meal-tips".into(),
+            folder: skill.clone(),
+        }],
+        servers: vec![
+            EffectiveServer {
+                name: "approved-tools".into(),
+                spec: ServerSpec::Stdio {
+                    command: "/usr/bin/python3".into(),
+                    args: vec!["/hidden/server.py".into()],
+                },
+                secrets: vec![EffectiveSecret {
+                    name: "FIXTURE_TOKEN".into(),
+                    reference: "secret-reference-1".into(),
+                }],
+            },
+            EffectiveServer {
+                name: "remote-docs".into(),
+                spec: ServerSpec::Http {
+                    url: "https://docs.example.test/mcp".into(),
+                },
+                secrets: vec![],
+            },
+        ],
+    };
+
+    let text = team_index(&plugins);
+
+    assert!(text.contains("Your own tools are off"));
+    assert!(text.contains("- Skill meal-tips: Gives meal planning tips.\n"));
+    assert!(text.contains("- MCP server approved-tools\n"));
+    assert!(text.contains("- MCP server remote-docs\n"));
+    for hidden in [
+        "/usr/bin/python3",
+        "server.py",
+        "FIXTURE_TOKEN",
+        "secret-reference-1",
+        "docs.example.test",
+        store.path().to_str().unwrap(),
+    ] {
+        assert!(!text.contains(hidden), "{hidden}");
+    }
+    assert_eq!(team_index(&EffectivePlugins::default()), "");
+}
+
+#[test]
+fn the_team_index_stays_within_its_bound_with_many_plugins() {
+    let plugins = EffectivePlugins {
+        skills: (0..300)
+            .map(|index| EffectiveSkill {
+                name: format!("skill-{index:03}-{}", "s".repeat(40)),
+                folder: PathBuf::from("/missing-skill-folder"),
+            })
+            .collect(),
+        servers: (0..100)
+            .map(|index| EffectiveServer {
+                name: format!("server-{index:03}"),
+                spec: ServerSpec::Http {
+                    url: "https://example.test/mcp".into(),
+                },
+                secrets: vec![],
+            })
+            .collect(),
+    };
+
+    let text = team_index(&plugins);
+
+    assert!(
+        text.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK,
+        "{}",
+        text.len()
+    );
+    assert!(text.contains("- Skill skill-000-"));
+    assert!(!text.contains("- MCP server server-099"));
+    assert!(text.ends_with(" more\n"));
 }
