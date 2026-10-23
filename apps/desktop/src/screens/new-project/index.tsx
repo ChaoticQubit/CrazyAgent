@@ -59,7 +59,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [stackError, setStackError] = useState("");
   const [docErrors, setDocErrors] = useState<string[]>([]);
   const [docPath, setDocPath] = useState("");
-  const [pickerReady, setPickerReady] = useState(true);
+  const [picker, setPicker] = useState<"ready" | "missing" | "failed">("ready");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
@@ -180,10 +180,11 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   async function choose() {
     const result = await pickDocuments();
     if (result.kind === "not_ready") {
-      setPickerReady(false);
+      setPicker("missing");
       return;
     }
     if (result.kind === "error") {
+      setPicker("failed");
       setDocErrors([failureCopy(result.code)]);
       return;
     }
@@ -279,9 +280,9 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <div className="pj-drop">
             <p><Button icon="upload" onClick={() => void choose()}>Choose files</Button></p>
             <p className="pj-help">PDF, Markdown, text, Word, CSV, PNG and JPG. Up to 50 MB each, 200 MB per project. Files are copied into context/documents in the project folder.</p>
-            {!pickerReady && <NotReady what="the file picker isn't in this build. Add a file by its full path below." />}
+            {picker === "missing" && <NotReady what="the file picker isn't in this build. Add a file by its full path below." />}
           </div>
-          {!pickerReady && <div className="pj-field">
+          {picker !== "ready" && <div className="pj-field">
             <label htmlFor="np-doc-path">Full path of a file on this Mac</label>
             <div className="pj-row">
               <input className="pj-input" id="np-doc-path" value={docPath} onChange={(event) => setDocPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addPath(); } }} />
