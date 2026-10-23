@@ -222,6 +222,7 @@ pub(in crate::tui) enum ProjectReply {
     },
     Open(String),
     PickPool,
+    Assign(crate::protocol::CredentialRef),
     Send(String),
     StopTurn,
     Retry,
@@ -739,7 +740,7 @@ impl ProjectScreen {
             KeyCode::Enter
                 if !self.pool.as_ref().is_some_and(|p| p.assigned) && suggested.is_empty() =>
             {
-                return ProjectReply::PickPool;
+                return self.pool_reply();
             }
             KeyCode::Enter => {
                 let index = self.overview_cursor.checked_sub(suggested.len());
@@ -914,9 +915,17 @@ impl ProjectScreen {
         }
     }
 
+    fn pool_reply(&self) -> ProjectReply {
+        let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
+        match (&self.pool, picked) {
+            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
+            _ => ProjectReply::PickPool,
+        }
+    }
+
     fn settings_key(&mut self, key: KeyEvent) -> ProjectReply {
         match key.code {
-            KeyCode::Enter => ProjectReply::PickPool,
+            KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
                 ProjectReply::Open(s.folder.clone())
             }),

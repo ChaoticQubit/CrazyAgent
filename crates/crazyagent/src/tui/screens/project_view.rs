@@ -331,6 +331,27 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         return (lines, None, vec![TABS, ("Esc", "Home")]);
     }
     if !assigned && screen.suggested().is_empty() {
+        let picked = screen
+            .pool
+            .as_ref()
+            .filter(|_| screen.setup.as_ref().is_some_and(|s| s.pool.is_some()));
+        let (problem, action, button, key) = match picked {
+            Some(pool) => (
+                format!(
+                    "Pool {} is picked but not assigned yet, so no agent can start.",
+                    pool.name
+                ),
+                "Press Enter to assign it. Work starts as soon as you do.",
+                format!("[> Assign {} ]", pool.name),
+                ("Enter", "Assign pool"),
+            ),
+            None => (
+                "This project has no pool, so no agent can start.".to_owned(),
+                "Pick a pool in Settings. Work starts as soon as you do.",
+                "[> Pick a pool ]".to_owned(),
+                ("Enter", "Pick a pool"),
+            ),
+        };
         let mut lines = vec![
             spread(
                 content,
@@ -339,19 +360,19 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
             ),
             Row::of(about_line(screen), look.fg).pad(content),
             Row::default(),
-            Row::of(
-                "This project has no pool, so no agent can start.",
-                look.warning,
-            ),
-            Row::of(
-                "Pick a pool in Settings. Work starts as soon as you do.",
-                look.fg,
-            ),
+        ];
+        lines.extend(
+            wrap_words(&problem, content)
+                .into_iter()
+                .map(|line| Row::of(line, look.warning)),
+        );
+        lines.extend([
+            Row::of(action, look.fg),
             Row::default(),
-            Row::of("[> Pick a pool ]", look.selection),
+            Row::of(button, look.selection),
             Row::default(),
             Row::of("Work", look.heading),
-        ];
+        ]);
         if let Some(setup) = &screen.setup {
             for kind in &setup.research {
                 lines.push(columns(
@@ -363,11 +384,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
                 ));
             }
         }
-        return (
-            lines,
-            None,
-            vec![("Enter", "Pick a pool"), TABS, ("Esc", "Home")],
-        );
+        return (lines, None, vec![key, TABS, ("Esc", "Home")]);
     }
     if !screen.suggested().is_empty() {
         help.extend([

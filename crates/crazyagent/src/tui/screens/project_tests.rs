@@ -1,5 +1,5 @@
 use super::new_project_view::{Look, Row};
-use super::project::{ProjectReply, ProjectScreen, Tab, plain_problem, research_kind};
+use super::project::{PoolInfo, ProjectReply, ProjectScreen, Tab, plain_problem, research_kind};
 use super::project_markdown::line_width;
 use super::project_view::project_screen;
 use crate::client_controller::OwnerController;
@@ -11,7 +11,7 @@ use crate::project_setup::{
     ContextKind, Platform, ProjectSetup, ResearchKind, ResearchStatus, SetupAction, SetupQuery,
     SetupView,
 };
-use crate::protocol::{ProjectId, ProjectSpec};
+use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -246,6 +246,35 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         assert_eq!(drawn.help.first(), Some(&("Enter", "Pick a pool")));
     }
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::PickPool);
+    let picked = CredentialRef::new("pool-main").unwrap();
+    screen.setup.as_mut().unwrap().pool = Some(picked.clone());
+    screen.pool = Some(PoolInfo {
+        name: "Main".into(),
+        accounts: 1,
+        assigned: false,
+    });
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("Pool Main is picked but not assigned yet"),
+        "{shown}"
+    );
+    assert!(shown.contains("[> Assign Main ]"));
+    assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Assign(picked.clone())
+    );
+    screen.open(Tab::Settings);
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Assign(picked)
+    );
+    screen.pool.as_mut().unwrap().assigned = true;
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::PickPool);
+    screen.open(Tab::Overview);
+    screen.setup.as_mut().unwrap().pool = None;
+    screen.pool = None;
 
     let folder = screen.setup.as_ref().unwrap().folder.clone();
     let report = std::path::Path::new(&folder).join(ResearchKind::CompetitorResearch.report_path());
