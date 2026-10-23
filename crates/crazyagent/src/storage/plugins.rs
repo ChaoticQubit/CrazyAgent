@@ -1,8 +1,9 @@
 use super::*;
 use crate::plugins::{
-    EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, SECRETS_PER_SERVER_MAX,
-    SERVERS_PER_SCOPE_MAX, SKILLS_PER_SCOPE_MAX, Scope, SecretView, ServerSpec, ServerStatus,
-    ServerView, SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
+    EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
+    LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
+    SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
+    SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -93,6 +94,9 @@ pub(crate) enum Command {
     Effective {
         project: ProjectId,
     },
+    Launch {
+        project: ProjectId,
+    },
 }
 
 pub(crate) struct SkillChange {
@@ -110,6 +114,7 @@ pub(crate) enum ResultValue {
     Secret(Box<ServerView>, Option<String>),
     Check(Box<ServerSpec>, Vec<EffectiveSecret>),
     Effective(Box<EffectivePlugins>),
+    Launch(Box<LaunchPlugins>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -751,6 +756,29 @@ pub(crate) fn effective(
     Ok(plugins)
 }
 
+fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
+    let mut servers = Vec::with_capacity(plugins.servers.len());
+    for server in plugins.servers {
+        let mut secrets = Vec::with_capacity(server.secrets.len());
+        for secret in server.secrets {
+            secrets.push(LaunchSecret {
+                name: secret.name,
+                value: SecretValue::new(read_secret(root, &secret.reference)?),
+            });
+        }
+        servers.push(LaunchServer {
+            name: server.name,
+            spec: server.spec,
+            secrets,
+        });
+    }
+    assert!(servers.len() <= 2 * SERVERS_PER_SCOPE_MAX);
+    Ok(LaunchPlugins {
+        skills: plugins.skills,
+        servers,
+    })
+}
+
 /// Runs one plugins command inside a single transaction.
 /// Inputs: the engine connection, the engine root holding the plugin store and the command.
 /// Output: the changed or listed items, or a plain rejection code with nothing changed.
@@ -984,5 +1012,15 @@ fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValu
             }
             ResultValue::Effective(Box::new(effective(tx, root, &project)?))
         }
+        Command::Launch { project } => {
+            if !project_exists(tx, &project)? {
+                return Err(error("plugin_project_unknown"));
+            }
+            ResultValue::Launch(Box::new(launch(root, effective(tx, root, &project)?)?))
+        }
     })
 }
+
+#[cfg(test)]
+#[path = "plugins_tests.rs"]
+mod tests;

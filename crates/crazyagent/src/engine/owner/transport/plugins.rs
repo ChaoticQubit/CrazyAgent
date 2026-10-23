@@ -441,6 +441,29 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Reads what agents launched for one project receive, with every MCP server secret
+    /// value already read from its private file, for the harness launchers inside the
+    /// engine. Input: the project. Output: skill folders and approved servers whose secret
+    /// values are zeroed when dropped and redacted in `Debug`.
+    pub async fn project_launch_plugins(
+        &self,
+        project: &ProjectId,
+    ) -> Result<crate::plugins::LaunchPlugins, EngineError> {
+        match actor(
+            self,
+            Command::Launch {
+                project: project.clone(),
+            },
+        )
+        .await?
+        {
+            ResultValue::Launch(plugins) => Ok(*plugins),
+            _ => Err(unknown()),
+        }
+    }
+}
+
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,

@@ -260,6 +260,55 @@ pub struct EffectivePlugins {
     pub servers: Vec<EffectiveServer>,
 }
 
+/// One MCP server secret value read for a launch. The bytes are zeroed when it is dropped
+/// and never shown by `Debug`.
+pub struct SecretValue(Vec<u8>);
+
+impl SecretValue {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Lends the secret bytes to the launcher, which passes them as an environment value
+    /// for a command server or a header value for a URL server.
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SecretValue {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("SecretValue([REDACTED])")
+    }
+}
+
+#[derive(Debug)]
+pub struct LaunchSecret {
+    pub name: String,
+    pub value: SecretValue,
+}
+
+#[derive(Debug)]
+pub struct LaunchServer {
+    pub name: String,
+    pub spec: ServerSpec,
+    pub secrets: Vec<LaunchSecret>,
+}
+
+/// The effective set with each server's secret values already read, ready for a harness
+/// launch. Skills are the same folders as in `EffectivePlugins`.
+#[derive(Debug, Default)]
+pub struct LaunchPlugins {
+    pub skills: Vec<EffectiveSkill>,
+    pub servers: Vec<LaunchServer>,
+}
+
 const PROBLEMS: &[(&str, &str)] = &[
     ("skill_folder_not_found", "That folder was not found."),
     ("skill_not_a_folder", "Pick a folder, not a file."),
@@ -333,6 +382,7 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Use letters, digits, _ or - for the secret name, starting with a letter.",
     ),
     ("server_secret_limit", "A server can have up to 16 secrets."),
+    ("server_secret_duplicate", "Each secret needs its own name."),
     ("server_secret_not_found", "This secret was removed."),
     (
         "server_secret_invalid",
