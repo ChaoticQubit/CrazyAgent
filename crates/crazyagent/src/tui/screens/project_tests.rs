@@ -105,6 +105,11 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
             .map_err(problem)?,
         )?,
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
+        other @ (SetupQuery::Team { .. }
+        | SetupQuery::TeamChange { .. }
+        | SetupQuery::Library(_)) => {
+            panic!("the project screen never sends {other:?}")
+        }
     })
 }
 
