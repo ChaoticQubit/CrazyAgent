@@ -163,6 +163,7 @@ fn setup(folder: &Path) -> StoredSetup {
         documents: vec![],
         folder: folder.to_str().unwrap().into(),
         created_ms: 1,
+        revision: 1,
     }
 }
 
