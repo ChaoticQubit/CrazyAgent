@@ -515,6 +515,13 @@ fn the_default_team_moves_off_harnesses_that_are_not_installed() {
         "Codex is not installed. Pick another harness."
     );
 
+    let mut early = wizard();
+    early.research = vec![ResearchKind::MarketResearch];
+    early.set_harnesses(catalog(HarnessState::NotInstalled));
+    assert_eq!(early.team, None);
+    load_catalog(&mut early, &["c-codex"]);
+    assert_eq!(early.team.as_ref().unwrap().master, "claude-code");
+
     let mut none = wizard();
     none.research = vec![ResearchKind::MarketResearch];
     load_catalog(&mut none, &["c-codex"]);

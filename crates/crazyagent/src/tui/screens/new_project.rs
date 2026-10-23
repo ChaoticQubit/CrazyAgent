@@ -567,6 +567,7 @@ impl Wizard {
                 let current = key == (self.pool.clone(), self.research_sorted());
                 if current && !self.team_edited {
                     self.set_team(catalog.default_team.clone());
+                    self.fit_team();
                 }
                 self.catalog = Some(catalog);
                 self.catalog_for = Some(key);
