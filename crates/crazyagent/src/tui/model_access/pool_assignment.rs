@@ -129,10 +129,11 @@ impl State {
                 "Assignment cancelled; no new save requested"
             }
             .into();
-        } else if matches!(event, UiEvent::Submit) && !self.loading() {
-            if let Err(problem) = self.confirm_assignment() {
-                self.notice = problem;
-            }
+        } else if matches!(event, UiEvent::Submit)
+            && !self.loading()
+            && let Err(problem) = self.confirm_assignment()
+        {
+            self.notice = problem;
         }
         self.assert_consistent();
         Ok(true)

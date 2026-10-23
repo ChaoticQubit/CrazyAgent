@@ -277,10 +277,10 @@ impl State {
         }
         match result {
             Ok(reply) if capability_matches(&submission, &reply) => {
-                if let ProducerCapability::Unavailable { code } = &reply.configured {
-                    if self.profile.pending.is_none() {
-                        self.notice = public_problem(code).into();
-                    }
+                if let ProducerCapability::Unavailable { code } = &reply.configured
+                    && self.profile.pending.is_none()
+                {
+                    self.notice = public_problem(code).into();
                 }
                 panel.capability = Some(reply.configured);
             }
