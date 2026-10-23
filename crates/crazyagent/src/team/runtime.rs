@@ -28,6 +28,7 @@ const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 const SESSION_EVENTS_MAX: usize = 200_000;
+const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
 /// Bounds every team agent obeys.
 /// `turn_time` caps one master or sub-agent turn, `session_time` a whole agent process,
@@ -1224,6 +1225,17 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)?;
+        if text.trim().is_empty() {
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                EMPTY_REPLY_NOTE,
+                MessageState::Note,
+                now,
+            )?;
+            return tx.commit().map_err(error);
+        }
         let delegations = parse_delegations(text);
         let mut refused = Vec::new();
         if !delegations.is_empty() && rounds >= DELEGATION_ROUNDS_MAX {
