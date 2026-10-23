@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 mod process;
 
+const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
+
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) run_time: Duration,
@@ -87,16 +89,19 @@ pub(in crate::engine) fn launch_command(
         return Err(failure("claude_host_unsafe_directory"));
     }
     let mut command = Command::new(executable);
+    command.args([
+        "--print",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]);
+    if model != ACCOUNT_DEFAULT_MODEL {
+        command.args(["--model", model]);
+    }
     command
         .args([
-            "--print",
-            "--verbose",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--model",
-            model,
             "--tools",
             "",
             "--strict-mcp-config",
@@ -115,6 +120,7 @@ pub(in crate::engine) fn launch_command(
         .env_clear()
         .env("HOME", profile_home)
         .env("CLAUDE_CONFIG_DIR", profile_home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
@@ -221,10 +227,6 @@ impl ClaudeHost {
                 .map_err(|_| failure("claude_host_startup_timeout"))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
-    }
-
-    pub(in crate::engine) async fn observe_account(&mut self) -> Result<(), EngineError> {
-        Err(failure("claude_host_account_observation_unsupported"))
     }
 
     pub(in crate::engine) async fn start_turn(
@@ -335,10 +337,13 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
     let directory = command.get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
     let args: Vec<_> = command.get_args().collect();
-    let model = args.windows(2)
-        .find(|pair| pair[0] == OsStr::new("--model"))
-        .and_then(|pair| pair[1].to_str())
-        .ok_or(Fault::Host("claude_host_model_unavailable"))?;
+    let model = match args.iter().position(|arg| *arg == OsStr::new("--model")) {
+        Some(index) => args
+            .get(index + 1)
+            .and_then(|model| model.to_str())
+            .ok_or(Fault::Host("claude_host_model_unavailable"))?,
+        None => ACCOUNT_DEFAULT_MODEL,
+    };
     let expected = launch_command(Path::new(command.get_program()), directory, &home, model)
         .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if command.get_args().ne(expected.get_args())

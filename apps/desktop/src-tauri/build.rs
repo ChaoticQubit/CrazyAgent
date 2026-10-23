@@ -2,6 +2,7 @@ fn main() {
     let manifest = tauri_build::AppManifest::new().commands(&[
         "desktop_connect",
         "desktop_status",
+        "desktop_harness_catalog",
         "desktop_baselines",
         "desktop_inspect_baseline",
         "desktop_approve_baseline",

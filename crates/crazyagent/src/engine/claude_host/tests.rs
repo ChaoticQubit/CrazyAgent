@@ -107,8 +107,27 @@ fn claude_launch_sets_only_selected_profile_environment() {
         OsStr::new("CLAUDE_CONFIG_DIR"),
         Some(directories.home.as_os_str())
     )));
+    assert!(environment.contains(&(
+        OsStr::new("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+        Some(directories.home.as_os_str())
+    )));
     assert!(environment.iter().all(|(key, _)| {
-        matches!(key.to_str(), Some("HOME" | "CLAUDE_CONFIG_DIR" | "TERM"))
+        matches!(
+            key.to_str(),
+            Some("HOME" | "CLAUDE_CONFIG_DIR" | "CLAUDE_SECURESTORAGE_CONFIG_DIR" | "TERM")
+        )
+    }));
+}
+
+#[test]
+fn claude_launch_lets_the_signed_in_account_choose_its_default_model() {
+    let directories = Directories::new();
+    let command = directories.command("native-default").unwrap();
+    let args: Vec<_> = command.get_args().collect();
+    assert!(!args.contains(&OsStr::new("--model")));
+    assert!(!args.contains(&OsStr::new("native-default")));
+    assert!(args.windows(2).any(|pair| {
+        pair == [OsStr::new("--tools"), OsStr::new("")]
     }));
 }
 
@@ -189,4 +208,104 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     ] {
         assert!(limits.validate().is_err());
     }
+}
+
+fn installed_claude() -> PathBuf {
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::from_environment());
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.id == "claude-code")
+        .unwrap();
+    fs::canonicalize(entry.executable.expect("installed Claude Code")).unwrap()
+}
+
+#[tokio::test]
+async fn real_claude_master_host_without_sign_in_reports_authentication_failure() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
+    use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
+    use crate::engine::owner::{HostStamp, NativeProfileBinding};
+    use crate::protocol::{ConfigId, Cursor, SessionId};
+
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("ca-claude-master-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database = root.path().join("engine.db");
+    let sqlite = rusqlite::Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    sqlite.close().map_err(|(_, error)| error).unwrap();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let mut custody =
+        NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
+    let host = HostStamp {
+        db_instance: "a".repeat(64),
+        engine_epoch: "b".repeat(64),
+    };
+    let connection = ModelConnection {
+        id: reference("claude-master-connection"),
+        provider: reference("anthropic"),
+        harness: reference("claude"),
+        protocol: reference("native"),
+        account_ref: reference("claude-master-account"),
+        endpoint: ModelEndpoint::Native {},
+        model: ModelReference {
+            id: "native-default".into(),
+            author: reference("anthropic"),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: reference("claude-master-profile"),
+        },
+    };
+    let (custody_id, _) = custody.prepare(&host, &connection).unwrap();
+    let binding = NativeProfileBinding {
+        database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(),
+        config_id: ConfigId::new("c".repeat(64)).unwrap(),
+        source_hash: "d".repeat(64),
+        at_revision: Cursor::new(1),
+        connection: connection.clone(),
+        custody_id,
+    };
+    let turn = RequestId::new("claude-master-turn").unwrap();
+    let profile = custody
+        .acquire_use(&host, &binding, &turn, 1, NativeProfileUsePurpose::Execution)
+        .unwrap();
+    let home = profile.profile_path().unwrap();
+    let command = launch_command(&installed_claude(), &project, &home, "native-default").unwrap();
+    let mut claude = ClaudeHost::spawn(
+        command,
+        profile,
+        NativeAction::Launch {
+            session_id: SessionId::new("claude-master-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: reference("claude-master-profile"),
+            worktree_lease: RequestId::new("claude-master-lease").unwrap(),
+        },
+        connection.account_ref.clone(),
+        ResourceBudget::unit(),
+    )
+    .await
+    .unwrap();
+    claude.start_turn(turn.clone(), "Reply with one word.").await.unwrap();
+    let mut errors = Vec::new();
+    let outcome = loop {
+        let event = claude.next_event().await.unwrap();
+        match event.kind {
+            EventKind::AssistantError { code } => errors.push(code),
+            EventKind::TurnFinished { outcome, .. } => {
+                assert_eq!(event.request_id.as_ref(), Some(&turn));
+                break outcome;
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(errors, ["authentication_failed"]);
+    assert_ne!(outcome, TurnOutcome::Success);
+    claude.close().await.unwrap();
+    assert!(!home.join(".credentials.json").exists());
 }
