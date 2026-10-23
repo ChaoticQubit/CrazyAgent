@@ -264,6 +264,13 @@ export function saveResearchToMemory(id: string, research: ResearchKind, section
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
+/** Saves text the owner selected in a project file as a suggested project memory.
+ * Inputs: the project id, the file's path in the folder, the selected text and a generation.
+ * Output: the engine receipt. */
+export function saveSelectionToMemory(id: string, path: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_save_selection_to_memory", { id, path, text, generation });
+}
+
 export const RESEARCH_LOG_LINES_MAX = 200;
 
 /** Reads the latest plain lines of one research agent's log.

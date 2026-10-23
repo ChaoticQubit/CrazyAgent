@@ -323,3 +323,11 @@ test("project Settings opens Plugins and skills for the old Skills and MCP serve
   assert.equal(settings.settingsSection("nope"), "general");
   assert.equal(settings.settingsSection(null), "general");
 });
+
+test("selected report text is cleaned before it can be saved to memory", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  assert.equal(context.selectionText("  Owners pay per seat.  "), "Owners pay per seat.");
+  assert.equal(context.selectionText("line one\r\nline two"), "line one\nline two");
+  assert.equal(context.selectionText(" \n\t "), null);
+  assert.equal(context.selectionText(""), null);
+});

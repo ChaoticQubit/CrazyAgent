@@ -1,7 +1,7 @@
 import { call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
+import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory, saveSelectionToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
 import { Button, ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
@@ -32,6 +32,13 @@ export function sectionText(report: string, heading: string | null): string | nu
   const offset = lines.slice(start + 1).findIndex((line) => level(line) > 0 && level(line) <= depth);
   const end = offset < 0 ? lines.length : start + 1 + offset;
   return lines.slice(start, end).join("\n").trim();
+}
+
+/** Cleans text the owner selected in the reader before it is saved: line endings become "\n"
+ * and outer space goes. Input: the raw selection. Output: the text, or null when nothing is left. */
+export function selectionText(raw: string): string | null {
+  const text = raw.replace(/\r\n?/gu, "\n").trim();
+  return text === "" ? null : text;
 }
 
 /** Finds which research kind wrote a context file.
@@ -67,7 +74,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const items = context?.items ?? [];
   const [selected, setSelected] = useState<string | null>(() => hashParam("file"));
   const [file, setFile] = useState<Result<{ text: string | null; truncated: boolean }>>();
-  const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
+  const [saving, setSaving] = useState<{ heading: string | null; selection?: string } | null>(null);
+  const [selection, setSelection] = useState<string | null>(null);
+  const reading = useRef<HTMLDivElement>(null);
   const [saveState, setSaveState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   const [actionNote, setActionNote] = useState("");
   const [deleting, setDeleting] = useState<{ path: string; busy: boolean } | null>(null);
@@ -84,6 +93,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   useEffect(() => {
     setFile(undefined);
     setSaving(null);
+    setSelection(null);
     setActionNote("");
     if (!chosen || chosen === MEMORY) return;
     const path = chosen;
@@ -98,15 +108,24 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const markdown = chosen !== null && extension(chosen) === "md";
   const blocks = text !== null && markdown ? parseMarkdown(text) : [];
   const sources = markdownLinks(blocks);
-  const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
+  const preview = saving?.selection ?? (saving && text !== null ? sectionText(text, saving.heading) : null);
+
+  const readSelection = () => {
+    const chosenText = window.getSelection();
+    const inside = chosenText !== null && chosenText.rangeCount > 0 && reading.current?.contains(chosenText.getRangeAt(0).commonAncestorContainer);
+    setSelection(inside ? selectionText(chosenText.toString()) : null);
+  };
   const previewBytes = preview === null ? 0 : new TextEncoder().encode(preview).length;
 
   async function save() {
-    if (!saving || !kind) return;
+    if (!saving || !chosen || (!kind && saving.selection === undefined)) return;
     setSaveState({ busy: true, error: "" });
-    const result = await saveResearchToMemory(data.id, kind, saving.heading, nextGeneration());
+    const result = saving.selection !== undefined
+      ? await saveSelectionToMemory(data.id, chosen, saving.selection, nextGeneration())
+      : await saveResearchToMemory(data.id, kind!, saving.heading, nextGeneration());
     if (result.kind !== "ok") {
-      setSaveState({ busy: false, error: result.kind === "not_ready" ? "Not ready yet: saving to memory isn't in this build." : failureCopy(result.code) });
+      const missing = saving.selection !== undefined ? "Not ready yet: saving selected text isn't in this build. Save its section instead." : "Not ready yet: saving to memory isn't in this build.";
+      setSaveState({ busy: false, error: result.kind === "not_ready" ? missing : failureCopy(result.code) });
       return;
     }
     const state = receiptState(result.value);
@@ -116,6 +135,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     }
     setSaveState({ busy: false, error: "" });
     setSaving(null);
+    setSelection(null);
     data.notify("Saved to memory as Suggested. Approve it in Project memory.");
   }
 
@@ -196,6 +216,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
         <div className="pj-reader-tb">
           <h2 className="pj-mono">{displayText(item.path)}</h2>
           <span className="pj-row">
+            {selection && <Button icon="brain" onClick={() => { setSaveState({ busy: false, error: "" }); setSaving({ heading: null, selection }); }}>Save selection</Button>}
             {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
             {item.kind === "brief" && <button type="button" className="btn" title="The brief is written from the project details"
               onClick={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=general`)}>Edit</button>}
@@ -211,14 +232,16 @@ export function ContextTab({ data }: { data: ProjectData }) {
         {writing && <p className="pj-note">{displayText(jobs.find((job) => job.report_path === chosen)?.kind_label ?? "Research")} is still writing this file. It updates as it goes.</p>}
         {saving && <div className="pj-popover" role="dialog" aria-labelledby="pj-save-title">
           <h3 id="pj-save-title">Save to memory</h3>
-          <label htmlFor="pj-save-part" className="pj-label">What to save</label>
-          <select id="pj-save-part" className="pj-select" value={saving.heading ?? ""} onChange={(event) => setSaving({ heading: event.target.value || null })}>
-            <option value="">The whole report</option>
-            {headings(blocks).map((heading) => <option key={heading} value={heading}>Section: {heading}</option>)}
-          </select>
+          {saving.selection === undefined ? <>
+            <label htmlFor="pj-save-part" className="pj-label">What to save</label>
+            <select id="pj-save-part" className="pj-select" value={saving.heading ?? ""} onChange={(event) => setSaving({ heading: event.target.value || null })}>
+              <option value="">The whole report</option>
+              {headings(blocks).map((heading) => <option key={heading} value={heading}>Section: {heading}</option>)}
+            </select>
+          </> : <p className="pj-label">The text you selected</p>}
           <p className="pj-small pj-muted">Saved for: this project.</p>
           <pre className="pj-preview">{displayText(preview ?? "")}</pre>
-          {previewBytes > MEMORY_TEXT_BYTES_MAX && <p className="pj-note warn">This is {formatBytes(previewBytes)}. Memories can be up to 4 KB. Pick one section instead.</p>}
+          {previewBytes > MEMORY_TEXT_BYTES_MAX && <p className="pj-note warn">This is {formatBytes(previewBytes)}. Memories can be up to 4 KB. {saving.selection === undefined ? "Pick one section instead." : "Select less text."}</p>}
           {saveState.error && <p className="pj-error" role="alert">{saveState.error}</p>}
           <div className="pj-row end">
             <button type="button" className="btn" onClick={() => setSaving(null)}>Cancel</button>
@@ -229,6 +252,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
         {file?.kind === "not_ready" && <NotReady what="reading project files isn't in this build." />}
         {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file.code)}</p>}
         {file?.kind === "ok" && text === null && <p className="pj-secondary">{formatBytes(item.bytes)}. A preview isn't shown for this kind of file. Use Open in default app.</p>}
+        <div ref={reading} onMouseUp={readSelection} onKeyUp={readSelection}>
         {text !== null && markdown && <article className="pj-md">
           <MarkdownView source={text} onOpenLink={open} headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
           {sources.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
@@ -236,6 +260,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
               {source.text !== source.href && <span className="pj-small pj-muted pj-mono"> {displayText(source.href)}</span>}</li>)}</ol></section>}
         </article>}
         {text !== null && !markdown && TEXT_TYPES.includes(extension(item.path)) && <pre className="pj-preview">{displayText(text)}</pre>}
+        </div>
         {file?.kind === "ok" && file.value.truncated && <p className="pj-note">Only the first 1 MB is shown.</p>}
       </>}
     </div>
