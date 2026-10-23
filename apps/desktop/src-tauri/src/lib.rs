@@ -10,6 +10,7 @@ use bridge::{
     ProjectPage,
 };
 use crazyagent::config::ModelAccessEdit;
+use crazyagent::harnesses::HarnessEntry;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
 };
@@ -49,6 +50,15 @@ fn desktop_status(
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
     Ok(lock(&state)?.status())
+}
+
+#[tauri::command]
+async fn desktop_harness_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<HarnessEntry>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.harness_catalog().await
 }
 
 #[tauri::command]
@@ -443,6 +453,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
+            desktop_harness_catalog,
             desktop_baselines,
             desktop_inspect_baseline,
             desktop_approve_baseline,

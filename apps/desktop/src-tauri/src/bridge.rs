@@ -17,6 +17,7 @@ use std::time::Duration;
 
 mod account_profile;
 mod account_setup;
+mod harnesses;
 pub mod master;
 mod model_access;
 mod native_auth;
