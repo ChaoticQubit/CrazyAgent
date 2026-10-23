@@ -40,3 +40,16 @@ test("setting an account up outside the desktop shell reports the engine as unre
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
 });
+
+test("a pool's saved-key, URL and local members can be set up for agents again from its menu", async () => {
+  const { keyedMembers, PoolsView } = await import("../src/screens/settings/pools.tsx");
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const member = (id, kind) => ({ id, kind, provider: "Provider", status: "set_up", status_label: "Set up" });
+  const pool = { id: "pool-1", name: "Research", summary: "3 accounts", members: [member("a", "api_key"), member("b", "chatgpt"), member("c", "url"), member("d", "local")], project_count: 0 };
+  assert.deepEqual(keyedMembers(pool), ["a", "c", "d"]);
+  assert.deepEqual(keyedMembers({ ...pool, members: [member("b", "claude")] }), []);
+  const forbidden = () => { throw new Error("static rendering must not act"); };
+  const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onPrepare: forbidden }));
+  assert.match(markup, /Research/);
+});
