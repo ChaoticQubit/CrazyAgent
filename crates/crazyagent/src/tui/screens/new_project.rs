@@ -1686,6 +1686,11 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
             "The team does not fit the limits. Check Team.".into(),
             Step::Team,
         ),
+        "creation_not_ready" => (
+            "Creating projects is not ready yet.",
+            "This window can't send a new project to CrazyAgent yet. Your draft is kept.".into(),
+            Step::Review,
+        ),
         "project_about_invalid" => (
             "Could not create the project.",
             "The description has characters CrazyAgent can't store. Check About.".into(),

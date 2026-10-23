@@ -304,6 +304,7 @@ fn needs_you(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
 
 fn pool_line(screen: &ProjectScreen, look: &Look) -> Row {
     match &screen.pool {
+        _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
         Some(pool) if pool.assigned => Row::of(pool.name.clone(), look.fg).push(
             format!(
                 "  {} {}",
@@ -348,7 +349,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         ];
         return (lines, None, vec![TABS, ("Esc", "Home")]);
     }
-    if !assigned && screen.suggested().is_empty() {
+    if !assigned && screen.pool_ready && screen.suggested().is_empty() {
         let picked = screen
             .pool
             .as_ref()
@@ -641,7 +642,9 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
         })
         .unwrap_or_else(|| "Master".into());
     let mut head = Row::of("Master", look.heading).push(format!("  {master}"), look.fg);
-    let status = if !assigned {
+    let status = if !screen.pool_ready {
+        MasterStatus::NotReady
+    } else if !assigned {
         MasterStatus::NeedsPool
     } else {
         screen
@@ -667,7 +670,17 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
         Row::default(),
     ];
     let available = room.saturating_sub(4);
-    let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if !assigned {
+    let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if !screen.pool_ready {
+        (
+            vec![Row::of(
+                "The master conversation is not ready yet in this window.",
+                look.fg,
+            )],
+            true,
+            Row::of("> Not ready yet", look.muted),
+            vec![TABS, ("Esc", "Home")],
+        )
+    } else if !assigned {
         (
             vec![
                 Row::of(
@@ -1135,6 +1148,7 @@ fn context(
 fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
     let entry = |label: &str, value: Row| Row::of(label, look.muted).pad(10).cat(value);
     let pool = match &screen.pool {
+        _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
         Some(pool) if pool.assigned => {
             Row::of(pool.name.clone(), look.fg).push("   Enter Change", look.muted)
         }

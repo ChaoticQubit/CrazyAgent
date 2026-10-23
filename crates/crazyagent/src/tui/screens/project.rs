@@ -243,6 +243,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub context: Option<ProjectContext>,
     pub memories: Option<Vec<KnowledgeEntry>>,
     pub pool: Option<PoolInfo>,
+    pub pool_ready: bool,
     pub transcript: Option<Transcript>,
     pub input: TextInput,
     pub typing: bool,
@@ -280,6 +281,7 @@ impl ProjectScreen {
             context: None,
             memories: None,
             pool: None,
+            pool_ready: true,
             transcript: None,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
@@ -936,6 +938,9 @@ impl ProjectScreen {
     }
 
     fn pool_reply(&self) -> ProjectReply {
+        if !self.pool_ready {
+            return ProjectReply::Handled;
+        }
         let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
         match (&self.pool, picked) {
             (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
