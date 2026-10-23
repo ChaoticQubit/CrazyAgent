@@ -1,0 +1,422 @@
+import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
+import {
+  closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
+  openMaster, openProject, projects, retryBusy, submitMaster,
+} from "./engine-client";
+import type {
+  AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage,
+} from "./engine-client";
+
+export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
+export type ResearchKind = "market_research" | "competitor_research" | "design_research" | "front_end_design" | "tech_stack_research";
+export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+
+export interface HarnessSlot {
+  harness: string;
+  agents: number;
+  tools: boolean;
+}
+
+export interface TeamPlan {
+  master: string;
+  master_tools: boolean;
+  sub_harnesses: HarnessSlot[];
+  min_agents: number;
+  max_agents: number;
+}
+
+export interface ProjectSpec {
+  name: string;
+  repositories: string[];
+}
+
+export interface ProjectSetup {
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan | null;
+  documents: string[];
+}
+
+export interface TechOption {
+  id: string;
+  label: string;
+  group: "language" | "framework" | "database";
+}
+
+export interface ProjectCatalog {
+  tech_stack: TechOption[];
+  platforms: { kind: Platform; label: string }[];
+  research: { kind: ResearchKind; label: string }[];
+  document_extensions: string[];
+  documents_max: number;
+  document_bytes_max: number;
+  project_document_bytes_max: number;
+  default_team: TeamPlan;
+}
+
+export interface StoredSetup {
+  project_id: string;
+  name: string;
+  about: string;
+  tech_stack: string[];
+  platforms: Platform[];
+  research: ResearchKind[];
+  pool: string | null;
+  team: TeamPlan;
+  documents: { name: string; bytes: number }[];
+  folder: string;
+  created_ms: number;
+}
+
+export interface ResearchJob {
+  id: number;
+  project_id: string;
+  kind: ResearchKind;
+  kind_label: string;
+  status: ResearchStatus;
+  status_label: string;
+  report_path: string;
+  harness: string;
+  tools: boolean;
+  attempts: number;
+  claimer: string | null;
+  error: string | null;
+  cancel_requested: boolean;
+  output_bytes: number;
+  created_ms: number;
+  started_ms: number | null;
+  heartbeat_ms: number | null;
+  finished_ms: number | null;
+}
+
+export interface ContextItem {
+  path: string;
+  kind: "brief" | "document" | "research";
+  bytes: number;
+}
+
+export interface ProjectContext {
+  project_id: string;
+  folder: string;
+  items: ContextItem[];
+}
+
+export interface ContextChunk {
+  path: string;
+  bytes: number;
+  offset: number;
+  text: string | null;
+  next_offset: number | null;
+}
+
+export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
+export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
+
+export interface HarnessEntry {
+  id: string;
+  name: string;
+  status: HarnessStatus;
+  status_label: string;
+  executable: string | null;
+  headless: string;
+  tools: ToolControl;
+  model_selection: boolean;
+  account_kinds: AccountKind[];
+}
+
+export interface PoolChoice {
+  pool: AccountPool;
+  members: ModelConnection[];
+}
+
+export type EngineResult<T> =
+  | { kind: "ok"; value: T }
+  | { kind: "not_ready"; command: string }
+  | { kind: "failed"; code: string };
+
+/** Maps one bridge rejection to a typed result. Tauri rejects a command the native side
+ * does not register, or does not permit, with a plain string naming it; that means the
+ * engine part is not merged yet. Inputs: the command and the rejection. Output: the result. */
+export function toResult<T>(command: string, failure: unknown): EngineResult<T> {
+  if (typeof failure === "string") {
+    const missing = failure === `Command ${command} not found` ||
+      failure === `Command ${command} not allowed by ACL` ||
+      failure.startsWith(`${command} not allowed`);
+    return missing ? { kind: "not_ready", command } : { kind: "failed", code: "unknown" };
+  }
+  if (typeof failure === "object" && failure !== null && "code" in failure && typeof failure.code === "string") {
+    return { kind: "failed", code: failure.code };
+  }
+  return { kind: "failed", code: "unknown" };
+}
+
+/** Calls one engine bridge command, retrying the bridge's pre-action busy refusal.
+ * Inputs: the command and its arguments. Output: the typed engine result. */
+export async function call<T>(command: string, args?: InvokeArgs): Promise<EngineResult<T>> {
+  try {
+    return { kind: "ok", value: await retryBusy(() => native<T>(command, args)) };
+  } catch (failure) {
+    return toResult<T>(command, failure);
+  }
+}
+
+async function wrap<T>(command: string, action: () => Promise<T>): Promise<EngineResult<T>> {
+  try {
+    return { kind: "ok", value: await action() };
+  } catch (failure) {
+    return toResult<T>(command, failure);
+  }
+}
+
+const copy: Record<string, string> = {
+  pending_intent: "Another change is still being saved. Wait for it to finish, then try again.",
+  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_read_failed: "Couldn't read this from the engine. Try again.",
+  not_connected: "CrazyAgent's engine isn't running.",
+  not_configured: "CrazyAgent's engine isn't running.",
+  owner_unavailable: "CrazyAgent's engine isn't running.",
+  busy: "Another change is still being saved. Wait for it to finish, then try again.",
+  stale_revision: "This changed since you opened it. Review and save again.",
+  stale_model_access: "This changed since you opened it. Review and save again.",
+  invalid_project: "This project no longer exists.",
+  invalid_pool: "That pool no longer exists. Choose another pool.",
+  pool_missing: "That pool no longer exists. Choose another pool.",
+  project_spec_bounds: "Enter a project name of at most 80 characters.",
+  project_setup_bounds: "Some answers are too long or repeated. Check each step, then try again.",
+  project_about_invalid: "The description is too long or has characters that can't be saved.",
+  tech_stack_too_long: "Pick at most 32 tech stack items.",
+  tech_stack_entry_invalid: "Each tech stack item must be unique and at most 40 characters.",
+  platforms_duplicate: "Each target platform can be picked once.",
+  research_duplicate: "Each kind of research can be picked once.",
+  documents_too_many: "Attach at most 16 documents.",
+  document_path_invalid: "One of the documents has a path that can't be used. Choose it again.",
+  document_not_found: "One of the documents was moved or deleted. Choose it again.",
+  document_not_a_regular_file: "Can't add a folder or a shortcut. Choose the original file.",
+  document_unreadable: "One of the documents can't be read. Check its permissions.",
+  document_changed_while_copying: "A document changed while it was being copied. Try again.",
+  document_name_duplicate: "Two documents have the same name. Rename one first.",
+  document_name_invalid: "One of the documents has a name that can't be used. Rename it first.",
+  document_too_large: "Files can be up to 50 MB.",
+  document_type_not_allowed: "This file type isn't supported.",
+  project_documents_too_large: "This project's documents would be over 200 MB. Remove some files first.",
+  project_exists: "This project already exists.",
+  project_folder_exists: "A folder for this project already exists. Try again.",
+  project_folder_unwritable: "CrazyAgent can't write the project folder. Check the disk and try again.",
+  projects_root_not_a_directory: "CrazyAgent can't write the project folder. Check the disk and try again.",
+  project_setup_missing: "This project was created before project setup existed.",
+  team_harness_invalid: "Pick a harness for the master and for each agent row.",
+  team_harnesses_too_many: "Use at most 8 agent harnesses.",
+  team_agent_count_invalid: "Each harness runs 1 to 15 agents.",
+  team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
+  research_report_missing: "This report hasn't been written yet.",
+  research_section_missing: "That section isn't in the report anymore.",
+  research_section_invalid: "That section can't be saved. Pick another heading.",
+  context_item_missing: "This file isn't in the project folder anymore.",
+  context_item_unreadable: "This file can't be read.",
+  context_path_invalid: "This file can't be opened here.",
+  master_open_unavailable: "This project needs a pool before the master can reply.",
+  master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
+  master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
+  stale_master: "The conversation changed. It was reloaded; send again.",
+  conversation_text_bounds: "Messages can be up to 8192 bytes.",
+  unavailable: "The engine couldn't do this right now. Try again.",
+  rejected: "The engine refused this change.",
+};
+
+/** Plain sentence for one engine failure code.
+ * Input: the code. Output: what happened and what to do, or the generic fallback. */
+export function failureCopy(code: string): string {
+  return copy[code] ?? "Something went wrong. Try again.";
+}
+
+/** Adds a project and the master role to a pool without changing anything else.
+ * Inputs: the saved pool and the project id. Output: the new pool record. */
+export function assignedPool(pool: AccountPool, projectId: string): AccountPool {
+  const projects = pool.projects.includes(projectId) ? [...pool.projects] : [...pool.projects, projectId];
+  const roles = pool.roles.includes("project_leader") ? [...pool.roles] : [...pool.roles, "project_leader"];
+  if (projects.length > 64 || roles.length > 64) throw new Error("A pool allows at most 64 project and 64 role assignments.");
+  return { ...pool, projects, roles };
+}
+
+export type ReceiptState = { kind: "applied" } | { kind: "rejected"; code: string } | { kind: "unconfirmed" };
+
+/** Classifies an intent receipt for the screens.
+ * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
+export function receiptState(receipt: IntentReceipt): ReceiptState {
+  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
+  if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
+    return { kind: "unconfirmed" };
+  }
+  if (receipt.outcome === "applied") return { kind: "applied" };
+  return { kind: "rejected", code: receipt.outcome };
+}
+
+let lastGeneration = 0;
+
+/** Issues a fresh draft generation for one owner intent.
+ * Input: none. Output: a positive safe integer larger than every earlier one. */
+export function nextGeneration(): number {
+  lastGeneration = Math.max(lastGeneration + 1, Date.now());
+  if (!Number.isSafeInteger(lastGeneration)) throw new Error("Generation left the safe integer range.");
+  return lastGeneration;
+}
+
+export function loadProjectCatalog(pool: string | null, research: ResearchKind[]): Promise<EngineResult<ProjectCatalog>> {
+  return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
+}
+
+export function loadHarnesses(): Promise<EngineResult<HarnessEntry[]>> {
+  return call<HarnessEntry[]>("desktop_harness_catalog");
+}
+
+export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
+}
+
+export function loadSetup(id: string): Promise<EngineResult<StoredSetup | null>> {
+  return call<StoredSetup | null>("desktop_project_setup", { id });
+}
+
+export function loadResearch(id: string): Promise<EngineResult<{ project_id: string; jobs: ResearchJob[] }>> {
+  return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
+}
+
+export function loadContext(id: string): Promise<EngineResult<ProjectContext>> {
+  return call<ProjectContext>("desktop_project_context", { id });
+}
+
+export const CONTEXT_READ_BYTES_MAX = 1024 * 1024;
+
+/** Reads one context file whole, chunk by chunk, up to the report size limit.
+ * Inputs: the project id and the item path. Output: the text, or null for a binary file. */
+export async function loadContextText(id: string, path: string): Promise<EngineResult<{ text: string | null; truncated: boolean }>> {
+  let offset = 0;
+  let text = "";
+  for (let chunks = 0; chunks < 256; chunks += 1) {
+    const chunk = await call<ContextChunk>("desktop_project_context_item", { id, path, offset });
+    if (chunk.kind !== "ok") return chunk;
+    if (chunk.value.text === null) return { kind: "ok", value: { text: null, truncated: false } };
+    text += chunk.value.text;
+    if (chunk.value.next_offset === null) return { kind: "ok", value: { text, truncated: false } };
+    if (chunk.value.next_offset <= offset || chunk.value.next_offset > CONTEXT_READ_BYTES_MAX) {
+      return { kind: "ok", value: { text, truncated: true } };
+    }
+    offset = chunk.value.next_offset;
+  }
+  return { kind: "ok", value: { text, truncated: true } };
+}
+
+export function saveResearchToMemory(id: string, research: ResearchKind, section: string | null, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
+}
+
+export function pickDocuments(): Promise<EngineResult<string[]>> {
+  return call<string[]>("desktop_pick_documents");
+}
+
+export function revealProjectFolder(id: string): Promise<EngineResult<void>> {
+  return call<void>("desktop_reveal_project_folder", { id });
+}
+
+export function openLink(url: string): Promise<EngineResult<void>> {
+  return call<void>("desktop_open_link", { url });
+}
+
+export function loadProjectSkills(id: string): Promise<EngineResult<unknown>> {
+  return call<unknown>("desktop_project_skills", { id });
+}
+
+export function loadProjectMcpServers(id: string): Promise<EngineResult<unknown>> {
+  return call<unknown>("desktop_project_mcp_servers", { id });
+}
+
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, generation });
+}
+
+export function removeProject(id: string, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_remove_project", { id, generation });
+}
+
+export const PAGES_MAX = 50;
+
+async function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
+  const records: ModelAccessRecord[] = [];
+  let page = await modelAccessPage(collection, false);
+  records.push(...page.items);
+  for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+    page = await modelAccessPage(collection, true);
+    records.push(...page.items);
+  }
+  return records;
+}
+
+/** Reads every pool with its member connections.
+ * Input: none. Output: pools in engine order, each with the connections it holds. */
+export function loadPools(): Promise<EngineResult<PoolChoice[]>> {
+  return wrap("desktop_model_access_page", async () => {
+    const pools = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
+    const connections = (await allRecords("connections")).flatMap((record) => record.kind === "connection" ? [record.connection] : []);
+    return pools.map((pool) => ({ pool, members: connections.filter((connection) => pool.members.includes(connection.id)) }));
+  });
+}
+
+/** Reads every project name the engine holds.
+ * Input: none. Output: the projects, across every page. */
+export function loadProjects(): Promise<EngineResult<ProjectPage["items"]>> {
+  return wrap("desktop_projects", async () => {
+    let page = await projects(false);
+    const items = [...page.items];
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await projects(true);
+      items.push(...page.items);
+    }
+    return items;
+  });
+}
+
+/** Assigns a saved pool to a project as its master pool and checks the saved record.
+ * Inputs: the project id, the pool id and a generation. Output: applied, or why not. */
+export async function assignPool(projectId: string, poolId: string, generation: number): Promise<EngineResult<ReceiptState>> {
+  return wrap("desktop_edit_model_access", async () => {
+    const opened = await openProject(projectId);
+    if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
+    const basis = await inspectModelAccess("pools", poolId);
+    if (basis.record.kind !== "pool" || !basis.writable) throw { code: "invalid_pool" };
+    const pool = assignedPool(basis.record.pool, projectId);
+    if (JSON.stringify(pool) === JSON.stringify(basis.record.pool)) return { kind: "applied" } as ReceiptState;
+    const state = receiptState(await editModelAccess(basis.ticket, { kind: "replace_pool", pool }, generation));
+    if (state.kind !== "applied") return state;
+    const saved = await inspectModelAccess("pools", poolId);
+    if (saved.record.kind !== "pool" || JSON.stringify(saved.record.pool) !== JSON.stringify(pool)) return { kind: "unconfirmed" } as ReceiptState;
+    return state;
+  });
+}
+
+export function openMasterProject(id: string): Promise<EngineResult<ProjectDetail>> {
+  return wrap("desktop_open_project", () => openProject(id));
+}
+
+export function readMaster(ticket: string): Promise<EngineResult<MasterState>> {
+  return wrap("desktop_master_state", () => masterState(ticket));
+}
+
+export function readMasterTurns(ticket: string, session: string): Promise<EngineResult<MasterTurns>> {
+  return wrap("desktop_master_turns", () => masterTurns(ticket, session));
+}
+
+export function startMaster(ticket: string, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return wrap("desktop_open_master", () => openMaster(ticket, generation));
+}
+
+export function endMaster(ticket: string, session: string, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return wrap("desktop_close_master", () => closeMaster(ticket, session, generation));
+}
+
+export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<EngineResult<IntentReceipt>> {
+  return wrap("desktop_submit_master", () => submitMaster(ticket, session, text, generation));
+}
