@@ -22,6 +22,7 @@ use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::owner_profile::OwnerProfile;
+use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
@@ -598,6 +599,169 @@ async fn desktop_local_models(
 }
 
 #[tauri::command]
+async fn desktop_plugin_skills(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<SkillView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_skills(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_plugin_servers(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<ServerView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.plugin_servers(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_add_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    folder: String,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_skill(scope, folder).await
+}
+
+#[tauri::command]
+async fn desktop_set_skill_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<SkillView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_skill_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_skill(id).await
+}
+
+#[tauri::command]
+async fn desktop_add_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    name: String,
+    spec: ServerSpec,
+    secrets: Vec<(String, String)>,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_mcp_server(scope, name, spec, secrets).await
+}
+
+#[tauri::command]
+async fn desktop_update_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.update_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_approve_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    spec: ServerSpec,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.approve_mcp_server(id, spec).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_server_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_server_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_switch_plugin(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    on: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.switch_plugin(project_id, id, on).await
+}
+
+#[tauri::command]
+async fn desktop_set_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+    value: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_mcp_secret(id, name, value).await
+}
+
+#[tauri::command]
+async fn desktop_remove_mcp_secret(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_mcp_secret(id, name).await
+}
+
+#[tauri::command]
+async fn desktop_check_mcp_server(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<ServerView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.check_mcp_server(id).await
+}
+
+#[tauri::command]
+async fn desktop_project_plugins(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<EffectivePlugins, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.project_plugins(project_id).await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -755,6 +919,21 @@ pub fn run() {
             desktop_remove_account,
             desktop_check_account,
             desktop_local_models,
+            desktop_plugin_skills,
+            desktop_plugin_servers,
+            desktop_add_skill,
+            desktop_set_skill_enabled,
+            desktop_remove_skill,
+            desktop_add_mcp_server,
+            desktop_update_mcp_server,
+            desktop_approve_mcp_server,
+            desktop_set_mcp_server_enabled,
+            desktop_remove_mcp_server,
+            desktop_switch_plugin,
+            desktop_set_mcp_secret,
+            desktop_remove_mcp_secret,
+            desktop_check_mcp_server,
+            desktop_project_plugins,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
