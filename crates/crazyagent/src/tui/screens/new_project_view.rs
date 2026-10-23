@@ -3,6 +3,7 @@ use super::new_project::{
     team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
+use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -97,19 +98,35 @@ impl Look {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(in crate::tui) struct Row(pub Vec<Span<'static>>);
 
+/// Makes text safe to draw on one terminal row.
+/// Takes any text, including names and reports from outside CrazyAgent.
+/// Returns it without escape sequences, control characters or direction overrides; line breaks become spaces.
+pub(in crate::tui) fn printable(text: String) -> String {
+    let risky = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+    };
+    if !text.chars().any(risky) {
+        return text;
+    }
+    let clean = sanitize(&text).replace('\n', " ");
+    assert!(!clean.chars().any(risky));
+    clean
+}
+
 impl Row {
     /// Starts a line with one piece.
     /// Takes the text and its style.
     /// Returns the row.
     pub fn of(text: impl Into<String>, style: Style) -> Self {
-        Self(vec![Span::styled(text.into(), style)])
+        Self(vec![Span::styled(printable(text.into()), style)])
     }
 
     /// Appends one piece.
     /// Takes the text and its style.
     /// Returns the longer row.
     pub fn push(mut self, text: impl Into<String>, style: Style) -> Self {
-        let text = text.into();
+        let text = printable(text.into());
         if !text.is_empty() {
             self.0.push(Span::styled(text, style));
         }

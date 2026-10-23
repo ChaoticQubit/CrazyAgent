@@ -351,3 +351,21 @@ fn wizard_empty_error_and_loading_states_match_the_design() {
     }
     check_frames(&drawn);
 }
+
+#[test]
+fn rows_never_carry_terminal_escapes_or_control_characters() {
+    use super::new_project_view::printable;
+    let hostile = "re\u{1b}[2Jport\u{1b}]8;;https://x\u{7}.md\r\nnext\u{202e}txt.exe\ttab";
+    let row = Row::of(hostile, Style::new()).push(hostile, Style::new());
+    let text = row.text();
+    assert_eq!(
+        printable(hostile.to_owned()),
+        "report.md nexttxt.exe    tab"
+    );
+    assert_eq!(
+        text,
+        "report.md nexttxt.exe    tabreport.md nexttxt.exe    tab"
+    );
+    assert!(!text.chars().any(char::is_control));
+    assert_eq!(printable("plain".into()), "plain");
+}
