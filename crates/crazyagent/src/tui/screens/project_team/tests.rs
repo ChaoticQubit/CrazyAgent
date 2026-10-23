@@ -124,6 +124,7 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        paused: false,
         min_agents: 1,
         max_agents: 4,
         harnesses: vec![
@@ -161,6 +162,7 @@ fn team() -> TeamStatus {
         ],
         tasks: vec![setup, charts, api],
         messages: Vec::new(),
+        plan: Vec::new(),
     }
 }
 
