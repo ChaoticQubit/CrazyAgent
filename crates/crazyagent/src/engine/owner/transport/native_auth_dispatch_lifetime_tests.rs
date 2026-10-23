@@ -31,10 +31,12 @@ roles = ["leader"]
 fallback_allowed = false
 "#;
 
+type FenceRow = (String, String, i64, String, String, String, String, i64);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     facts: Vec<NativeAuthFact>,
-    fences: Vec<(String, String, i64, String, String, String, String, i64)>,
+    fences: Vec<FenceRow>,
 }
 
 struct LifetimeCase {
@@ -349,7 +351,7 @@ impl LifetimeCase {
         rustix::process::test_kill_process(self.retained_pid()).unwrap();
         assert!(
             rustix::fs::flock(
-                &self.probe(),
+                self.probe(),
                 rustix::fs::FlockOperation::NonBlockingLockExclusive
             )
             .is_err()
@@ -540,7 +542,7 @@ async fn native_auth_dispatch_lifetime_actual_child_and_task_survive_retirement_
         case.drain().await;
         assert_reaped(pid);
         rustix::fs::flock(
-            &case.probe(),
+            case.probe(),
             rustix::fs::FlockOperation::NonBlockingLockExclusive,
         )
         .unwrap();
@@ -613,7 +615,7 @@ async fn native_auth_dispatch_lifetime_invalidate_rolls_back_real_pending_retire
         assert_eq!(after.facts[0].operation_id, fact.operation_id);
         assert_ne!(after.facts[0].phase, NativeAuthPhase::Unavailable);
         rustix::fs::flock(
-            &case.probe(),
+            case.probe(),
             rustix::fs::FlockOperation::NonBlockingLockExclusive,
         )
         .unwrap();

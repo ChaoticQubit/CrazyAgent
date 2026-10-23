@@ -7,8 +7,9 @@ use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-const _: fn(&OwnerRuntimeHandle) -> Result<(RequestId, RequestId, File), EngineError> =
-    OwnerRuntimeHandle::allocate_master_capture;
+type AllocateCapture = fn(&OwnerRuntimeHandle) -> Result<(RequestId, RequestId, File), EngineError>;
+
+const _: AllocateCapture = OwnerRuntimeHandle::allocate_master_capture;
 
 const _: fn(&mut Capture, &crate::rcli_host::Event) -> Result<(), EngineError> = Capture::record;
 

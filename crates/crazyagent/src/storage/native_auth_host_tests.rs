@@ -97,7 +97,7 @@ fn fresh_work(begin: NativeAuthBegin) -> (NativeAuthFact, NativeAuthWork) {
         fn evidence() {}
     }
     impl<T: ?Sized> NonCloneEvidence<()> for T {}
-    impl<T: ?Sized + Clone> NonCloneEvidence<u8> for T {}
+    impl<T: Clone> NonCloneEvidence<u8> for T {}
     let _ = <NativeAuthWork as NonCloneEvidence<_>>::evidence;
     assert_eq!(begin.reply.fact.phase, NativeAuthPhase::Starting);
     assert!(begin.reply.challenge.is_none());

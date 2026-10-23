@@ -277,7 +277,7 @@ fn native_auth_custody_dispatch_requires_genuine_committed_starting_and_fence() 
         fn evidence() {}
     }
     impl<T: ?Sized> NonClone<()> for T {}
-    impl<T: ?Sized + Clone> NonClone<u8> for T {}
+    impl<T: Clone> NonClone<u8> for T {}
     let _ = <NativeAuthDispatch as NonClone<_>>::evidence;
     let mut case = CustodyCase::new();
     let (fact, work) = case.work("dispatch-committed");
