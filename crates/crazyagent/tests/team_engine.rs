@@ -1,5 +1,5 @@
 use crazyagent::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
-use crazyagent::protocol::{Outcome, ProjectId};
+use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::team::{
     AgentRole, AgentStatus, MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAction,
     TeamStatus,
@@ -225,6 +225,19 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
     let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
     database.busy_timeout(Duration::from_secs(5)).unwrap();
     let setup = setup(&folder);
+    let project_row = StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    database
+        .execute(
+            "INSERT INTO projects VALUES (?1, ?2)",
+            rusqlite::params![PROJECT, serde_json::to_string(&project_row).unwrap()],
+        )
+        .unwrap();
     database
         .execute(
             "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",

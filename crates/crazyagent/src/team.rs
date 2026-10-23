@@ -19,6 +19,7 @@ pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const DELEGATE_MARKER: &str = "DELEGATE";
+const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -388,12 +389,26 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// One keyless pool account a team agent can run on.
+/// One pool account a team agent can run on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamAccount {
     pub connection: CredentialRef,
-    pub base_url: String,
-    pub model: String,
+    pub reach: TeamReach,
+}
+
+/// How a team agent reaches its model: a keyless HTTP endpoint, or a native managed
+/// profile the owner signed in, which the engine lends to one agent turn at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeamReach {
+    Endpoint {
+        base_url: String,
+        model: String,
+    },
+    Managed {
+        profile_ref: CredentialRef,
+        model: Option<String>,
+    },
 }
 
 /// The accounts a harness may use for one project, or why there are none.
@@ -403,9 +418,10 @@ pub enum Accounts {
     Usable(Vec<TeamAccount>),
 }
 
-/// Lists pool accounts the launch harness can run on for one project.
+/// Lists pool accounts the launch harness can run on for one project: keyless endpoints
+/// whose protocol fits and native managed profiles of that harness, signed in or not.
 /// Takes the live model access, the project and the launch harness identifier.
-/// Returns NoPool when no pool is assigned, otherwise the usable members in pool order.
+/// Returns NoPool when no pool is assigned, otherwise the fitting members in pool order.
 pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &str) -> Accounts {
     let assigned: Vec<_> = access
         .pools
@@ -429,22 +445,34 @@ pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &st
             let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
                 continue;
             };
-            let (ModelEndpoint::Http { url }, ModelAuthentication::None {}) =
-                (&connection.endpoint, &connection.auth)
-            else {
-                continue;
+            let reach = match (&connection.endpoint, &connection.auth) {
+                (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => {
+                    let protocol = connection.protocol.as_str();
+                    let fits = match harness {
+                        "codex" => protocol.starts_with("openai"),
+                        "claude-code" => protocol == "anthropic-messages",
+                        _ => false,
+                    };
+                    fits.then(|| TeamReach::Endpoint {
+                        base_url: url.clone(),
+                        model: connection.model.id.clone(),
+                    })
+                }
+                (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
+                    let fits = crate::harnesses::spec(connection.harness.as_str())
+                        .is_some_and(|spec| spec.id == harness);
+                    fits.then(|| TeamReach::Managed {
+                        profile_ref: profile_ref.clone(),
+                        model: (connection.model.id != NATIVE_DEFAULT_MODEL)
+                            .then(|| connection.model.id.clone()),
+                    })
+                }
+                _ => None,
             };
-            let protocol = connection.protocol.as_str();
-            let fits = match harness {
-                "codex" => protocol.starts_with("openai"),
-                "claude-code" => protocol == "anthropic-messages",
-                _ => false,
-            };
-            if fits {
+            if let Some(reach) = reach {
                 usable.push(TeamAccount {
                     connection: connection.id.clone(),
-                    base_url: url.clone(),
-                    model: connection.model.id.clone(),
+                    reach,
                 });
             }
         }

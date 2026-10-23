@@ -1,15 +1,19 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, MessageAuthor, MessageState, TaskSource,
-    TaskStatus, TeamAccount, admit, agent_row, append_message, bound_text, eligible_accounts,
-    launch_harness, now_ms, parse_delegations, pick_account,
+    TaskStatus, TeamAccount, TeamReach, admit, agent_row, append_message, bound_text,
+    eligible_accounts, launch_harness, now_ms, parse_delegations, pick_account,
 };
 use crate::config::ModelAccess;
-use crate::engine::EngineError;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::HostStamp;
+use crate::engine::owner::native_auth::NativeAuthFact;
+use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Session};
+use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{ResearchAccount, add_worktree, ensure_repository, model_remote};
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -81,8 +85,54 @@ impl TeamLimits {
 }
 
 enum Order {
-    Turn(String),
+    Turn(String, Option<Box<Grant>>),
     Stop,
+}
+
+/// What one turn of an agent on a signed-in managed account needs: the profile, held
+/// under the engine's custody lock for that turn only, and the project's launch context.
+struct Grant {
+    profile: NativeProfileUse,
+    context: AgentContext,
+}
+
+/// Everything about an agent's harness launch except the account, so a managed agent
+/// can start a fresh process for each turn.
+struct Plan {
+    harness: String,
+    executable: PathBuf,
+    working_dir: PathBuf,
+    model: Option<String>,
+    tools: bool,
+    sandbox_profile: PathBuf,
+    limits: LaunchLimits,
+}
+
+impl Plan {
+    fn request(&self, account: AccountBinding) -> LaunchRequest {
+        LaunchRequest {
+            harness: self.harness.clone(),
+            executable: self.executable.clone(),
+            working_dir: self.working_dir.clone(),
+            account,
+            model: self.model.clone(),
+            tools: self.tools,
+            sandbox_profile: Some(self.sandbox_profile.clone()),
+            limits: self.limits,
+        }
+    }
+}
+
+/// How an agent's process lives: kept across turns on an endpoint account, or started
+/// for each turn on a managed profile whose home is given.
+enum Mode {
+    Kept {
+        account: AccountBinding,
+        context: AgentContext,
+    },
+    PerTurn {
+        home: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +170,8 @@ struct Worker {
     busy: Option<Busy>,
     idle_since: Instant,
     stopping: bool,
+    managed: bool,
+    grants: u64,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -136,6 +188,7 @@ pub struct TeamRuntime {
     access: AccessSource,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
+    custody: Result<NativeProfileCustody, EngineError>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -212,6 +265,9 @@ impl TeamRuntime {
                  COMMIT;"
             ))
             .map_err(error)?;
+        let custody = std::fs::symlink_metadata(database)
+            .map_err(error)
+            .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
         Ok(Self {
             connection,
             state: state.to_path_buf(),
@@ -219,6 +275,7 @@ impl TeamRuntime {
             access,
             limits,
             workers: BTreeMap::new(),
+            custody,
         })
     }
 
@@ -345,7 +402,7 @@ impl TeamRuntime {
             };
             let usable = matches!(
                 eligible_accounts(access, &stored.project_id, launch),
-                Accounts::Usable(accounts) if !accounts.is_empty()
+                Accounts::Usable(accounts) if accounts.iter().any(|a| self.ready(access, a))
             );
             let (from, to) = if usable {
                 ("needs_pool", "queued")
@@ -413,19 +470,110 @@ impl TeamRuntime {
         if accounts != Accounts::NoPool && !self.executables.contains_key(launch) {
             return Err(format!("{harness} is not installed"));
         }
-        match accounts {
-            Accounts::NoPool => Err("Needs a pool".into()),
-            Accounts::Usable(accounts) if accounts.is_empty() => Err(format!(
+        let Accounts::Usable(fitting) = accounts else {
+            return Err("Needs a pool".into());
+        };
+        if fitting.is_empty() {
+            return Err(format!(
                 "No account in this project's pool can run {harness}"
-            )),
-            Accounts::Usable(accounts) => {
-                pick_account(&accounts, &|c: &CredentialRef| self.load(c), paused)
-                    .cloned()
-                    .ok_or_else(|| {
-                        "Every account in this project's pool is resting after a rate limit".into()
-                    })
-            }
+            ));
         }
+        let accounts: Vec<TeamAccount> = fitting
+            .into_iter()
+            .filter(|account| self.ready(access, account))
+            .collect();
+        if accounts.is_empty() {
+            return Err(format!(
+                "Sign in to an account in this project's pool to run {harness}"
+            ));
+        }
+        pick_account(&accounts, &|c: &CredentialRef| self.load(c), paused)
+            .cloned()
+            .ok_or_else(|| {
+                "Every account in this project's pool is resting after a rate limit".into()
+            })
+    }
+
+    /// Tells whether an account can take agent work now: endpoints always, managed
+    /// profiles only while their sign-in passes the master's check for this engine run.
+    fn ready(&self, access: &ModelAccess, account: &TeamAccount) -> bool {
+        match account.reach {
+            TeamReach::Endpoint { .. } => true,
+            TeamReach::Managed { .. } => self.sign_in(access, &account.connection).is_ok(),
+        }
+    }
+
+    /// Proves a managed pool account is signed in for this engine run with the same
+    /// check every master turn uses. Takes the live access and the pool member.
+    /// Returns the active host and the sign-in, or a plain refusal code.
+    fn sign_in(
+        &self,
+        access: &ModelAccess,
+        account: &CredentialRef,
+    ) -> Result<(HostStamp, NativeAuthFact), String> {
+        let connection = access
+            .connections
+            .iter()
+            .find(|c| &c.id == account)
+            .ok_or("team_account_left_pool")?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        let host = tx
+            .query_row(
+                "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+                [],
+                |row| {
+                    Ok(HostStamp {
+                        db_instance: row.get(0)?,
+                        engine_epoch: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or("team_engine_not_ready")?;
+        let fact = crate::storage::native_sign_in(&tx, &host, connection, None).map_err(|e| e.0)?;
+        drop(tx);
+        assert_eq!(fact.binding.engine_epoch, host.engine_epoch);
+        Ok((host, fact))
+    }
+
+    /// Takes a managed agent's profile for its next turn under the engine's custody lock
+    /// and reads the project's launch context for the fresh process.
+    /// Returns none while another process holds the profile, so the turn waits.
+    fn grant(
+        &mut self,
+        access: &ModelAccess,
+        id: i64,
+        project: &ProjectId,
+    ) -> Result<Option<Box<Grant>>, String> {
+        let connection = self.workers[&id].connection.clone();
+        let (host, fact) = match self.sign_in(access, &connection) {
+            Ok(signed) => signed,
+            Err(code) if code == "native_profile_in_use" => return Ok(None),
+            Err(code) => return Err(sign_in_problem(&code).to_owned()),
+        };
+        let generation = self.workers[&id].grants + 1;
+        let operation =
+            RequestId::new(format!("team-agent-{id}-turn-{generation}")).map_err(|e| e.0)?;
+        let custody = self.custody.as_mut().map_err(|e| e.0.clone())?;
+        let profile = match custody.acquire_use(
+            &host,
+            &fact.binding,
+            &operation,
+            generation,
+            NativeProfileUsePurpose::Execution,
+        ) {
+            Ok(profile) => profile,
+            Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
+            Err(problem) => return Err(problem.0),
+        };
+        let context =
+            crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+        self.workers.get_mut(&id).expect("worker exists").grants = generation;
+        Ok(Some(Box::new(Grant { profile, context })))
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -500,6 +648,30 @@ impl TeamRuntime {
                 }
             }
         };
+        let grant = if self.workers[&id].managed {
+            match self.grant(access, id, project) {
+                Ok(Some(grant)) => Some(grant),
+                Ok(None) => return Ok(()),
+                Err(reason) => {
+                    let worker = self.workers.get_mut(&id).expect("master worker exists");
+                    worker.stopping = true;
+                    let _ = worker.orders.send(Order::Stop);
+                    self.connection
+                        .execute(
+                            "UPDATE team_messages SET state='failed' WHERE id=?1",
+                            [message],
+                        )
+                        .map_err(error)?;
+                    return self.note(
+                        project,
+                        &format!("The master could not start: {}.", bound_text(&reason, 300)),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let fresh = fresh || grant.is_some();
         let speaker = if author == "owner" {
             "Message from the owner"
         } else {
@@ -518,7 +690,7 @@ impl TeamRuntime {
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
         let worker = self.workers.get_mut(&id).expect("master worker exists");
-        if worker.orders.send(Order::Turn(prompt)).is_err() {
+        if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
             return Ok(());
         }
         worker.busy = Some(Busy::Message(message));
@@ -726,6 +898,27 @@ impl TeamRuntime {
                     }
                 }
             };
+            let grant = if self.workers[&agent].managed {
+                match self.grant(access, agent, project) {
+                    Ok(Some(grant)) => Some(grant),
+                    Ok(None) => continue,
+                    Err(reason) => {
+                        let worker = self.workers.get_mut(&agent).expect("worker exists");
+                        worker.stopping = true;
+                        let _ = worker.orders.send(Order::Stop);
+                        self.fail_task(
+                            task,
+                            &format!(
+                                "The sub-agent could not start: {}",
+                                bound_text(&reason, 300)
+                            ),
+                        )?;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let worktree: Option<String> = self
                 .connection
                 .query_row(
@@ -741,7 +934,7 @@ impl TeamRuntime {
                 prompt
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
-            if worker.orders.send(Order::Turn(prompt)).is_err() {
+            if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
                 continue;
             }
             worker.busy = Some(Busy::Task(task));
@@ -854,7 +1047,7 @@ impl TeamRuntime {
         let id = self.connection.last_insert_rowid();
         assert!(id > 0);
         let prepared = self.prepare(stored, id, role, harness, tools, account);
-        let (root, request) = match prepared {
+        let (root, plan, mode) = match prepared {
             Ok(prepared) => prepared,
             Err(problem) => {
                 self.connection
@@ -866,10 +1059,9 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         };
-        let worktree = (request.working_dir != root)
+        let worktree = (plan.working_dir != root)
             .then(|| {
-                request
-                    .working_dir
+                plan.working_dir
                     .strip_prefix(&root)
                     .ok()
                     .map(|p| p.display().to_string())
@@ -886,9 +1078,10 @@ impl TeamRuntime {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let turn_time = self.limits.turn_time;
+        let managed = matches!(mode, Mode::PerTurn { .. });
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(request, inbox, outbox, flag, turn_time))
+            .spawn(move || work(plan, mode, inbox, outbox, flag, turn_time))
             .map_err(error)?;
         self.workers.insert(
             id,
@@ -903,6 +1096,8 @@ impl TeamRuntime {
                 busy: None,
                 idle_since: Instant::now(),
                 stopping: false,
+                managed,
+                grants: 0,
                 thread: Some(thread),
             },
         );
@@ -917,7 +1112,7 @@ impl TeamRuntime {
         harness: &str,
         tools: bool,
         account: &TeamAccount,
-    ) -> Result<(PathBuf, LaunchRequest), String> {
+    ) -> Result<(PathBuf, Plan, Mode), String> {
         let plain = |e: &dyn std::fmt::Display| e.to_string();
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
@@ -931,19 +1126,35 @@ impl TeamRuntime {
             return Err("project folder overlaps engine state".into());
         }
         let agent = self.state.join("agents").join(format!("agent-{id}"));
-        let home = agent.join("home");
+        let own_home = agent.join("home");
         let tmp = agent.join("tmp");
-        for directory in [&agent, &home, &tmp] {
+        for directory in [&agent, &own_home, &tmp] {
             private_directory(directory).map_err(|e| e.0)?;
         }
-        let endpoint = ResearchAccount::Endpoint {
-            base_url: account.base_url.clone(),
-            model: account.model.clone(),
+        let (home, remote, model) = match &account.reach {
+            TeamReach::Endpoint { base_url, model } => {
+                let endpoint = ResearchAccount::Endpoint {
+                    base_url: base_url.clone(),
+                    model: model.clone(),
+                };
+                let remote = model_remote(&endpoint).map_err(|e| plain(&e))?;
+                (own_home, remote, Some(model.clone()))
+            }
+            TeamReach::Managed { profile_ref, model } => {
+                let custody = self.custody.as_ref().map_err(|e| e.0.clone())?;
+                (
+                    custody.profile_home(profile_ref),
+                    SandboxRemote::AnyHost(443),
+                    model.clone(),
+                )
+            }
         };
+        let context = crate::launch_context::for_project(&self.connection, &stored.project_id)
+            .map_err(|e| e.0)?;
         let network = if tools {
             SandboxNetwork::Open
         } else {
-            SandboxNetwork::Only(vec![model_remote(&endpoint).map_err(|e| plain(&e))?])
+            SandboxNetwork::Only(vec![remote])
         };
         let mut sandbox =
             ProjectSandbox::new(&root, &home, &tmp, network).map_err(|e| plain(&e))?;
@@ -954,6 +1165,13 @@ impl TeamRuntime {
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
         sandbox = sandbox.allow_read(&install).map_err(|e| plain(&e))?;
+        if tools {
+            for server in context.read_paths() {
+                if let Some(folder) = server.parent() {
+                    sandbox = sandbox.allow_read(folder).map_err(|e| plain(&e))?;
+                }
+            }
+        }
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
         sandbox.install(&profile).map_err(|e| plain(&e))?;
         ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
@@ -966,18 +1184,13 @@ impl TeamRuntime {
             }
         };
         assert!(working_dir.starts_with(&root));
-        let request = LaunchRequest {
+        let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),
             working_dir,
-            account: AccountBinding::Url {
-                home,
-                base_url: account.base_url.clone(),
-                key: None,
-            },
-            model: Some(account.model.clone()),
+            model,
             tools,
-            sandbox_profile: Some(profile),
+            sandbox_profile: profile,
             limits: LaunchLimits {
                 run_time: self.limits.session_time,
                 stop_grace: self.limits.stop_grace,
@@ -985,7 +1198,18 @@ impl TeamRuntime {
                 events: SESSION_EVENTS_MAX,
             },
         };
-        Ok((root, request))
+        let mode = match &account.reach {
+            TeamReach::Endpoint { base_url, .. } => Mode::Kept {
+                account: AccountBinding::Url {
+                    home,
+                    base_url: base_url.clone(),
+                    key: None,
+                },
+                context,
+            },
+            TeamReach::Managed { .. } => Mode::PerTurn { home },
+        };
+        Ok((root, plan, mode))
     }
 
     fn collect(&mut self) -> Result<(), EngineError> {
@@ -1303,39 +1527,73 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
+fn sign_in_problem(code: &str) -> &'static str {
+    match code {
+        "master_authentication_unknown" => "the account is not signed in",
+        "master_authentication_stale" => "the account needs a fresh sign-in",
+        "team_account_left_pool" => "the account left the pool",
+        "team_engine_not_ready" => "the engine is not ready",
+        _ => "the account's sign-in could not be checked",
+    }
+}
+
 fn work(
-    request: LaunchRequest,
+    plan: Plan,
+    mode: Mode,
     orders: Receiver<Order>,
     reports: Sender<Report>,
     cancel: Arc<AtomicBool>,
     turn_time: Duration,
 ) {
-    let mut session = match Session::start(request) {
-        Ok(session) => session,
-        Err(problem) => {
-            let _ = reports.send(Report::Ended {
-                problem: Some(format!("The agent could not start ({})", problem.0)),
-            });
-            return;
+    let problem = match mode {
+        Mode::Kept { account, context } => kept(
+            plan.request(account),
+            context,
+            &orders,
+            &reports,
+            &cancel,
+            turn_time,
+        ),
+        Mode::PerTurn { home } => per_turn(&plan, &home, &orders, &reports, &cancel, turn_time),
+    };
+    let _ = reports.send(Report::Ended { problem });
+}
+
+fn next_turn(
+    orders: &Receiver<Order>,
+    cancel: &AtomicBool,
+) -> Option<(String, Option<Box<Grant>>)> {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
         }
+        match orders.recv_timeout(ORDER_WAIT) {
+            Ok(Order::Turn(prompt, grant)) => return Some((prompt, grant)),
+            Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn kept(
+    request: LaunchRequest,
+    context: AgentContext,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    turn_time: Duration,
+) -> Option<String> {
+    let mut session = match Session::start_with_context(request, context) {
+        Ok(session) => session,
+        Err(problem) => return Some(format!("The agent could not start ({})", problem.0)),
     };
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
     });
     let mut problem = None;
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            break;
-        }
-        let order = match orders.recv_timeout(ORDER_WAIT) {
-            Ok(order) => order,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-        let Order::Turn(prompt) = order else {
-            break;
-        };
-        let (text, end) = turn(&mut session, &prompt, &reports, &cancel, turn_time);
+    while let Some((prompt, grant)) = next_turn(orders, cancel) {
+        assert!(grant.is_none());
+        let (text, end) = turn(&mut session, &prompt, reports, cancel, turn_time);
         let reusable = matches!(end, TurnEnd::Success | TurnEnd::Failed);
         if end == TurnEnd::Closed {
             problem = Some("The agent process closed".to_owned());
@@ -1345,7 +1603,58 @@ fn work(
         }
     }
     let _ = session.stop();
-    let _ = reports.send(Report::Ended { problem });
+    problem
+}
+
+fn per_turn(
+    plan: &Plan,
+    home: &Path,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    turn_time: Duration,
+) -> Option<String> {
+    while let Some((prompt, grant)) = next_turn(orders, cancel) {
+        let Some(grant) = grant else {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Closed,
+            });
+            return Some("The agent was given a turn without its signed-in account".into());
+        };
+        let Grant { profile, context } = *grant;
+        if profile.profile_path().ok().as_deref() != Some(home) {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Closed,
+            });
+            return Some("The signed-in account changed".into());
+        }
+        let request = plan.request(AccountBinding::Subscription {
+            home: home.to_path_buf(),
+        });
+        let mut session = match Session::start_with_context(request, context) {
+            Ok(session) => session,
+            Err(problem) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                });
+                return Some(format!("The agent could not start ({})", problem.0));
+            }
+        };
+        let _ = reports.send(Report::Ready {
+            group: session.process_group(),
+        });
+        let (text, end) = turn(&mut session, &prompt, reports, cancel, turn_time);
+        let _ = session.stop();
+        drop(profile);
+        let reusable = matches!(end, TurnEnd::Success | TurnEnd::Failed);
+        if reports.send(Report::Finished { text, end }).is_err() || !reusable {
+            return (end == TurnEnd::Closed).then(|| "The agent process closed".to_owned());
+        }
+    }
+    None
 }
 
 fn turn(

@@ -23,11 +23,35 @@ fn connection(id: &str, url: &str, protocol: &str, auth: ModelAuthentication) ->
     }
 }
 
+fn managed(id: &str, harness: &str, model: &str) -> ModelConnection {
+    ModelConnection {
+        id: reference(id),
+        provider: reference(if harness == "codex" {
+            "openai"
+        } else {
+            "anthropic"
+        }),
+        harness: reference(harness),
+        protocol: reference("native"),
+        account_ref: reference("local-account"),
+        endpoint: ModelEndpoint::Native {},
+        model: ModelReference {
+            id: model.into(),
+            author: reference("openai-compatible"),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: reference(&format!("{id}-profile")),
+        },
+    }
+}
+
 fn access(project: &str, members: &[&str]) -> ModelAccess {
     let none = || ModelAuthentication::None {};
     ModelAccess {
         accounts: vec![reference("local-account")],
         connections: vec![
+            managed("codex-signed-in", "codex", "gpt-5.5"),
+            managed("claude-signed-in", "claude", "native-default"),
             connection(
                 "local-a",
                 "http://127.0.0.1:11434/v1",
@@ -156,6 +180,51 @@ fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
     assert_eq!(
         eligible_accounts(&all, &ProjectId::new("other").unwrap(), "codex"),
         Accounts::NoPool
+    );
+}
+
+#[test]
+fn managed_profiles_are_listed_only_for_their_own_harness() {
+    let project = ProjectId::new("team-managed").unwrap();
+    let all = access(
+        "team-managed",
+        &["claude-signed-in", "local-a", "codex-signed-in", "keyed"],
+    );
+    let Accounts::Usable(codex) = eligible_accounts(&all, &project, "codex") else {
+        panic!("pool assigned");
+    };
+    assert_eq!(
+        codex,
+        [
+            TeamAccount {
+                connection: reference("local-a"),
+                reach: TeamReach::Endpoint {
+                    base_url: "http://127.0.0.1:11434/v1".into(),
+                    model: "qwen2.5:0.5b".into(),
+                },
+            },
+            TeamAccount {
+                connection: reference("codex-signed-in"),
+                reach: TeamReach::Managed {
+                    profile_ref: reference("codex-signed-in-profile"),
+                    model: Some("gpt-5.5".into()),
+                },
+            },
+        ]
+    );
+    let Accounts::Usable(claude) = eligible_accounts(&all, &project, "claude-code") else {
+        panic!("pool assigned");
+    };
+    assert_eq!(
+        claude,
+        [TeamAccount {
+            connection: reference("claude-signed-in"),
+            reach: TeamReach::Managed {
+                profile_ref: reference("claude-signed-in-profile"),
+                model: None,
+            },
+        }],
+        "the claude alias maps to Claude Code and native-default leaves the model to the account"
     );
 }
 
@@ -654,6 +723,93 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
         waiting.agents.is_empty(),
         "codex has no registered executable, so nothing starts"
     );
+    assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
+
+#[test]
+fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-unsigned",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &ModelAccess::default(), &action).unwrap(),
+            Outcome::Applied
+        );
+    }
+    tx.commit().unwrap();
+    let executable = base.join("codex");
+    std::fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let pool = access("team-unsigned", &["codex-signed-in"]);
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(pool.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    team.tick().unwrap();
+    let parked = status(&connection, &setup).unwrap();
+    assert_eq!(
+        parked
+            .messages
+            .iter()
+            .map(|m| (m.author, m.state, m.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+            (
+                MessageAuthor::Engine,
+                MessageState::Note,
+                "The master could not start: Sign in to an account in this project's pool to run codex."
+            ),
+        ]
+    );
+    assert_eq!(
+        parked.tasks[0].status,
+        TaskStatus::NeedsPool,
+        "a pool whose only member is not signed in holds the task"
+    );
+    assert!(parked.agents.is_empty());
     assert!(!team.has_live_agents());
     team.shutdown().unwrap();
 }
