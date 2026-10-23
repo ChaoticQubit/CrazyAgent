@@ -61,46 +61,82 @@ export function teamTaskWord(status: TeamTaskStatus): string {
   }
 }
 
-export interface TeamRow {
+export type TeamFilter = "running" | "all";
+
+export interface TeamAgentRow {
   key: string;
-  title: string;
+  role: "Master" | "Sub-agent";
+  name: string;
   harness: string;
+  account: string;
   word: string;
-  detail: string;
-  turns: number | null;
+  task: string;
+}
+
+export interface TeamTaskRow {
+  key: string;
+  from: string;
+  to: string;
+  word: string;
+  prompt: string;
+  summary: string;
+  result: string | null;
+  elapsed: string;
   stop: { task: number; label: "Stop" | "Cancel" } | null;
 }
 
 const WAITING: TeamTaskStatus[] = ["queued", "needs_pool"];
+const SUMMARY_MAX = 200;
+const MARKER = /^(?:#{1,6}|[-*+]|>|\d+\.)\s+/u;
 
-/** Lists the live team for the Agents tab: each agent with the task it holds, then the tasks no
- * agent holds. "running" keeps agents that have not stopped and tasks still to finish.
- * Inputs: the team status and the filter. Output: the rows in engine order. */
-export function teamRows(status: Pick<TeamStatus, "agents" | "tasks">, filter: "running" | "all"): TeamRow[] {
-  const task = (id: number | null) => status.tasks.find((item) => item.id === id);
-  const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamRow => {
-    const held = task(agent.task);
+/** Sums up a task result in one plain line: its first line that is not a heading, without list,
+ * quote or heading marks, cut to fit a row. Input: the result text. Output: the line, or "". */
+export function resultSummary(text: string): string {
+  const lines = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  const line = (lines.find((item) => !item.startsWith("#")) ?? lines[0] ?? "").replace(MARKER, "");
+  return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
+}
+
+/** Builds the Team panel: each agent with its role, plain name, harness, account and current task,
+ * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
+ * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
+ * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
+ * Output: the agent rows and task rows in engine order. */
+export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
+  filter: TeamFilter, now: number): { agents: TeamAgentRow[]; tasks: TeamTaskRow[] } {
+  const names = new Map<number, string>();
+  const counts = new Map<string, number>();
+  for (const agent of status.agents) {
+    if (agent.role === "master") { names.set(agent.id, "Master"); continue; }
+    const count = (counts.get(agent.harness) ?? 0) + 1;
+    counts.set(agent.harness, count);
+    names.set(agent.id, `${harnessLabel(agent.harness)} ${count}`);
+  }
+  const account = (id: string | null) => id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+  const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
+    const held = status.tasks.find((item) => item.id === agent.task);
     return {
       key: `agent-${agent.id}`,
-      title: agent.role === "master" ? "Master" : "Agent",
-      harness: agent.harness,
+      role: agent.role === "master" ? "Master" : "Sub-agent",
+      name: names.get(agent.id) ?? harnessLabel(agent.harness),
+      harness: harnessLabel(agent.harness),
+      account: account(agent.account),
       word: teamAgentWord(agent.status),
-      detail: agent.problem ?? (held ? firstLine(held.prompt) : ""),
-      turns: agent.turns,
-      stop: held?.status === "running" ? { task: held.id, label: "Stop" } : null,
+      task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
     };
   });
-  const holding = new Set(status.agents.map((agent) => agent.task).filter((id) => id !== null));
-  const tasks = status.tasks.filter((item) => !holding.has(item.id) && (filter === "all" || WAITING.includes(item.status) || item.status === "running")).map((item): TeamRow => ({
+  const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
     key: `task-${item.id}`,
-    title: "Task",
-    harness: item.harness,
+    from: item.source === "owner" ? "From you" : "From the master",
+    to: (item.agent !== null ? names.get(item.agent) : undefined) ?? harnessLabel(item.harness),
     word: teamTaskWord(item.status),
-    detail: item.problem ?? firstLine(item.prompt),
-    turns: null,
+    prompt: firstLine(item.prompt),
+    summary: item.problem ?? (item.result !== null ? resultSummary(item.result) : ""),
+    result: item.result,
+    elapsed: item.started_ms !== null ? elapsed((item.finished_ms ?? now) - item.started_ms) : "",
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
-  return [...agents, ...tasks];
+  return { agents, tasks };
 }
 
 /** The Overview fact for skills or MCP servers: how many are on in this project. An item is on

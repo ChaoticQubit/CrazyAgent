@@ -1,17 +1,17 @@
 import { call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { cancelTeamTask, failureCopy, loadResearchLog, loadTeamStatus, receiptState } from "../../api-projects";
-import type { HarnessEntry } from "../../api";
-import type { ResearchJob, TeamStatus } from "../../api-projects";
+import { failureCopy, loadResearchLog } from "../../api-projects";
+import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { nearBottom, researchRow, teamRows } from "./research";
-import type { ResearchRow, TeamRow } from "./research";
+import { nearBottom, researchRow, teamPanel } from "./research";
+import type { ResearchRow } from "./research";
+import { TeamPanel, useTeam } from "./team";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ConfirmDialog, Icon, Segmented, StatusBadge, type Tone } from "../../ui";
+import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
  * Input: the research row. Output: the agent status word and tone. */
@@ -54,65 +54,8 @@ function AgentLog({ data, job }: { data: ProjectData; job: ResearchJob }) {
   </div>;
 }
 
-const TEAM_POLL_MS = 3000;
-
-/** Reads the project's live team now and every few seconds while shown; stops asking when the
- * engine has no team command. Input: the project id. Output: the latest read and a reload. */
-function useTeam(id: string): [Result<TeamStatus> | undefined, () => void] {
-  const [team, setTeam] = useState<Result<TeamStatus>>();
-  const [round, setRound] = useState(0);
-  useEffect(() => {
-    let live = true;
-    let timer: number | undefined;
-    const read = () => void loadTeamStatus(id).then((result) => {
-      if (!live) return;
-      setTeam(result);
-      if (result.kind === "not_ready" && timer !== undefined) window.clearInterval(timer);
-    });
-    read();
-    timer = window.setInterval(read, TEAM_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [id, round]);
-  return [team, () => setRound((value) => value + 1)];
-}
-
-function TeamSection({ data, rows, team, harnesses, reload }: {
-  data: ProjectData; rows: TeamRow[]; team: Result<TeamStatus> | undefined; harnesses: HarnessEntry[] | null; reload: () => void;
-}) {
-  const [stopping, setStopping] = useState<TeamRow | null>(null);
-  const [note, setNote] = useState("");
-  async function stop(row: TeamRow) {
-    setStopping(null);
-    if (!row.stop) return;
-    const result = await cancelTeamTask(data.id, row.stop.task, nextGeneration());
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping team work isn't in this build." : failureCopy(result.code));
-    const state = receiptState(result.value);
-    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.");
-    reload();
-  }
-  if (team === undefined) return <p className="pj-muted" role="status">Loading the team...</p>;
-  if (team.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
-  if (team.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.code)}</p>;
-  return <section className="pj-stack-s" aria-labelledby="pj-team-title">
-    <h3 id="pj-team-title">Team</h3>
-    {note && <p className="pj-note warn" role="status">{note}</p>}
-    {rows.length ? <ul className="pj-rows" aria-label="Team">{rows.map((row) => <li className="pj-agent-row" key={row.key}>
-      <strong className="pj-kind"><Icon name={row.title === "Master" ? "sparkles" : "bot"} size={16} />{row.title}</strong>
-      <span className="pj-secondary pj-small">{harnessName(harnesses, row.harness)}</span>
-      <span><StatusBadge word={row.word} /> <span className="pj-small pj-secondary">{displayText(row.detail)}</span></span>
-      <span className="pj-small pj-muted">{row.turns ? `${row.turns} ${row.turns === 1 ? "turn" : "turns"}` : ""}</span>
-      <span className="pj-row">{row.stop && <button type="button" className="btn danger-text" onClick={() => setStopping(row)}>{row.stop.label}</button>}</span>
-    </li>)}</ul> : <p className="pj-muted">No team agents are working. The master starts them when you ask it to build something.</p>}
-    <ConfirmDialog open={stopping !== null} title={stopping?.stop?.label === "Cancel" ? "Cancel this task?" : "Stop this agent's task?"}
-      confirmLabel={stopping?.stop?.label === "Cancel" ? "Cancel task" : "Stop task"} cancelLabel="Keep it"
-      onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
-      {displayText(stopping?.detail ?? "")}
-    </ConfirmDialog>
-  </section>;
-}
-
-/** Agents tab: every agent the project has started, with live progress from the engine.
- * Input: the project data. Output: the list; rows refresh while research polls. */
+/** Agents tab: the live team panel, then every research agent the project has started, with live
+ * progress from the engine. Input: the project data. Output: the tab; rows refresh while they poll. */
 export function AgentsTab({ data }: { data: ProjectData }) {
   const [filter, setFilter] = useState<"running" | "all">("running");
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
@@ -125,9 +68,9 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
   const [team, reloadTeam] = useTeam(data.id);
-  const teamValue = team?.kind === "ok" ? team.value : { agents: [], tasks: [] };
-  const teamLive = teamRows(teamValue, "running").length;
-  const teamShown = teamRows(teamValue, filter);
+  const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
+  const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
+  const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
 
   async function stop(job: ResearchJob) {
     setStopping(null);
@@ -141,7 +84,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   return <div className="pj-stack">
     <div className="pj-row between">
       <Segmented label="Show" value={filter} onValue={setFilter}
-        options={[{ value: "running", label: `Running (${running.length + teamLive})` }, { value: "all", label: `All (${jobs.length + teamRows(teamValue, "all").length})` }]} />
+        options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
       <span className="pj-secondary">{data.assigned
         ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
         : "No pool. Agents wait until you choose one."}</span>
@@ -149,6 +92,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
+    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={reloadTeam} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);
@@ -164,11 +108,10 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
         {logOpen === job.id && <AgentLog data={data} job={job} />}
       </li>;
-    })}</ul> : data.research?.kind === "ok" && teamShown.length === 0 && <div className="pj-empty">
+    })}</ul> : data.research?.kind === "ok" && teamShown.agents.length + teamShown.tasks.length === 0 && <div className="pj-empty">
       <h3>{filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}</h3>
       <p className="pj-secondary">Research agents start from the Work step, and the master starts agents when you ask it to build something.</p>
     </div>}
-    <TeamSection data={data} rows={teamShown} team={team} harnesses={harnesses} reload={reloadTeam} />
     <ConfirmDialog open={stopping !== null} title={`Stop ${displayText(stopping?.kind_label ?? "this agent")}?`} confirmLabel="Stop agent" cancelLabel="Keep running"
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       Work so far stays in its working copy.
