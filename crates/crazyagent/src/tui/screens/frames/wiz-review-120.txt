@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  New project  /  Review
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New project             │ Review
+                          │
+  ✓ About                 │ Tidepool
+  ✓ Stack and platforms   │ A live dashboard for marine researchers to watch sensor buoys and get alerts when readings
+  ✓ Documents             │ look wrong.
+  ✓ Work to start         │
+  ✓ Pool                  │ Project folder  Made by CrazyAgent  new
+  ✓ Team                  │ Stack           None picked
+  > Review                │ Platforms       None picked
+                          │ Documents       None
+  Esc keeps this draft    │ Work to start   Market research, Competitor research, Front-end design
+  and goes home.          │ Pool            Main
+                          │ Team            Codex leads. Codex x3. Tools on.
+                          │
+                          │ Research starts right away. You can close CrazyAgent and agents keep working.
+                          │
+                          │ [ Back ]   [> Create project ]
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+
+ Enter Create project   Shift-Tab Back   Shift-←→ Steps   Esc Leave, keep draft                                  ? Help

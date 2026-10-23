@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Pool
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   Pool   Team   Review
+─────────────────────────────────────────────━━━━───────────────────────────────
+  Pool
+  Agents in this project use accounts from one pool.
+
+  > (*) No pool yet
+
+  You have no pools yet. Press a to create one now, or continue and pick one
+  later. Work waits and shows "Needs a pool" until then.
+
+  a  Create a pool
+
+  [ Back ]   [ Continue ]
+
+
+
+
+
+
+
+
+ ↑↓ Choose  a Create a pool  Tab Buttons  Shift-←→ Steps                 ? Help

@@ -10,7 +10,7 @@ use crate::tui::text::styled;
 use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 const FORM_WIDTH: usize = 72;
 
@@ -107,6 +107,7 @@ impl Screen for ProfilePage {
                         if let Ok(profile) = form.profile() {
                             ctx.store.profile = Load::Ready(Some(profile));
                         }
+                        form.settle();
                         let colors = form.colors().unwrap_or_default();
                         let saved_colors = match &ctx.prefs {
                             Some(path) => prefs::save_colors(path, colors),
@@ -154,12 +155,20 @@ impl Screen for ProfilePage {
         let wide = ctx.wide();
         let (content, cursor) = match &self.form {
             Some(form) => {
-                let limit = if wide { FORM_WIDTH } else { area.width as usize - 4 };
+                let limit = if wide {
+                    FORM_WIDTH
+                } else {
+                    area.width as usize - 4
+                };
                 let (lines, cursor) = form.lines(limit, wide, "Save changes", ctx);
                 if wide {
                     let mut content = vec![
                         styled("Profile", Role::Accent, &ctx.theme),
-                        styled("Agents read this before they start.", Role::Muted, &ctx.theme),
+                        styled(
+                            "Agents read this before they start.",
+                            Role::Muted,
+                            &ctx.theme,
+                        ),
                         Line::default(),
                     ];
                     content.extend(lines);
@@ -172,10 +181,7 @@ impl Screen for ProfilePage {
                 vec![
                     styled("Profile", Role::Accent, &ctx.theme),
                     Line::default(),
-                    Line::from(vec![
-                        Span::styled(ctx.spinner(), ctx.theme.running),
-                        Span::raw(" Loading your profile"),
-                    ]),
+                    ctx.loading("Loading your profile"),
                 ],
                 None,
             ),
@@ -185,6 +191,14 @@ impl Screen for ProfilePage {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.form.as_ref().is_none_or(|form| form.saving)
+    }
+
+    fn draft(&self) -> bool {
+        self.form.as_ref().is_some_and(ProfileForm::edited)
+    }
+
+    fn loss(&self) -> &'static str {
+        "Your profile changes will be lost."
     }
 
     fn place(&self) -> Option<Place> {

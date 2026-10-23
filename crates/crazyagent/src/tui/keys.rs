@@ -137,17 +137,35 @@ mod tests {
 
     #[test]
     fn events_normalize_to_plain_keys() {
-        assert_eq!(press(KeyCode::Char('a'), KeyModifiers::NONE), Some(Key::Char('a')));
-        assert_eq!(press(KeyCode::Char('A'), KeyModifiers::SHIFT), Some(Key::Char('A')));
-        assert_eq!(press(KeyCode::Char('K'), KeyModifiers::CONTROL), Some(Key::Ctrl('k')));
+        assert_eq!(
+            press(KeyCode::Char('a'), KeyModifiers::NONE),
+            Some(Key::Char('a'))
+        );
+        assert_eq!(
+            press(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Some(Key::Char('A'))
+        );
+        assert_eq!(
+            press(KeyCode::Char('K'), KeyModifiers::CONTROL),
+            Some(Key::Ctrl('k'))
+        );
         assert_eq!(
             press(KeyCode::Char('j'), KeyModifiers::CONTROL),
             Some(Key::Ctrl('j'))
         );
-        assert_eq!(press(KeyCode::Left, KeyModifiers::SHIFT), Some(Key::ShiftLeft));
-        assert_eq!(press(KeyCode::Right, KeyModifiers::SHIFT), Some(Key::ShiftRight));
+        assert_eq!(
+            press(KeyCode::Left, KeyModifiers::SHIFT),
+            Some(Key::ShiftLeft)
+        );
+        assert_eq!(
+            press(KeyCode::Right, KeyModifiers::SHIFT),
+            Some(Key::ShiftRight)
+        );
         assert_eq!(press(KeyCode::Tab, KeyModifiers::SHIFT), Some(Key::BackTab));
-        assert_eq!(press(KeyCode::BackTab, KeyModifiers::SHIFT), Some(Key::BackTab));
+        assert_eq!(
+            press(KeyCode::BackTab, KeyModifiers::SHIFT),
+            Some(Key::BackTab)
+        );
         assert_eq!(press(KeyCode::F(2), KeyModifiers::NONE), None);
         assert_eq!(press(KeyCode::Char('x'), KeyModifiers::ALT), None);
         assert_eq!(press(KeyCode::Char('1'), KeyModifiers::CONTROL), None);
@@ -163,7 +181,10 @@ mod tests {
         assert_eq!(global(&Key::Ctrl('k'), true), Some(Global::GoTo));
         assert_eq!(global(&Key::Char('?'), false), Some(Global::Help));
         assert_eq!(global(&Key::Char('?'), true), None);
-        assert_eq!(global(&Key::Char('['), false), Some(Global::PreviousSection));
+        assert_eq!(
+            global(&Key::Char('['), false),
+            Some(Global::PreviousSection)
+        );
         assert_eq!(global(&Key::Char(']'), true), None);
         assert_eq!(global(&Key::ShiftRight, true), Some(Global::NextSection));
         assert_eq!(global(&Key::Char('n'), false), None);

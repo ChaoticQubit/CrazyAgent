@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Team
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   ✓ Pool   Team   Review
+──────────────────────────────────────────────────────━━━━──────────────────────
+  Team      ┌─ Harness for the master ─────────────────────────────┐
+  Pick who l│ > rcli                           1 in pool           │.
+            │   Claude Code                    1 in pool           │
+    Role    │   Codex                          1 in pool           │
+    Master  │                                                      │
+    Sub-agen│ Not ready yet: the full harness list with install    │
+            │ checks. These come from your pool's accounts.        │
+            └──────────────────────────────────────────────────────┘
+  Team size   Min [ 1 ]   Max [ 4 ]
+  At most 4 agents run at once. Extra work waits until one finishes.
+
+  Research: 3 agents, one per Work item, on the sub-agent harnesses.
+
+  Tools on: agents edit files and run commands, only in the project folder.
+
+  [ Back ]   [ Continue ]
+
+
+
+ ↑↓ Move  Enter Pick  r Check again  Esc Close                           ? Help

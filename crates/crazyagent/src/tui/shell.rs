@@ -1,7 +1,8 @@
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint, too_small,
+    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint,
+    too_small,
 };
 use super::keys::{Global, Key, global};
 use super::screens::startup::Startup;
@@ -14,6 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Position;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
+use std::time::{Duration, Instant};
 
 const STACK_MAX: usize = 32;
 const GO_TO_ROWS_MAX: usize = 8;
@@ -22,6 +24,7 @@ const HELP_WIDTH: u16 = 74;
 const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
 const QUIT_WIDTH: u16 = 46;
+const QUIET: Duration = Duration::from_millis(150);
 
 /// One Go to destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +47,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
                 } else {
                     format!("{} / {}", card.name, tab.label())
                 },
-                kind: if tab == ProjectTab::Overview { "Project" } else { "Project tab" },
+                kind: if tab == ProjectTab::Overview {
+                    "Project"
+                } else {
+                    "Project tab"
+                },
                 place: Place::Project {
                     id: card.id.clone(),
                     name: card.name.clone(),
@@ -125,7 +132,7 @@ impl GoTo {
 struct QuitAsk {
     quit_focused: bool,
     running: usize,
-    draft: bool,
+    loss: Option<&'static str>,
 }
 
 enum Overlay {
@@ -143,6 +150,7 @@ pub struct Shell {
     stack: Vec<Box<dyn Screen>>,
     overlay: Option<Overlay>,
     quit: bool,
+    busy_since: Option<Instant>,
 }
 
 impl Shell {
@@ -160,6 +168,7 @@ impl Shell {
             stack: vec![screen],
             overlay: None,
             quit: false,
+            busy_since: None,
         };
         shell.refresh();
         shell
@@ -186,7 +195,10 @@ impl Shell {
     }
 
     fn top(&self) -> &dyn Screen {
-        self.stack.last().expect("the stack is never empty").as_ref()
+        self.stack
+            .last()
+            .expect("the stack is never empty")
+            .as_ref()
     }
 
     /// Records a new window size.
@@ -202,6 +214,25 @@ impl Shell {
         self.top().busy(&self.ctx)
     }
 
+    /// Tracks how long the top screen has been busy, so loading lines stay
+    /// empty for the first 150 ms and quick replies never flash a spinner.
+    /// Input: the current time. Output: true when the quiet state changed and
+    /// the frame needs drawing.
+    pub fn pace(&mut self, now: Instant) -> bool {
+        self.busy_since = match (self.busy(), self.busy_since) {
+            (true, Some(since)) => Some(since),
+            (true, None) => Some(now),
+            (false, _) => None,
+        };
+        let quiet = self
+            .busy_since
+            .is_some_and(|since| now.saturating_duration_since(since) < QUIET);
+        let changed = quiet != self.ctx.quiet;
+        self.ctx.quiet = quiet;
+        assert!(!quiet || self.busy());
+        changed
+    }
+
     /// Asks the top screen to refresh its data.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn refresh(&mut self) {
@@ -213,28 +244,30 @@ impl Shell {
     }
 
     fn running(&self) -> usize {
-        self.ctx
-            .store
-            .projects
-            .ready()
-            .map_or(0, |cards| cards.iter().map(|card| card.research.running).sum())
+        self.ctx.store.projects.ready().map_or(0, |cards| {
+            cards.iter().map(|card| card.research.running).sum()
+        })
     }
 
-    fn draft(&self) -> bool {
-        self.stack.iter().any(|screen| screen.draft())
+    fn loss(&self) -> Option<&'static str> {
+        self.stack
+            .iter()
+            .rev()
+            .find(|screen| screen.draft())
+            .map(|screen| screen.loss())
     }
 
     fn ask_quit(&mut self) {
         let running = self.running();
-        let draft = self.draft();
-        if running == 0 && !draft {
+        let loss = self.loss();
+        if running == 0 && loss.is_none() {
             self.quit = true;
             return;
         }
         self.overlay = Some(Overlay::Quit(QuitAsk {
             quit_focused: false,
             running,
-            draft,
+            loss,
         }));
     }
 
@@ -277,7 +310,8 @@ impl Shell {
     }
 
     fn home(&mut self) {
-        let root_is_home = self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
+        let root_is_home =
+            self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
         if root_is_home {
             self.stack.truncate(1);
             self.refresh();
@@ -397,14 +431,21 @@ impl Shell {
     pub fn arrive(&mut self, arrival: Arrival) {
         let was_ready = self.ctx.link == Link::Ready;
         match &arrival {
-            Arrival::Connected => {
+            Arrival::Connected(identity) => {
                 if self.ctx.link == Link::Reconnecting {
-                    self.ctx.say(Message::success("Connected to the engine again.", ""));
+                    self.ctx
+                        .say(Message::success("Connected to the engine again.", ""));
                 }
                 self.ctx.link = Link::Ready;
+                self.ctx.identity = identity.clone();
             }
             Arrival::Disconnected(problem) => {
-                let started = self.stack.first().and_then(|screen| screen.place()).is_some();
+                self.ctx.identity = None;
+                let started = self
+                    .stack
+                    .first()
+                    .and_then(|screen| screen.place())
+                    .is_some();
                 if started {
                     self.ctx.link = Link::Reconnecting;
                     self.ctx.say(Message::error(
@@ -424,6 +465,12 @@ impl Shell {
             Arrival::Pools(result) => {
                 self.ctx.store.pools = match result {
                     Ok(pools) => Load::Ready(pools.clone()),
+                    Err(problem) => Load::Failed(problem.clone()),
+                }
+            }
+            Arrival::PoolProjects(result) => {
+                self.ctx.store.pool_projects = match result {
+                    Ok(scopes) => Load::Ready(scopes.clone()),
                     Err(problem) => Load::Failed(problem.clone()),
                 }
             }
@@ -451,7 +498,7 @@ impl Shell {
             }
         }
         self.apply(top_flow);
-        if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected) {
+        if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.refresh();
         }
     }
@@ -600,8 +647,8 @@ impl Shell {
                 if ask.running == 1 { "s" } else { "" },
             )));
         }
-        if ask.draft {
-            body.push(Line::raw("Your new project draft will be lost."));
+        if let Some(loss) = ask.loss {
+            body.push(Line::raw(loss));
         }
         body.push(Line::default());
         body.push(buttons(
@@ -641,7 +688,10 @@ impl Shell {
         draw_lines(
             frame.buffer_mut(),
             rule,
-            &[Line::from(Span::styled(glyphs.hline.repeat(width), theme.muted))],
+            &[Line::from(Span::styled(
+                glyphs.hline.repeat(width),
+                theme.muted,
+            ))],
         );
         let ctx = &self.ctx;
         let cursor = self
@@ -657,7 +707,11 @@ impl Shell {
             .overlay_hints()
             .or_else(|| screen_modal.as_ref().map(|(_, hints)| hints.clone()))
             .unwrap_or_else(|| self.top().hints(&self.ctx));
-        draw_lines(frame.buffer_mut(), help, &[help_line(width, &hints, &theme, glyphs)]);
+        draw_lines(
+            frame.buffer_mut(),
+            help,
+            &[help_line(width, &hints, &theme, glyphs)],
+        );
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None
         } else {
@@ -668,7 +722,8 @@ impl Shell {
         }
         match &self.overlay {
             Some(Overlay::Help) => {
-                self.help_modal().draw(frame.buffer_mut(), area, &theme, glyphs);
+                self.help_modal()
+                    .draw(frame.buffer_mut(), area, &theme, glyphs);
             }
             Some(Overlay::GoTo(go)) => {
                 let (modal, at) = self.go_to_modal(go);
@@ -676,7 +731,8 @@ impl Shell {
                 cursor = Some(Position::new(inner.x + at.x, inner.y + at.y));
             }
             Some(Overlay::Quit(ask)) => {
-                self.quit_modal(ask).draw(frame.buffer_mut(), area, &theme, glyphs);
+                self.quit_modal(ask)
+                    .draw(frame.buffer_mut(), area, &theme, glyphs);
             }
             None => {}
         }
@@ -699,7 +755,13 @@ mod tests {
     use crate::tui::theme::{Appearance, Colors, Depth};
 
     fn ctx() -> Ctx {
-        let mut ctx = Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new());
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
         ctx.link = Link::Ready;
         ctx
     }
@@ -746,7 +808,10 @@ mod tests {
     fn go_to_lists_projects_tabs_settings_and_actions_and_opens_over_home() {
         let mut ctx = ctx();
         ctx.store.projects = Load::Ready(vec![card("Tidepool", 0)]);
-        let labels: Vec<String> = targets(&ctx).into_iter().map(|target| target.label).collect();
+        let labels: Vec<String> = targets(&ctx)
+            .into_iter()
+            .map(|target| target.label)
+            .collect();
         assert_eq!(labels[0], "Tidepool");
         assert!(labels.contains(&"Tidepool / Agents".to_owned()));
         assert!(labels.contains(&"Settings / Plugins and skills".to_owned()));
@@ -769,19 +834,28 @@ mod tests {
     fn go_to_and_help_stay_closed_where_they_do_not_apply() {
         let mut shell = Shell::new(ctx());
         shell.key(Key::Ctrl('k'));
-        assert!(shell.overlay.is_none(), "no Go to before the owner is set up");
+        assert!(
+            shell.overlay.is_none(),
+            "no Go to before the owner is set up"
+        );
 
         let mut shell = at(Place::Welcome, ctx());
         shell.key(Key::Ctrl('k'));
         assert!(shell.overlay.is_none(), "no Go to on the first-run page");
         shell.key(Key::Char('?'));
-        assert!(shell.overlay.is_none(), "? types into the focused name field");
+        assert!(
+            shell.overlay.is_none(),
+            "? types into the focused name field"
+        );
 
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('?'));
         assert!(matches!(shell.overlay, Some(Overlay::Help)));
         shell.key(Key::Char('x'));
-        assert!(matches!(shell.overlay, Some(Overlay::Help)), "other keys keep it open");
+        assert!(
+            matches!(shell.overlay, Some(Overlay::Help)),
+            "other keys keep it open"
+        );
         shell.key(Key::Esc);
         assert!(shell.overlay.is_none());
     }
@@ -791,7 +865,10 @@ mod tests {
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('s'));
         assert_eq!(shell.depth(), 2);
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Accounts)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Accounts))
+        );
         shell.key(Key::Esc);
         assert_eq!(shell.place(), Some(Place::Home));
         shell.key(Key::Esc);
@@ -804,9 +881,15 @@ mod tests {
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('s'));
         shell.key(Key::ShiftLeft);
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Profile)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Profile))
+        );
         shell.key(Key::Char(']'));
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Accounts)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Accounts))
+        );
         shell.key(Key::ShiftRight);
         assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Pools)));
         assert_eq!(shell.depth(), 2, "sections replace each other");
@@ -827,7 +910,10 @@ mod tests {
             _ => panic!("quit asks first"),
         }
         shell.key(Key::Enter);
-        assert!(!shell.quitting() && shell.overlay.is_none(), "Enter on Stay stays");
+        assert!(
+            !shell.quitting() && shell.overlay.is_none(),
+            "Enter on Stay stays"
+        );
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Esc);
         assert!(!shell.quitting() && shell.overlay.is_none());
@@ -845,15 +931,110 @@ mod tests {
     }
 
     #[test]
+    fn loading_lines_stay_empty_for_the_first_150_ms_of_a_busy_spell() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        assert!(shell.busy(), "the profile is still loading");
+        assert!(!shell.ctx.quiet);
+        let start = Instant::now();
+        assert!(shell.pace(start), "becoming busy starts the quiet spell");
+        assert!(shell.ctx.quiet);
+        assert_eq!(shell.ctx.loading("Loading your profile"), Line::default());
+        assert!(!shell.pace(start + Duration::from_millis(149)));
+        assert!(shell.ctx.quiet);
+        assert!(shell.pace(start + Duration::from_millis(150)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            crate::tui::text::plain(&shell.ctx.loading("Loading your profile")),
+            format!("{} Loading your profile", shell.ctx.spinner())
+        );
+        assert!(!shell.pace(start + Duration::from_millis(400)));
+        assert!(!shell.ctx.quiet, "a long load keeps its spinner");
+
+        shell.arrive(Arrival::Profile(Ok(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }))));
+        assert!(!shell.busy());
+        assert!(!shell.pace(start + Duration::from_millis(500)));
+        assert!(!shell.ctx.quiet);
+        assert_eq!(
+            shell.busy_since, None,
+            "the next busy spell starts quiet again"
+        );
+    }
+
+    #[test]
+    fn quit_asks_before_unsaved_profile_changes_are_lost() {
+        let loaded = || {
+            let mut ctx = ctx();
+            ctx.store.profile = Load::Ready(Some(OwnerProfile {
+                name: "Mira".into(),
+                role: String::new(),
+                bio: String::new(),
+                preferred_stack: Vec::new(),
+                working_style: Default::default(),
+            }));
+            at(Place::Settings(SettingsSection::Profile), ctx)
+        };
+        let mut shell = loaded();
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an untouched profile quits at once");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(
+                (ask.running, ask.loss),
+                (0, Some("Your profile changes will be lost."))
+            ),
+            _ => panic!("edited profile asks first"),
+        }
+        shell.key(Key::Esc);
+        assert!(!shell.quitting());
+        shell.key(Key::Backspace);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "undoing the edit leaves nothing to lose");
+
+        let mut shell = loaded();
+        shell.key(Key::Tab);
+        shell.key(Key::Char('!'));
+        for _ in 0..7 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        shell.key(Key::Ctrl('q'));
+        assert!(
+            matches!(&shell.overlay, Some(Overlay::Quit(ask)) if ask.loss.is_some()),
+            "a save still in flight can be lost"
+        );
+        shell.key(Key::Esc);
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "a saved profile has nothing to lose");
+    }
+
+    #[test]
     fn losing_the_engine_after_start_says_so_and_refreshes_on_return() {
         let mut shell = at(Place::Home, ctx());
         drain(&mut shell);
         shell.arrive(Arrival::Disconnected("trusted_connection_lost".into()));
         assert_eq!(shell.ctx.link, Link::Reconnecting);
-        assert_eq!(shell.ctx.message().unwrap().lead, "Lost the connection to the engine.");
-        shell.arrive(Arrival::Connected);
+        assert_eq!(
+            shell.ctx.message().unwrap().lead,
+            "Lost the connection to the engine."
+        );
+        shell.arrive(Arrival::Connected(None));
         assert_eq!(shell.ctx.link, Link::Ready);
-        assert_eq!(shell.ctx.message().unwrap().lead, "Connected to the engine again.");
+        assert_eq!(
+            shell.ctx.message().unwrap().lead,
+            "Connected to the engine again."
+        );
         let requests = drain(&mut shell);
         assert!(requests.contains(&"Projects".to_owned()), "{requests:?}");
         assert!(requests.contains(&"Pools".to_owned()), "{requests:?}");
@@ -875,14 +1056,14 @@ mod tests {
         assert!(shell.ctx.take_reconnect());
         assert_eq!(shell.ctx.link, Link::Connecting);
 
-        shell.arrive(Arrival::Connected);
+        shell.arrive(Arrival::Connected(None));
         assert!(drain(&mut shell).contains(&"Profile".to_owned()));
         shell.arrive(Arrival::Profile(Ok(None)));
         assert_eq!(shell.place(), Some(Place::Welcome));
         assert_eq!(shell.depth(), 1);
 
         let mut shell = Shell::new(ctx());
-        shell.arrive(Arrival::Connected);
+        shell.arrive(Arrival::Connected(None));
         let profile = OwnerProfile {
             name: "Mira".into(),
             role: String::new(),

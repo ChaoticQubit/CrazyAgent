@@ -1,27 +1,15 @@
+mod research_support;
+
 use crazyagent::protocol::CredentialRef;
 use crazyagent::research::accounts::AccountPick;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use crazyagent::research::service::{ResearchService, progress};
+use research_support::{EngineRuntime, codex};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-fn codex() -> PathBuf {
-    let path = std::env::var_os("CRAZYAGENT_CODEX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
-        .canonicalize()
-        .expect("real codex binary required");
-    assert!(
-        path.is_file(),
-        "real codex binary required: {}",
-        path.display()
-    );
-    path
-}
 
 fn ollama() -> AccountPick {
     AccountPick::Account {
@@ -46,18 +34,13 @@ fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) {
 
 #[test]
 fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    let project = root.join("project");
-    let state = root.join("state");
-    fs::create_dir_all(project.join("context")).unwrap();
-    fs::create_dir_all(&state).unwrap();
-    fs::write(
-        project.join("context").join("brief.md"),
-        "# Bakery ordering\n\nA website where a small bakery takes cake orders.\n",
-    )
-    .unwrap();
-    let database = state.join("research.sqlite3");
+    let runtime = EngineRuntime::with_projects(&[(
+        "project-a",
+        "A website where a small bakery takes cake orders.",
+    )]);
+    let project = runtime.folder("project-a");
+    let state = runtime.state.clone();
+    let database = runtime.database.clone();
     let jobs = ResearchJobs::open(&database).unwrap();
     let market = jobs
         .enqueue("project-a", "market_research", "codex", false)
@@ -141,13 +124,10 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
 
 #[test]
 fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    let project = root.join("project");
-    let state = root.join("state");
-    fs::create_dir_all(project.join("context")).unwrap();
-    fs::create_dir_all(&state).unwrap();
-    let database = state.join("research.sqlite3");
+    let runtime = EngineRuntime::with_projects(&[("project-b", "A site for a flower shop.")]);
+    let project = runtime.folder("project-b");
+    let state = runtime.state.clone();
+    let database = runtime.database.clone();
     let jobs = ResearchJobs::open(&database).unwrap();
     let id = jobs
         .enqueue("project-b", "design_research", "codex", true)

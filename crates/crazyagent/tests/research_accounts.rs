@@ -1,7 +1,11 @@
+mod research_support;
+
 use crazyagent::config::ModelAccess;
 use crazyagent::protocol::CredentialRef;
 use crazyagent::research::accounts::{AccountPick, pick_account};
 use crazyagent::research::runner::ResearchAccount;
+use sha2::Digest;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 const ACCESS: &str = r#"
@@ -106,20 +110,26 @@ fn a_pool_with_no_account_the_harness_can_use_says_so_plainly() {
 #[test]
 fn the_settings_resolver_reads_live_pool_assignment_and_the_project_folder() {
     use crazyagent::research::accounts::SettingsResolver;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    let global = root.join("global.toml");
-    let project = root.join("project.toml");
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let root = runtime.root.clone();
+    let global = root.join("research-global.toml");
+    let project = root.join("research-project.toml");
     let projects = root.join("projects");
-    std::fs::create_dir_all(projects.join("project-a")).unwrap();
     std::fs::write(&project, "").unwrap();
     let catalog = |assigned: &str| {
         format!(
-            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }}\nmodel = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [{assigned}]\nroles = [\"project_leader\"]\nfallback_allowed = false\n"
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"codex-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"codex-connection\"\nprovider = \"openai\"\nharness = \"codex\"\nprotocol = \"native\"\naccount_ref = \"codex-account\"\nendpoint = {{ kind = \"native\" }}\nmodel = {{ id = \"native-default\", author = \"openai\" }}\nauth = {{ method = \"native_managed\", profile_ref = \"codex-profile\" }}\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }}\nmodel = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"codex-connection\", \"local-connection\"]\nprojects = [{assigned}]\nroles = [\"project_leader\"]\nfallback_allowed = false\n"
         )
     };
+    let unsigned = root
+        .join("native-profiles")
+        .join(format!("{:x}", sha2::Sha256::digest(b"codex-profile")))
+        .join("home");
+    std::fs::create_dir_all(&unsigned).unwrap();
+    std::fs::set_permissions(&unsigned, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(&global, catalog("")).unwrap();
-    let resolver = SettingsResolver::new(&global, &project, &projects).unwrap();
+    let resolver = SettingsResolver::new(&global, &project, &projects, &runtime.database).unwrap();
     let (folder, pick) = resolver.resolve("project-a", "codex").unwrap();
     assert_eq!(folder, projects.join("project-a"));
     assert_eq!(pick, AccountPick::NeedsPool);
@@ -143,6 +153,7 @@ fn the_settings_resolver_reads_live_pool_assignment_and_the_project_folder() {
     assert!(resolver.resolve("../escape", "codex").is_none());
     std::os::unix::fs::symlink(&root, projects.join("project-link")).unwrap();
     assert!(resolver.resolve("project-link", "codex").is_none());
+    assert!(SettingsResolver::new(&global, &project, &projects, &root.join("missing.db")).is_err());
 }
 
 #[test]

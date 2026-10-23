@@ -33,7 +33,10 @@ pub fn hint(key: &str, label: &str) -> Hint {
 /// The shared "Shift-←→ Sections" hint.
 /// Input: glyphs for the arrows. Output: the hint.
 pub fn sections_hint(glyphs: &Glyphs) -> Hint {
-    hint(&format!("Shift-{}{}", glyphs.left, glyphs.right), "Sections")
+    hint(
+        &format!("Shift-{}{}", glyphs.left, glyphs.right),
+        "Sections",
+    )
 }
 
 /// What kind of result the message line shows.
@@ -159,14 +162,12 @@ pub fn header(
 /// hints that do not fit; `? Help` always stays.
 pub fn help_line(limit: usize, hints: &[Hint], theme: &Theme, glyphs: &Glyphs) -> Line<'static> {
     let separator = if limit >= 100 { "   " } else { "  " };
-    let right = Line::from(vec![
-        Span::styled("?", theme.heading),
-        Span::raw(" Help "),
-    ]);
+    let right = Line::from(vec![Span::styled("?", theme.heading), Span::raw(" Help ")]);
     let mut used = 1;
     let mut spans = vec![Span::raw(" ")];
     for (index, item) in hints.iter().enumerate() {
-        let cost = usize::from(index > 0) * separator.len() + width(&item.key) + 1 + width(&item.label);
+        let cost =
+            usize::from(index > 0) * separator.len() + width(&item.key) + 1 + width(&item.label);
         if used + cost + right.width() + 2 > limit {
             break;
         }
@@ -216,10 +217,15 @@ pub fn tab_strip(
             + gap * (tabs.len() - 1)
             + 2
     };
-    let (counts, marks, gap) = [(true, true, 3), (false, true, 3), (false, true, 2), (false, false, 3)]
-        .into_iter()
-        .find(|(counts, marks, gap)| cost(*counts, *marks, *gap) <= limit)
-        .unwrap_or((false, false, 2));
+    let (counts, marks, gap) = [
+        (true, true, 3),
+        (false, true, 3),
+        (false, true, 2),
+        (false, false, 3),
+    ]
+    .into_iter()
+    .find(|(counts, marks, gap)| cost(*counts, *marks, *gap) <= limit)
+    .unwrap_or((false, false, 2));
     let mut top = vec![Span::raw("  ")];
     let mut under = vec![Span::styled(glyphs.hline.repeat(2), theme.muted)];
     for (index, tab) in tabs.iter().enumerate() {
@@ -229,7 +235,11 @@ pub fn tab_strip(
         };
         let mut segment = vec![Span::styled(
             shown,
-            if index == active { theme.accent } else { theme.text },
+            if index == active {
+                theme.accent
+            } else {
+                theme.text
+            },
         )];
         if counts && !tab.count.is_empty() {
             segment.push(Span::raw(" "));
@@ -334,7 +344,10 @@ impl Modal {
         let inner = box_width as usize - 4;
         let title_room = box_width as usize - 5 - width(&self.title).min(box_width as usize - 5);
         let mut lines = vec![Line::from(vec![
-            Span::styled(format!("{}{} ", glyphs.top_left, glyphs.hline), theme.accent),
+            Span::styled(
+                format!("{}{} ", glyphs.top_left, glyphs.hline),
+                theme.accent,
+            ),
             Span::styled(self.title.clone(), theme.heading),
             Span::styled(
                 format!(" {}{}", glyphs.hline.repeat(title_room), glyphs.top_right),
@@ -373,7 +386,12 @@ impl Modal {
             }
         }
         draw_lines(buffer, boxed, &lines);
-        Rect::new(x + 2, y + 1, box_width.saturating_sub(4), height.saturating_sub(2))
+        Rect::new(
+            x + 2,
+            y + 1,
+            box_width.saturating_sub(4),
+            height.saturating_sub(2),
+        )
     }
 }
 
@@ -412,7 +430,13 @@ mod tests {
             " CrazyAgent  /  …  /  ChatGPT / Codex  /  Sign in with ChatGPT"
         );
         assert_eq!(narrow.width(), 80);
-        let status = header(80, &crumbs(&["Home"]), Line::raw("2 agents running"), &theme(), &ASCII);
+        let status = header(
+            80,
+            &crumbs(&["Home"]),
+            Line::raw("2 agents running"),
+            &theme(),
+            &ASCII,
+        );
         assert_eq!(
             plain(&status),
             format!(" CrazyAgent  /  Home{}2 agents running ", " ".repeat(43))
@@ -454,12 +478,36 @@ mod tests {
     #[test]
     fn tab_strip_drops_counts_then_gaps_then_glyphs() {
         let tabs = vec![
-            Tab { label: "Accounts".into(), section: Some(Section::Accounts), count: "240".into() },
-            Tab { label: "Pools".into(), section: Some(Section::Pools), count: "3".into() },
-            Tab { label: "Harnesses".into(), section: Some(Section::Harnesses), count: "2 of 9".into() },
-            Tab { label: "Plugins and skills".into(), section: Some(Section::Plugins), count: String::new() },
-            Tab { label: "Memory".into(), section: Some(Section::Memory), count: "41".into() },
-            Tab { label: "Profile".into(), section: Some(Section::Profile), count: String::new() },
+            Tab {
+                label: "Accounts".into(),
+                section: Some(Section::Accounts),
+                count: "240".into(),
+            },
+            Tab {
+                label: "Pools".into(),
+                section: Some(Section::Pools),
+                count: "3".into(),
+            },
+            Tab {
+                label: "Harnesses".into(),
+                section: Some(Section::Harnesses),
+                count: "2 of 9".into(),
+            },
+            Tab {
+                label: "Plugins and skills".into(),
+                section: Some(Section::Plugins),
+                count: String::new(),
+            },
+            Tab {
+                label: "Memory".into(),
+                section: Some(Section::Memory),
+                count: "41".into(),
+            },
+            Tab {
+                label: "Profile".into(),
+                section: Some(Section::Profile),
+                count: String::new(),
+            },
         ];
         let [top, under] = tab_strip(120, &tabs, 0, &theme(), &UNICODE);
         assert_eq!(
