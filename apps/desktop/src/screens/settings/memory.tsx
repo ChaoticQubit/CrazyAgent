@@ -1,56 +1,162 @@
-import { useState } from "react";
-import { forgetMemory, keepMemory, listMemories, type Memory } from "../../api";
-import { useAppSession, useLoad } from "../../state";
-import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, SearchField, Skeleton } from "../../ui";
+import { useEffect, useState } from "react";
+import {
+  addMemory, deleteMemory, dismissSuggestion, memorySuggestions, saveSuggestion, savedMemories,
+  type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
+} from "../../api";
+import { useAppSession, useLoad, type Loaded } from "../../state";
+import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, SearchField, Select, Skeleton, TextArea } from "../../ui";
 
-/** Filters saved memories by search text, case-insensitively, over text and source.
- * Inputs: memories and the search text. Output: the matching saved memories. */
-export function savedMemories(memories: Memory[], search: string): Memory[] {
-  const needle = search.trim().toLowerCase();
-  return memories.filter((memory) => memory.state === "saved" &&
-    (!needle || memory.text.toLowerCase().includes(needle) || memory.source.toLowerCase().includes(needle)));
+const NOTE_MAX = 2000;
+const NOT_READY = "This change isn't ready in this build yet.";
+
+/** Says where a saved memory applies and where it came from. Inputs: the memory and project
+ * names by id. Output: "App-wide", "App-wide, from Harbor Notes" or "Harbor Notes only". */
+export function memorySource(memory: SavedMemory, names: Map<string, string>): string {
+  if (memory.scope === "project") return `${names.get(memory.project_id ?? "") ?? "A removed project"} only`;
+  if (memory.origin !== "promoted") return "App-wide";
+  return `App-wide, from ${names.get(memory.from_project_id ?? "") ?? "a removed project"}`;
 }
 
-/** Settings, Memory: suggestions to save or dismiss (one click is the owner's approval) and
- * the saved list with search and delete. */
-export function MemorySettings() {
-  const session = useAppSession();
-  const [memories, reload] = useLoad(listMemories);
-  const [search, setSearch] = useState("");
-  const [deleting, setDeleting] = useState<Memory>();
-  const [failure, setFailure] = useState("");
-  async function act(id: string, keep: boolean) {
-    setFailure("");
-    const result = session.noteResult(await (keep ? keepMemory(id) : forgetMemory(id)));
-    setDeleting(undefined);
-    if (result.kind === "ok") { session.showToast(keep ? "Saved to memory." : "Memory removed."); reload(); }
-    else setFailure(result.kind === "not_ready" ? "This change isn't ready in this build yet." : result.message);
+/** The Show filter: app-wide memory, then each project. Input: the projects.
+ * Output: select options; "" means app-wide. */
+export function scopeOptions(projects: { id: string; name: string }[]): { value: string; label: string }[] {
+  return [{ value: "", label: "App-wide" }, ...projects.map((project) => ({ value: project.id, label: project.name }))];
+}
+
+function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) => Promise<boolean> }) {
+  const [text, setText] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  const save = async () => {
+    const trimmed = text.trim();
+    const invalid = !trimmed ? "Write something to remember." : [...trimmed].length > NOTE_MAX ? "Keep the memory under 2000 characters." : undefined;
+    setError(invalid);
+    if (invalid) return;
+    setPending(true);
+    if (await onAdd(trimmed)) setText("");
+    setPending(false);
+  };
+  return <Panel title="Add memory">
+    <form className="stack-small" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <TextArea id="memory-note" label={`Something agents should remember (${where})`} value={text} onValue={setText} rows={2}
+        maxLength={NOTE_MAX} counterAt={NOTE_MAX - 200} error={error} />
+      <span><Button type="submit" variant="primary" icon="brain" pending={pending} pendingLabel="Saving...">Add memory</Button></span>
+    </form>
+  </Panel>;
+}
+
+/** Settings, Memory as a pure view: research suggestions to save or dismiss (one click is the
+ * owner's approval), saved memory for the chosen scope with search, older pages and delete,
+ * and a form to add a memory. Inputs: the reads, filters, last failure and the actions. */
+export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onSave, onDismiss, onDelete, onMore, onRetry }: {
+  saved: Loaded<SavedMemoryPage>;
+  suggested: Loaded<Suggestion[]>;
+  scope: string;
+  projects: { id: string; name: string }[];
+  search: string;
+  failure: string;
+  busy: string | null;
+  onSearch: (search: string) => void;
+  onScope: (scope: string) => void;
+  onAdd: (text: string) => Promise<boolean>;
+  onSave: (suggestion: Suggestion) => void;
+  onDismiss: (suggestion: Suggestion) => void;
+  onDelete: (memory: SavedMemory) => void;
+  onMore: () => void;
+  onRetry: () => void;
+}) {
+  const names = new Map(projects.map((project) => [project.id, project.name]));
+  const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
+  const filters = <span className="row">
+    {projects.length > 0 && <Select id="memory-scope" label="Show" hideLabel value={scope} options={scopeOptions(projects)} onValue={onScope} />}
+    <SearchField label="Search memory" value={search} onValue={onSearch} />
+  </span>;
+  let list;
+  if (saved.kind === "loading") list = <Skeleton shape="row" count={4} />;
+  else if (saved.kind === "not_ready") list = <NotReady what="Memory" compact />;
+  else if (saved.kind === "error") list = <LoadError message={saved.message} onRetry={onRetry} />;
+  else if (saved.value.items.length === 0) {
+    list = search.trim() ? <p className="item-row muted"><Icon name="search" size={14} /> No memories match.</p>
+      : <EmptyState icon="brain" title="No memories yet" compact>When agents find something worth keeping, it shows up here for you to save.</EmptyState>;
+  } else {
+    list = <div className="rows">
+      {saved.value.items.map((memory) => <div className="item-row" key={memory.id}>
+        <div className="stack-small"><span>{memory.text}</span><span className="muted small">{memorySource(memory, names)}</span></div>
+        <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
+      </div>)}
+      {saved.value.next !== null && <div className="item-row"><span /><Button size="small" onClick={onMore}>Show older</Button></div>}
+    </div>;
   }
-  if (memories.kind === "loading") return <Skeleton shape="row" count={5} />;
-  if (memories.kind === "not_ready") return <NotReady what="Memory" />;
-  if (memories.kind === "error") return <LoadError message="Couldn't load memory." onRetry={reload} />;
-  const suggested = memories.value.filter((memory) => memory.state === "suggested");
-  const saved = savedMemories(memories.value, search);
   return <div className="stack">
     <p className="secondary">Facts agents keep across projects. Nothing is saved here without your click.</p>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    {suggested.length > 0 && <Panel title="Suggested" padded={false}><div className="rows">
-      {suggested.map((memory) => <div className="item-row" key={memory.id}>
-        <div className="stack-small"><span>{memory.text}</span><span className="muted small">{memory.source}</span></div>
-        <span className="row"><Button variant="primary" size="small" icon="brain" onClick={() => void act(memory.id, true)}>Save to memory</Button>
-          <Button size="small" onClick={() => void act(memory.id, false)}>Dismiss</Button></span>
+    {suggested.kind === "ok" && suggested.value.length > 0 && <Panel title="Suggested" padded={false}><div className="rows">
+      {suggested.value.map((suggestion) => <div className="item-row" key={`${suggestion.project_id}/${suggestion.id}`}>
+        <div className="stack-small"><span>{suggestion.text}</span><span className="muted small">From {suggestion.project_name}</span></div>
+        <span className="row">
+          <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
+          <Button size="small" onClick={() => onDismiss(suggestion)}>Dismiss</Button>
+        </span>
       </div>)}
     </div></Panel>}
-    {memories.value.every((memory) => memory.state !== "saved") ? <EmptyState icon="brain" title="No memories yet">
-      When agents find something worth keeping, it shows up here for you to save.
-    </EmptyState> : <Panel title="Saved" actions={<SearchField label="Search memory" value={search} onValue={setSearch} />} padded={false}>
-      <div className="rows">{saved.map((memory) => <div className="item-row" key={memory.id}>
-        <div className="stack-small"><span>{memory.text}</span><span className="muted small">{memory.source}{memory.saved_at ? `, ${memory.saved_at}` : ""}</span></div>
-        <Button variant="danger-text" size="small" icon="trash" onClick={() => setDeleting(memory)}>Delete</Button>
-      </div>)}
-      {saved.length === 0 && <p className="item-row muted"><Icon name="search" size={14} /> No memories match.</p>}</div>
-    </Panel>}
-    <ConfirmDialog open={Boolean(deleting)} title="Delete this memory?" confirmLabel="Delete" onCancel={() => setDeleting(undefined)}
-      onConfirm={() => { if (deleting) void act(deleting.id, false); }}>Agents stop using it right away.</ConfirmDialog>
+    <Panel title="Saved" actions={filters} padded={false}>{list}</Panel>
+    <AddMemoryForm where={where} onAdd={onAdd} />
   </div>;
+}
+
+/** Settings, Memory: reads saved memory and research suggestions from the engine; saving a
+ * suggestion keeps it in its project and makes it app-wide in one click. */
+export function MemorySettings() {
+  const session = useAppSession();
+  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => ({ id: project.id, name: project.name })) : [];
+  const projectKey = projects.map((project) => project.id).join(",");
+  const [scope, setScope] = useState("");
+  const [search, setSearch] = useState("");
+  const [first, reloadSaved] = useLoad(() => savedMemories(scope || null, search), [scope, search]);
+  const [suggested, reloadSuggested] = useLoad(() => memorySuggestions(projects), [projectKey]);
+  const [older, setOlder] = useState<SavedMemoryPage>();
+  const [deleting, setDeleting] = useState<SavedMemory>();
+  const [failure, setFailure] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => setOlder(undefined), [first]);
+
+  const saved: Loaded<SavedMemoryPage> = first.kind === "ok" && older
+    ? { kind: "ok", value: { items: [...first.value.items, ...older.items], next: older.next } } : first;
+  const plain = (result: Result<unknown>) => result.kind === "not_ready" ? NOT_READY : result.kind === "error" ? result.message : "";
+
+  async function act(id: string, action: () => Promise<Result<void>>, done: string, reload: () => void) {
+    setFailure("");
+    setBusy(id);
+    const result = session.noteResult(await action());
+    setBusy(null);
+    if (result.kind === "ok") session.showToast(done);
+    else setFailure(plain(result));
+    reload();
+  }
+
+  const more = async () => {
+    if (saved.kind !== "ok" || saved.value.next === null) return;
+    const page = session.noteResult(await savedMemories(scope || null, search, saved.value.next));
+    if (page.kind === "ok") setOlder({ items: [...(older?.items ?? []), ...page.value.items], next: page.value.next });
+    else setFailure(plain(page));
+  };
+
+  return <>
+    <MemoryView saved={saved} suggested={suggested} scope={scope} projects={projects} search={search} failure={failure} busy={busy}
+      onSearch={setSearch} onScope={setScope} onRetry={reloadSaved} onMore={() => void more()} onDelete={setDeleting}
+      onAdd={async (text) => {
+        setFailure("");
+        const result = session.noteResult(await addMemory(scope || null, text));
+        if (result.kind !== "ok") { setFailure(plain(result)); return false; }
+        session.showToast("Saved to memory.");
+        reloadSaved();
+        return true;
+      }}
+      onSave={(suggestion) => void act(suggestion.id, () => saveSuggestion(suggestion), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}
+      onDismiss={(suggestion) => void act(suggestion.id, () => dismissSuggestion(suggestion), "Suggestion dismissed.", reloadSuggested)} />
+    <ConfirmDialog open={Boolean(deleting)} title="Delete this memory?" confirmLabel="Delete" onCancel={() => setDeleting(undefined)}
+      onConfirm={() => { const memory = deleting; setDeleting(undefined); if (memory) void act(memory.id, () => deleteMemory(memory.id), "Memory deleted.", reloadSaved); }}>
+      Agents stop using it right away.
+    </ConfirmDialog>
+  </>;
 }
