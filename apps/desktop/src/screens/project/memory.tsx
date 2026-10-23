@@ -1,13 +1,14 @@
 import { deleteMemory, nextGeneration, savedMemories } from "../../api";
 import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
-import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, receiptState, reviewMemory } from "../../api-projects";
+import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, promoteProjectMemory, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
+import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
-import { memoryGroups } from "./research";
+import { memoryGroups, memoryOutcome } from "./research";
 import { useLoad } from "../../state";
 import { NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
@@ -26,7 +27,8 @@ async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: 
 }
 
 /** The project's memories in the Context tab: Suggested ones wait for Save to memory or
- * Dismiss, Saved ones and the owner's own notes can be deleted. Input: the project data. Output: the panel. */
+ * Dismiss, Saved ones can be used in all projects with one click or deleted, and the owner's
+ * own notes can be deleted. Input: the project data. Output: the panel. */
 export function ProjectMemory({ data }: { data: ProjectData }) {
   const [memories, setMemories] = useState<Result<{ items: MemoryItem[]; more: boolean }>>();
   const [round, setRound] = useState(0);
@@ -43,18 +45,25 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     return () => { live = false; };
   }, [data.id, round]);
 
+  function settle(result: Result<IntentReceipt>, done: string, missing: string) {
+    setBusy(null);
+    setDeleting(null);
+    const outcome = memoryOutcome(result, done, missing);
+    setNote(outcome.note);
+    if (outcome.toast) data.notify(outcome.toast);
+    if (outcome.reload) setRound((value) => value + 1);
+  }
+
   async function review(item: MemoryItem, decision: MemoryDecision, done: string) {
     setBusy(item.id);
     setNote("");
-    const result = await reviewMemory(data.id, item.id, item.version, decision, nextGeneration());
-    setBusy(null);
-    setDeleting(null);
-    if (result.kind === "not_ready") return setNote("Not ready yet: reviewing memories isn't in this build.");
-    if (result.kind === "error") return setNote(failureCopy(result.code));
-    const state = receiptState(result.value);
-    if (state.kind === "applied") data.notify(done);
-    else setNote(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.");
-    setRound((value) => value + 1);
+    settle(await reviewMemory(data.id, item.id, item.version, decision, nextGeneration()), done, "reviewing memories");
+  }
+
+  async function promote(item: MemoryItem) {
+    setBusy(item.id);
+    setNote("");
+    settle(await promoteProjectMemory(data.id, item.id, item.version, nextGeneration()), "Now used in all projects.", "using a memory in all projects");
   }
 
   async function forget(memory: SavedMemory) {
@@ -92,6 +101,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
       <ul className="pj-rows">{groups.saved.map((item) => <li key={item.id} className="pj-memory">
         <MarkdownView source={item.text} onOpenLink={open} />
         <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
+          <Button size="small" variant="quiet" disabled={busy === item.id} onClick={() => void promote(item)}>Use in all projects</Button>
           <Button size="small" variant="danger-text" disabled={busy === item.id} onClick={() => setDeleting(item)}>Delete</Button></span>
       </li>)}</ul>
     </section>}

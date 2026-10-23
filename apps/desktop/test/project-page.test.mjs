@@ -298,6 +298,19 @@ test("only the brief offers Edit, which opens the project details it is written 
   assert.doesNotMatch(markup, />Edit</);
 });
 
+test("a project memory change shows a toast only when the engine applied it", () => {
+  const receipt = (outcome, rejection = null, pending = false) => ({ kind: "ok", value: {
+    kind: "research_memory", generation: "4", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "o", outcome, pending, rejection,
+  } });
+  const promote = (result) => research.memoryOutcome(result, "Now used in all projects.", "using a memory in all projects");
+  assert.deepEqual(promote(receipt("applied")), { toast: "Now used in all projects.", note: "", reload: true });
+  assert.deepEqual(promote(receipt("rejected", "memory_already_global")), { toast: "", note: "This memory is already in global memory.", reload: true });
+  assert.deepEqual(promote(receipt("rejected", "memory_changed")), { toast: "", note: "This memory changed. Reload it and try again.", reload: true });
+  assert.deepEqual(promote(receipt("uncertain", null, true)), { toast: "", note: "We couldn't confirm your last change. Check the list before trying again.", reload: true });
+  assert.deepEqual(promote({ kind: "not_ready" }), { toast: "", note: "Not ready yet: using a memory in all projects isn't in this build.", reload: false });
+  assert.deepEqual(promote({ kind: "error", code: "memory_missing", message: "" }), { toast: "", note: "That memory no longer exists.", reload: false });
+});
+
 test("project empty states show the brand mark, hidden from screen readers and without its name", async () => {
   const mark = /<div class="pj-empty"><span class="pj-mark large" aria-hidden="true"><span class="brand-mark large" role="img" aria-label="CrazyAgent"><svg class="brand-glyph full" width="48" height="48"/;
   const agents = await import("../src/screens/project/agents.tsx");

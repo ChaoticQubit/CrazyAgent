@@ -324,6 +324,12 @@ export function reviewMemory(id: string, memory: string, version: number, decisi
   return call<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
 }
 
+/** Makes one of the project's memories app-wide with one owner click; the engine keeps a
+ * suggested one first. Inputs: project id, memory id, its version and a generation. Output: the receipt. */
+export function promoteProjectMemory(id: string, memory: string, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
+}
+
 /** Deletes one document or research report from the project folder.
  * Inputs: project id, the path inside the folder and a generation. Output: the receipt. */
 export function deleteContextItem(id: string, path: string, generation: number): Promise<Result<IntentReceipt>> {

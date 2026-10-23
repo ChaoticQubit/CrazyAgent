@@ -1,8 +1,8 @@
 import type { IconName, Tone } from "../../ui";
-import { failureCopy } from "../../api-projects";
+import { failureCopy, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
-import type { HarnessEntry, PoolSummary } from "../../api";
-import type { MasterState, MasterTurn } from "../../engine-client";
+import type { HarnessEntry, PoolSummary, Result } from "../../api";
+import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -137,6 +137,17 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** What one change to a project memory tells the owner: a toast when the engine applied it,
+ * otherwise a line in the panel. Inputs: the engine result, the toast and what is missing when
+ * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
+export function memoryOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
+  if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
+  if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
+  const state = receiptState(result.value);
+  if (state.kind === "applied") return { toast: done, note: "", reload: true };
+  return { toast: "", note: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
 }
 
 /** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
