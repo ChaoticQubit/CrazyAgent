@@ -34,6 +34,7 @@
     "allow-desktop-promote-memory",
     "allow-desktop-delete-memory",
     "allow-desktop-forget-memory",
+    "allow-desktop-remember-research",
     "allow-desktop-open-project",
     "allow-desktop-history",
     "allow-desktop-send-message",

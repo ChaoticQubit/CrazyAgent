@@ -664,7 +664,62 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         OwnerResult::Applied,
         "research deleted for good can be saved again"
     );
+    assert_eq!(
+        owner.project_memories(meals.clone(), None).await.unwrap()[0].status,
+        KnowledgeStatus::Provisional
+    );
+    assert_eq!(
+        result(
+            owner
+                .remember_research(
+                    meals.clone(),
+                    ResearchKind::MarketResearch,
+                    Some("Absent heading".into()),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        rejected("research_section_missing")
+    );
+    assert_eq!(
+        result(
+            owner
+                .remember_research(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "one click keeps saved research"
+    );
+    let remembered = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(
+        remembered
+            .iter()
+            .map(|e| (&e.status, e.human_reviewed))
+            .collect::<Vec<_>>(),
+        [(&KnowledgeStatus::Confirmed, true)]
+    );
+    assert_eq!(
+        result(
+            owner
+                .remember_research(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_duplicate")
+    );
     let approved = owner.approved_memories(meals.clone()).await.unwrap();
+    assert!(approved.items.iter().any(|item| item.kind == ApprovedKind::Research
+        && item.text == entry.text));
+    assert_eq!(
+        approved
+            .items
+            .iter()
+            .filter(|item| item.text == entry.text)
+            .count(),
+        1
+    );
 
     let secret = globals.items[0].clone();
     assert_eq!(secret.text, secret_note);

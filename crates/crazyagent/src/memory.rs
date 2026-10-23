@@ -873,6 +873,18 @@ fn publish(
     save_entry(tx, &config.settings.knowledge, &entry)
 }
 
+/// Names the project knowledge entry an owner-saved research excerpt becomes.
+/// Takes the project, research source name and excerpt. Returns the same id for
+/// the same excerpt, so saving it twice is detected.
+pub(crate) fn research_entry_id(
+    project: &ProjectId,
+    source: &str,
+    text: &str,
+) -> Result<RequestId, EngineError> {
+    let digest = hash(format!("{}\n{source}\n{text}", project.as_str()).as_bytes());
+    RequestId::new(format!("research-{}", &digest[..32])).map_err(error)
+}
+
 /// Records an owner-selected research excerpt as a provisional project knowledge entry.
 /// Takes the project, the research source name, the bounded excerpt and the revision.
 /// Returns Applied with an entry the owner confirms through the existing Review Keep.
@@ -887,8 +899,7 @@ pub(crate) fn propose_research(
     if !text_valid(text, config.settings.knowledge.text_bytes_max) {
         return reject("memory_text_too_long");
     }
-    let digest = hash(format!("{}\n{source}\n{text}", project.as_str()).as_bytes());
-    let id = RequestId::new(format!("research-{}", &digest[..32])).map_err(error)?;
+    let id = research_entry_id(project, source, text)?;
     if load_entry(tx, &id)?.is_some() {
         return reject("memory_entry_exists");
     }

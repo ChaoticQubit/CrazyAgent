@@ -10,7 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
+    "desktop_remember_research",
     "desktop_memories",
     "desktop_memory",
     "desktop_approved_memories",
@@ -179,16 +180,47 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         "the promoted global copy stays"
     );
 
+    std::fs::write(
+        Path::new(&folder).join("context/research/market_research.md"),
+        "# Market\n\n## Habits\nCooks plan on Sundays.\n\n## Prices\nMost apps are free.\n",
+    )?;
+    let remembered = bridge
+        .remember_research(&id, ResearchKind::MarketResearch, Some("Habits".into()), 13)
+        .await?;
+    assert!(matches!(remembered.outcome, ActionOutcome::Applied), "{remembered:?}");
+    assert_eq!(remembered.intent.kind, "memory_remember");
+    let kept = bridge.project_memories(&id, None).await?;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].status, KnowledgeStatus::Confirmed);
+    assert!(kept[0].text.contains("Cooks plan on Sundays."));
+    assert!(!kept[0].text.contains("free"));
+    assert_eq!(
+        bridge
+            .remember_research(&id, ResearchKind::MarketResearch, Some("Absent".into()), 14)
+            .await?
+            .rejection,
+        Some("research_section_missing")
+    );
+    assert!(
+        bridge
+            .approved_memories(&id)
+            .await?
+            .items
+            .iter()
+            .any(|m| m.kind == ApprovedKind::Research && m.text.contains("Sundays")),
+        "one click from a research section to an approved memory"
+    );
+
     let target = global.items[1].id.clone();
     assert_eq!(
         bridge.memory(&target).await?.unwrap().text,
         "Prefer plain words in every screen."
     );
-    let deleted = bridge.delete_memory(&target, 11).await?;
+    let deleted = bridge.delete_memory(&target, 15).await?;
     assert!(matches!(deleted.outcome, ActionOutcome::Applied), "{deleted:?}");
     assert_eq!(deleted.intent.kind, "memory_delete");
     assert!(bridge.memory(&target).await?.is_none());
-    let again = bridge.delete_memory(&target, 12).await?;
+    let again = bridge.delete_memory(&target, 16).await?;
     assert_eq!(again.rejection, Some("memory_missing"));
     assert_eq!(
         bridge.memory("bad id").await.unwrap_err().code,

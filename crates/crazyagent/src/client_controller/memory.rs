@@ -111,6 +111,24 @@ impl OwnerController {
         self.change_memory(action, generation).await
     }
 
+    /// Keeps a research report, or one of its sections, as an approved project
+    /// memory with one owner click, saving it first when it was not saved yet.
+    /// Takes the project, research kind, optional heading and the client generation.
+    pub async fn remember_research(
+        &mut self,
+        project_id: ProjectId,
+        research: crate::project_setup::ResearchKind,
+        section: Option<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        let action = LibraryAction::Remember {
+            project_id,
+            research,
+            section,
+        };
+        self.change_memory(action, generation).await
+    }
+
     /// Sends one validated saved-memory change as a retained owner mutation.
     /// Takes the action and the client generation. Returns the owner response.
     pub async fn change_memory(

@@ -285,7 +285,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "master" | "owner_profile";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "master" | "owner_profile";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -531,6 +531,15 @@ export function promoteMemory(
 
 export function deleteMemory(id: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_delete_memory", { id, generation });
+}
+
+export function rememberResearch(
+  project: string,
+  research: ResearchKind,
+  section: string | null,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_remember_research", { project, research, section, generation });
 }
 
 export function forgetMemory(project: string, memory: string, generation: number): Promise<IntentReceipt> {

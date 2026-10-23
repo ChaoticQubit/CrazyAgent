@@ -99,6 +99,11 @@ pub enum LibraryAction {
         project_id: ProjectId,
         entry_id: RequestId,
     },
+    Remember {
+        project_id: ProjectId,
+        research: crate::project_setup::ResearchKind,
+        section: Option<String>,
+    },
 }
 
 impl LibraryAction {
@@ -108,6 +113,16 @@ impl LibraryAction {
         match self {
             Self::Add { text, .. } => validate_note(text),
             Self::Promote { version: 0, .. } => Err(error("memory_changed")),
+            Self::Remember {
+                project_id,
+                research,
+                section,
+            } => crate::project_setup::SetupAction::SaveToMemory {
+                project_id: project_id.clone(),
+                research: *research,
+                section: section.clone(),
+            }
+            .validate(),
             Self::Promote { .. } | Self::Delete { .. } | Self::Forget { .. } => Ok(()),
         }
     }
@@ -241,7 +256,8 @@ pub fn validate_page(search: Option<&str>, limit: u8) -> Result<(), EngineError>
     Ok(())
 }
 
-const CODES: [&str; 12] = [
+const CODES: [&str; 13] = [
+    "memory_source_removed",
     "memory_note_blank",
     "memory_note_too_long",
     "memory_note_invalid",
@@ -282,6 +298,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "memory_project_missing" => Some("That project no longer exists."),
         "memory_search_invalid" => Some("Keep the search on one line, up to 100 characters."),
         "memory_page_invalid" => Some("Show between 1 and 20 memories at a time."),
+        "memory_source_removed" => {
+            Some("This memory's source was removed. Delete the memory, then save the research again.")
+        }
         _ => None,
     }
 }
@@ -318,7 +337,58 @@ pub(crate) fn execute(
             project_id,
             entry_id,
         } => forget(tx, project_id, entry_id),
+        LibraryAction::Remember {
+            project_id,
+            research,
+            section,
+        } => remember(tx, config, project_id, *research, section.as_deref(), revision),
     }
+}
+
+fn remember(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    research: crate::project_setup::ResearchKind,
+    section: Option<&str>,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let text = match crate::project_setup::research_text(tx, project, research, section)? {
+        Ok(text) => text,
+        Err(code) => return rejected(code),
+    };
+    let id = super::research_entry_id(project, research.name(), &text)?;
+    if load_entry(tx, &id)?.is_none() {
+        let outcome = super::propose_research(tx, config, project, research.name(), &text, revision)?;
+        if outcome != Outcome::Applied {
+            return Ok(outcome);
+        }
+    }
+    let entry = load_entry(tx, &id)?.ok_or_else(|| error("memory_insert_lost"))?;
+    assert_eq!(&entry.project_id, project);
+    if entry.status == KnowledgeStatus::Confirmed {
+        return rejected("memory_duplicate");
+    }
+    for source in &entry.source_ids {
+        if !super::source_live(tx, project, source)? {
+            return rejected("memory_source_removed");
+        }
+    }
+    let outcome = super::review(
+        tx,
+        config,
+        &entry.id,
+        entry.version,
+        &ReviewDecision::Keep,
+        revision,
+    )?;
+    if outcome != Outcome::Applied {
+        return Err(error("memory_keep_failed"));
+    }
+    let kept = load_entry(tx, &id)?.ok_or_else(|| error("memory_keep_failed"))?;
+    assert_eq!(kept.status, KnowledgeStatus::Confirmed);
+    assert!(kept.human_reviewed);
+    Ok(Outcome::Applied)
 }
 
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {

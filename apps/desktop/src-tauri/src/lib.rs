@@ -365,6 +365,21 @@ async fn desktop_forget_memory(
 }
 
 #[tauri::command]
+async fn desktop_remember_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    research: ResearchKind,
+    section: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .remember_research(&project, research, section, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_delete_project_context(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1030,6 +1045,7 @@ pub fn run() {
             desktop_promote_memory,
             desktop_delete_memory,
             desktop_forget_memory,
+            desktop_remember_research,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
