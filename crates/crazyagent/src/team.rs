@@ -277,11 +277,9 @@ impl DelegationPath {
 /// Takes the opaque harness identifier stored in the team plan.
 /// Returns the launch adapter identifier, or none when no adapter exists.
 pub fn launch_harness(harness: &str) -> Option<&'static str> {
-    match harness {
-        "codex" => Some("codex"),
-        "claude" | "claude-code" => Some("claude-code"),
-        _ => None,
-    }
+    crate::harnesses::spec(harness)
+        .map(|spec| spec.id)
+        .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
 /// Records how a master on this harness asks for sub-agents.

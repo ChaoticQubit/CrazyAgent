@@ -552,3 +552,14 @@ fn reopening_the_runtime_returns_interrupted_work_to_the_queue() {
         .mode();
     assert_eq!(mode & 0o777, 0o700);
 }
+
+#[test]
+fn team_plan_harness_names_map_to_launch_adapters_and_delegation_paths() {
+    assert_eq!(launch_harness("codex"), Some("codex"));
+    assert_eq!(launch_harness("claude"), Some("claude-code"));
+    assert_eq!(launch_harness("claude-code"), Some("claude-code"));
+    assert_eq!(launch_harness("gemini"), None);
+    assert_eq!(launch_harness("no-such-harness"), None);
+    assert_eq!(delegation_path("claude"), DelegationPath::Reply);
+    assert_eq!(delegation_path("gemini"), DelegationPath::Unavailable);
+}
