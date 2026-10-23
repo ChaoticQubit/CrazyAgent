@@ -331,16 +331,19 @@ fn the_harness_picker_lists_everything_but_picks_only_installed_harnesses() {
             id: "codex".into(),
             name: "Codex".into(),
             state: HarnessState::Ready,
+            limited: None,
         },
         HarnessChoice {
             id: "opencode".into(),
             name: "OpenCode".into(),
             state: HarnessState::NotInstalled,
+            limited: None,
         },
         HarnessChoice {
-            id: "claude".into(),
+            id: "claude-code".into(),
             name: "Claude Code".into(),
-            state: HarnessState::Limited("tools always on".into()),
+            state: HarnessState::Ready,
+            limited: Some("Limited control: tools always on.".into()),
         },
     ]);
     wizard.key(key(KeyCode::Down));
@@ -365,7 +368,7 @@ fn the_harness_picker_lists_everything_but_picks_only_installed_harnesses() {
     wizard.key(key(KeyCode::Enter));
     assert_eq!(wizard.picker, None);
     let team = wizard.team.clone().unwrap();
-    assert_eq!(team.sub_harnesses[1].harness, "claude");
+    assert_eq!(team.sub_harnesses[1].harness, "claude-code");
     assert_eq!(team.sub_harnesses[1].agents, 1);
     assert_eq!(
         team_summary(&team, wizard.harnesses.as_deref()),
@@ -399,6 +402,129 @@ fn the_harness_picker_lists_everything_but_picks_only_installed_harnesses() {
         wizard.check_team().unwrap_err().text,
         "OpenCode is not installed. Pick another harness."
     );
+}
+
+#[test]
+fn harness_ids_from_pools_teams_and_the_catalog_name_the_same_harness() {
+    assert!(same_harness("claude", "claude-code"));
+    assert!(same_harness("claude-code", "claude"));
+    assert!(same_harness("codex", "codex"));
+    assert!(!same_harness("codex", "claude"));
+    assert!(same_harness("made-up", "made-up"));
+    assert!(!same_harness("made-up", "codex"));
+    let mut wizard = wizard();
+    wizard.pool = Some(CredentialRef::new("pool-main").unwrap());
+    assert_eq!(wizard.pool_accounts("claude-code"), Some(1));
+    assert_eq!(wizard.pool_accounts("claude"), Some(1));
+    let catalog = [HarnessChoice {
+        id: "claude-code".into(),
+        name: "Claude Code".into(),
+        state: HarnessState::Ready,
+        limited: None,
+    }];
+    assert_eq!(harness_name("claude", Some(&catalog)), "Claude Code");
+}
+
+#[test]
+fn harnesses_that_cannot_start_can_be_picked_but_missing_ones_cannot() {
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.set_harnesses(vec![
+        HarnessChoice {
+            id: "codex".into(),
+            name: "Codex".into(),
+            state: HarnessState::Ready,
+            limited: None,
+        },
+        HarnessChoice {
+            id: "opencode".into(),
+            name: "OpenCode".into(),
+            state: HarnessState::CantStart,
+            limited: Some("Limited control: installed, but CrazyAgent cannot start it yet.".into()),
+        },
+    ]);
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.picker.is_some());
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.picker, None);
+    assert_eq!(wizard.team.as_ref().unwrap().master, "opencode");
+    assert!(wizard.check_team().is_ok());
+    assert_eq!(
+        wizard.limited_note(),
+        Some("OpenCode: Limited control: installed, but CrazyAgent cannot start it yet.".into())
+    );
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.team_row, 1);
+    assert_eq!(wizard.limited_note(), None);
+}
+
+#[test]
+fn the_default_team_moves_off_harnesses_that_are_not_installed() {
+    let mut wizard = wizard();
+    wizard.research = vec![
+        ResearchKind::MarketResearch,
+        ResearchKind::CompetitorResearch,
+    ];
+    load_catalog(&mut wizard, &["c-codex"]);
+    let team = wizard.team.clone().unwrap();
+    assert_eq!(team.master, "codex");
+    assert_eq!(team.sub_harnesses[0].harness, "codex");
+    let catalog = |codex: HarnessState| {
+        vec![
+            HarnessChoice {
+                id: "codex".into(),
+                name: "Codex".into(),
+                state: codex,
+                limited: None,
+            },
+            HarnessChoice {
+                id: "claude-code".into(),
+                name: "Claude Code".into(),
+                state: HarnessState::Ready,
+                limited: None,
+            },
+            HarnessChoice {
+                id: "opencode".into(),
+                name: "OpenCode".into(),
+                state: HarnessState::Ready,
+                limited: None,
+            },
+        ]
+    };
+    wizard.set_harnesses(catalog(HarnessState::NotInstalled));
+    let fitted = wizard.team.clone().unwrap();
+    assert_eq!(fitted.master, "claude-code");
+    assert_eq!(fitted.sub_harnesses[0].harness, "claude-code");
+    assert_eq!(fitted.sub_harnesses[0].agents, 2);
+    assert_eq!((fitted.min_agents, fitted.max_agents), (1, 3));
+    assert!(wizard.check_team().is_ok());
+
+    let mut edited = wizard();
+    edited.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut edited, &["c-codex"]);
+    edited.go(Step::Team);
+    edited.key(key(KeyCode::Char(' ')));
+    assert!(!edited.team.as_ref().unwrap().master_tools);
+    edited.set_harnesses(catalog(HarnessState::NotInstalled));
+    assert_eq!(edited.team.as_ref().unwrap().master, "codex");
+    assert_eq!(
+        edited.check_team().unwrap_err().text,
+        "Codex is not installed. Pick another harness."
+    );
+
+    let mut none = wizard();
+    none.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut none, &["c-codex"]);
+    none.set_harnesses(vec![HarnessChoice {
+        id: "codex".into(),
+        name: "Codex".into(),
+        state: HarnessState::NotInstalled,
+        limited: None,
+    }]);
+    assert_eq!(none.team.as_ref().unwrap().master, "codex");
 }
 
 #[test]

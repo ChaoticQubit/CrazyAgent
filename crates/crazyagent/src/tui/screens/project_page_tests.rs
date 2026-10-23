@@ -1,6 +1,7 @@
+use super::new_project::{HarnessChoice, HarnessState};
 use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
-use super::new_project_page::{kept_draft, key_event, pool_choices_from};
+use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project_page::open_path;
 use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
@@ -11,6 +12,7 @@ use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crate::tui::client::Connection;
+use crate::tui::client::settings::SettingsJob;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
@@ -105,6 +107,13 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         sent.push("master");
                         connection.master(*job).unwrap();
                     }
+                    Request::Settings(job) => {
+                        sent.push(match job.as_ref() {
+                            SettingsJob::Harnesses => "harnesses",
+                            _ => "settings",
+                        });
+                        connection.settings(*job).unwrap();
+                    }
                     Request::Setup(query) => {
                         sent.push(match &query {
                             SetupQuery::Catalog { .. } => "catalog",
@@ -115,6 +124,9 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                             SetupQuery::Memories { .. } => "memories",
                             SetupQuery::Change { .. } => "change",
                             SetupQuery::ReviewMemory { .. } => "review",
+                            SetupQuery::Team { .. } => "team",
+                            SetupQuery::TeamChange { .. } => "team change",
+                            SetupQuery::Library(_) => "library",
                         });
                         connection.project_setup(query).unwrap();
                     }
@@ -271,6 +283,58 @@ fn pool_choices_count_accounts_and_the_harnesses_they_run_on() {
         [("codex".to_owned(), 2), ("claude".to_owned(), 1)]
     );
     assert_eq!(choices[0].accounts_for("codex"), 2);
+}
+
+#[test]
+fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-harnesses-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    for name in ["codex", "opencode", "cursor-agent"] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let choices = harness_choices_from(&entries);
+    assert_eq!(choices.len(), entries.len());
+    let find = |id: &str| choices.iter().find(|choice| choice.id == id).unwrap();
+    assert_eq!(
+        find("codex"),
+        &HarnessChoice {
+            id: "codex".into(),
+            name: "Codex".into(),
+            state: HarnessState::Ready,
+            limited: None,
+        }
+    );
+    assert_eq!(find("claude-code").state, HarnessState::NotInstalled);
+    assert_eq!(find("claude-code").limited, None);
+    let opencode = find("opencode");
+    assert_eq!(opencode.state, HarnessState::CantStart);
+    assert_eq!(
+        opencode.limited.as_deref(),
+        Some("Limited control: installed, but CrazyAgent cannot start it yet.")
+    );
+    let cursor = find("cursor-agent");
+    assert_eq!(cursor.state, HarnessState::CantStart);
+    assert!(
+        cursor
+            .limited
+            .as_deref()
+            .is_some_and(|text| text.contains("Cursor's permission file")),
+        "{cursor:?}"
+    );
+    let gemini = find("gemini-cli");
+    assert_eq!(
+        (gemini.state, gemini.limited.as_deref()),
+        (HarnessState::NotInstalled, None)
+    );
 }
 
 #[test]
@@ -482,7 +546,7 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     let screen = open(&Place::NewProject, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent, ["pools", "catalog", "catalog"]);
+    assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  About"), "{shown}");
     assert!(
