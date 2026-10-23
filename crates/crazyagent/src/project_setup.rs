@@ -326,6 +326,8 @@ pub struct ProjectCatalog {
     pub document_bytes_max: u64,
     pub project_document_bytes_max: u64,
     pub default_team: TeamPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_team_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,6 +589,11 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+const DEFAULT_TEAM_HARNESS: &str = "codex";
+const SIGNED_IN_TEAM_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
+const TEAM_NEEDS_POOL: &str = "Needs a pool";
+const TEAM_NEEDS_SIGN_IN: &str = "Needs a signed-in account";
+
 const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
     ("typescript", "TypeScript", TechGroup::Language),
     ("javascript", "JavaScript", TechGroup::Language),
@@ -663,6 +670,7 @@ pub fn catalog(
         document_bytes_max: DOCUMENT_BYTES_MAX,
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, research, signed_in),
+        default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -730,49 +738,18 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 
 /// Builds the smart team defaults for the New Project Team step.
 /// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
-/// Returns the best ready harness as master and one research agent per toggle, tools on.
+/// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
+/// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
-    let members: Vec<(u8, &str)> = pool
-        .and_then(|pool| {
-            let access = config.settings.model_access.as_ref()?;
-            let pool = access.pools.iter().find(|p| &p.id == pool)?;
-            Some(
-                access
-                    .connections
-                    .iter()
-                    .filter(|c| pool.members.contains(&c.id))
-                    .map(|c| {
-                        let tier = match c.auth {
-                            ModelAuthentication::NativeManaged { .. }
-                                if signed_in.contains(&c.id) =>
-                            {
-                                0
-                            }
-                            ModelAuthentication::NativeManaged { .. } => 2,
-                            _ => 1,
-                        };
-                        (tier, c.harness.as_str())
-                    })
-                    .collect(),
-            )
-        })
-        .unwrap_or_default();
-    let rank = |harness: &str| match harness {
-        "codex" => 0,
-        "claude" => 1,
-        _ => 2,
-    };
-    let master = members
-        .iter()
-        .filter(|(_, harness)| harness_valid(harness))
-        .min_by_key(|(tier, harness)| (*tier, rank(harness), *harness))
-        .map_or("codex", |(_, harness)| harness)
+    let master = best_signed_in_harness(config, pool, signed_in)
+        .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
+    assert!(master != "rcli" && harness_valid(&master));
     let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
     let sub_harnesses = if agents == 0 {
         Vec::new()
@@ -792,6 +769,60 @@ pub fn default_team(
     };
     assert!(team.validate().is_ok());
     team
+}
+
+/// Finds the best harness among the pool's signed-in managed connections that can lead a
+/// project and run its research. Takes the configuration, the chosen pool and the signed-in
+/// connections. Returns the harness id, Codex before Claude Code, or none without one.
+fn best_signed_in_harness<'a>(
+    config: &'a EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'a str> {
+    let access = config.settings.model_access.as_ref()?;
+    let pool = access.pools.iter().find(|p| Some(&p.id) == pool)?;
+    access
+        .connections
+        .iter()
+        .filter(|c| {
+            pool.members.contains(&c.id)
+                && signed_in.contains(&c.id)
+                && matches!(c.auth, ModelAuthentication::NativeManaged { .. })
+        })
+        .filter_map(|c| {
+            SIGNED_IN_TEAM_HARNESSES
+                .iter()
+                .position(|harness| *harness == c.harness.as_str())
+                .map(|rank| (rank, c.harness.as_str()))
+        })
+        .min()
+        .map(|(_, harness)| harness)
+}
+
+/// Says in plain words why the default team cannot start yet.
+/// Takes the configuration, the chosen pool and the signed-in connections.
+/// Returns "Needs a pool" without a pool that has members, "Needs a signed-in account" when no
+/// member can run the default harness, or none when the default team can start.
+pub fn default_team_status(
+    config: &EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'static str> {
+    let Some((access, chosen)) = pool
+        .and_then(|pool| {
+            let access = config.settings.model_access.as_ref()?;
+            Some((access, access.pools.iter().find(|p| &p.id == pool)?))
+        })
+        .filter(|(_, chosen)| !chosen.members.is_empty())
+    else {
+        return Some(TEAM_NEEDS_POOL);
+    };
+    let harness = best_signed_in_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
+    let ready = |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
+    match crate::research::accounts::pool_account(access, chosen, harness, &ready) {
+        Some(_) => None,
+        None => Some(TEAM_NEEDS_SIGN_IN),
+    }
 }
 
 fn extension_allowed(name: &str) -> bool {

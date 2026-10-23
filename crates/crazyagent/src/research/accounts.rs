@@ -1,5 +1,7 @@
 use super::runner::{ResearchAccount, ResearchHarness};
-use crate::config::{ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint};
+use crate::config::{
+    AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
+};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
@@ -54,19 +56,30 @@ pub fn pick_account(
         return AccountPick::NeedsPool;
     }
     for pool in assigned {
-        for member in &pool.members {
-            let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
-                continue;
+        if let Some((connection, account)) = pool_account(access, pool, harness, &signed_in) {
+            return AccountPick::Account {
+                connection,
+                account,
             };
-            if let Some(account) = usable(connection, harness, &signed_in) {
-                return AccountPick::Account {
-                    connection: connection.id.clone(),
-                    account,
-                };
-            }
         }
     }
     AccountPick::NoUsableAccount
+}
+
+/// Picks the first member of `pool` that `harness` can use, in member order,
+/// with the same rules as [`pick_account`]. Takes the model access, the pool,
+/// the harness id and the signed-in check for managed connections. Returns the
+/// connection id and its account, or `None` when no member fits.
+pub fn pool_account(
+    access: &ModelAccess,
+    pool: &AccountPool,
+    harness: &str,
+    signed_in: &impl Fn(&ModelConnection) -> bool,
+) -> Option<(CredentialRef, ResearchAccount)> {
+    pool.members.iter().find_map(|member| {
+        let connection = access.connections.iter().find(|c| &c.id == member)?;
+        usable(connection, harness, signed_in).map(|account| (connection.id.clone(), account))
+    })
 }
 
 fn usable(

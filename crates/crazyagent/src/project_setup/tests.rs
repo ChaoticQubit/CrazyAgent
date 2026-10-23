@@ -48,6 +48,45 @@ roles = []
 fallback_allowed = false
 "#;
 
+const MANAGED_ONLY: &str = r#"
+timeout_ms = 1000
+[model_access]
+accounts = ["account-codex", "account-claude", "account-rcli"]
+[[model_access.connections]]
+id = "m-claude"
+provider = "provider-claude"
+harness = "claude"
+protocol = "native"
+account_ref = "account-claude"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-claude" }
+auth = { method = "native_managed", profile_ref = "profile-claude" }
+[[model_access.connections]]
+id = "m-codex"
+provider = "provider-codex"
+harness = "codex"
+protocol = "native"
+account_ref = "account-codex"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-codex" }
+auth = { method = "native_managed", profile_ref = "profile-codex" }
+[[model_access.connections]]
+id = "m-rcli"
+provider = "provider-rcli"
+harness = "rcli"
+protocol = "native"
+account_ref = "account-rcli"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-rcli" }
+auth = { method = "native_managed", profile_ref = "profile-rcli" }
+[[model_access.pools]]
+id = "pool-managed"
+members = ["m-rcli", "m-claude", "m-codex"]
+projects = []
+roles = []
+fallback_allowed = false
+"#;
+
 fn config() -> EffectiveConfig {
     resolve_config_bytes(POOLED, "").unwrap()
 }
@@ -234,25 +273,101 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
         only_claude.master, "claude",
         "a signed-in harness beats an unsigned one"
     );
-    let nobody = default_team(&config, Some(&mixed), &[], &signed(&[]));
-    assert_eq!(
-        nobody.master, "rcli",
-        "a configured endpoint beats a harness that is not signed in"
-    );
-    let local = default_team(
+    let nobody = default_team(
         &config,
-        Some(&CredentialRef::new("pool-local").unwrap()),
-        &[],
+        Some(&mixed),
+        &[ResearchKind::MarketResearch],
         &signed(&[]),
     );
-    assert_eq!(local.master, "rcli");
+    assert_eq!(
+        nobody.master, "codex",
+        "without a signed-in harness the team defaults to Codex, never RCLI"
+    );
+    assert_eq!(nobody.sub_harnesses[0].harness, "codex");
+    let local_pool = CredentialRef::new("pool-local").unwrap();
+    let local = default_team(&config, Some(&local_pool), &[], &signed(&[]));
+    assert_eq!(local.master, "codex");
     assert!(local.sub_harnesses.is_empty());
     assert_eq!((local.min_agents, local.max_agents), (1, 1));
     assert_eq!(
         default_team(&config, None, &[], &signed(&[])).master,
         "codex"
     );
+    assert_eq!(catalog.default_team_status, None);
+    assert_eq!(
+        default_team_status(&config, Some(&local_pool), &signed(&[])),
+        None,
+        "Codex can run on the pool's keyless endpoint"
+    );
+    assert_eq!(
+        default_team_status(&config, None, &signed(&[])),
+        Some("Needs a pool")
+    );
     assert!(catalog_ok_without_pool(&config));
+}
+
+#[test]
+fn research_slots_follow_the_best_signed_in_harness_and_say_what_is_missing() {
+    let config = resolve_config_bytes(MANAGED_ONLY, "").unwrap();
+    let managed = CredentialRef::new("pool-managed").unwrap();
+    let absent = CredentialRef::new("pool-absent").unwrap();
+    let signed = |ids: &[&str]| -> BTreeSet<CredentialRef> {
+        ids.iter()
+            .map(|id| CredentialRef::new(*id).unwrap())
+            .collect()
+    };
+    let toggles = [
+        ResearchKind::MarketResearch,
+        ResearchKind::CompetitorResearch,
+        ResearchKind::DesignResearch,
+    ];
+    let claude = default_team(&config, Some(&managed), &toggles, &signed(&["m-claude"]));
+    assert_eq!(claude.master, "claude");
+    assert!(claude.master_tools);
+    assert_eq!(
+        claude.sub_harnesses,
+        [HarnessSlot {
+            harness: "claude".into(),
+            agents: 3,
+            tools: true
+        }]
+    );
+    assert_eq!((claude.min_agents, claude.max_agents), (1, 4));
+    assert_eq!(
+        default_team_status(&config, Some(&managed), &signed(&["m-claude"])),
+        None
+    );
+    let both = default_team(
+        &config,
+        Some(&managed),
+        &toggles,
+        &signed(&["m-claude", "m-codex"]),
+    );
+    assert_eq!(both.master, "codex");
+    assert_eq!(both.sub_harnesses[0].harness, "codex");
+    let nobody = default_team(&config, Some(&managed), &toggles, &signed(&[]));
+    assert_eq!(nobody.master, "codex");
+    assert_eq!(nobody.sub_harnesses[0].harness, "codex");
+    assert_eq!(
+        default_team_status(&config, Some(&managed), &signed(&[])),
+        Some("Needs a signed-in account")
+    );
+    assert_eq!(
+        default_team_status(&config, Some(&managed), &signed(&["m-rcli"])),
+        Some("Needs a signed-in account"),
+        "an RCLI account never leads the default team"
+    );
+    assert_eq!(
+        catalog(&config, Some(&managed), &toggles, &signed(&[]))
+            .unwrap()
+            .default_team_status
+            .as_deref(),
+        Some("Needs a signed-in account")
+    );
+    assert_eq!(
+        default_team_status(&config, Some(&absent), &signed(&[])),
+        Some("Needs a pool")
+    );
 }
 
 fn catalog_ok_without_pool(config: &EffectiveConfig) -> bool {
