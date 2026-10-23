@@ -1,9 +1,9 @@
-import { call, nextGeneration } from "../../api";
+import { addMemory, call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory, saveSelectionToMemory } from "../../api-projects";
+import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
-import { Button, ConfirmDialog, Icon, StatusBadge } from "../../ui";
+import { Button, ConfirmDialog, Icon, Segmented, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
@@ -15,6 +15,7 @@ import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
 export const MEMORY_TEXT_BYTES_MAX = 4096;
+export const NOTE_BYTES_MAX = 2000;
 
 /** Cuts the part of a report the engine saves for one heading, the same way the engine does:
  * from the heading line to the next heading of the same or a higher level.
@@ -39,6 +40,14 @@ export function sectionText(report: string, heading: string | null): string | nu
 export function selectionText(raw: string): string | null {
   const text = raw.replace(/\r\n?/gu, "\n").trim();
   return text === "" ? null : text;
+}
+
+/** Checks a memory note the owner is about to save, with the engine's limit in bytes.
+ * Input: the note as typed. Output: plain error copy, or null when it can be saved. */
+export function noteError(text: string): string | null {
+  const note = text.trim();
+  if (note === "") return "Write what agents should remember.";
+  return new TextEncoder().encode(note).length > NOTE_BYTES_MAX ? "This is too long for one memory. Keep it under 2,000 characters." : null;
 }
 
 /** Finds which research kind wrote a context file.
@@ -74,7 +83,8 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const items = context?.items ?? [];
   const [selected, setSelected] = useState<string | null>(() => hashParam("file"));
   const [file, setFile] = useState<Result<{ text: string | null; truncated: boolean }>>();
-  const [saving, setSaving] = useState<{ heading: string | null; selection?: string } | null>(null);
+  const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
+  const [noting, setNoting] = useState<{ text: string; scope: "project" | "all"; busy: boolean; error: string } | null>(null);
   const [selection, setSelection] = useState<string | null>(null);
   const reading = useRef<HTMLDivElement>(null);
   const [saveState, setSaveState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
@@ -93,6 +103,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   useEffect(() => {
     setFile(undefined);
     setSaving(null);
+    setNoting(null);
     setSelection(null);
     setActionNote("");
     if (!chosen || chosen === MEMORY) return;
@@ -108,7 +119,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const markdown = chosen !== null && extension(chosen) === "md";
   const blocks = text !== null && markdown ? parseMarkdown(text) : [];
   const sources = markdownLinks(blocks);
-  const preview = saving?.selection ?? (saving && text !== null ? sectionText(text, saving.heading) : null);
+  const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
 
   const readSelection = () => {
     const chosenText = window.getSelection();
@@ -118,14 +129,11 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const previewBytes = preview === null ? 0 : new TextEncoder().encode(preview).length;
 
   async function save() {
-    if (!saving || !chosen || (!kind && saving.selection === undefined)) return;
+    if (!saving || !kind) return;
     setSaveState({ busy: true, error: "" });
-    const result = saving.selection !== undefined
-      ? await saveSelectionToMemory(data.id, chosen, saving.selection, nextGeneration())
-      : await saveResearchToMemory(data.id, kind!, saving.heading, nextGeneration());
+    const result = await saveResearchToMemory(data.id, kind, saving.heading, nextGeneration());
     if (result.kind !== "ok") {
-      const missing = saving.selection !== undefined ? "Not ready yet: saving selected text isn't in this build. Save its section instead." : "Not ready yet: saving to memory isn't in this build.";
-      setSaveState({ busy: false, error: result.kind === "not_ready" ? missing : failureCopy(result.code) });
+      setSaveState({ busy: false, error: result.kind === "not_ready" ? "Not ready yet: saving to memory isn't in this build." : failureCopy(result.code) });
       return;
     }
     const state = receiptState(result.value);
@@ -135,8 +143,19 @@ export function ContextTab({ data }: { data: ProjectData }) {
     }
     setSaveState({ busy: false, error: "" });
     setSaving(null);
-    setSelection(null);
     data.notify("Saved to memory as Suggested. Approve it in Project memory.");
+  }
+
+  async function saveNote() {
+    if (!noting) return;
+    const problem = noteError(noting.text);
+    if (problem) return setNoting({ ...noting, error: problem });
+    setNoting({ ...noting, busy: true, error: "" });
+    const result = await addMemory(noting.scope === "project" ? data.id : null, noting.text.trim());
+    if (result.kind !== "ok") return setNoting({ ...noting, busy: false, error: result.kind === "not_ready" ? "Not ready yet: saving a memory isn't in this build." : result.message });
+    setNoting(null);
+    setSelection(null);
+    data.notify(noting.scope === "project" ? "Saved to this project's memory." : "Saved to memory for every project.");
   }
 
   async function fileAction(command: string, label: string) {
@@ -216,7 +235,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
         <div className="pj-reader-tb">
           <h2 className="pj-mono">{displayText(item.path)}</h2>
           <span className="pj-row">
-            {selection && <Button icon="brain" onClick={() => { setSaveState({ busy: false, error: "" }); setSaving({ heading: null, selection }); }}>Save selection</Button>}
+            {selection && <Button icon="brain" onClick={() => { setSaving(null); setNoting({ text: selection, scope: "project", busy: false, error: "" }); }}>Save selection</Button>}
             {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
             {item.kind === "brief" && <button type="button" className="btn" title="The brief is written from the project details"
               onClick={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=general`)}>Edit</button>}
@@ -232,22 +251,34 @@ export function ContextTab({ data }: { data: ProjectData }) {
         {writing && <p className="pj-note">{displayText(jobs.find((job) => job.report_path === chosen)?.kind_label ?? "Research")} is still writing this file. It updates as it goes.</p>}
         {saving && <div className="pj-popover" role="dialog" aria-labelledby="pj-save-title">
           <h3 id="pj-save-title">Save to memory</h3>
-          {saving.selection === undefined ? <>
-            <label htmlFor="pj-save-part" className="pj-label">What to save</label>
-            <select id="pj-save-part" className="pj-select" value={saving.heading ?? ""} onChange={(event) => setSaving({ heading: event.target.value || null })}>
-              <option value="">The whole report</option>
-              {headings(blocks).map((heading) => <option key={heading} value={heading}>Section: {heading}</option>)}
-            </select>
-          </> : <p className="pj-label">The text you selected</p>}
+          <label htmlFor="pj-save-part" className="pj-label">What to save</label>
+          <select id="pj-save-part" className="pj-select" value={saving.heading ?? ""} onChange={(event) => setSaving({ heading: event.target.value || null })}>
+            <option value="">The whole report</option>
+            {headings(blocks).map((heading) => <option key={heading} value={heading}>Section: {heading}</option>)}
+          </select>
           <p className="pj-small pj-muted">Saved for: this project.</p>
           <pre className="pj-preview">{displayText(preview ?? "")}</pre>
-          {previewBytes > MEMORY_TEXT_BYTES_MAX && <p className="pj-note warn">This is {formatBytes(previewBytes)}. Memories can be up to 4 KB. {saving.selection === undefined ? "Pick one section instead." : "Select less text."}</p>}
+          {previewBytes > MEMORY_TEXT_BYTES_MAX && <p className="pj-note warn">This is {formatBytes(previewBytes)}. Memories can be up to 4 KB. Pick one section instead.</p>}
           {saveState.error && <p className="pj-error" role="alert">{saveState.error}</p>}
           <div className="pj-row end">
             <button type="button" className="btn" onClick={() => setSaving(null)}>Cancel</button>
             <button type="button" className="btn primary" disabled={saveState.busy || previewBytes === 0 || previewBytes > MEMORY_TEXT_BYTES_MAX} onClick={() => void save()}>{saveState.busy ? "Saving..." : "Save to memory"}</button>
           </div>
         </div>}
+        {noting && <form className="pj-popover" role="dialog" aria-labelledby="pj-note-title" onSubmit={(event) => { event.preventDefault(); void saveNote(); }}>
+          <h3 id="pj-note-title">Save to memory</h3>
+          <label htmlFor="pj-note-text" className="pj-label">This is what agents will remember</label>
+          <textarea id="pj-note-text" className="pj-input" rows={4} value={noting.text} aria-invalid={noting.error ? true : undefined}
+            aria-describedby={noting.error ? "pj-note-error" : undefined} onChange={(event) => setNoting({ ...noting, text: event.target.value, error: "" })} />
+          <span className="pj-label">Use it in</span>
+          <Segmented label="Use it in" value={noting.scope} onValue={(scope) => setNoting({ ...noting, scope })}
+            options={[{ value: "project", label: "This project" }, { value: "all", label: "All projects" }]} />
+          {noting.error && <p className="pj-error" id="pj-note-error" role="alert">{displayText(noting.error)}</p>}
+          <div className="pj-row end">
+            <Button onClick={() => setNoting(null)}>Cancel</Button>
+            <Button type="submit" variant="primary" icon="brain" pending={noting.busy} pendingLabel="Saving...">Save to memory</Button>
+          </div>
+        </form>}
         {file === undefined && <p className="pj-muted" role="status">Opening {displayText(item.path)}...</p>}
         {file?.kind === "not_ready" && <NotReady what="reading project files isn't in this build." />}
         {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file.code)}</p>}

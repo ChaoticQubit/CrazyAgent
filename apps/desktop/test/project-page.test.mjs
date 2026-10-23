@@ -331,3 +331,13 @@ test("selected report text is cleaned before it can be saved to memory", async (
   assert.equal(context.selectionText(" \n\t "), null);
   assert.equal(context.selectionText(""), null);
 });
+
+test("a memory note must have text and fit the engine's 2,000 byte limit", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  assert.equal(context.noteError("Owners pay per seat."), null);
+  assert.equal(context.noteError("  \n "), "Write what agents should remember.");
+  assert.equal(context.noteError("a".repeat(2000)), null);
+  assert.equal(context.noteError(`  ${"a".repeat(2000)}  `), null);
+  assert.equal(context.noteError("a".repeat(2001)), "This is too long for one memory. Keep it under 2,000 characters.");
+  assert.equal(context.noteError("é".repeat(1001)), "This is too long for one memory. Keep it under 2,000 characters.");
+});

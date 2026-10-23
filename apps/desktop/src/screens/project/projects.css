@@ -163,3 +163,4 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-title-skeleton { display: inline-block; width: 220px; vertical-align: middle; }
 .pj-memory { display: grid; gap: 8px; }
 .pj-memory .markdown { max-width: none; }
+.pj-note-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

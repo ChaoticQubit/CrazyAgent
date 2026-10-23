@@ -1,12 +1,14 @@
-import { nextGeneration } from "../../api";
-import type { Result } from "../../api";
+import { deleteMemory, nextGeneration, savedMemories } from "../../api";
+import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
 import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, receiptState, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
 import { Button, ConfirmDialog, EmptyState, StatusBadge } from "../../ui";
+import { displayText } from "../conversation";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
 import { memoryGroups } from "./research";
+import { useLoad } from "../../state";
 import { NotReady } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -24,13 +26,15 @@ async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: 
 }
 
 /** The project's memories in the Context tab: Suggested ones wait for Save to memory or
- * Dismiss, Saved ones can be deleted. Input: the project data. Output: the panel. */
+ * Dismiss, Saved ones and the owner's own notes can be deleted. Input: the project data. Output: the panel. */
 export function ProjectMemory({ data }: { data: ProjectData }) {
   const [memories, setMemories] = useState<Result<{ items: MemoryItem[]; more: boolean }>>();
   const [round, setRound] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [deleting, setDeleting] = useState<MemoryItem | null>(null);
+  const [notes, reloadNotes] = useLoad(() => savedMemories(data.id, ""), [data.id]);
+  const [forgetting, setForgetting] = useState<SavedMemory | null>(null);
   const open = useLinkOpener(data.notify);
 
   useEffect(() => {
@@ -53,7 +57,19 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     setRound((value) => value + 1);
   }
 
+  async function forget(memory: SavedMemory) {
+    setBusy(memory.id);
+    setNote("");
+    const result = await deleteMemory(memory.id);
+    setBusy(null);
+    setForgetting(null);
+    if (result.kind === "ok") data.notify("Memory deleted.");
+    else setNote(result.kind === "not_ready" ? "Not ready yet: deleting notes isn't in this build." : result.message);
+    reloadNotes();
+  }
+
   const value = memories?.kind === "ok" ? memories.value : null;
+  const ownNotes = notes.kind === "ok" ? notes.value.items : [];
   const groups = memoryGroups(value?.items ?? []);
   return <div className="pj-stack">
     <div className="pj-reader-tb"><h2>Project memory</h2></div>
@@ -79,12 +95,25 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
           <Button size="small" variant="danger-text" disabled={busy === item.id} onClick={() => setDeleting(item)}>Delete</Button></span>
       </li>)}</ul>
     </section>}
+    {ownNotes.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-notes">
+      <h3 id="pj-mem-notes">Your notes</h3>
+      <ul className="pj-rows">{ownNotes.map((memory) => <li key={memory.id} className="pj-memory">
+        <p className="pj-note-text">{displayText(memory.text)}</p>
+        <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
+          <Button size="small" variant="danger-text" disabled={busy === memory.id} onClick={() => setForgetting(memory)}>Delete</Button></span>
+      </li>)}</ul>
+      {notes.kind === "ok" && notes.value.next !== null && <p className="pj-small pj-muted">Showing your newest {ownNotes.length} notes. Settings, Memory lists them all.</p>}
+    </section>}
     {value && value.more && <p className="pj-small pj-muted">Showing the first {value.items.length} memories.</p>}
-    {value && groups.suggested.length === 0 && groups.saved.length === 0 && <EmptyState icon="brain" title="No memories yet" compact>
-      Open a research report and use Save to memory. It shows up here for you to approve.
+    {value && groups.suggested.length === 0 && groups.saved.length === 0 && ownNotes.length === 0 && <EmptyState icon="brain" title="No memories yet" compact>
+      Open a research report and use Save to memory, or select text in any file and use Save selection.
     </EmptyState>}
     <ConfirmDialog open={deleting !== null} title="Delete this memory?" confirmLabel="Delete" pending={deleting !== null && busy === deleting.id}
       onCancel={() => setDeleting(null)} onConfirm={() => { if (deleting) void review(deleting, { decision: "Remove" }, "Memory deleted."); }}>
+      Agents stop using it right away.
+    </ConfirmDialog>
+    <ConfirmDialog open={forgetting !== null} title="Delete this memory?" confirmLabel="Delete" pending={forgetting !== null && busy === forgetting.id}
+      onCancel={() => setForgetting(null)} onConfirm={() => { if (forgetting) void forget(forgetting); }}>
       Agents stop using it right away.
     </ConfirmDialog>
   </div>;
