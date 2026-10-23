@@ -167,6 +167,13 @@ export function signInLine(pool: PoolSummary | undefined): string | null {
   return count === 1 ? `1 account in ${pool.name} isn't signed in.` : `${count} accounts in ${pool.name} aren't signed in.`;
 }
 
+/** The readiness shown next to the project's pool: accounts signed in or set up, of all.
+ * Input: the pool's summary. Output: for example "2 of 3 ready". */
+export function poolReadiness(pool: PoolSummary): string {
+  if (pool.members.length === 0) return "No accounts";
+  return `${pool.members.filter((member) => member.status !== "not_signed_in").length} of ${pool.members.length} ready`;
+}
+
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.
