@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts                                           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts                                     240 accounts   3 need attention  
+  /  Filter by name, provider, status or pool                                   
+                                                                                
+    Name     ┌─ Remove account ───────────────────────────────────┐     Pools   
+  > Claude Pr│ Remove Claude Pro - personal?                      │     1    █  
+    ChatGPT P│                                                    │     -    │  
+    LM Studio│ It leaves pool Research. Agents using it finish    │URL  1    │  
+    Anthropic│ their current step, then switch to another         │     1    │  
+    ChatGPT P│ account in the pool.                               │     2    │  
+    ChatGPT P│                                                    │     1    │  
+    ChatGPT P│ [> Cancel ]   [ Remove ]                           │     1    │  
+    ChatGPT P└────────────────────────────────────────────────────┘     1    │  
+    ChatGPT Team - seat 01   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Team - seat 02   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Team - seat 03   ⬡ ChatGPT / Codex  ✓ Signed in             -    │  
+    Claude Max - work        ✻ Claude           ✓ Signed in             1    │  
+                                                                                
+  Showing 1-12 of 240. Needs attention first, then by name.                     
+                                                                                
+ ←→ Choose  Enter Confirm  Esc Cancel                                    ? Help 

@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  OpenAI API            
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Use an API key                                                                
+  OpenAI API                                                                    
+                                                                                
+  Account name                                                                  
+  [ OpenAI API - billing                                         ]              
+  API key                                            51 characters              
+  [ •••••••••••••••••••••••••••••••••••••••••••••••••••█         ]              
+  Stored in your macOS Keychain. Never shown again.                             
+                                                                                
+  [ Save key ]                                                                  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter Save key  Ctrl-U Clear  Tab Next field  Esc Back                  ? Help 

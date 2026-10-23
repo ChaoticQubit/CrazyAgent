@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  ChatGPT / Codex       
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  ChatGPT / Codex                                                               
+  How do you want to connect?                                                   
+                                                                                
+  ▌ Sign in with ChatGPT                                                        
+  ▌   Recommended. Uses your ChatGPT plan. You get a code to enter on any       
+  ▌   device.                                                                   
+                                                                                
+    Use an API key                                                              
+      Pay per use with an OpenAI key.                                           
+                                                                                
+    Use the Codex sign-in on this Mac                                           
+      Reuses the account Codex is already signed in to.                         
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  Enter Choose  Esc Back                                         ? Help 

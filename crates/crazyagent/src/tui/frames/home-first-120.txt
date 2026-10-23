@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Projects                                                                    │ Get set up                              
+                                                                              │                                         
+  No projects yet.                                                            │ ▌ [ ] Add an account                    
+  Start one with n. You can add accounts first, or start a project now and    │ ▌     Sign in with ChatGPT or           
+  pick a pool later.                                                          │ ▌     Claude, or add an API             
+                                                                              │ ▌     key or local model.               
+                                                                              │                                         
+                                                                              │   [ ] Create a pool                     
+                                                                              │       Group up to 15 accounts           
+                                                                              │       for projects to use.              
+                                                                              │                                         
+                                                                              │   [x] Check your harnesses              
+                                                                              │       2 of 9 harnesses ready            
+                                                                              │       on this Mac.                      
+                                                                              │                                         
+                                                                              │ Enter opens Settings                    
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                              │                                         
+                                                                                                                        
+ Enter Add an account   ↑↓ Move   Tab Switch panel   n New project   s Settings   Ctrl-K Go to   Ctrl-Q Quit     ? Help 

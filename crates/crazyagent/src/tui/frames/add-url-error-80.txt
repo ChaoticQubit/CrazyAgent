@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Local model           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Connect a URL                                                                 
+  Local model                                                                   
+                                                                                
+  Account name                                                                  
+  [ Ollama on this Mac                                           ]              
+  Server URL                                                                    
+  [ http://127.0.0.1:11434/v1█                                   ]              
+  Could not reach this address. Is the server running?                          
+  API key                                                 Optional              
+  [ Leave empty if the server has no key                         ]              
+                                                                                
+  [ Check again ]                                                               
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter Check again  Tab Next field  Esc Back                             ? Help 

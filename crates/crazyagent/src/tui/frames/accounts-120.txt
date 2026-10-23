@@ -1,0 +1,36 @@
+ CrazyAgent  /  Settings  /  Accounts                                                                                   
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
+──━━━━━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Accounts                                                                             240 accounts   3 need attention  
+  /  Filter by name, provider, status or pool                                                                           
+                                                                                                                        
+    Name                      Provider           Sign-in           Status                  Pools                        
+  > Claude Pro - personal     ✻ Claude           Claude sign-in    ! Not signed in         Research                  █  
+    ChatGPT Plus - spare 4    ⬡ ChatGPT / Codex  ChatGPT sign-in   ! Not signed in         -                         █  
+    LM Studio on mini         ⌂ Local model      URL               ✗ Can't reach this URL  Local only                │  
+    Anthropic API - team      ✻ Anthropic API    API key           ✓ Key saved             Main                      │  
+    ChatGPT Plus - spare 1    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Main, Research            │  
+    ChatGPT Plus - spare 2    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Main                      │  
+    ChatGPT Plus - spare 3    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Research                  │  
+    ChatGPT Pro - main        ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Main                      │  
+    ChatGPT Team - seat 01    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Main                      │  
+    ChatGPT Team - seat 02    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             Main                      │  
+    ChatGPT Team - seat 03    ⬡ ChatGPT / Codex  ChatGPT sign-in   ✓ Signed in             -                         │  
+    Claude Max - work         ✻ Claude           Claude sign-in    ✓ Signed in             Main                      │  
+    Claude Max - work 2       ✻ Claude           Claude sign-in    ✓ Signed in             Research                  │  
+    Claude Team - seat 01     ✻ Claude           Claude sign-in    ✓ Signed in             Main                      │  
+    Claude Team - seat 02     ✻ Claude           Claude sign-in    ✓ Signed in             Main                      │  
+    Claude Team - seat 03     ✻ Claude           Claude sign-in    ✓ Signed in             Main                      │  
+    Claude Team - seat 04     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 05     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 06     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 07     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 08     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 09     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 10     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+    Claude Team - seat 11     ✻ Claude           Claude sign-in    ✓ Signed in             -                         │  
+                                                                                                                        
+  Showing 1-24 of 240. Needs attention first, then by name.                                                             
+                                                                                                                        
+ a Add account   Enter Open   / Filter   f Needs attention   Space Select   Shift-←→ Sections   Esc Home         ? Help 

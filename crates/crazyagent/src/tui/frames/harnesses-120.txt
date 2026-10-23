@@ -1,0 +1,36 @@
+ CrazyAgent  /  Settings  /  Harnesses                                                                                  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile                      
+───────────────────────────────━━━━━━━━━━━━━━━━━━───────────────────────────────────────────────────────────────────────
+  Harnesses                                                                                           2 of 9 installed  
+  Agents run inside these tools. CrazyAgent finds them on this Mac and never installs them.                             
+                                                                                                                        
+    Harness         Status           Control            Works with                                                      
+  > Codex           ✓ Ready          Full control       ChatGPT, OpenAI API                                             
+    Claude Code     ✓ Ready          Full control       Claude, Anthropic API                                           
+    OpenCode        ⊘ Not installed  ? Unknown          Any API key or URL                                              
+    Gemini CLI      ⊘ Not installed  ? Unknown          Google, Gemini API key                                          
+    Cursor CLI      ⊘ Not installed  ◧ Limited control  Cursor account                                                  
+    fx by Vercel    ⊘ Not installed  ? Unknown          Not known yet                                                   
+    Antigravity     ⊘ Not installed  ◧ Limited control  Google account                                                  
+    OpenClaw        ⊘ Not installed  ? Unknown          Any API key or URL                                              
+    Pi              ⊘ Not installed  ? Unknown          Any API key or URL                                              
+                                                                                                                        
+  Codex                                                                                                                 
+  Found at     /opt/homebrew/bin/codex                                                                                  
+  Version      0.163.0                                                                                                  
+  Control      Full control. Runs without a window, streams progress, and tools can be turned off.                      
+  Can be       Master, sub-agent, research agent                                                                        
+  Accounts     7 ChatGPT accounts signed in                                                                             
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ Move   r Check again   Shift-←→ Sections   Esc Home                                                          ? Help 

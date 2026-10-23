@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Pools                                              
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────━━━━━━━───────────────────────────────────────────────────────────
+  Pools                                                                3 pools  
+  A pool is a group of accounts. Each project uses one pool.                    
+                                                                                
+    Name           Accounts   Ready                           Used by           
+  > Main           7 of 15    6 ready, 1 not signed in        2 projects        
+    Research       4 of 15    3 ready, 1 not signed in        Not used          
+    Local only     2 of 15    1 ready, 1 can't be reached     Not used          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ a New pool  Enter Edit  d Delete  Shift-←→ Sections  Esc Home           ? Help 
