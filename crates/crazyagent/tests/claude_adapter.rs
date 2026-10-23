@@ -279,6 +279,26 @@ fn result_before_init_and_assistant_without_an_active_request_are_rejected() {
 }
 
 #[test]
+fn system_notice_before_init_is_skipped_and_init_still_binds_the_session() {
+    let mut p = protocol();
+    let notice = json!({
+        "type":"system", "subtype":"ui_invalidate", "event":"ui.render",
+        "uuid":"notice-1", "session_id":"native-session"
+    });
+    assert_eq!(p.receive(&wire(notice.clone())), Ok(Vec::new()));
+    assert_eq!(p.state(), State::AwaitingInit);
+    assert_eq!(p.receive(&wire(notice)), Err(ProtocolError::StaleMessage));
+    let mut p = protocol();
+    p.receive(&wire(json!({
+        "type":"system", "subtype":"ui_invalidate", "uuid":"notice-2", "session_id":"native-session"
+    })))
+    .unwrap();
+    let events = p.receive(&wire(init())).unwrap();
+    assert!(matches!(events[0].kind, EventKind::Initialized { .. }));
+    assert_eq!(p.state(), State::Idle);
+}
+
+#[test]
 fn duplicate_keys_at_every_depth_are_rejected_before_normalization() {
     for bytes in [
         br#"{"type":"result","type":"assistant","uuid":"duplicate","session_id":"native-session"}
