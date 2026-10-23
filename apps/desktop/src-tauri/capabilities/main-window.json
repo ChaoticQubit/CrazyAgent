@@ -27,6 +27,14 @@
     "allow-desktop-delete-project-context",
     "allow-desktop-project-memories",
     "allow-desktop-review-memory",
+    "allow-desktop-memories",
+    "allow-desktop-memory",
+    "allow-desktop-approved-memories",
+    "allow-desktop-add-memory",
+    "allow-desktop-promote-memory",
+    "allow-desktop-delete-memory",
+    "allow-desktop-forget-memory",
+    "allow-desktop-remember-research",
     "allow-desktop-open-project",
     "allow-desktop-history",
     "allow-desktop-send-message",
@@ -78,6 +86,9 @@
     "allow-desktop-check-mcp-server",
     "allow-desktop-project-plugins",
     "allow-desktop-pick-folder",
-    "allow-desktop-pick-documents"
+    "allow-desktop-pick-documents",
+    "allow-desktop-open-link",
+    "allow-desktop-reveal-project-folder",
+    "allow-desktop-open-context-item"
   ]
 }

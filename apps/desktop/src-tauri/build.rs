@@ -22,6 +22,14 @@ fn main() {
         "desktop_delete_project_context",
         "desktop_project_memories",
         "desktop_review_memory",
+        "desktop_memories",
+        "desktop_memory",
+        "desktop_approved_memories",
+        "desktop_add_memory",
+        "desktop_promote_memory",
+        "desktop_delete_memory",
+        "desktop_forget_memory",
+        "desktop_remember_research",
         "desktop_open_project",
         "desktop_history",
         "desktop_send_message",
@@ -74,6 +82,9 @@ fn main() {
         "desktop_project_plugins",
         "desktop_pick_folder",
         "desktop_pick_documents",
+        "desktop_open_link",
+        "desktop_reveal_project_folder",
+        "desktop_open_context_item",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

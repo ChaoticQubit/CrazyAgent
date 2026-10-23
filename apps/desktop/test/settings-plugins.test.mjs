@@ -142,3 +142,10 @@ test("every plugins and folder chooser command the settings call is registered i
     assert.match(handler, new RegExp(`\\b${command},`), `${command} missing from invoke_handler`);
   }
 });
+
+test("refusals from the native open commands read as plain sentences", () => {
+  for (const code of ["link_not_allowed", "open_failed", "project_folder_missing", "context_item_not_openable", "picker_failed"]) {
+    assert.notEqual(api.plainError(code), "Something went wrong. Try again.", code);
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+  }
+});

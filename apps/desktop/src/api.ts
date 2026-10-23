@@ -1,7 +1,8 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import { errorMessage, retryBusy } from "./engine-client";
-import type { AccountPool, AccountProfileView, IntentReceipt, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SkillView } from "./engine-client";
+import type { AccountPool, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView } from "./engine-client";
 
+export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
@@ -64,10 +65,28 @@ const COPY: Record<string, string> = {
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
+  link_not_allowed: "CrazyAgent only opens web links that start with https:// or http://.",
+  open_failed: "Your Mac couldn't open this. Try again.",
+  project_folder_missing: "The project folder isn't on this Mac anymore.",
+  context_item_not_openable: "CrazyAgent opens only documents inside the project folder.",
   rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
   native_profile_in_use: "An agent is using this account now. Try again after it stops.",
   account_profile_operations_full: "This engine can't set up more accounts for agents.",
   account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
+  memory_note_blank: "Write something to remember.",
+  memory_note_too_long: "Keep the memory under 2000 characters.",
+  memory_note_invalid: "Remove special control characters from the memory.",
+  memory_duplicate: "This memory is already saved.",
+  memory_full: "Memory is full. Delete an old memory first.",
+  memory_missing: "That memory no longer exists.",
+  memory_changed: "This memory changed. Reload it and try again.",
+  memory_not_kept: "Only memories you kept can be made global.",
+  memory_already_global: "This memory is already in global memory.",
+  memory_project_missing: "That project no longer exists.",
+  memory_search_invalid: "Keep the search on one line, up to 100 characters.",
+  memory_page_invalid: "Show between 1 and 20 memories at a time.",
+  knowledge_version_conflict: "This memory changed. Reload it and try again.",
+  knowledge_source_revoked: "The research this came from was deleted.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -382,15 +401,6 @@ export function harnessCatalog(): Promise<Result<HarnessEntry[]>> {
   return call<HarnessEntry[]>("desktop_harness_catalog");
 }
 
-export interface Memory {
-  id: string;
-  text: string;
-  source: string;
-  scope: "app" | { project: string };
-  state: "saved" | "suggested";
-  saved_at: string | null;
-}
-
 /** Reads skills for global settings (no project) or one project's settings, where global
  * items carry the project's own switch. Output: skills in engine order. */
 export function listSkills(projectId?: string): Promise<Result<SkillView[]>> {
@@ -470,19 +480,66 @@ export function pickFolder(): Promise<Result<string | null>> {
   return call<string | null>("desktop_pick_folder");
 }
 
-/** Reads saved and suggested memories across projects. Output: the memories. */
-export function listMemories(): Promise<Result<Memory[]>> {
-  return call<Memory[]>("desktop_memories");
+const SUGGESTION_PROJECTS_MAX = 50;
+
+export interface Suggestion {
+  project_id: string;
+  project_name: string;
+  id: string;
+  version: number;
+  text: string;
 }
 
-/** Saves a suggested memory; this click is the owner's approval. Input: memory id. */
-export function keepMemory(id: string): Promise<Result<void>> {
-  return call<void>("desktop_keep_memory", { id });
+/** Reads one page of saved memory, newest first: app-wide (no project) or one project's
+ * own notes. Inputs: project id or null, search text, and the previous page's next value.
+ * Output: the page. */
+export function savedMemories(project: string | null, search: string, before: number | null = null): Promise<Result<SavedMemoryPage>> {
+  return call<SavedMemoryPage>("desktop_memories", { project, search: search.trim() || null, before });
 }
 
-/** Dismisses a suggestion or deletes a saved memory. Input: memory id. */
-export function forgetMemory(id: string): Promise<Result<void>> {
-  return call<void>("desktop_forget_memory", { id });
+/** Saves a memory the owner wrote, app-wide or for one project. Inputs: project id or null
+ * and the text. Output: ok once saved. */
+export function addMemory(project: string | null, text: string): Promise<Result<void>> {
+  return change("desktop_add_memory", { project, text, generation: nextGeneration() });
+}
+
+/** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */
+export function deleteMemory(id: string): Promise<Result<void>> {
+  return change("desktop_delete_memory", { id, generation: nextGeneration() });
+}
+
+/** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
+ * memory list. Output: the suggestions, in engine order. */
+export function suggestionsFrom(project: { id: string; name: string }, items: MemoryItem[]): Suggestion[] {
+  return items.filter((item) => item.status === "Provisional" && !item.human_reviewed)
+    .map((item) => ({ project_id: project.id, project_name: project.name, id: item.id, version: item.version, text: item.text }));
+}
+
+/** Reads unreviewed research memories across projects (first page of each, up to 50
+ * projects). Input: the projects. Output: the suggestions. */
+export async function memorySuggestions(projects: { id: string; name: string }[]): Promise<Result<Suggestion[]>> {
+  const found: Suggestion[] = [];
+  for (const project of projects.slice(0, SUGGESTION_PROJECTS_MAX)) {
+    const items = await call<MemoryItem[]>("desktop_project_memories", { id: project.id, after: null });
+    if (items.kind !== "ok") return items;
+    found.push(...suggestionsFrom(project, items.value));
+  }
+  return { kind: "ok", value: found };
+}
+
+/** Saves a research suggestion to app-wide memory with one owner click: the engine first
+ * keeps it in its project, then makes it global. Input: the suggestion. Output: ok once both
+ * are saved, or the plain reason the second step failed. */
+export async function saveSuggestion(suggestion: Suggestion): Promise<Result<void>> {
+  const kept = await change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Keep" }, generation: nextGeneration() });
+  if (kept.kind !== "ok") return kept;
+  assert(suggestion.version < Number.MAX_SAFE_INTEGER, "memory version exhausted");
+  return change("desktop_promote_memory", { project: suggestion.project_id, memory: suggestion.id, version: suggestion.version + 1, generation: nextGeneration() });
+}
+
+/** Dismisses a research suggestion; it stays out of memory. Input: the suggestion. */
+export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>> {
+  return change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Reject" }, generation: nextGeneration() });
 }
 
 /** Reads the first page of projects for Home and the sidebar. Output: projects. */
