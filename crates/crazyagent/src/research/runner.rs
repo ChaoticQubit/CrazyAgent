@@ -1,7 +1,12 @@
+use super::accounts::PROFILE_BUSY;
 use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use crate::config::ModelConnection;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::{HostStamp, NativeProfileBinding};
+use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::LaunchError;
 use crate::launch_context::AgentContext;
-use crate::protocol::ProjectId;
+use crate::protocol::{ProjectId, RequestId};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -106,17 +111,20 @@ impl ResearchHarness {
 pub enum ResearchAccount {
     /// An OpenAI-compatible URL or a local model server, with no key, for Codex.
     Endpoint { base_url: String, model: String },
-    /// A signed-in managed Codex profile directory owned by the engine.
+    /// A managed Codex connection of the project's pool. Each launch proves
+    /// it is signed in for this engine run and holds its profile under the
+    /// engine's custody lease while the agent runs.
     ManagedCodex {
-        home: PathBuf,
+        connection: ModelConnection,
         model: Option<String>,
     },
     /// An Anthropic Messages URL or local model server, with no key, for
     /// Claude Code.
     AnthropicEndpoint { base_url: String, model: String },
-    /// A signed-in managed Claude profile directory owned by the engine.
+    /// A managed Claude connection of the project's pool, held like
+    /// [`ResearchAccount::ManagedCodex`].
     ManagedClaude {
-        home: PathBuf,
+        connection: ModelConnection,
         model: Option<String>,
     },
 }
@@ -158,6 +166,8 @@ pub enum RunError {
     Jobs(JobError),
     Sandbox(SandboxError),
     Context(LaunchError),
+    Account(String),
+    Busy,
     Io(io::Error),
 }
 
@@ -168,6 +178,8 @@ impl fmt::Display for RunError {
             Self::Jobs(error) => write!(f, "{error}"),
             Self::Sandbox(error) => write!(f, "{error}"),
             Self::Context(error) => write!(f, "research context: {}", error.0),
+            Self::Account(code) => write!(f, "research account: {code}"),
+            Self::Busy => write!(f, "research account busy"),
             Self::Io(error) => write!(f, "research I/O: {error}"),
         }
     }
@@ -205,6 +217,7 @@ pub struct ResearchRunner {
     claimer: String,
     stopping: AtomicBool,
     setup: Mutex<()>,
+    custody: Mutex<Result<NativeProfileCustody, EngineError>>,
 }
 
 enum Ending {
@@ -247,6 +260,11 @@ impl ResearchRunner {
             private_directory(&state.join(directory))?;
         }
         ResearchJobs::open(database)?;
+        let custody = database
+            .canonicalize()
+            .and_then(|canonical| fs::symlink_metadata(&canonical).map(|meta| (canonical, meta)))
+            .map_err(|error| EngineError(error.to_string()))
+            .and_then(|(canonical, metadata)| NativeProfileCustody::capture(&canonical, &metadata));
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -260,6 +278,7 @@ impl ResearchRunner {
             claimer: format!("runner-{}-{nanos}", std::process::id()),
             stopping: AtomicBool::new(false),
             setup: Mutex::new(()),
+            custody: Mutex::new(custody),
         })
     }
 
@@ -422,12 +441,16 @@ impl ResearchRunner {
                 let status = jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
                 Ok(run(status, None, Some(group)))
             }
-            Err(RunError::Context(LaunchError(code))) if code == CONTEXT_BUSY => {
+            Err(RunError::Busy) => {
                 jobs.release(job.id, &self.claimer)?;
                 let status = jobs
                     .get(job.id)?
                     .map_or(ResearchStatus::Queued, |job| job.status);
                 Ok(run(status, None, None))
+            }
+            Err(RunError::Account(_)) => {
+                jobs.needs_pool(job.id, &self.claimer)?;
+                Ok(run(ResearchStatus::NeedsPool, None, None))
             }
             Err(error) => {
                 let reason = match error {
@@ -458,20 +481,39 @@ impl ResearchRunner {
         let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
         let agent = self.state.join("agents").join(&name);
-        let home = match account {
-            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => {
+        let lease = match account {
+            ResearchAccount::ManagedCodex { connection, .. }
+            | ResearchAccount::ManagedClaude { connection, .. } => {
+                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
+                    if code == PROFILE_BUSY {
+                        RunError::Busy
+                    } else {
+                        RunError::Account(code)
+                    }
+                })?;
+                Some(self.lease(&host, &fact.binding, &name, u64::from(job.attempts))?)
+            }
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+        };
+        let home = match &lease {
+            Some(lease) => lease_home(lease)?,
+            None => {
                 private_directory(&agent)?;
                 let home = agent.join("home");
                 private_directory(&home)?;
                 home
             }
-            ResearchAccount::ManagedCodex { home, .. }
-            | ResearchAccount::ManagedClaude { home, .. } => home.canonicalize()?,
         };
         let harness = account.harness();
         let installed = context
             .install(harness.id(), &home, job.tools)
-            .map_err(RunError::Context)?;
+            .map_err(|problem| {
+                if problem.0 == CONTEXT_BUSY {
+                    RunError::Busy
+                } else {
+                    RunError::Context(problem)
+                }
+            })?;
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
@@ -554,7 +596,44 @@ impl ResearchRunner {
         }
         let ending = self.supervise(jobs, job, &mut child, group, &counted)?;
         drop(installed);
+        drop(lease);
         Ok((ending, group, output))
+    }
+
+    /// Takes a managed profile for one research launch under the engine's
+    /// custody lease, so no other research, team or master launch uses it
+    /// until the lease is dropped. Takes the active engine host, the sign-in
+    /// binding, the launch name and the job attempt as the lease generation.
+    /// Returns the lease, [`RunError::Busy`] while another launch holds the
+    /// profile, or the custody refusal code.
+    fn lease(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        name: &str,
+        generation: u64,
+    ) -> Result<NativeProfileUse, RunError> {
+        let operation = RequestId::new(format!("research-{name}"))
+            .map_err(|_| RunError::Invalid("research launch name".into()))?;
+        let mut custody = self.custody.lock().unwrap_or_else(PoisonError::into_inner);
+        let custody = custody
+            .as_mut()
+            .map_err(|problem| RunError::Account(problem.0.clone()))?;
+        custody
+            .acquire_use(
+                host,
+                binding,
+                &operation,
+                generation,
+                NativeProfileUsePurpose::Execution,
+            )
+            .map_err(|problem| {
+                if problem.0 == PROFILE_BUSY {
+                    RunError::Busy
+                } else {
+                    RunError::Account(problem.0)
+                }
+            })
     }
 
     fn supervise(
@@ -640,6 +719,20 @@ impl ResearchRunner {
         let report = render_report(&kind_label(&job.kind), harness.label(), body);
         write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
     }
+}
+
+/// The agent home a managed launch runs in: the held lease's profile path,
+/// which is a configured profile folder when the owner set one and the
+/// engine-owned `native-profiles/<key>/home` otherwise. Takes the lease.
+/// Returns the canonical home, or an error once the lease no longer verifies.
+fn lease_home(lease: &NativeProfileUse) -> Result<PathBuf, RunError> {
+    let home = lease
+        .profile_path()
+        .map_err(|problem| RunError::Account(problem.0))?;
+    if !home.is_absolute() || home.canonicalize()? != home {
+        return Err(RunError::Invalid("managed home must be canonical".into()));
+    }
+    Ok(home)
 }
 
 /// Lists the folders an agent's sandbox must let it read beyond its home:
@@ -1244,6 +1337,203 @@ fn utc_date(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
+    use crate::protocol::{ConfigId, CredentialRef, Cursor};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct EngineRoot {
+        _temp: tempfile::TempDir,
+        base: PathBuf,
+        database: PathBuf,
+        state: PathBuf,
+    }
+
+    fn private_directory_at(path: &Path) {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn engine_root() -> EngineRoot {
+        let temp = tempfile::Builder::new()
+            .prefix("ca-research-lease-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let engine = base.join("engine");
+        private_directory_at(&engine);
+        let database = engine.join("engine.db");
+        let sqlite = rusqlite::Connection::open(&database).unwrap();
+        sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+        sqlite.close().map_err(|(_, error)| error).unwrap();
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
+        let state = engine.join("research");
+        private_directory_at(&state);
+        EngineRoot {
+            _temp: temp,
+            base,
+            database,
+            state,
+        }
+    }
+
+    fn reference(value: &str) -> CredentialRef {
+        CredentialRef::new(value).unwrap()
+    }
+
+    fn host() -> HostStamp {
+        HostStamp {
+            db_instance: "a".repeat(64),
+            engine_epoch: "b".repeat(64),
+        }
+    }
+
+    fn binding(
+        host: &HostStamp,
+        connection: &ModelConnection,
+        custody_id: String,
+    ) -> NativeProfileBinding {
+        NativeProfileBinding {
+            database_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            config_id: ConfigId::new("c".repeat(64)).unwrap(),
+            source_hash: "d".repeat(64),
+            at_revision: Cursor::new(1),
+            connection: connection.clone(),
+            custody_id,
+        }
+    }
+
+    #[test]
+    fn two_research_launches_never_hold_one_managed_profile_at_once() {
+        let root = engine_root();
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap();
+        let host = host();
+        let connection = ModelConnection {
+            id: reference("codex-connection"),
+            provider: reference("openai"),
+            harness: reference("codex"),
+            protocol: reference("native"),
+            account_ref: reference("codex-account"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "native-default".into(),
+                author: reference("openai"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: reference("codex-profile"),
+            },
+        };
+        let (custody_id, default_home) = {
+            let mut custody = runner.custody.lock().unwrap();
+            let custody = custody.as_mut().unwrap();
+            let (custody_id, _) = custody.prepare(&host, &connection).unwrap();
+            (
+                custody_id,
+                custody.profile_home(&reference("codex-profile")),
+            )
+        };
+        let binding = binding(&host, &connection, custody_id);
+        let first = runner.lease(&host, &binding, "job-1-1", 1).unwrap();
+        assert_eq!(lease_home(&first).unwrap(), default_home);
+        assert!(matches!(
+            runner.lease(&host, &binding, "job-2-1", 1),
+            Err(RunError::Busy)
+        ));
+        drop(first);
+        let holding = AtomicU64::new(0);
+        let most = AtomicU64::new(0);
+        let granted = AtomicU64::new(0);
+        let refused = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for worker in 0..6_u64 {
+                let (runner, binding, host) = (&runner, &binding, &host);
+                let (holding, most, granted, refused) = (&holding, &most, &granted, &refused);
+                scope.spawn(move || {
+                    for round in 0..20_u64 {
+                        let name = format!("job-{worker}-{round}");
+                        match runner.lease(host, binding, &name, round + 1) {
+                            Ok(lease) => {
+                                let now = holding.fetch_add(1, Ordering::SeqCst) + 1;
+                                most.fetch_max(now, Ordering::SeqCst);
+                                granted.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(Duration::from_millis(5));
+                                holding.fetch_sub(1, Ordering::SeqCst);
+                                drop(lease);
+                            }
+                            Err(RunError::Busy) => {
+                                refused.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Err(other) => panic!("research lease failed: {other}"),
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(most.load(Ordering::SeqCst), 1);
+        assert!(granted.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            granted.load(Ordering::SeqCst) + refused.load(Ordering::SeqCst),
+            120
+        );
+        assert!(runner.lease(&host, &binding, "job-3-1", 1).is_ok());
+    }
+
+    #[test]
+    fn a_configured_profile_folder_overrides_the_default_managed_home() {
+        let root = engine_root();
+        let mut custody =
+            NativeProfileCustody::capture(&root.database, &fs::metadata(&root.database).unwrap())
+                .unwrap();
+        let host = host();
+        let home = root.base.join("configured-home");
+        private_directory_at(&home);
+        private_directory_at(&home.join(".backboard"));
+        let config = serde_json::json!({
+            "model": { "provider": "local-provider", "model": "local-model" },
+            "providers": [{
+                "id": "local-provider", "name": "Local provider",
+                "protocol": "openai-chat", "baseUrl": "http://127.0.0.1:11434/v1",
+                "auth": { "type": "none" }
+            }]
+        });
+        let file = home.join(".backboard").join("config.json");
+        fs::write(&file, serde_json::to_vec(&config).unwrap()).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let connection = ModelConnection {
+            id: reference("configured-connection"),
+            provider: reference("local-provider"),
+            harness: reference("rcli"),
+            protocol: reference("openai-chat"),
+            account_ref: reference("declared-account"),
+            endpoint: ModelEndpoint::Http {
+                url: "http://127.0.0.1:11434/v1".into(),
+            },
+            model: ModelReference {
+                id: "local-model".into(),
+                author: reference("local-author"),
+            },
+            auth: ModelAuthentication::None {},
+        };
+        let profile = reference("declared-profile");
+        let metadata = custody
+            .register_configured_rcli_profile(&host, &connection, &profile, &home)
+            .unwrap();
+        let binding = binding(&host, &connection, metadata.custody_id.clone());
+        let operation = RequestId::new("research-job-1-1").unwrap();
+        let lease = custody
+            .acquire_configured_rcli_use(&host, &binding, &profile, &operation, 1)
+            .unwrap();
+        assert_eq!(lease_home(&lease).unwrap(), home);
+        assert_ne!(lease_home(&lease).unwrap(), custody.profile_home(&profile));
+        drop(lease);
+    }
 
     #[test]
     fn utc_date_formats_known_instants() {

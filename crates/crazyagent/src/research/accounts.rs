@@ -1,19 +1,20 @@
 use super::runner::{ResearchAccount, ResearchHarness};
 use crate::config::{
-    EffectiveConfig, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
+    AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
 };
+use crate::engine::owner::HostStamp;
+use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
-use rusqlite::{Connection, OpenFlags};
-use std::collections::BTreeMap;
-use std::os::unix::fs::MetadataExt;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const ANTHROPIC_PROTOCOL: &str = "anthropic-messages";
-const PROFILES: &str = "native-profiles";
-const PROFILE_HOME: &str = "home";
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The custody and sign-in code for a managed profile another launch holds.
+pub(crate) const PROFILE_BUSY: &str = "native_profile_in_use";
 
 /// The account a research job should run on, or why it has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,14 +39,13 @@ impl AccountPick {
 }
 
 /// Picks the first account `harness` can use from the pools explicitly
-/// assigned to `project`, in pool and member order. `managed_home` maps a
-/// managed profile reference to its engine-owned directory only while that
-/// profile is signed in.
+/// assigned to `project`, in pool and member order. `signed_in` reports
+/// whether a managed connection is signed in for this engine run.
 pub fn pick_account(
     access: &ModelAccess,
     project: &str,
     harness: &str,
-    managed_home: impl Fn(&CredentialRef) -> Option<PathBuf>,
+    signed_in: impl Fn(&ModelConnection) -> bool,
 ) -> AccountPick {
     let assigned: Vec<_> = access
         .pools
@@ -56,25 +56,36 @@ pub fn pick_account(
         return AccountPick::NeedsPool;
     }
     for pool in assigned {
-        for member in &pool.members {
-            let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
-                continue;
+        if let Some((connection, account)) = pool_account(access, pool, harness, &signed_in) {
+            return AccountPick::Account {
+                connection,
+                account,
             };
-            if let Some(account) = usable(connection, harness, &managed_home) {
-                return AccountPick::Account {
-                    connection: connection.id.clone(),
-                    account,
-                };
-            }
         }
     }
     AccountPick::NoUsableAccount
 }
 
+/// Picks the first member of `pool` that `harness` can use, in member order,
+/// with the same rules as [`pick_account`]. Takes the model access, the pool,
+/// the harness id and the signed-in check for managed connections. Returns the
+/// connection id and its account, or `None` when no member fits.
+pub fn pool_account(
+    access: &ModelAccess,
+    pool: &AccountPool,
+    harness: &str,
+    signed_in: &impl Fn(&ModelConnection) -> bool,
+) -> Option<(CredentialRef, ResearchAccount)> {
+    pool.members.iter().find_map(|member| {
+        let connection = access.connections.iter().find(|c| &c.id == member)?;
+        usable(connection, harness, signed_in).map(|account| (connection.id.clone(), account))
+    })
+}
+
 fn usable(
     connection: &ModelConnection,
     harness: &str,
-    managed_home: &impl Fn(&CredentialRef) -> Option<PathBuf>,
+    signed_in: &impl Fn(&ModelConnection) -> bool,
 ) -> Option<ResearchAccount> {
     let harness = ResearchHarness::of(harness)?;
     let anthropic = connection.protocol.as_str() == ANTHROPIC_PROTOCOL;
@@ -92,17 +103,17 @@ fn usable(
             }),
             _ => None,
         },
-        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref })
-            if ResearchHarness::of(connection.harness.as_str()) == Some(harness) =>
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. })
+            if ResearchHarness::of(connection.harness.as_str()) == Some(harness)
+                && signed_in(connection) =>
         {
-            let home = managed_home(profile_ref)?;
             Some(match harness {
                 ResearchHarness::Codex => ResearchAccount::ManagedCodex {
-                    home,
+                    connection: connection.clone(),
                     model: model(),
                 },
                 ResearchHarness::ClaudeCode => ResearchAccount::ManagedClaude {
-                    home,
+                    connection: connection.clone(),
                     model: model(),
                 },
             })
@@ -114,9 +125,8 @@ fn usable(
 /// Resolves a project to its folder under `projects_root` and the account
 /// picked from its assigned pool, rereading the engine's settings files and
 /// sign-in records on every call so pool assignment and sign-in take effect
-/// without a restart. A managed account is offered only while the engine
-/// database records its profile as signed in and its engine-owned home is a
-/// private canonical folder.
+/// without a restart. A managed account is offered only while it passes the
+/// sign-in check every master and team turn uses for this engine run.
 #[derive(Debug, Clone)]
 pub struct SettingsResolver {
     global: PathBuf,
@@ -166,87 +176,64 @@ impl SettingsResolver {
             return None;
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
-        let homes = self.managed_homes(&config, project);
         let access = config.settings.model_access.unwrap_or_default();
-        Some((
-            folder,
-            pick_account(&access, project, harness, |profile| {
-                homes.get(profile).cloned()
-            }),
-        ))
+        let database = self.engine();
+        let pick = pick_account(&access, project, harness, |connection| {
+            database
+                .as_ref()
+                .is_some_and(|database| match managed_sign_in(database, connection) {
+                    Ok(_) => true,
+                    Err(code) => code == PROFILE_BUSY,
+                })
+        });
+        Some((folder, pick))
     }
 
-    /// Maps the profile reference of every signed-in managed connection in
-    /// the pools assigned to `project` to its engine-owned home. Takes the
-    /// effective settings and the project. Returns an empty map when the
-    /// engine database or its sign-in records cannot be read.
-    fn managed_homes(
-        &self,
-        config: &EffectiveConfig,
-        project: &str,
-    ) -> BTreeMap<CredentialRef, PathBuf> {
-        let mut homes = BTreeMap::new();
-        let (Some(access), Some(runtime)) = (
-            config.settings.model_access.as_ref(),
-            self.database.parent(),
-        ) else {
-            return homes;
-        };
-        let Ok(database) = Connection::open_with_flags(
+    /// Opens the engine database for one resolve, or `None` when it cannot be
+    /// opened, so managed accounts are then treated as signed out.
+    fn engine(&self) -> Option<Connection> {
+        let database = Connection::open_with_flags(
             &self.database,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        ) else {
-            return homes;
-        };
-        if database.busy_timeout(DATABASE_WAIT).is_err() {
-            return homes;
-        }
-        let Ok(tx) = database.unchecked_transaction() else {
-            return homes;
-        };
-        for pool in access
-            .pools
-            .iter()
-            .filter(|pool| pool.projects.iter().any(|id| id.as_str() == project))
-        {
-            let Ok(signed) =
-                crate::project_setup::signed_in_connections(&tx, config, Some(&pool.id))
-            else {
-                continue;
-            };
-            for connection in access
-                .connections
-                .iter()
-                .filter(|connection| signed.contains(&connection.id))
-            {
-                if let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
-                    && let Some(home) = profile_home(runtime, profile_ref)
-                {
-                    homes.insert(profile_ref.clone(), home);
-                }
-            }
-        }
-        drop(tx);
-        assert!(homes.len() <= access.connections.len());
-        homes
+        )
+        .ok()?;
+        database.busy_timeout(DATABASE_WAIT).ok()?;
+        Some(database)
     }
 }
 
-/// The engine-owned home of a managed profile,
-/// `<runtime>/native-profiles/<sha256 of the reference>/home`, when it is a
-/// private canonical directory of this user. Takes the canonical engine
-/// runtime folder and the profile reference. Returns the home, or `None`
-/// for a missing, linked or shared one.
-fn profile_home(runtime: &Path, profile: &CredentialRef) -> Option<PathBuf> {
-    let home = runtime
-        .join(PROFILES)
-        .join(crate::memory::hash(profile.as_str().as_bytes()))
-        .join(PROFILE_HOME);
-    let metadata = std::fs::symlink_metadata(&home).ok()?;
-    let private = metadata.is_dir()
-        && metadata.uid() == rustix::process::geteuid().as_raw()
-        && metadata.mode() & 0o7777 == 0o700;
-    (private && home.canonicalize().ok()? == home).then_some(home)
+/// Proves a managed connection is signed in for the running engine with the
+/// same check every master and team turn uses. Takes the engine database and
+/// the connection. Returns the active engine host and the sign-in, or a plain
+/// code such as `research_engine_not_ready`, `master_authentication_stale` or
+/// `native_profile_in_use`.
+pub(crate) fn managed_sign_in(
+    database: &Connection,
+    connection: &ModelConnection,
+) -> Result<(HostStamp, NativeAuthFact), String> {
+    let tx = database
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let host = tx
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+            [],
+            |row| {
+                Ok(HostStamp {
+                    db_instance: row.get(0)?,
+                    engine_epoch: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or("research_engine_not_ready")?;
+    let fact = crate::storage::native_sign_in(&tx, &host, connection, None)
+        .map_err(|problem| problem.0)?;
+    drop(tx);
+    assert_eq!(fact.binding.engine_epoch, host.engine_epoch);
+    assert_eq!(fact.binding.connection, *connection);
+    Ok((host, fact))
 }

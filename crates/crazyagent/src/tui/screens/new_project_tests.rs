@@ -219,7 +219,7 @@ fn team_defaults_come_from_the_engine_and_owner_edits_survive_a_reload() {
     let mut unsigned = Wizard::new(pool_choices(&config()), None);
     load_catalog(&mut unsigned, &[]);
     let fallback = unsigned.team.unwrap();
-    assert_eq!(fallback.master, "rcli");
+    assert_eq!(fallback.master, "codex", "RCLI never leads the default team");
     assert!(fallback.sub_harnesses.is_empty());
     assert_eq!((fallback.min_agents, fallback.max_agents), (1, 1));
 }
