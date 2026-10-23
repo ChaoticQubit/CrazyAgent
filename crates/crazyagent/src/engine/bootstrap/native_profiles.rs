@@ -21,7 +21,7 @@ use configured_rcli::lock;
 const ROOT: &str = "native-profiles";
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
-const MAX_PROFILES: usize = 64;
+const MAX_PROFILES: usize = 1024;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())

@@ -6,6 +6,8 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+pub(super) const SETTINGS_JOURNAL_MAX: usize = 5 * crate::config::CONFIG_BYTES_MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
     identity: Option<(u64, u64)>,
@@ -115,15 +117,15 @@ impl SourceFile {
         let mut file = std::fs::File::from(fd);
         let metadata = file.metadata().map_err(error)?;
         private(&metadata, false)?;
-        if metadata.len() > 65536 {
+        if metadata.len() > crate::config::CONFIG_BYTES_MAX as u64 {
             return Err(error("settings_file_bounds"));
         }
         let mut bytes = String::new();
         (&mut file)
-            .take(65537)
+            .take(crate::config::CONFIG_BYTES_MAX as u64 + 1)
             .read_to_string(&mut bytes)
             .map_err(error)?;
-        if bytes.len() > 65536 {
+        if bytes.len() > crate::config::CONFIG_BYTES_MAX {
             return Err(error("settings_file_bounds"));
         }
         let after = file.metadata().map_err(error)?;
@@ -139,7 +141,7 @@ impl SourceFile {
         if (named.st_dev as u64, named.st_ino) != identity(&metadata) {
             return Err(error("settings_source_replaced"));
         }
-        assert!(bytes.len() <= 65536);
+        assert!(bytes.len() <= crate::config::CONFIG_BYTES_MAX);
         Ok(FileState {
             identity: Some(identity(&metadata)),
             bytes,
@@ -318,7 +320,7 @@ struct Pending {
 
 fn save_pending(db: &Connection, pending: &Pending) -> Result<(), EngineError> {
     let body = serde_json::to_vec(pending).map_err(error)?;
-    if body.len() > 262144 {
+    if body.len() > SETTINGS_JOURNAL_MAX {
         return Err(error("settings_journal_bounds"));
     }
     db.execute("INSERT INTO settings_publication(singleton,body) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET body=excluded.body", [body]).map_err(error)?;
@@ -327,7 +329,7 @@ fn save_pending(db: &Connection, pending: &Pending) -> Result<(), EngineError> {
 }
 
 fn load_pending(db: &Connection) -> Result<Option<Pending>, EngineError> {
-    let row: Option<Option<Vec<u8>>> = db.query_row("SELECT CASE WHEN length(body)<=262144 THEN body END FROM settings_publication WHERE singleton=1", [], |r| r.get(0)).optional().map_err(error)?;
+    let row: Option<Option<Vec<u8>>> = db.query_row(&format!("SELECT CASE WHEN length(body)<={SETTINGS_JOURNAL_MAX} THEN body END FROM settings_publication WHERE singleton=1"), [], |r| r.get(0)).optional().map_err(error)?;
     row.map(|body| {
         serde_json::from_slice(&body.ok_or_else(|| error("settings_journal_bounds"))?)
             .map_err(|_| error("settings_journal_invalid"))
@@ -388,8 +390,9 @@ pub(super) fn recover(
         return Err(error("settings_journal_invalid"));
     };
     let old_config = pending.old.config()?;
+    let registered = super::accounts::pool_materialization(db, &old_config, edit)?;
     let (new_global, next) =
-        edit_model_access(&pending.old.global.bytes, &pending.old.project.bytes, edit)
+        edit_model_access(&pending.old.global.bytes, &pending.old.project.bytes, edit, &registered)
             .map_err(|e| error(e.0))?;
     if &old_config.id != expected_config_id
         || pending.old.hash()? != *expected_source_hash
@@ -542,7 +545,8 @@ pub(super) fn apply(
         if old.hash()? != *expected_source_hash || old.config()?.id != config.id {
             return Err(error("settings_source_conflict"));
         }
-        let (new_global, next) = edit_model_access(&old.global.bytes, &old.project.bytes, edit)
+        let registered = super::accounts::pool_materialization(&tx, config, edit)?;
+        let (new_global, next) = edit_model_access(&old.global.bytes, &old.project.bytes, edit, &registered)
             .map_err(|e| error(e.0))?;
         if revision == i64::MAX as u64 {
             return Err(error("revision_exhausted"));
@@ -568,7 +572,7 @@ pub(super) fn apply(
         }
         Ok((sources, mut pending, next)) => {
             let body = serde_json::to_vec(&pending).map_err(error)?;
-            if body.len() > 262144 {
+            if body.len() > SETTINGS_JOURNAL_MAX {
                 drop(tx);
                 return reject(db, a, request, "settings_journal_bounds".into());
             }

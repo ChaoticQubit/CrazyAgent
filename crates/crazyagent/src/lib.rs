@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod accounts;
 pub mod adapters;
 pub mod assets;
 pub mod client_controller;

@@ -17,6 +17,7 @@ pub use native_auth::{
     NativeAuthScope, NativeAuthStart,
 };
 
+pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };

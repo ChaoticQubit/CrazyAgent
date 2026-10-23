@@ -182,7 +182,7 @@ fn catalog_rejects_duplicate_dangling_oversized_and_incompatible_metadata() {
             "accounts = [\"account\"]",
             &format!(
                 "accounts = {:?}",
-                (0..65).map(|i| format!("account{i}")).collect::<Vec<_>>()
+                ["account", "account"]
             ),
         ),
     ];
