@@ -425,6 +425,12 @@ export function endMaster(ticket: string, session: string, generation: number): 
   return wrap(() => closeMaster(ticket, session, generation));
 }
 
+/** Asks the engine to stop the master's reply in progress.
+ * Inputs: the master ticket, session id, turn id and a draft generation. Output: the receipt. */
+export function cancelMasterTurn(ticket: string, session: string, turn: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_cancel_master_turn", { ticket, session, turn, generation });
+}
+
 export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => submitMaster(ticket, session, text, generation));
 }

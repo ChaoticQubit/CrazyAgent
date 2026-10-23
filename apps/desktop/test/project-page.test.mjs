@@ -260,3 +260,11 @@ test("Thinking shows the seconds since this window sent the message", () => {
   assert.equal(research.thinkingLine(50_000, 49_000), "Thinking... 0 s");
   assert.equal(research.thinkingLine(0, 3 * 60_000 + 5_000), "Thinking... 3 min");
 });
+
+test("Stop targets the master turn that is still replying", () => {
+  const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: null });
+  assert.equal(research.replyingTurn([turn(1, "succeeded"), turn(2, "running")])?.id, "t2");
+  assert.equal(research.replyingTurn([turn(3, "queued"), turn(1, "failed")])?.id, "t3");
+  assert.equal(research.replyingTurn([turn(1, "succeeded"), turn(2, "cancelled")]), null);
+  assert.equal(research.replyingTurn([]), null);
+});

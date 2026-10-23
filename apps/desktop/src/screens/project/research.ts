@@ -144,6 +144,12 @@ export function nearBottom(box: { scrollHeight: number; scrollTop: number; clien
   return box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK_PX;
 }
 
+/** Finds the master turn that is still replying, which Stop cancels.
+ * Input: the turns. Output: the newest unsettled turn, or null. */
+export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
+  return turns.filter((turn) => !turnSettled(turn)).reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
+}
+
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.

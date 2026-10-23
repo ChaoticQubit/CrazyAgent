@@ -1,12 +1,12 @@
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
+import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { MarkdownView } from "./markdown";
-import { masterStatus, nearBottom, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import type { Tone } from "../../ui";
@@ -138,6 +138,17 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     await refresh();
   }, sendFailureLine);
 
+  async function stopReply() {
+    const turn = replyingTurn(turns);
+    if (!turn || !session) return;
+    const result = await cancelMasterTurn(ticket, session.session_id, turn.id, nextGeneration());
+    if (result.kind === "not_ready") return data.notify("Not ready yet: stopping a reply isn't in this build.");
+    if (result.kind === "error") return setProblem(failureCopy(result.code));
+    const state = receiptState(result.value);
+    if (state.kind === "rejected") return setProblem(failureCopy(state.code));
+    await refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+  }
+
   const end = () => act(async () => {
     if (!session) return;
     confirm(unwrap(await endMaster(ticket, session.session_id, nextGeneration())));
@@ -184,7 +195,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void send(); } }} />
       <div className="pj-row between">
         <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : "Cmd+Enter to send"}</span>
-        <button type="submit" className="btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button>
+        <span className="pj-row">{waiting && <button type="button" className="btn" onClick={() => void stopReply()}>Stop</button>}
+          <button type="submit" className="btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
       </div>
     </form>
   </div>;
