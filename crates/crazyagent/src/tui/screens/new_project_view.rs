@@ -32,6 +32,7 @@ impl Look {
     /// Builds the NO_COLOR look: modifiers only, Unicode glyphs.
     /// Takes nothing.
     /// Returns the look.
+    #[cfg(test)]
     pub fn plain() -> Self {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         Self {
@@ -206,6 +207,7 @@ impl Row {
     /// Gives the row's text without styles.
     /// Takes the row.
     /// Returns the text.
+    #[cfg(test)]
     pub fn text(&self) -> String {
         self.0.iter().map(|span| span.content.as_ref()).collect()
     }

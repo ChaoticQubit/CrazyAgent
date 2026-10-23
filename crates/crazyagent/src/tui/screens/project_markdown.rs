@@ -102,6 +102,7 @@ pub(in crate::tui) fn line_width(line: &MdLine) -> usize {
 /// Gives the plain text of a rendered line.
 /// Takes the line.
 /// Returns the pieces joined without styles.
+#[cfg(test)]
 pub(in crate::tui) fn line_text(line: &MdLine) -> String {
     line.iter().map(|(text, _)| text.as_str()).collect()
 }

@@ -61,6 +61,7 @@ impl TextInput {
     /// Gives the cursor position as a character index.
     /// Takes the field.
     /// Returns a value from zero to the number of characters.
+    #[cfg(test)]
     pub fn cursor(&self) -> usize {
         self.cursor
     }

@@ -8,7 +8,6 @@ pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
-pub(in crate::tui) mod project_pool;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
 pub mod settings;

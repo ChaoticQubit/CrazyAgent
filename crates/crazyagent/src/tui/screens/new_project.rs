@@ -1,4 +1,5 @@
 use super::new_project_input::TextInput;
+#[cfg(test)]
 use crate::config::EffectiveConfig;
 use crate::project_setup::{
     ABOUT_BYTES_MAX, DOCUMENT_BYTES_MAX, DOCUMENT_EXTENSIONS, DOCUMENTS_MAX, HARNESS_AGENTS_MAX,
@@ -164,6 +165,7 @@ impl PoolChoice {
 /// Builds the pool choices from the engine's effective settings.
 /// Takes the configuration from the latest snapshot.
 /// Returns every pool in settings order with plain names and counts.
+#[cfg(test)]
 pub(in crate::tui) fn pool_choices(config: &EffectiveConfig) -> Vec<PoolChoice> {
     let Some(access) = config.settings.model_access.as_ref() else {
         return Vec::new();
