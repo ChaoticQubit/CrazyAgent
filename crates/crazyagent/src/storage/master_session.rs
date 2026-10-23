@@ -1317,7 +1317,8 @@ pub(crate) fn native_sign_in(
         return Err(error("native_profile_not_managed"));
     };
     let key = crate::memory::hash(profile_ref.as_str().as_bytes());
-    let row: Option<(String, i64, String, Vec<u8>, Vec<u8>)> = tx.query_row(
+    type OperationRow = (String, i64, String, Vec<u8>, Vec<u8>);
+    let row: Option<OperationRow> = tx.query_row(
         "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
         [&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(error)?;
