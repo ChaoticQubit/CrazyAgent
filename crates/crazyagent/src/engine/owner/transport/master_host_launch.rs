@@ -652,6 +652,51 @@ mod tests {
             ])
         );
 
+        let claude = crate::engine::claude_host::launch_command(
+            &executable,
+            &worktree,
+            &home,
+            ACCOUNT_DEFAULT_MODEL,
+            None,
+        )
+        .unwrap();
+        let claude = sandbox.wrap(&claude).unwrap();
+        assert_eq!(claude.get_program(), crate::sandbox::SANDBOX_EXEC);
+        let claude_args = claude
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            claude_args[..3],
+            [
+                "-f",
+                sandbox.profile().to_str().unwrap(),
+                executable.to_str().unwrap()
+            ]
+        );
+        assert!(claude_args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert_eq!(claude.get_current_dir(), Some(worktree.as_path()));
+        let claude_environment = claude
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            claude_environment,
+            BTreeMap::from([
+                ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
+                ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
+                ("HOME", home.to_str().unwrap()),
+                ("LANG", "C"),
+                ("LC_ALL", "C"),
+                (
+                    "PATH",
+                    "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+                ),
+                ("TERM", "dumb"),
+                ("TMPDIR", tmp.to_str().unwrap()),
+            ])
+        );
+
         let run = |target: &Path| {
             let mut harness = Command::new("/bin/sh");
             harness
