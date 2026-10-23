@@ -463,13 +463,13 @@ fn harnesses_that_cannot_start_can_be_picked_but_missing_ones_cannot() {
 
 #[test]
 fn the_default_team_moves_off_harnesses_that_are_not_installed() {
-    let mut wizard = wizard();
-    wizard.research = vec![
+    let mut fresh = wizard();
+    fresh.research = vec![
         ResearchKind::MarketResearch,
         ResearchKind::CompetitorResearch,
     ];
-    load_catalog(&mut wizard, &["c-codex"]);
-    let team = wizard.team.clone().unwrap();
+    load_catalog(&mut fresh, &["c-codex"]);
+    let team = fresh.team.clone().unwrap();
     assert_eq!(team.master, "codex");
     assert_eq!(team.sub_harnesses[0].harness, "codex");
     let catalog = |codex: HarnessState| {
@@ -494,13 +494,13 @@ fn the_default_team_moves_off_harnesses_that_are_not_installed() {
             },
         ]
     };
-    wizard.set_harnesses(catalog(HarnessState::NotInstalled));
-    let fitted = wizard.team.clone().unwrap();
+    fresh.set_harnesses(catalog(HarnessState::NotInstalled));
+    let fitted = fresh.team.clone().unwrap();
     assert_eq!(fitted.master, "claude-code");
     assert_eq!(fitted.sub_harnesses[0].harness, "claude-code");
     assert_eq!(fitted.sub_harnesses[0].agents, 2);
     assert_eq!((fitted.min_agents, fitted.max_agents), (1, 3));
-    assert!(wizard.check_team().is_ok());
+    assert!(fresh.check_team().is_ok());
 
     let mut edited = wizard();
     edited.research = vec![ResearchKind::MarketResearch];
