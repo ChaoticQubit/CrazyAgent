@@ -9,7 +9,7 @@ import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { nearBottom, researchRow, teamPanel } from "./research";
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
-import { Badge, NotReady, valueOf } from "./shared";
+import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
 
@@ -108,10 +108,10 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
         {logOpen === job.id && <AgentLog data={data} job={job} />}
       </li>;
-    })}</ul> : data.research?.kind === "ok" && teamShown.agents.length + teamShown.tasks.length === 0 && <div className="pj-empty">
-      <h3>{filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}</h3>
-      <p className="pj-secondary">Research agents start from the Work step, and the master starts agents when you ask it to build something.</p>
-    </div>}
+    })}</ul> : data.research?.kind === "ok" && teamShown.agents.length + teamShown.tasks.length === 0 &&
+      <ProjectEmpty title={filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}>
+        Research agents start from the Work step, and the master starts agents when you ask it to build something.
+      </ProjectEmpty>}
     <ConfirmDialog open={stopping !== null} title={`Stop ${displayText(stopping?.kind_label ?? "this agent")}?`} confirmLabel="Stop agent" cancelLabel="Keep running"
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       Work so far stays in its working copy.

@@ -3,13 +3,13 @@ import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
 import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, receiptState, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
-import { Button, ConfirmDialog, EmptyState, StatusBadge } from "../../ui";
+import { Button, ConfirmDialog, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
 import { memoryGroups } from "./research";
 import { useLoad } from "../../state";
-import { NotReady } from "./shared";
+import { NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
 
 async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
@@ -105,9 +105,9 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
       {notes.kind === "ok" && notes.value.next !== null && <p className="pj-small pj-muted">Showing your newest {ownNotes.length} notes. Settings, Memory lists them all.</p>}
     </section>}
     {value && value.more && <p className="pj-small pj-muted">Showing the first {value.items.length} memories.</p>}
-    {value && groups.suggested.length === 0 && groups.saved.length === 0 && ownNotes.length === 0 && <EmptyState icon="brain" title="No memories yet" compact>
+    {value && groups.suggested.length === 0 && groups.saved.length === 0 && ownNotes.length === 0 && <ProjectEmpty title="No memories yet">
       Open a research report and use Save to memory, or select text in any file and use Save selection.
-    </EmptyState>}
+    </ProjectEmpty>}
     <ConfirmDialog open={deleting !== null} title="Delete this memory?" confirmLabel="Delete" pending={deleting !== null && busy === deleting.id}
       onCancel={() => setDeleting(null)} onConfirm={() => { if (deleting) void review(deleting, { decision: "Remove" }, "Memory deleted."); }}>
       Agents stop using it right away.

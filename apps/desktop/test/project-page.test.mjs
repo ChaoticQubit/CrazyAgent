@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -295,6 +296,34 @@ test("only the brief offers Edit, which opens the project details it is written 
   const documentOnly = { kind: "ok", value: { ...folder.value, items: [folder.value.items[1]] } };
   const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: documentOnly } }));
   assert.doesNotMatch(markup, />Edit</);
+});
+
+test("project empty states show the brand mark, hidden from screen readers and without its name", async () => {
+  const mark = /<div class="pj-empty"><span class="pj-mark large" aria-hidden="true"><span class="brand-mark large" role="img" aria-label="CrazyAgent"><svg class="brand-glyph full" width="48" height="48"/;
+  const agents = await import("../src/screens/project/agents.tsx");
+  const noAgents = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([]) }));
+  assert.match(noAgents, mark);
+  assert.match(noAgents, /<h3>No agents yet<\/h3>/);
+  const context = await import("../src/screens/project/context.tsx");
+  const empty = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1", items: [] } };
+  const noFiles = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: empty } }));
+  assert.match(noFiles, mark);
+  assert.match(noFiles, /<h3>Nothing here yet<\/h3>/);
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const noMessages = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: tabData([]) }));
+  assert.match(noMessages, mark);
+  assert.match(noMessages, /<h3>No messages yet<\/h3>/);
+  assert.match(noMessages, /Ask the master anything about (<!-- -->)?Harbor Notes(<!-- -->)?\. It has read the brief/);
+});
+
+test("the master's reply mark is the small mark with the reduced drawing for low density screens", async () => {
+  const shared = await import("../src/screens/project/shared.tsx");
+  const markup = renderToStaticMarkup(createElement(shared.ProjectMark));
+  assert.match(markup, /^<span class="pj-mark" aria-hidden="true"><span class="brand-mark" role="img" aria-label="CrazyAgent">/);
+  assert.match(markup, /<svg class="brand-glyph full" width="24" height="24" viewBox="0 0 64 64"/);
+  assert.match(markup, /<svg class="brand-glyph reduced" width="24" height="24" viewBox="0 0 16 16"/);
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  assert.match(css, /\.pj-mark \.brand-name \{ display: none; \}/);
 });
 
 test("Needs you names the project's pool accounts that aren't signed in", () => {
