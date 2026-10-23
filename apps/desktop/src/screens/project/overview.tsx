@@ -8,7 +8,7 @@ import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { activity, ago, memoryGroups, researchRow, suggestedLine, tildePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, suggestedLine, tildePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -39,6 +39,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
     return () => { live = false; };
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
+  const [allActivity, setAllActivity] = useState(false);
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
     const result = await retryResearch(data.id, job.id, nextGeneration());
@@ -73,9 +74,10 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>
       <section className="pj-stack-s" aria-labelledby="pj-activity"><h2 id="pj-activity">Recent activity</h2>
-        {events.length ? <ul className="pj-rows" aria-label="Recent activity">{events.map((event, index) => <li className="pj-activity-row" key={index}>
+        {events.length ? <ul className="pj-rows" aria-label="Recent activity">{(allActivity ? events : events.slice(0, ACTIVITY_ROWS)).map((event, index) => <li className="pj-activity-row" key={index}>
           <span className="pj-small pj-muted">{ago(event.at, data.now)}</span><span>{displayText(event.text)}</span></li>)}</ul>
           : <p className="pj-muted">Nothing yet.</p>}
+        {!allActivity && events.length > ACTIVITY_ROWS && <button type="button" className="pj-link" onClick={() => setAllActivity(true)}>Show all ({events.length})</button>}
       </section>
     </div>
     <aside className="pj-panel pj-facts" aria-label="Project facts">

@@ -78,7 +78,7 @@ export function waitingLine(jobs: ResearchJob[]): string {
 }
 
 /** Builds the Recent activity list from real job times.
- * Inputs: the jobs, the project name and when it was created. Output: newest first, at most eight. */
+ * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
 export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
   const events: { at: number; text: string }[] = [];
   if (created !== null) events.push({ at: created, text: `You created ${project} with ${jobs.length} research ${jobs.length === 1 ? "task" : "tasks"}` });
@@ -90,8 +90,10 @@ export function activity(jobs: ResearchJob[], project: string, created: number |
     else if (job.status === "failed") events.push({ at: job.finished_ms, text: `${job.kind_label} stopped: ${job.error?.trim() || "error"}` });
     else if (job.status === "cancelled") events.push({ at: job.finished_ms, text: `${job.kind_label} was stopped` });
   }
-  return events.sort((a, b) => b.at - a.at).slice(0, 8);
+  return events.sort((a, b) => b.at - a.at);
 }
+
+export const ACTIVITY_ROWS = 8;
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
 
