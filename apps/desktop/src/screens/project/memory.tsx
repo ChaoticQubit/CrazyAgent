@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, receiptState, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
 import { Button, ConfirmDialog, EmptyState, StatusBadge } from "../../ui";
-import { displayText } from "../conversation";
+import { useLinkOpener } from "./links";
+import { MarkdownView } from "./markdown";
 import { memoryGroups } from "./research";
 import { NotReady } from "./shared";
 import type { ProjectData } from "./shared";
@@ -30,6 +31,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [deleting, setDeleting] = useState<MemoryItem | null>(null);
+  const open = useLinkOpener(data.notify);
 
   useEffect(() => {
     let live = true;
@@ -63,7 +65,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     {groups.suggested.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-suggested">
       <h3 id="pj-mem-suggested">Suggested</h3>
       <ul className="pj-rows">{groups.suggested.map((item) => <li key={item.id} className="pj-memory">
-        <p className="pj-pre">{displayText(item.text)}</p>
+        <MarkdownView source={item.text} onOpenLink={open} />
         <span className="pj-row"><StatusBadge word="Suggested" />
           <Button size="small" variant="primary" pending={busy === item.id} pendingLabel="Saving..." onClick={() => void review(item, { decision: "Keep" }, "Saved to memory.")}>Save to memory</Button>
           <Button size="small" variant="quiet" disabled={busy === item.id} onClick={() => void review(item, { decision: "Reject" }, "Dismissed.")}>Dismiss</Button></span>
@@ -72,7 +74,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     {groups.saved.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-saved">
       <h3 id="pj-mem-saved">Saved</h3>
       <ul className="pj-rows">{groups.saved.map((item) => <li key={item.id} className="pj-memory">
-        <p className="pj-pre">{displayText(item.text)}</p>
+        <MarkdownView source={item.text} onOpenLink={open} />
         <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
           <Button size="small" variant="danger-text" disabled={busy === item.id} onClick={() => setDeleting(item)}>Delete</Button></span>
       </li>)}</ul>
