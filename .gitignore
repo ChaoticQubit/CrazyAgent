@@ -2,8 +2,9 @@ graphify-out
 .worktrees/
 .superpowers/
 .local-state/
+.serena/
 target/
-node_modules/
+node_modules
 dist/
 .DS_Store
 .env*
@@ -23,3 +24,6 @@ GEMINI.md
 !**/LICENSE*
 !**/tests/**/*.md
 !**/fixtures/**/*.md
+docs/
+research_notes/
+reports/

@@ -108,6 +108,28 @@ pub struct ProjectSpec {
     pub repositories: Vec<String>,
 }
 
+impl ProjectSpec {
+    /// Validates a project name and explicit repository declarations.
+    /// Takes an untrusted specification without accessing its paths.
+    /// Returns the existing validation error and preserves empty-list compatibility.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.name.trim().is_empty()
+            || self.name.len() > 256
+            || self.name.chars().any(char::is_control)
+            || self.repositories.len() > 64
+            || self.repositories.iter().any(|p| {
+                p.is_empty()
+                    || p.len() > 4096
+                    || p.chars().any(char::is_control)
+                    || p.contains("://")
+            })
+        {
+            return Err(ProtocolError("invalid project specification".into()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionContext {
@@ -123,6 +145,44 @@ pub struct ExecutionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Command {
+    #[serde(skip_deserializing)]
+    OwnerModelAccess {
+        expected_config_id: ConfigId,
+        expected_source_hash: String,
+        edit: crate::config::ModelAccessEdit,
+    },
+    #[serde(skip_deserializing)]
+    OwnerConversation {
+        mutation: crate::conversation::ConversationMutation,
+    },
+    #[serde(skip_deserializing)]
+    OwnerProfile {
+        profile: crate::owner_profile::OwnerProfile,
+    },
+    #[serde(skip_deserializing)]
+    OwnerMemory {
+        action: crate::memory::library::LibraryAction,
+    },
+    #[serde(skip_deserializing)]
+    ProposeBaseline {
+        draft: crate::verification::BaselineDraft,
+    },
+    #[serde(skip_deserializing)]
+    OwnerVerification {
+        action: crate::verification::OwnerVerification,
+    },
+    #[serde(skip_deserializing)]
+    Knowledge {
+        action: crate::memory::KnowledgeAction,
+    },
+    #[serde(skip_deserializing)]
+    Assets {
+        action: crate::assets::AssetAction,
+    },
+    #[serde(skip_deserializing)]
+    ProjectSetup {
+        action: crate::project_setup::SetupAction,
+    },
     ProposePlan {
         plan: crate::coordination::WorkPlan,
     },
@@ -197,25 +257,24 @@ pub struct WireRequest {
 }
 
 impl WireRequest {
+    /// Validates supported commands, draft content and wire bounds.
+    /// Takes an untrusted request and returns structural validation.
+    /// Host-only authority variants remain unavailable to wire decoding.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(ProtocolError("unsupported protocol version".into()));
         }
         match &self.command {
+            Command::OwnerConversation { mutation } => {
+                mutation
+                    .validate()
+                    .map_err(|e| ProtocolError(e.to_string()))?;
+            }
+            Command::ProposeBaseline { draft } => {
+                draft.validate().map_err(|e| ProtocolError(e.to_string()))?;
+            }
             Command::CreateProject { spec, .. } => {
-                if spec.name.trim().is_empty()
-                    || spec.name.len() > 256
-                    || spec.name.chars().any(char::is_control)
-                    || spec.repositories.len() > 64
-                    || spec.repositories.iter().any(|p| {
-                        p.is_empty()
-                            || p.len() > 4096
-                            || p.chars().any(char::is_control)
-                            || p.contains("://")
-                    })
-                {
-                    return Err(ProtocolError("invalid project specification".into()));
-                }
+                spec.validate()?;
             }
             Command::PinTask { context } if context.allowed_destinations.len() > 64 => {
                 return Err(ProtocolError("too many destinations".into()));
@@ -268,6 +327,24 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum Outcome {
+    Verification {
+        state: Box<crate::verification::VerificationState>,
+    },
+    Nominations {
+        nominations: Vec<crate::memory::Nomination>,
+    },
+    GlobalCandidates {
+        candidates: Vec<crate::memory::GlobalCandidate>,
+    },
+    Knowledge {
+        entries: Vec<crate::memory::KnowledgeEntry>,
+    },
+    Extraction {
+        batch: crate::memory::ExtractionBatch,
+    },
+    Assets {
+        snapshot: Box<crate::assets::AssetSnapshot>,
+    },
     Coordination {
         state: Box<crate::coordination::PlanState>,
     },
@@ -330,6 +407,9 @@ pub fn decode_request(frame: &[u8]) -> Result<WireRequest, ProtocolError> {
     }
     let request: WireRequest =
         serde_json::from_slice(&frame[4..]).map_err(|e| ProtocolError(e.to_string()))?;
+    if request.client_id.as_str().starts_with("owner:") {
+        return Err(ProtocolError("reserved_owner_identity".into()));
+    }
     request.validate()?;
     assert_eq!(size, frame.len() - 4);
     assert!(size <= FRAME_BYTES_MAX);

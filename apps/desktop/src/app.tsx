@@ -1,0 +1,84 @@
+import { useEffect } from "react";
+import { SessionContext, useSession, type Session } from "./state";
+import { Home } from "./screens/dashboard";
+import { Welcome } from "./screens/first-run";
+import { NewProjectFlow } from "./screens/new-project";
+import { ProjectPage } from "./screens/project";
+import { Settings } from "./screens/settings";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, useRoute, type Route } from "./ui";
+
+function EngineDown({ onRetry }: { onRetry: () => void }) {
+  return <main id="main" className="full-state">
+    <div className="box">
+      <BrandMark />
+      <Icon name="wifi-off" size={28} />
+      <h1>CrazyAgent's engine isn't running</h1>
+      <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
+      <span><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
+    </div>
+  </main>;
+}
+
+function Launching() {
+  return <div className="shell" aria-busy="true">
+    <aside className="sidebar"><BrandMark /><Skeleton shape="line" count={6} /></aside>
+    <main id="main" className="main"><div className="page"><div className="page-header"><Skeleton shape="line" /></div><Skeleton shape="card" count={6} /></div></main>
+  </div>;
+}
+
+function Screen({ route, session }: { route: Route; session: Session }) {
+  const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
+  switch (route.name) {
+    case "settings": return <Settings tab={route.tab} action={route.action} />;
+    case "new-project": return <NewProjectFlow step={route.step} />;
+    case "project": return <ProjectPage id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
+    default: return <Home />;
+  }
+}
+
+/** The whole app for one session and route: the engine-down state, the launch skeleton, the
+ * first-run Welcome page while the profile is empty, or the shell with the routed screen.
+ * Inputs: the session and the current route. */
+export function AppView({ session, route }: { session: Session; route: Route }) {
+  if (session.engine === "down") return <EngineDown onRetry={session.retry} />;
+  if (session.engine === "connecting" || session.profile.kind === "loading") return <Launching />;
+  const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
+  if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
+    return <SessionContext.Provider value={session}>
+      <Welcome onSaved={() => { void session.refreshProfile().then(() => navigate({ name: "home" }, true)); }}
+        onSkip={() => navigate({ name: "home" }, true)} />
+    </SessionContext.Provider>;
+  }
+  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => ({ id: project.id, name: project.name })) : undefined;
+  return <SessionContext.Provider value={session}>
+    <AppShell toast={<Toast message={session.toast} />}
+      sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
+      {session.unconfirmed && <Banner action={<Button size="small" onClick={() => void session.checkUnconfirmed()}>Check again</Button>}>
+        We couldn't confirm your last change. Check it and save again.
+      </Banner>}
+      <Screen route={route} session={session} />
+    </AppShell>
+  </SessionContext.Provider>;
+}
+
+function useShortcuts() {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.altKey || event.ctrlKey) return;
+      if (event.key === "n") { event.preventDefault(); navigate({ name: "new-project", step: "basics" }); }
+      else if (event.key === ",") { event.preventDefault(); navigate({ name: "settings", tab: "accounts" }); }
+      else if (event.key === "[") { event.preventDefault(); window.history.back(); }
+      else if (event.key === "]") { event.preventDefault(); window.history.forward(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+}
+
+/** The desktop app: one engine session, the hash route and the app-wide shortcuts. */
+export function App() {
+  const session = useSession();
+  const route = useRoute();
+  useShortcuts();
+  return <AppView session={session} route={route} />;
+}

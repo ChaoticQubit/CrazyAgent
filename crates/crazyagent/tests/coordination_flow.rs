@@ -132,6 +132,7 @@ fn plan(context: ExecutionContext, id: &str) -> WorkPlan {
                 session_id: SessionId::new(id).unwrap(),
                 role: Role::Worker,
                 native_descendant: None,
+                pool_ref: None,
                 route: RouteRequest {
                     resources: ResourceBudget::unit(),
                     preferred_target: Some(CredentialRef::new("profile-a").unwrap()),

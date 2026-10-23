@@ -99,8 +99,72 @@ def validate_topology(observation):
     require(not any(line.split()[1] == "00000000" and int(line.split()[3], 16) & 1 and not int(line.split()[3], 16) & 0x200 for line in routes), "default IPv4 route")
     require(not any(line.split()[0] == "0" * 32 and line.split()[1] == "00" and int(line.split()[8], 16) & 1 and not int(line.split()[8], 16) & 0x200 for line in routes6), "default IPv6 route")
 
-def topology(role="worker", ipv4_path=Path("/proc/net/route"), ipv6_path=Path("/proc/net/ipv6_route")):
+def read_link_states(interfaces, root=Path("/sys/class/net")):
+    invariant(len(interfaces) <= 64, "link observation input bound lost")
+    states, errors = {}, {}
+    for index, name in interfaces:
+        if not isinstance(name, str) or not name or len(name) > 15 or not name.isascii() or name in (".", "..") or Path(name).name != name or "\x00" in name:
+            errors["interface-" + str(index)] = "invalid interface name"
+            continue
+        try:
+            values = {}
+            for field in ("flags", "operstate"):
+                with (root / name / field).open("r", encoding="ascii") as source:
+                    value = source.read(65)
+                require(len(value) <= 64 and bool(value.strip()), "link field unavailable or oversized")
+                values[field] = value.strip()
+            flags = int(values["flags"], 16)
+            require(0 <= flags < 1 << 32, "link flags out of range")
+            states[name] = {"flags": flags, "flags_text": values["flags"], "operstate": values["operstate"]}
+        except (OSError, ValueError) as error:
+            errors[name] = error.errno if isinstance(error, OSError) else "invalid link state"
+    invariant(len(states) + len(errors) <= 64, "link retention bound lost")
+    return {"states": states, "read_errors": errors, "complete": not errors}
+
+def validate_offline_topology(observation):
+    required = {"complete", "read_errors", "interfaces", "links", "ipv4_routes", "ipv6_routes"}
+    require(isinstance(observation, dict) and required <= observation.keys(), "missing offline topology evidence")
+    require(observation["complete"] is True and observation["read_errors"] == {}, "incomplete offline topology observation")
+    interfaces, links = observation["interfaces"], observation["links"]
+    require(isinstance(interfaces, list) and 1 <= len(interfaces) <= 64 and isinstance(links, dict), "invalid offline link collection")
+    names, indexes = [], []
+    allowed = {"lo", "tunl0", "gre0", "gretap0", "erspan0", "ip_vti0", "ip6_vti0", "sit0", "ip6tnl0", "ip6gre0"}
+    for interface in interfaces:
+        require(isinstance(interface, (list, tuple)) and len(interface) == 2, "invalid offline interface identity")
+        index, name = interface
+        require(type(index) is int and index > 0 and isinstance(name, str) and name in allowed, "unknown offline interface")
+        indexes.append(index)
+        names.append(name)
+    require(len(set(indexes)) == len(indexes) and len(set(names)) == len(names) and names.count("lo") == 1, "conflicting offline interface identity")
+    require(set(links) == set(names), "missing or extra link evidence")
+    for name in names:
+        state = links[name]
+        require(isinstance(state, dict) and {"flags", "operstate"} <= state.keys(), "missing link fields")
+        flags = state["flags"]
+        require(type(flags) is int and 0 <= flags < 1 << 32, "invalid link flags")
+        if name == "lo":
+            require(flags & 0x9 == 0x9 and state["operstate"] in ("unknown", "up"), "loopback is not available")
+        else:
+            require(flags & 0x10041 == 0 and state["operstate"] == "down", "fallback interface is usable or state unknown")
+    for key in ("ipv4_routes", "ipv6_routes"):
+        require(isinstance(observation[key], list) and len(observation[key]) <= 128, "invalid offline route collection")
+        for row in observation[key]:
+            require(isinstance(row, str), "invalid offline route row")
+            fields = row.split()
+            if key == "ipv4_routes":
+                require(4 <= len(fields) <= 16 and fields[0] == "lo" and len(fields[1]) == 8, "unexpected IPv4 route")
+                destination, flags = int(fields[1], 16), int(fields[3], 16)
+                require(destination >= 0 and 0 <= flags < 1 << 32, "invalid IPv4 route values")
+                require(not (destination == 0 and flags & 1 and not flags & 0x200), "default IPv4 route")
+            else:
+                require(len(fields) == 10 and fields[9] == "lo" and len(fields[0]) == 32, "unexpected IPv6 route")
+                destination, prefix, flags = int(fields[0], 16), int(fields[1], 16), int(fields[8], 16)
+                require(destination >= 0 and 0 <= prefix <= 128 and 0 <= flags < 1 << 32, "invalid IPv6 route values")
+                require(not (destination == 0 and prefix == 0 and flags & 1 and not flags & 0x200), "default IPv6 route")
+
+def topology(role="worker", ipv4_path=Path("/proc/net/route"), ipv6_path=Path("/proc/net/ipv6_route"), contract="strict-lo-only-v1"):
     invariant(role in ("worker", "child"), "unknown topology actor")
+    require(contract in ("strict-lo-only-v1", "offline-network-v2"), "unknown network contract")
     interfaces = socket.if_nameindex()
     observation = {"interfaces": interfaces[:64], "complete": len(interfaces) <= 64, "read_errors": {}}
     for name, path, header in (("ipv4_routes", ipv4_path, 1), ("ipv6_routes", ipv6_path, 0)):
@@ -113,9 +177,18 @@ def topology(role="worker", ipv4_path=Path("/proc/net/route"), ipv6_path=Path("/
             observation[name] = []
             observation["read_errors"][name] = error.errno
             observation["complete"] = False
+    if contract == "offline-network-v2":
+        links = read_link_states(interfaces[:64])
+        observation["links"] = links["states"]
+        observation["read_errors"].update(links["read_errors"])
+        observation["complete"] &= links["complete"]
+        observation["network_contract"] = contract
     invariant(len(observation["interfaces"]) <= 64, "interface retention bound lost")
     emit("topology-" + role, **observation)
-    validate_topology(observation)
+    if contract == "offline-network-v2":
+        validate_offline_topology(observation)
+    else:
+        validate_topology(observation)
     return observation
 
 def exchange(address, family, nonce):
@@ -140,7 +213,7 @@ def filesystem_actor(manifest, role, port, unix_path):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(0.25)
         errors["host_socket"] = denied(lambda: client.connect(manifest["host_engine"] + "/engine.sock"), (errno.ENOENT,))
-    network = topology(role)
+    network = topology(role, contract=manifest.get("network_contract", "strict-lo-only-v1"))
     exchange(("127.0.0.1", port), socket.AF_INET, nonce)
     exchange(unix_path, socket.AF_UNIX, nonce)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
@@ -798,10 +871,11 @@ def finalize_case(root, case, record, baseline, run, uid, gid):
     return record
 
 
-def execute_case(controller, case, baseline):
+def execute_case(controller, case, baseline, network_contract="strict-lo-only-v1"):
+    require(network_contract in ("strict-lo-only-v1", "offline-network-v2"), "unknown network contract")
     controller.budget.admit_case()
     root, run = controller.root, controller.run
-    manifest = {"run_id": run, "case": case, "canaries": baseline, "host_engine": str(root / "host-engine"), "uid": controller.uid, "gid": controller.gid}
+    manifest = {"run_id": run, "case": case, "canaries": baseline, "host_engine": str(root / "host-engine"), "uid": controller.uid, "gid": controller.gid, "network_contract": network_contract}
     manifest_path = root / "payload" / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, sort_keys=True))
     require((root / "payload" / "probe.py").stat().st_size + manifest_path.stat().st_size <= 65536, "payload fixture overflow")
@@ -916,11 +990,15 @@ def selected_cases(diagnostic):
     return ("boundary",) if diagnostic else CASES
 
 
-def claim_attempt(directory, diagnostic, provenance):
+def claim_attempt(directory, diagnostic, provenance, network_contract="strict-lo-only-v1"):
+    require(network_contract in ("strict-lo-only-v1", "offline-network-v2"), "unknown network contract")
+    require(not (diagnostic and network_contract == "offline-network-v2"), "diagnostic and offline contract are exclusive")
     cases = selected_cases(diagnostic)
     name = "linux-topology-diagnostic-attempt.json" if diagnostic else "linux-containment-native-attempt.json"
+    if network_contract == "offline-network-v2":
+        name = "linux-offline-network-v2-attempt.json"
     record = {**provenance, "mode": "boundary-only-diagnostic" if diagnostic else "five-case-qualification",
-              "cases": list(cases), "payload_sha256": payload_hash()}
+              "cases": list(cases), "payload_sha256": payload_hash(), "network_contract": network_contract}
     with (directory / name).open("x") as attempt:
         json.dump(record, attempt, sort_keys=True)
     return record
@@ -940,8 +1018,11 @@ def main():
     parser.add_argument("--engine-sha256", required=True)
     parser.add_argument("--build-evidence", type=Path, required=True)
     parser.add_argument("--check-local", action="store_true", help="validate existing local inputs without Docker or experiment setup")
-    parser.add_argument("--boundary-only-diagnostic", action="store_true", help="one separately authorized boundary diagnostic; never five-case qualification")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--boundary-only-diagnostic", action="store_true", help="one separately authorized boundary diagnostic; never five-case qualification")
+    selection.add_argument("--offline-network-contract", action="store_true", help="separately authorized offline-network-v2 five-case profile; preserves strict default")
     args = parser.parse_args()
+    network_contract = "offline-network-v2" if args.offline_network_contract else "strict-lo-only-v1"
     require(__debug__, "assertions disabled")
     if args.check_local:
         evidence = local_preflight(args.engine, args.engine_sha256, args.build_evidence)
@@ -956,6 +1037,7 @@ def main():
     controller = Controller(root, run, budget)
     report = {"run_id": run, "root": str(root), "status": "unavailable", "cases": [], "native_admitted": False,
               "mode": "boundary-only-diagnostic" if args.boundary_only_diagnostic else "five-case-qualification",
+              "network_contract": network_contract,
               "selected_cases": list(selected_cases(args.boundary_only_diagnostic)), "combined_qualification_passed": False,
               "permanent_runtime_selected": False, "aggregate_cpu_budget_proven": False, "review": "deferred",
               "gaps": ["full Task 2 admission", "aggregate CPU-time and disk budgets", "native harness/auth/child control/live recovery", "worker-engine bridge and arbitrary escape resistance"]}
@@ -963,7 +1045,7 @@ def main():
     operations = ["host-before", "host-create"]
     try:
         report["attempt"] = claim_attempt(ROOT / ".local-state", args.boundary_only_diagnostic,
-                                          {"run_id": run, "root": str(root), "source_sha256": file_hash(Path(__file__)), "engine_sha256": args.engine_sha256})
+                                          {"run_id": run, "root": str(root), "source_sha256": file_hash(Path(__file__)), "engine_sha256": args.engine_sha256}, network_contract=network_contract)
         with (root / "evidence" / "allocation.lock").open("x") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             report["provenance"] = preflight(controller, args.engine, args.engine_sha256, args.build_evidence)
@@ -997,7 +1079,7 @@ def main():
             operations.append("host-control")
             for case in selected_cases(args.boundary_only_diagnostic):
                 require(engine.poll() is None and not engine_log.get("overflow"), "host engine control/log unavailable")
-                result = execute_case(controller, case, baseline)
+                result = execute_case(controller, case, baseline, network_contract=network_contract)
                 report["cases"].append(result)
                 host_state(root, "host-after-" + case, operations)
                 operations.append("host-after-" + case)

@@ -435,6 +435,44 @@ pub(crate) fn reserve(
     persist_reservation(connection, &record)
 }
 
+pub(crate) fn reserve_master_bootstrap(
+    connection: &Connection,
+    runtime: &Path,
+    project: &ProjectId,
+    task: &TaskId,
+    owner_session: &SessionId,
+    repository: &str,
+) -> Result<Outcome, EngineError> {
+    assert!(!connection.is_autocommit());
+    let body: Option<String> = connection
+        .query_row(
+            "SELECT body FROM repository_admissions WHERE project=?1 AND repository=?2",
+            params![project.as_str(), repository],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(body) = body else {
+        return Ok(rejected("repository_not_admitted"));
+    };
+    if load(connection, task, repository)?.is_some() {
+        return Ok(rejected("writer_already_owned"));
+    }
+    let admission: Admission = serde_json::from_str(&body).map_err(error)?;
+    let record = match prepare(
+        runtime,
+        admission,
+        project.clone(),
+        task.clone(),
+        owner_session.clone(),
+        None,
+    ) {
+        Ok(record) => record,
+        Err(error) => return Ok(rejected(&error.0)),
+    };
+    persist_reservation(connection, &record)
+}
+
 fn persist_reservation(
     connection: &Connection,
     record: &LeaseRecord,
@@ -681,6 +719,9 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     {
         return Err(error("worktree_changed_during_materialization"));
     }
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
     let deadline = Instant::now() + Duration::from_secs(10);

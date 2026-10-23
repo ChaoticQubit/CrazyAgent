@@ -348,3 +348,350 @@ async fn state_quota_failure_rolls_back() {
     assert_eq!(projects.len(), 1);
     engine.close().await.unwrap();
 }
+
+mod project_creation {
+    use super::*;
+    use crazyagent::engine::bootstrap::EngineService;
+    use crazyagent::engine::owner::{
+        OwnerClient, OwnerClientKind, OwnerOperation, OwnerRequest, OwnerResponse, OwnerResult,
+    };
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn specification_cases() -> Vec<(&'static str, ProjectSpec, bool)> {
+        [
+            ("empty legacy repositories", "Project".into(), vec![], true),
+            ("name spacing retained", " Project ".into(), vec![], true),
+            ("ASCII name limit", "x".repeat(256), vec![], true),
+            ("UTF-8 name limit", "é".repeat(128), vec![], true),
+            (
+                "repository count limit",
+                "P".into(),
+                vec!["/repo".into(); 64],
+                true,
+            ),
+            (
+                "repository byte limit",
+                "P".into(),
+                vec!["x".repeat(4096)],
+                true,
+            ),
+            (
+                "UTF-8 repository limit",
+                "P".into(),
+                vec!["é".repeat(2048)],
+                true,
+            ),
+            (
+                "relative repository",
+                "P".into(),
+                vec!["relative/repo".into()],
+                true,
+            ),
+            ("space repository", "P".into(), vec![" ".into()], true),
+            (
+                "duplicate declarations",
+                "P".into(),
+                vec!["/repo".into(); 2],
+                true,
+            ),
+            (
+                "colon without scheme",
+                "P".into(),
+                vec!["host:repo".into()],
+                true,
+            ),
+            ("empty name", "".into(), vec![], false),
+            ("blank name", "   ".into(), vec![], false),
+            ("Unicode blank name", "\u{2003}".into(), vec![], false),
+            ("ASCII name overflow", "x".repeat(257), vec![], false),
+            ("UTF-8 name overflow", "é".repeat(129), vec![], false),
+            ("name newline", "P\n".into(), vec![], false),
+            ("name null", "P\0".into(), vec![], false),
+            ("name DEL", "P\u{7f}".into(), vec![], false),
+            ("name C1 control", "P\u{85}".into(), vec![], false),
+            ("empty repository", "P".into(), vec!["".into()], false),
+            (
+                "ASCII repository overflow",
+                "P".into(),
+                vec!["x".repeat(4097)],
+                false,
+            ),
+            (
+                "UTF-8 repository overflow",
+                "P".into(),
+                vec!["é".repeat(2048) + "x"],
+                false,
+            ),
+            (
+                "repository newline",
+                "P".into(),
+                vec!["/repo\n".into()],
+                false,
+            ),
+            ("repository null", "P".into(), vec!["/repo\0".into()], false),
+            (
+                "repository DEL",
+                "P".into(),
+                vec!["/repo\u{7f}".into()],
+                false,
+            ),
+            (
+                "repository C1 control",
+                "P".into(),
+                vec!["/repo\u{85}".into()],
+                false,
+            ),
+            (
+                "repository count overflow",
+                "P".into(),
+                vec!["/repo".into(); 65],
+                false,
+            ),
+            (
+                "remote scheme",
+                "P".into(),
+                vec!["https://host/repo".into()],
+                false,
+            ),
+            (
+                "local scheme",
+                "P".into(),
+                vec!["file:///repo".into()],
+                false,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, name, repositories, accepted)| {
+            (label, ProjectSpec { name, repositories }, accepted)
+        })
+        .collect()
+    }
+
+    fn owner_creation(spec: &ProjectSpec) -> Result<OwnerRequest, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "protocol_version": 1,
+            "request_id": "owner-create-project",
+            "expected_revision": "0",
+            "operation": {
+                "kind": "Apply",
+                "mutation": {
+                    "kind": "CreateProject",
+                    "project_id": "owner-project",
+                    "spec": spec
+                }
+            }
+        }))
+    }
+
+    fn legacy_creation(spec: ProjectSpec) -> WireRequest {
+        request(
+            "legacy-create-project",
+            0,
+            Command::CreateProject {
+                project_id: ProjectId::new("legacy-project").unwrap(),
+                spec,
+            },
+        )
+    }
+
+    #[test]
+    fn legacy_specification_acceptance_is_unchanged() {
+        for (label, spec, accepted) in specification_cases() {
+            let wire = legacy_creation(spec);
+            assert!(serde_json::to_vec(&wire).unwrap().len() < FRAME_BYTES_MAX);
+            assert_eq!(wire.validate().is_ok(), accepted, "{label}");
+        }
+    }
+
+    #[test]
+    fn owner_specification_acceptance_matches_legacy() {
+        for (label, spec, accepted) in specification_cases() {
+            let owner = owner_creation(&spec)
+                .expect("closed owner CreateProject must deserialize before validation");
+            assert_eq!(owner.validate().is_ok(), accepted, "owner: {label}");
+            assert_eq!(
+                legacy_creation(spec).validate().is_ok(),
+                accepted,
+                "legacy: {label}"
+            );
+        }
+    }
+
+    fn frame_specification() -> ProjectSpec {
+        let mut repositories = vec!["x".repeat(4096); 15];
+        repositories.push("/".into());
+        ProjectSpec {
+            name: "Frame boundary".into(),
+            repositories,
+        }
+    }
+
+    #[test]
+    fn legacy_creation_enforces_exact_frame_boundary() {
+        let mut wire = legacy_creation(frame_specification());
+        let padding = FRAME_BYTES_MAX - serde_json::to_vec(&wire).unwrap().len();
+        let Command::CreateProject { spec, .. } = &mut wire.command else {
+            panic!("legacy creation required");
+        };
+        spec.repositories[15].push_str(&"x".repeat(padding));
+        assert!(spec.repositories[15].len() <= 4096);
+        assert_eq!(serde_json::to_vec(&wire).unwrap().len(), FRAME_BYTES_MAX);
+        assert!(wire.validate().is_ok());
+        assert_eq!(encode_frame(&wire).unwrap().len(), FRAME_BYTES_MAX + 4);
+        let Command::CreateProject { spec, .. } = &mut wire.command else {
+            panic!("legacy creation required");
+        };
+        spec.repositories[15].push('x');
+        assert_eq!(
+            serde_json::to_vec(&wire).unwrap().len(),
+            FRAME_BYTES_MAX + 1
+        );
+        assert!(wire.validate().is_err());
+        assert!(encode_frame(&wire).is_err());
+    }
+
+    #[test]
+    fn owner_creation_enforces_exact_frame_boundary() {
+        let owner = owner_creation(&frame_specification())
+            .expect("closed owner CreateProject must deserialize before frame validation");
+        let padding = FRAME_BYTES_MAX - serde_json::to_vec(&owner).unwrap().len();
+        let mut value = serde_json::to_value(&owner).unwrap();
+        value["operation"]["mutation"]["spec"]["repositories"][15] =
+            ("/".to_owned() + &"x".repeat(padding)).into();
+        let owner: OwnerRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_vec(&owner).unwrap().len(), FRAME_BYTES_MAX);
+        assert!(owner.validate().is_ok());
+        assert_eq!(encode_frame(&owner).unwrap().len(), FRAME_BYTES_MAX + 4);
+        let mut value = serde_json::to_value(&owner).unwrap();
+        let repository = value["operation"]["mutation"]["spec"]["repositories"][15]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        value["operation"]["mutation"]["spec"]["repositories"][15] = (repository + "x").into();
+        let oversized: OwnerRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&oversized).unwrap().len(),
+            FRAME_BYTES_MAX + 1
+        );
+        assert!(oversized.validate().is_err());
+        assert!(encode_frame(&oversized).is_err());
+    }
+
+    #[test]
+    fn owner_creation_keeps_identity_and_unknown_fields_closed() {
+        let spec = ProjectSpec {
+            name: "Closed input".into(),
+            repositories: vec![],
+        };
+        let owner = owner_creation(&spec)
+            .expect("closed owner CreateProject must deserialize before closed-shape checks");
+        let value = serde_json::to_value(owner).unwrap();
+        for project_id in [String::new(), "bad id".into(), "x".repeat(129)] {
+            let mut invalid = value.clone();
+            invalid["operation"]["mutation"]["project_id"] = project_id.into();
+            assert!(serde_json::from_value::<OwnerRequest>(invalid).is_err());
+        }
+        for pointer in ["/operation/mutation", "/operation/mutation/spec"] {
+            let mut invalid = value.clone();
+            invalid
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("admit_repository".into(), true.into());
+            assert!(serde_json::from_value::<OwnerRequest>(invalid).is_err());
+        }
+    }
+
+    async fn start_engine(root: &Path) -> EngineService {
+        let config = resolve_config(&root.join("g"), &root.join("p")).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        EngineService::start(root, "engine.sock", &config, &stopped)
+            .await
+            .unwrap()
+    }
+
+    async fn desktop(root: &Path) -> OwnerClient {
+        OwnerClient::discover(root, OwnerClientKind::Desktop, Duration::from_secs(2))
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn reconcile(client: &OwnerClient, create: &OwnerRequest) -> OwnerResponse {
+        client
+            .request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: RequestId::new("after-restart-reconcile").unwrap(),
+                expected_revision: Cursor::new(0),
+                operation: OwnerOperation::Reconcile {
+                    operation_id: create.request_id.clone(),
+                    expected_hash: Some(create.mutation_hash().unwrap()),
+                },
+            })
+            .await
+            .unwrap()
+            .response
+    }
+
+    fn assert_persisted_project(root: &Path, spec: ProjectSpec) {
+        let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let body: String = db
+            .query_row(
+                "SELECT body FROM projects WHERE id='owner-project'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored: StoredProject = serde_json::from_str(&body).unwrap();
+        assert_eq!(stored.project_id, ProjectId::new("owner-project").unwrap());
+        assert_eq!(stored.spec, spec);
+        for table in ["projects", "events", "owner_operations"] {
+            let count: i64 = db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_project_survives_restart_and_exact_replay() {
+        let spec = ProjectSpec {
+            name: "Durable owner project".into(),
+            repositories: vec!["relative/declaration-only".into()],
+        };
+        let create = owner_creation(&spec)
+            .expect("closed owner CreateProject must deserialize before engine execution");
+        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut service = start_engine(root.path()).await;
+        let old = desktop(root.path()).await;
+        let OwnerResponse::Applied { operation: first } =
+            old.request(create.clone()).await.unwrap().response
+        else {
+            panic!("real owner creation receipt required");
+        };
+        assert_eq!(first.result, OwnerResult::Applied);
+        assert!(!first.historical_replay);
+        assert_eq!(first.provenance.revision_after, Cursor::new(1));
+        service.shutdown().await.unwrap();
+        let mut service = start_engine(root.path()).await;
+        assert!(old.request(create.clone()).await.is_err());
+        let client = desktop(root.path()).await;
+        let OwnerResponse::Committed { operation } = reconcile(&client, &create).await else {
+            panic!("persisted owner receipt required");
+        };
+        assert_eq!(operation.provenance, first.provenance);
+        assert_eq!(operation.result, first.result);
+        let OwnerResponse::Applied { operation } = client.request(create).await.unwrap().response
+        else {
+            panic!("exact owner replay required");
+        };
+        assert!(operation.historical_replay);
+        assert_eq!(operation.provenance, first.provenance);
+        assert_eq!(operation.current_revision, Cursor::new(1));
+        service.shutdown().await.unwrap();
+        assert_persisted_project(root.path(), spec);
+    }
+}

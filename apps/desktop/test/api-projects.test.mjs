@@ -1,0 +1,38 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import "./load-source.mjs";
+
+const api = await import("../src/api-projects.ts");
+
+test("project failures use project copy first, then the app's shared copy", () => {
+  assert.equal(api.failureCopy("stale_config"), "This changed since you opened it. Review and save again.");
+  assert.equal(api.failureCopy("settings_read_only"), "Settings can't be changed in this engine. Start it with writable settings.");
+  assert.equal(api.failureCopy("engine_unreachable"), "CrazyAgent's engine isn't running.");
+  assert.equal(api.failureCopy("project_documents_too_large"), "This project's documents would be over 200 MB. Remove some files first.");
+});
+
+test("failure copy is plain language and falls back for unknown codes", () => {
+  assert.equal(api.failureCopy("pending_intent"), "Another change is still being saved. Wait for it to finish, then try again.");
+  assert.equal(api.failureCopy("document_not_a_regular_file"), "Can't add a folder or a shortcut. Choose the original file.");
+  assert.equal(api.failureCopy("made_up_code"), "Something went wrong. Try again.");
+  for (const code of ["owner_read_failed", "team_agent_range_invalid", "document_type_unsupported", "project_folder_exists"]) {
+    assert.doesNotMatch(api.failureCopy(code), /_|—/);
+  }
+});
+
+test("assigning a pool adds the project and master role once and keeps everything else", () => {
+  const pool = { id: "main", members: ["a", "b"], projects: ["other"], roles: ["reviewer"], fallback_allowed: false, provider_quota_policy: "strict" };
+  const assigned = api.assignedPool(pool, "p-1");
+  assert.deepEqual(assigned, { ...pool, projects: ["other", "p-1"], roles: ["reviewer", "project_leader"] });
+  assert.deepEqual(pool.projects, ["other"]);
+  assert.deepEqual(api.assignedPool(assigned, "p-1"), assigned);
+  assert.throws(() => api.assignedPool({ ...pool, projects: Array.from({ length: 64 }, (_, i) => `p${i}`) }, "new"), /64/);
+});
+
+test("a receipt is applied only when the engine recorded it without rejection", () => {
+  const base = { kind: "setup_project", generation: "4", project_id: "p", baseline_id: null, model_access: null, project_spec: null, operation_id: "o" };
+  assert.deepEqual(api.receiptState({ ...base, outcome: "applied", pending: false, rejection: null }), { kind: "applied" });
+  assert.deepEqual(api.receiptState({ ...base, outcome: "rejected", pending: false, rejection: "project_setup_bounds" }), { kind: "rejected", code: "project_setup_bounds" });
+  assert.deepEqual(api.receiptState({ ...base, outcome: "uncertain", pending: true, rejection: null }), { kind: "unconfirmed" });
+  assert.deepEqual(api.receiptState({ ...base, outcome: "unavailable", pending: false, rejection: null }), { kind: "rejected", code: "unavailable" });
+});
