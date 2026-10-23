@@ -20,8 +20,20 @@ pools = [{ id = "pool-mixed", name = "Team", members = ["codex-a", "claude-a", "
 
 async fn flow(root: &Path) -> Result<(), String> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
-    assert!(bridge.connect().await.map_err(|e| e.code.to_owned())?.connected);
-    assert_eq!(bridge.owner_profile().await.map_err(|e| e.code.to_owned())?, None);
+    assert!(
+        bridge
+            .connect()
+            .await
+            .map_err(|e| e.code.to_owned())?
+            .connected
+    );
+    assert_eq!(
+        bridge
+            .owner_profile()
+            .await
+            .map_err(|e| e.code.to_owned())?,
+        None
+    );
     let profile = OwnerProfile {
         name: "Ada".into(),
         role: "Founder".into(),
@@ -40,7 +52,10 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert!(matches!(receipt.outcome, ActionOutcome::Applied));
     assert!(!receipt.pending);
     assert_eq!(
-        bridge.owner_profile().await.map_err(|e| e.code.to_owned())?,
+        bridge
+            .owner_profile()
+            .await
+            .map_err(|e| e.code.to_owned())?,
         Some(profile.clone())
     );
     let mut blank = profile;
@@ -49,11 +64,18 @@ async fn flow(root: &Path) -> Result<(), String> {
         bridge.save_owner_profile(blank, 2).await.unwrap_err().code,
         "owner_profile_name"
     );
-    let pools = bridge.pool_summaries().await.map_err(|e| e.code.to_owned())?;
+    let pools = bridge
+        .pool_summaries()
+        .await
+        .map_err(|e| e.code.to_owned())?;
     assert_eq!(pools.len(), 1);
     assert_eq!(pools[0].name, "Team");
     assert_eq!(pools[0].summary, "1 ChatGPT, 1 Claude, 1 Local model");
-    let words: Vec<&str> = pools[0].members.iter().map(|m| m.status_label.as_str()).collect();
+    let words: Vec<&str> = pools[0]
+        .members
+        .iter()
+        .map(|m| m.status_label.as_str())
+        .collect();
     assert_eq!(words, vec!["Not signed in", "Not signed in", "Set up"]);
     Ok(())
 }
@@ -86,7 +108,10 @@ async fn the_desktop_bridge_reads_and_saves_the_owner_profile_and_lists_pools() 
         let _ = body.await;
     }
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
-    assert!(matches!(cleanup, Ok(Ok(()))), "actual owner service must stop");
+    assert!(
+        matches!(cleanup, Ok(Ok(()))),
+        "actual owner service must stop"
+    );
     result.unwrap().unwrap().unwrap();
 }
 

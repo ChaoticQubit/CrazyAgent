@@ -179,7 +179,10 @@ pools = [
         assert_eq!(summaries.len(), 2);
         let mixed = &summaries[0];
         assert_eq!(mixed.name, "Everything");
-        assert_eq!(mixed.summary, "2 ChatGPT, 1 Claude, 1 API key, 1 URL, 1 Local model");
+        assert_eq!(
+            mixed.summary,
+            "2 ChatGPT, 1 Claude, 1 API key, 1 URL, 1 Local model"
+        );
         assert_eq!(mixed.project_count, 1);
         let status: Vec<(&str, &str, &str)> = mixed
             .members

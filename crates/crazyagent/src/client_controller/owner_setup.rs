@@ -37,8 +37,10 @@ impl OwnerController {
         let mut pools = Vec::new();
         let mut offset = 0u8;
         loop {
-            let OwnerData::PoolSummaries { pools: page, next_offset } =
-                self.read(OwnerRead::PoolSummaries { offset }).await?.data
+            let OwnerData::PoolSummaries {
+                pools: page,
+                next_offset,
+            } = self.read(OwnerRead::PoolSummaries { offset }).await?.data
             else {
                 return Err(EngineError("controller_read_response".into()));
             };

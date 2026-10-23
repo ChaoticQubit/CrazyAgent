@@ -70,16 +70,16 @@ impl OwnerProfile {
     /// Input: an untrusted profile. Output: Ok, or the code naming the first
     /// field that is blank, too long or holds control characters.
     pub fn validate(&self) -> Result<(), EngineError> {
-        if self.name.trim().is_empty() || self.name.len() > NAME_BYTES_MAX || !single_line(&self.name)
+        if self.name.trim().is_empty()
+            || self.name.len() > NAME_BYTES_MAX
+            || !single_line(&self.name)
         {
             return Err(error("owner_profile_name"));
         }
         if self.role.len() > ROLE_BYTES_MAX || !single_line(&self.role) {
             return Err(error("owner_profile_role"));
         }
-        if self.bio.len() > BIO_BYTES_MAX
-            || self.bio.chars().any(|c| c.is_control() && c != '\n')
-        {
+        if self.bio.len() > BIO_BYTES_MAX || self.bio.chars().any(|c| c.is_control() && c != '\n') {
             return Err(error("owner_profile_bio"));
         }
         if self.preferred_stack.len() > STACK_ITEMS_MAX
@@ -175,16 +175,16 @@ pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineE
         let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
         let profile: OwnerProfile =
             serde_json::from_str(&body).map_err(|_| error("owner_profile_invalid"))?;
-        profile.validate().map_err(|_| error("owner_profile_invalid"))?;
+        profile
+            .validate()
+            .map_err(|_| error("owner_profile_invalid"))?;
         Ok(profile)
     })
     .transpose()
 }
 
 pub(crate) fn read(tx: &Transaction<'_>) -> Result<OwnerData, EngineError> {
-    Ok(OwnerData::OwnerProfile {
-        profile: load(tx)?,
-    })
+    Ok(OwnerData::OwnerProfile { profile: load(tx)? })
 }
 
 #[cfg(test)]
@@ -215,9 +215,18 @@ mod tests {
             (|p| p.role = "a\tb".into(), "owner_profile_role"),
             (|p| p.bio = "b".repeat(1001), "owner_profile_bio"),
             (|p| p.bio = "a\u{7}b".into(), "owner_profile_bio"),
-            (|p| p.preferred_stack = vec!["x".into(); 2], "owner_profile_stack"),
-            (|p| p.preferred_stack = vec![" ".into()], "owner_profile_stack"),
-            (|p| p.preferred_stack = vec!["s".repeat(41)], "owner_profile_stack"),
+            (
+                |p| p.preferred_stack = vec!["x".into(); 2],
+                "owner_profile_stack",
+            ),
+            (
+                |p| p.preferred_stack = vec![" ".into()],
+                "owner_profile_stack",
+            ),
+            (
+                |p| p.preferred_stack = vec!["s".repeat(41)],
+                "owner_profile_stack",
+            ),
             (
                 |p| p.preferred_stack = (0..13).map(|i| format!("t{i}")).collect(),
                 "owner_profile_stack",
@@ -266,9 +275,7 @@ mod tests {
             name: "n".repeat(NAME_BYTES_MAX),
             role: "r".repeat(ROLE_BYTES_MAX),
             bio: "b".repeat(BIO_BYTES_MAX),
-            preferred_stack: (0..STACK_ITEMS_MAX)
-                .map(|i| format!("{i:0>40}"))
-                .collect(),
+            preferred_stack: (0..STACK_ITEMS_MAX).map(|i| format!("{i:0>40}")).collect(),
             working_style: WorkingStyle::default(),
         };
         largest.validate().unwrap();
