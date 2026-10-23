@@ -297,6 +297,7 @@ fn configured_plan(
     };
     let pool = AccountPool {
         id: reference("pool")?,
+        name: None,
         members: vec![connection.id.clone()],
         projects: Vec::new(),
         roles: Vec::new(),

@@ -50,6 +50,9 @@
     "allow-desktop-master-turns",
     "allow-desktop-open-master",
     "allow-desktop-submit-master",
-    "allow-desktop-close-master"
+    "allow-desktop-close-master",
+    "allow-desktop-owner-profile",
+    "allow-desktop-save-owner-profile",
+    "allow-desktop-pool-summaries"
   ]
 }

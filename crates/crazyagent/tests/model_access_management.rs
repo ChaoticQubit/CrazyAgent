@@ -271,9 +271,7 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
             .result,
         OwnerResult::Applied
     );
-    let account_only_id = resolve_config(&path, &fixture.root.path().join("project.toml"))
-        .unwrap()
-        .id;
+    let account_only = resolve_config(&path, &fixture.root.path().join("project.toml")).unwrap();
     assert_eq!(
         fixture
             .edit(
@@ -289,6 +287,7 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
     );
     let pool = crazyagent::config::AccountPool {
         id: reference("pool"),
+        name: None,
         members: vec![reference("connection")],
         projects: vec![reference("project")],
         roles: vec![reference("implementer")],
@@ -351,8 +350,24 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
     assert!(
         matches!(record.data, OwnerData::ModelAccessRecord { record: ModelAccessRecord::Connection { connection }, .. } if connection == replacement)
     );
+    let assigned = fixture
+        .edit(
+            "remove-assigned-pool",
+            RemovePool {
+                id: reference("pool"),
+            },
+        )
+        .await;
+    assert_eq!(
+        assigned.result,
+        OwnerResult::Rejected {
+            code: "pool_in_use".into()
+        }
+    );
+    assert_eq!(assigned.current_revision.value(), 4);
     let mut replacement_pool = pool;
     replacement_pool.fallback_allowed = false;
+    replacement_pool.projects = vec![];
     assert_eq!(
         fixture
             .edit(
@@ -392,11 +407,15 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
             .value(),
         7
     );
+    let mut approved = account_only.settings.clone();
+    approved.routing.approved_accounts = vec![reference("account")];
+    approved.allowed_destinations = vec![reference("local")];
     assert_eq!(
         resolve_config(&path, &fixture.root.path().join("project.toml"))
             .unwrap()
-            .id,
-        account_only_id
+            .settings,
+        approved,
+        "removing everything but the account leaves only the approval the project assignment granted"
     );
     assert_eq!(
         fixture
@@ -412,9 +431,12 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
         8
     );
     let current = std::fs::read_to_string(&path).unwrap();
+    let mut remaining = current.lines();
     assert!(
-        current.starts_with(&original),
-        "unrelated TOML text must survive exactly"
+        original
+            .lines()
+            .all(|line| remaining.any(|candidate| candidate == line)),
+        "every unrelated TOML line must survive exactly and in order: {current}"
     );
     assert_eq!(
         std::fs::read(fixture.root.path().join("project.toml")).unwrap(),
@@ -442,7 +464,8 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM configs", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9,
+        "the kept assignment approval makes the final config distinct from the account-only one"
     );
 }
 
@@ -1025,6 +1048,7 @@ fn wire_rejects_secret_fields_client_paths_and_oversized_metadata() {
     let edit = crazyagent::config::ModelAccessEdit::CreatePool {
         pool: crazyagent::config::AccountPool {
             id: reference("pool"),
+            name: None,
             members: vec![reference("member"); 10000],
             projects: vec![reference("project")],
             roles: vec![reference("role")],
@@ -1474,6 +1498,7 @@ async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
     }
     let pool = AccountPool {
         id: reference("unassigned-pool"),
+        name: None,
         members: vec![reference("connection")],
         projects: vec![],
         roles: vec![],

@@ -156,6 +156,10 @@ pub enum Command {
         mutation: crate::conversation::ConversationMutation,
     },
     #[serde(skip_deserializing)]
+    OwnerProfile {
+        profile: crate::owner_profile::OwnerProfile,
+    },
+    #[serde(skip_deserializing)]
     ProposeBaseline {
         draft: crate::verification::BaselineDraft,
     },

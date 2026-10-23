@@ -804,9 +804,7 @@ impl State {
                                     self.confirmation = None;
                                 }
                                 OwnerResult::Rejected { code } => {
-                                    self.notice = format!(
-                                        "Engine rejected metadata: {code}; values retained; Ctrl-P refreshes"
-                                    );
+                                    self.notice = rejection_notice(&code);
                                     self.confirmation = None;
                                 }
                                 OwnerResult::VerificationUnavailable { .. } => {
@@ -1162,6 +1160,19 @@ pub(super) fn rcli_home_supported(connection: &ModelConnection) -> bool {
 #[path = "model_access_tests.rs"]
 mod tests;
 
+/// Words the notice for a refused metadata edit.
+/// Input: the engine rejection code. Output: the plain sentence for a known pool
+/// refusal, else the code itself, followed by the retained-values hint.
+fn rejection_notice(code: &str) -> String {
+    match crate::config::plain_problem(code) {
+        Some(text) => format!(
+            "{}; values retained; Ctrl-P refreshes",
+            text.trim_end_matches('.')
+        ),
+        None => format!("Engine rejected metadata: {code}; values retained; Ctrl-P refreshes"),
+    }
+}
+
 fn record_in(record: &ModelAccessRecord, collection: ModelAccessCollection) -> bool {
     matches!(
         (record, collection),
@@ -1273,6 +1284,7 @@ impl Form {
                 ("Role IDs", &[], 16384),
                 ("Fallback allowed", &["false", "true"], 256),
                 ("Provider quota policy", &["bounded_attempt", "strict"], 256),
+                ("Pool name (optional)", &[], 256),
             ],
         };
         Self {
@@ -1343,6 +1355,7 @@ impl Form {
                     refs(&pool.roles),
                     pool.fallback_allowed.to_string(),
                     provider_quota_policy_name(pool.provider_quota_policy).into(),
+                    pool.name.unwrap_or_default(),
                 ],
             ),
         };
@@ -1460,6 +1473,7 @@ impl Form {
             ModelAccessCollection::Pools => {
                 let pool = AccountPool {
                     id: reference(0)?,
+                    name: Some(value(6)).filter(|name| !name.is_empty()),
                     members: references(1)?,
                     projects: references(2)?,
                     roles: references(3)?,

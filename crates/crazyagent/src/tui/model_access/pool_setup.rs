@@ -58,6 +58,7 @@ impl Setup {
         self.pool = Some(AccountPool {
             id: CredentialRef::new(format!("pool-{stem}-{nonce}"))
                 .map_err(|error| error.to_string())?,
+            name: Some(self.label.trim().to_owned()).filter(|name| !name.is_empty()),
             members: Vec::new(),
             projects: Vec::new(),
             roles: Vec::new(),
@@ -69,8 +70,8 @@ impl Setup {
     }
 
     fn edit(&self) -> Result<ModelAccessEdit, String> {
-        if self.members.is_empty() || self.members.len() > 64 {
-            return Err("Choose between 1 and 64 saved connections".into());
+        if self.members.is_empty() || self.members.len() > crate::config::POOL_MEMBERS_MAX {
+            return Err("Choose between 1 and 15 saved accounts".into());
         }
         let mut pool = self.pool.clone().ok_or("Confirm a pool label first")?;
         pool.members = self.members.iter().cloned().collect();

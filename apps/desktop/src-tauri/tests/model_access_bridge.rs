@@ -183,6 +183,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
         }
         let pool = AccountPool {
             id: reference("pool"),
+            name: None,
             members: vec![reference("connection")],
             projects: vec![reference("project")],
             roles: vec![reference("builder")],
@@ -204,10 +205,22 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
         {
             return Err(format!("real dependency rejection required: {rejected:?}").into());
         }
+        let in_use = h
+            .submit(
+                RemovePool {
+                    id: reference("pool"),
+                },
+                6,
+            )
+            .await?;
+        if in_use.outcome != ActionOutcome::Rejected || in_use.rejection != Some("pool_in_use") {
+            return Err(format!("an assigned pool must not be removed: {in_use:?}").into());
+        }
         let mut pool = pool;
         pool.roles = vec![reference("reviewer")];
+        pool.projects = vec![];
         pool.fallback_allowed = true;
-        applied(&h.submit(ReplacePool { pool }, 6).await?)?;
+        applied(&h.submit(ReplacePool { pool }, 7).await?)?;
         let actual = resolve_config(
             &h.root.path().join("global.toml"),
             &h.root.path().join("project.toml"),
@@ -226,7 +239,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
                 RemovePool {
                     id: reference("pool"),
                 },
-                7,
+                8,
             )
             .await?,
         )?;
@@ -235,7 +248,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
                 RemoveConnection {
                     id: reference("connection"),
                 },
-                8,
+                9,
             )
             .await?,
         )?;
@@ -244,7 +257,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
                 RemoveAccount {
                     account_ref: reference("account"),
                 },
-                9,
+                10,
             )
             .await?,
         )?;

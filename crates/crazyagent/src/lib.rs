@@ -12,6 +12,8 @@ pub mod master_session;
 pub mod memory;
 pub mod model_gateway;
 pub mod project_setup;
+pub mod owner_profile;
+pub mod pools;
 pub mod protocol;
 pub mod qualification;
 pub mod rcli_host;

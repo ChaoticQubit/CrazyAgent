@@ -129,6 +129,14 @@ export function errorMessage(error: unknown): string {
     account_not_found: "That account reference no longer exists. Refresh the metadata.",
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
+    pool_member_limit: "A pool can hold up to 15 accounts",
+    pool_in_use: "This pool is used by a project. Remove it from the project first.",
+    pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
+    owner_profile_name: "Enter your name, up to 100 characters.",
+    owner_profile_role: "Keep the role on one line, up to 100 characters.",
+    owner_profile_bio: "Keep the bio under 1000 characters.",
+    owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
+    owner_profile_bounds: "The profile is too large. Shorten it and save again.",
     model_access_record_not_found: "That metadata identity was not found. Refresh the collection and choose a current record.",
     owner_revoked: "Desktop owner authority was revoked. The engine host must restore it before reconnecting.",
     stale_revision: "The engine revision changed. Refresh and review retained values before saving.",
@@ -207,7 +215,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "master";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "master" | "owner_profile";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -444,6 +452,7 @@ export interface ModelConnection {
 
 export interface AccountPool {
   id: string;
+  name?: string;
   members: string[];
   projects: string[];
   roles: string[];
@@ -550,6 +559,45 @@ export function inspectModelAccess(collection: ModelAccessCollection, id: string
 
 export function editModelAccess(ticket: string, edit: ModelAccessEdit, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_edit_model_access", { ticket, edit, generation });
+}
+
+export interface OwnerProfile {
+  name: string;
+  role: string;
+  bio: string;
+  preferred_stack: string[];
+  working_style: { detail: "terse" | "detailed"; initiative: "ask_first" | "act_first" };
+}
+
+export interface PoolMember {
+  id: string;
+  kind: "chatgpt" | "claude" | "api_key" | "url" | "local" | "other";
+  provider: string;
+  status: "signed_in" | "not_signed_in" | "set_up";
+  status_label: string;
+}
+
+export interface PoolSummary {
+  id: string;
+  name: string;
+  summary: string;
+  members: PoolMember[];
+  project_count: number;
+}
+
+/** Reads the owner's first-run profile. Output: null on first run, which shows the first-run page. */
+export function ownerProfile(): Promise<OwnerProfile | null> {
+  return invoke<OwnerProfile | null>("desktop_owner_profile");
+}
+
+/** Saves or updates the owner profile. Inputs: the full profile and a fresh draft generation. */
+export function saveOwnerProfile(profile: OwnerProfile, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_save_owner_profile", { profile, generation });
+}
+
+/** Reads every pool with plain counts such as "2 ChatGPT, 1 Claude" and member status words. */
+export function poolSummaries(): Promise<PoolSummary[]> {
+  return invoke<PoolSummary[]>("desktop_pool_summaries");
 }
 
 export interface MasterTurn {

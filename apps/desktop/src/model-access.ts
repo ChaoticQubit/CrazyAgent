@@ -16,6 +16,7 @@ export interface ModelAccessForm {
   auth: ModelAuthentication["method"];
   credential: string;
   members: string;
+  name: string;
   projects: string;
   roles: string;
   fallback: boolean;
@@ -61,7 +62,7 @@ export function configuredAccountInput(provider: unknown, label: unknown, endpoi
 }
 
 export function newForm(collection: ModelAccessCollection, ticket: string): ModelAccessForm {
-  return { collection, ticket, action: "create", id: "", provider: "", harness: "", protocol: "", account: "", endpoint: "http", url: "", model: "", author: "", auth: "none", credential: "", members: "", projects: "", roles: "", fallback: false, providerQuotaPolicy: "bounded_attempt" };
+  return { collection, ticket, action: "create", id: "", provider: "", harness: "", protocol: "", account: "", endpoint: "http", url: "", model: "", author: "", auth: "none", credential: "", members: "", name: "", projects: "", roles: "", fallback: false, providerQuotaPolicy: "bounded_attempt" };
 }
 
 function quotaPolicy(value: unknown): ModelAccessForm["providerQuotaPolicy"] {
@@ -86,7 +87,7 @@ export function formFromRecord(record: ModelAccessRecord, ticket: string, remove
   }
   if (record.kind === "pool") {
     const p = record.pool;
-    return { ...form, members: p.members.join(", "), projects: p.projects.join(", "), roles: p.roles.join(", "), fallback: p.fallback_allowed, providerQuotaPolicy: quotaPolicy(p.provider_quota_policy === undefined ? "bounded_attempt" : p.provider_quota_policy) };
+    return { ...form, members: p.members.join(", "), name: p.name ?? "", projects: p.projects.join(", "), roles: p.roles.join(", "), fallback: p.fallback_allowed, providerQuotaPolicy: quotaPolicy(p.provider_quota_policy === undefined ? "bounded_attempt" : p.provider_quota_policy) };
   }
   return form;
 }
@@ -103,12 +104,27 @@ function references(value: string, allowEmpty = false): string[] {
   return items;
 }
 
+export const POOL_MEMBERS_MAX = 15;
+
+function poolMembers(value: string): string[] {
+  const members = references(value);
+  if (members.length > POOL_MEMBERS_MAX) throw new Error("A pool can hold up to 15 accounts");
+  return members;
+}
+
+function poolName(value: string): { name?: string } {
+  const name = value.trim();
+  if (!name) return {};
+  if ([...name].length > 64 || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) throw new Error("Use a pool name of 1 to 64 characters, without control characters.");
+  return { name };
+}
+
 export function setPoolConnection(form: ModelAccessForm, id: string, selected: boolean): ModelAccessForm {
   if (form.collection !== "pools" || form.action === "remove") throw new Error("Choose connections only for an editable pool.");
   const connection = reference(id);
   const members = references(form.members, true);
   if (members.includes(connection) === selected) return form;
-  if (selected && members.length === 64) throw new Error("An account pool allows at most 64 connections.");
+  if (selected && members.length >= POOL_MEMBERS_MAX) throw new Error("A pool can hold up to 15 accounts");
   return { ...form, members: (selected ? [...members, connection] : members.filter((member) => member !== connection)).join(", ") };
 }
 
@@ -134,7 +150,7 @@ export function editFromForm(form: ModelAccessForm): ModelAccessEdit {
   if (form.action === "remove") return { kind: form.collection === "connections" ? "remove_connection" : "remove_pool", id };
   if (form.collection === "pools") {
     const policy = quotaPolicy(form.providerQuotaPolicy);
-    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, members: references(form.members), projects: references(form.projects, true), roles: references(form.roles, true), fallback_allowed: form.fallback, ...(policy === "strict" ? { provider_quota_policy: policy } : {}) } };
+    return { kind: form.action === "create" ? "create_pool" : "replace_pool", pool: { id, ...poolName(form.name), members: poolMembers(form.members), projects: references(form.projects, true), roles: references(form.roles, true), fallback_allowed: form.fallback, ...(policy === "strict" ? { provider_quota_policy: policy } : {}) } };
   }
   if (!/^[A-Za-z0-9_.:/@+-]{1,256}$/.test(form.model)) throw new Error("Model ID requires 1 to 256 safe ASCII model identifier characters.");
   if (form.endpoint === "native" && form.protocol !== "native") throw new Error("Native endpoints require the native protocol.");

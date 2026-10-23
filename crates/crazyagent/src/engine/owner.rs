@@ -146,6 +146,9 @@ pub enum OwnerMutation {
     Conversation {
         mutation: crate::conversation::ConversationMutation,
     },
+    SaveOwnerProfile {
+        profile: crate::owner_profile::OwnerProfile,
+    },
     ProposeBaseline {
         draft: BaselineDraft,
     },
@@ -263,6 +266,12 @@ impl OwnerMutation {
                 mutation.validate()?;
                 Command::OwnerConversation {
                     mutation: mutation.clone(),
+                }
+            }
+            Self::SaveOwnerProfile { profile } => {
+                profile.validate()?;
+                Command::OwnerProfile {
+                    profile: profile.clone(),
                 }
             }
             Self::ProposeBaseline { draft } => Command::ProposeBaseline {
@@ -398,6 +407,10 @@ pub enum OwnerRead {
         path: String,
         offset: u64,
     },
+    OwnerProfile,
+    PoolSummaries {
+        offset: u8,
+    },
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -454,7 +467,9 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ResearchJobs { .. }
-            | Self::ProjectContext { .. } => return Ok(None),
+            | Self::ProjectContext { .. }
+            | Self::OwnerProfile
+            | Self::PoolSummaries { .. } => return Ok(None),
             Self::ProjectCatalog { research, .. } => {
                 if research.len() > crate::project_setup::ResearchKind::ALL.len() {
                     return Err(failure("research_duplicate"));
@@ -770,6 +785,13 @@ pub enum OwnerData {
     },
     ProjectContextItem {
         chunk: crate::project_setup::ContextChunk,
+    },
+    OwnerProfile {
+        profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    PoolSummaries {
+        pools: Vec<crate::pools::PoolSummary>,
+        next_offset: Option<u8>,
     },
     Page {
         items: Vec<OwnerSummary>,

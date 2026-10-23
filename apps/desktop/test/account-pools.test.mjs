@@ -30,8 +30,29 @@ test("connection checkbox edits preserve the exact pool and other selected conne
   assert.throws(() => modelAccess.setPoolConnection(form, "unsafe value", true));
   assert.throws(() => modelAccess.setPoolConnection({ ...form, collection: "connections" }, "second", true));
   assert.throws(() => modelAccess.setPoolConnection({ ...form, action: "remove" }, "second", true));
-  const full = { ...form, members: Array.from({ length: 64 }, (_, index) => `connection-${index}`).join(", ") };
-  assert.throws(() => modelAccess.setPoolConnection(full, "overflow", true));
+  const full = { ...form, members: Array.from({ length: 15 }, (_, index) => `connection-${index}`).join(", ") };
+  assert.throws(() => modelAccess.setPoolConnection(full, "overflow", true), /A pool can hold up to 15 accounts/);
   assert.equal(modelAccess.setPoolConnection(full, "connection-0", true).members, full.members);
   assert.equal(modelAccess.setPoolConnection({ ...form, members: "only" }, "only", false).members, "");
+});
+
+test("a pool keeps its display name through edits and a rename leaves its id alone", () => {
+  const pool = { id: "pool-work-1", name: "Work", members: ["first"], projects: [], roles: [], fallback_allowed: false };
+  const form = modelAccess.formFromRecord({ kind: "pool", pool }, "inspected-pool");
+  assert.equal(form.name, "Work");
+  assert.deepEqual(modelAccess.editFromForm(form), { kind: "replace_pool", pool });
+  const renamed = modelAccess.editFromForm({ ...form, name: "  Daily work  " });
+  assert.deepEqual(renamed, { kind: "replace_pool", pool: { ...pool, name: "Daily work" } });
+  const unnamed = modelAccess.editFromForm({ ...form, name: "" });
+  assert.equal("name" in unnamed.pool, false, "an empty name falls back to the pool id");
+  assert.throws(() => modelAccess.editFromForm({ ...form, name: "x".repeat(65) }), /1 to 64 characters/);
+  assert.throws(() => modelAccess.editFromForm({ ...form, name: "tab\there" }), /1 to 64 characters/);
+  assert.equal(modelAccess.newForm("pools", "t").name, "");
+});
+
+test("a pool form refuses a sixteenth account before the engine sees it", () => {
+  const form = { ...modelAccess.newForm("pools", "t"), id: "pool-big", members: Array.from({ length: 16 }, (_, index) => `c-${index}`).join(", ") };
+  assert.throws(() => modelAccess.editFromForm(form), /A pool can hold up to 15 accounts/);
+  const fifteen = { ...form, members: Array.from({ length: 15 }, (_, index) => `c-${index}`).join(", ") };
+  assert.equal(modelAccess.editFromForm(fifteen).pool.members.length, 15);
 });

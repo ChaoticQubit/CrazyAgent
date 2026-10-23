@@ -18,6 +18,8 @@ use crazyagent::memory::ReviewDecision;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
+use crazyagent::owner_profile::OwnerProfile;
+use crazyagent::pools::PoolSummary;
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -483,6 +485,35 @@ async fn desktop_read_account_profile(
 }
 
 #[tauri::command]
+async fn desktop_owner_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Option<OwnerProfile>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.owner_profile().await
+}
+
+#[tauri::command]
+async fn desktop_save_owner_profile(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    profile: OwnerProfile,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.save_owner_profile(profile, generation).await
+}
+
+#[tauri::command]
+async fn desktop_pool_summaries(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<PoolSummary>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.pool_summaries().await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -629,6 +660,9 @@ pub fn run() {
             desktop_cancel_native_auth,
             desktop_logout_native_auth,
             desktop_submit_claude_auth_code,
+            desktop_owner_profile,
+            desktop_save_owner_profile,
+            desktop_pool_summaries,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
