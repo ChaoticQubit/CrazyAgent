@@ -16,12 +16,15 @@ const PANEL_TEXT_LINES: usize = 2;
 
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
-/// to queue, whose reply comes back through `apply`.
+/// to queue, whose reply comes back through `apply`; AddSkill and AddServer
+/// ask the host to open the add form for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
     Handled,
     Send(SettingsJob),
+    AddSkill,
+    AddServer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +206,8 @@ impl ProjectPlugins {
                 PluginsReply::Handled
             }
             KeyCode::Char(' ') => self.toggle(),
+            KeyCode::Char('a') => PluginsReply::AddSkill,
+            KeyCode::Char('m') => PluginsReply::AddServer,
             KeyCode::Enter => match self.item() {
                 Some(Item::Server(index))
                     if self.servers[index].status == ServerStatus::WaitingForApproval =>
@@ -348,7 +353,7 @@ impl ProjectPlugins {
 
         if self.skills.is_empty() {
             lines.push(Row::of(
-                "  No skills yet. Add them in Settings, Plugins and skills.",
+                "  No skills yet. Press a to add one for this project.",
                 look.muted,
             ));
         }
@@ -379,7 +384,7 @@ impl ProjectPlugins {
         lines.push(self.heading("MCP servers", self.servers.len(), content, look));
         if self.servers.is_empty() {
             lines.push(Row::of(
-                "  No MCP servers yet. Add them in Settings, Plugins and skills.",
+                "  No MCP servers yet. Press m to add one for this project.",
                 look.muted,
             ));
         }
@@ -508,7 +513,12 @@ impl ProjectPlugins {
         if self.confirm.is_some() {
             return vec![("y", "Approve"), ("n", "Not now")];
         }
-        let mut help = vec![("\u{2191}\u{2193}", "Move"), ("Space", "On or off here")];
+        let mut help = vec![
+            ("\u{2191}\u{2193}", "Move"),
+            ("Space", "On or off here"),
+            ("a", "Add skill"),
+            ("m", "Add MCP server"),
+        ];
         if let Some(Item::Server(index)) = self.item()
             && self.servers[index].status == ServerStatus::WaitingForApproval
         {

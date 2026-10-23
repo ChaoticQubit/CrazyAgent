@@ -377,6 +377,34 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
 }
 
 #[test]
+fn a_and_m_ask_the_host_for_the_project_add_forms() {
+    let mut view = loaded();
+    assert!(matches!(
+        view.key(press(KeyCode::Char('a'))),
+        PluginsReply::AddSkill
+    ));
+    assert!(matches!(
+        view.key(press(KeyCode::Char('m'))),
+        PluginsReply::AddServer
+    ));
+    let help = frame(&view, 120, 36);
+    assert!(help.last().unwrap().contains("a Add skill"));
+    assert!(help.last().unwrap().contains("m Add MCP server"));
+    let mut confirming = loaded();
+    for _ in 0..5 {
+        confirming.key(press(KeyCode::Down));
+    }
+    confirming.key(press(KeyCode::Enter));
+    assert!(
+        matches!(
+            confirming.key(press(KeyCode::Char('a'))),
+            PluginsReply::Handled
+        ),
+        "the approval question keeps every key"
+    );
+}
+
+#[test]
 fn long_lists_scroll_with_the_cursor() {
     let mut view = ProjectPlugins::new(project());
     view.next_job();

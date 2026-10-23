@@ -52,6 +52,7 @@ pub(in crate::tui) enum SettingsJob {
 /// Input: built by the plugins pages. Output: one plugins call on the engine.
 pub(in crate::tui) enum PluginChange {
     AddSkill {
+        scope: Scope,
         folder: String,
     },
     SetSkill {
@@ -62,6 +63,7 @@ pub(in crate::tui) enum PluginChange {
         id: String,
     },
     AddServer {
+        scope: Scope,
         name: String,
         spec: ServerSpec,
         secrets: Vec<(String, AccountSecret)>,
@@ -376,21 +378,21 @@ impl NativeOwner {
     ) -> Result<Option<ServerView>, String> {
         let controller = self.settings_controller()?;
         let done = match change {
-            PluginChange::AddSkill { folder } => controller
-                .add_skill(Scope::Global, folder)
-                .await
-                .map(|_| None),
+            PluginChange::AddSkill { scope, folder } => {
+                controller.add_skill(scope, folder).await.map(|_| None)
+            }
             PluginChange::SetSkill { id, enabled } => controller
                 .set_skill_enabled(id, enabled)
                 .await
                 .map(|_| None),
             PluginChange::RemoveSkill { id } => controller.remove_skill(id).await.map(|()| None),
             PluginChange::AddServer {
+                scope,
                 name,
                 spec,
                 secrets,
             } => controller
-                .add_mcp_server(Scope::Global, name, spec, secrets)
+                .add_mcp_server(scope, name, spec, secrets)
                 .await
                 .map(Some),
             PluginChange::Approve { id, spec } => {
@@ -880,6 +882,7 @@ mod tests {
         .unwrap();
         let added = native
             .settings(SettingsJob::Plugin(PluginChange::AddSkill {
+                scope: Scope::Global,
                 folder: folder.display().to_string(),
             }))
             .await;
