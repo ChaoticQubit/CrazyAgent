@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 fn codex() -> PathBuf {
     let path = std::env::var_os("CRAZYAGENT_CODEX")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/Caskroom/codex/0.163.0/bin/codex"));
+        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
+        .canonicalize()
+        .expect("real codex binary required");
     assert!(
         path.is_file(),
         "real codex binary required: {}",
@@ -58,7 +60,7 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let database = state.join("research.sqlite3");
     let jobs = ResearchJobs::open(&database).unwrap();
     let market = jobs
-        .enqueue("project-a", "market_research", "codex", true)
+        .enqueue("project-a", "market_research", "codex", false)
         .unwrap();
     let pools: Arc<Mutex<BTreeMap<String, AccountPick>>> = Arc::new(Mutex::new(BTreeMap::new()));
     pools

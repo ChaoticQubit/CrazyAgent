@@ -5,7 +5,9 @@ use std::process::Command;
 fn codex() -> PathBuf {
     let path = std::env::var_os("CRAZYAGENT_CODEX")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/Caskroom/codex/0.163.0/bin/codex"));
+        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"))
+        .canonicalize()
+        .expect("real codex binary required");
     assert!(
         path.is_file(),
         "real codex binary required: {}",
