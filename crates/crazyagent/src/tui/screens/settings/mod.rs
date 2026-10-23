@@ -1,3 +1,4 @@
+pub mod pool_editor;
 pub mod pools;
 pub mod profile;
 
@@ -37,7 +38,7 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
             label: section.label().into(),
             section: Some(glyph(*section)),
             count: match section {
-                SettingsSection::Accounts => count(&ctx.store.accounts, ToString::to_string),
+                SettingsSection::Accounts => count(&ctx.store.accounts, |rows| rows.len().to_string()),
                 SettingsSection::Pools => count(&ctx.store.pools, |pools| pools.len().to_string()),
                 SettingsSection::Harnesses => count(&ctx.store.harnesses, ToString::to_string),
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
@@ -91,12 +92,6 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
 /// Input: the context. Output: its first screen.
 pub fn open_add_account(_ctx: &mut Ctx) -> Box<dyn Screen> {
     Box::new(super::settings_add_account::AddAccount::new())
-}
-
-/// Builds the New pool editor.
-/// Input: the context. Output: the editor screen.
-pub fn open_new_pool(_ctx: &mut Ctx) -> Box<dyn Screen> {
-    Box::new(Pending::new(SettingsSection::Pools))
 }
 
 /// A Settings section whose engine call is not in this build.
