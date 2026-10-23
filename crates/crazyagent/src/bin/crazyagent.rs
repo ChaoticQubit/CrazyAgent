@@ -14,6 +14,7 @@ const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
+crazyagent research STATE_DIR PROJECT_ID PROJECT_DIR --codex-executable ABS_PATH --endpoint URL --model MODEL [--tools on|off] [--minutes N] KIND [KIND...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -68,6 +69,15 @@ fn main() -> ExitCode {
         .is_some_and(|arg| arg == "native-auth-custodian")
     {
         return match run_native_auth_custodian(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.first().is_some_and(|arg| arg == "research") {
+        return match crazyagent::research::cli::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -298,7 +308,28 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
                 };
             }
-            service.run(stopped).await.map_err(|e| e.to_string())
+            let research = match codex.as_deref().filter(|_| writable) {
+                None => None,
+                Some(executable) => match crazyagent::research::service::start_for_engine(
+                    runtime_dir,
+                    Path::new(&args[2]),
+                    Path::new(&args[3]),
+                    executable,
+                ) {
+                    Ok(research) => Some(research),
+                    Err(error) => {
+                        return match service.shutdown().await {
+                            Ok(()) => Err(error),
+                            Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                        };
+                    }
+                },
+            };
+            let result = service.run(stopped).await.map_err(|e| e.to_string());
+            if let Some(research) = research {
+                let _ = tokio::task::spawn_blocking(move || research.stop()).await;
+            }
+            result
         }
         .await;
         signal.abort();
