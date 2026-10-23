@@ -1,0 +1,373 @@
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+/// The macOS Seatbelt launcher every project agent process runs under.
+pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+const PATH_BYTES_MAX: usize = 1024;
+const READ_ROOTS_MAX: usize = 16;
+const REMOTES_MAX: usize = 8;
+const PROFILE_BYTES_MAX: usize = 64 * 1024;
+const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
+
+const SYSTEM_READ_ROOTS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/System",
+    "/Library/Apple",
+    "/Library/Preferences",
+    "/Library/Developer/CommandLineTools",
+    "/private/etc",
+    "/private/var/db",
+    "/private/var/select",
+    "/dev",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/opt/homebrew/lib",
+    "/opt/homebrew/libexec",
+    "/opt/homebrew/opt",
+    "/opt/homebrew/Cellar",
+    "/opt/homebrew/Caskroom",
+    "/opt/homebrew/share",
+    "/opt/homebrew/etc",
+    "/usr/local/bin",
+    "/usr/local/lib",
+    "/usr/local/opt",
+    "/usr/local/Cellar",
+    "/usr/local/share",
+    "/usr/local/etc",
+];
+
+const METADATA_LITERALS: &[&str] = &[
+    "/",
+    "/etc",
+    "/var",
+    "/tmp",
+    "/private",
+    "/private/var",
+    "/opt",
+    "/opt/homebrew",
+    "/usr/local",
+    "/Library",
+    "/Library/Developer",
+];
+
+const MACH_SERVICES: &[&str] = &[
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.system.DirectoryService.libinfo_v1",
+    "com.apple.PowerManagement.control",
+    "com.apple.bsd.dirhelper",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.diagnosticd",
+    "com.apple.system.notification_center",
+    "com.apple.SecurityServer",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    "com.apple.ocspd",
+    "com.apple.networkd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.SystemConfiguration.configd",
+];
+
+/// Network reach of a sandboxed agent: open when the agent's tools are on,
+/// otherwise only the listed model endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxNetwork {
+    Open,
+    Only(Vec<SandboxRemote>),
+}
+
+/// One outbound TCP destination a tools-off agent may still reach. Seatbelt
+/// filters by port only, either on loopback or on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxRemote {
+    Loopback(u16),
+    AnyHost(u16),
+}
+
+/// Refusal to build or install a project sandbox, with a plain reason.
+#[derive(Debug)]
+pub enum SandboxError {
+    Invalid(String),
+    Io(io::Error),
+}
+
+impl fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
+            Self::Io(error) => write!(f, "sandbox I/O: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SandboxError {}
+
+impl From<io::Error> for SandboxError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/// The Seatbelt boundary for one agent of one project: writes only inside the
+/// project folder (never its `context/` or git hooks and config) and the agent's
+/// own home and temp dirs, reads of system paths plus those roots, and network
+/// per [`SandboxNetwork`].
+#[derive(Debug, Clone)]
+pub struct ProjectSandbox {
+    project_root: PathBuf,
+    agent_home: PathBuf,
+    agent_tmp: PathBuf,
+    read_roots: Vec<PathBuf>,
+    network: SandboxNetwork,
+}
+
+impl ProjectSandbox {
+    /// Validates canonical, existing, quote-free directories that neither
+    /// contain nor sit inside the owner's home, `~/.codex` or `~/.claude`.
+    pub fn new(
+        project_root: &Path,
+        agent_home: &Path,
+        agent_tmp: &Path,
+        network: SandboxNetwork,
+    ) -> Result<Self, SandboxError> {
+        let owner = owner_home()?;
+        for root in [project_root, agent_home, agent_tmp] {
+            granted_root(root, &owner)?;
+        }
+        if let SandboxNetwork::Only(remotes) = &network
+            && (remotes.len() > REMOTES_MAX
+                || remotes.iter().any(|remote| match remote {
+                    SandboxRemote::Loopback(port) | SandboxRemote::AnyHost(port) => *port == 0,
+                }))
+        {
+            return Err(invalid("network remotes must be 1..8 nonzero ports"));
+        }
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            agent_home: agent_home.to_path_buf(),
+            agent_tmp: agent_tmp.to_path_buf(),
+            read_roots: Vec::new(),
+            network,
+        })
+    }
+
+    /// Adds one extra read-only root, such as a harness install directory.
+    pub fn allow_read(mut self, root: &Path) -> Result<Self, SandboxError> {
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        granted_root(root, &owner_home()?)?;
+        self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// The project folder this sandbox confines writes to.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// The agent's managed home directory.
+    pub fn agent_home(&self) -> &Path {
+        &self.agent_home
+    }
+
+    /// The agent's managed temp directory.
+    pub fn agent_tmp(&self) -> &Path {
+        &self.agent_tmp
+    }
+
+    /// The Seatbelt profile text for this agent.
+    pub fn profile(&self) -> String {
+        let mut text = String::from("(version 1)\n(deny default)\n");
+        text.push_str("(allow process-exec)\n(allow process-fork)\n");
+        text.push_str("(allow signal (target same-sandbox))\n");
+        text.push_str("(allow process-info* (target same-sandbox))\n");
+        text.push_str("(allow sysctl-read)\n");
+        text.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
+        text.push_str("(allow ipc-posix-sem)\n");
+        text.push_str(
+            "(allow ipc-posix-shm-read* (ipc-posix-name \"apple.shm.notification_center\"))\n",
+        );
+        text.push_str("(allow pseudo-tty)\n");
+        text.push_str("(allow mach-lookup");
+        for service in MACH_SERVICES {
+            text.push_str(&format!("\n  (global-name \"{service}\")"));
+        }
+        text.push_str(")\n");
+        text.push_str("(allow file-read* file-map-executable");
+        for root in SYSTEM_READ_ROOTS {
+            text.push_str(&format!("\n  (subpath \"{root}\")"));
+        }
+        text.push_str(")\n(allow file-read*");
+        for literal in METADATA_LITERALS {
+            text.push_str(&format!("\n  (literal \"{literal}\")"));
+        }
+        text.push_str(")\n");
+        let granted = [&self.project_root, &self.agent_home, &self.agent_tmp];
+        text.push_str("(allow file-read-metadata");
+        for root in granted.iter().copied().chain(self.read_roots.iter()) {
+            text.push_str(&format!("\n  (path-ancestors \"{}\")", root.display()));
+        }
+        text.push_str(")\n(allow file-read* file-map-executable");
+        for root in granted.iter().copied().chain(self.read_roots.iter()) {
+            text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
+        }
+        text.push_str(")\n(allow file-write*");
+        for root in granted {
+            text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
+        }
+        text.push_str(")\n");
+        let project = self.project_root.display();
+        text.push_str(&format!(
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
+        ));
+        text.push_str(
+            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",
+        );
+        match &self.network {
+            SandboxNetwork::Open => {
+                text.push_str("(allow network*)\n");
+                text.push_str(
+                    "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n",
+                );
+            }
+            SandboxNetwork::Only(remotes) => {
+                for remote in remotes {
+                    let target = match remote {
+                        SandboxRemote::Loopback(port) => format!("localhost:{port}"),
+                        SandboxRemote::AnyHost(port) => format!("*:{port}"),
+                    };
+                    text.push_str(&format!(
+                        "(allow network-outbound (remote ip \"{target}\"))\n"
+                    ));
+                }
+                if remotes
+                    .iter()
+                    .any(|remote| matches!(remote, SandboxRemote::AnyHost(_)))
+                {
+                    text.push_str(
+                        "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
+                    );
+                }
+            }
+        }
+        assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(text.len() <= PROFILE_BYTES_MAX);
+        text
+    }
+
+    /// Writes the profile with mode 0600 at `path`, replacing any earlier one
+    /// atomically. The path must lie outside every writable root, so no agent
+    /// can rewrite the profile its next launch uses.
+    pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
+        let parent = path
+            .parent()
+            .filter(|parent| clean_absolute(parent) && parent.is_dir())
+            .ok_or_else(|| invalid("profile directory must exist"))?;
+        let parent = parent.canonicalize()?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.ends_with(".sb") && name.len() <= 128)
+            .ok_or_else(|| invalid("profile name must end in .sb"))?;
+        let target = parent.join(name);
+        if [&self.project_root, &self.agent_home, &self.agent_tmp]
+            .iter()
+            .any(|root| target.starts_with(root))
+        {
+            return Err(invalid("profile must live outside the sandbox's writable roots"));
+        }
+        let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(&staging)?;
+        let written = file
+            .write_all(self.profile().as_bytes())
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&staging, &target));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&staging);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// A command that runs `program` under the installed profile with a cleared
+    /// environment: HOME and TMPDIR point at the agent's own dirs, and the
+    /// process leads its own group so the whole tree can be stopped.
+    pub fn command(&self, profile: &Path, program: &Path) -> Command {
+        let mut command = Command::new(SANDBOX_EXEC);
+        command
+            .arg("-f")
+            .arg(profile)
+            .arg(program)
+            .env_clear()
+            .env("HOME", &self.agent_home)
+            .env("TMPDIR", &self.agent_tmp)
+            .env("PATH", AGENT_PATH)
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .current_dir(&self.project_root)
+            .process_group(0);
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        command
+    }
+}
+
+fn invalid(reason: &str) -> SandboxError {
+    SandboxError::Invalid(reason.into())
+}
+
+fn owner_home() -> Result<PathBuf, SandboxError> {
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .map_err(|error| SandboxError::Io(io::Error::from(error)))?
+        .ok_or_else(|| invalid("owner account is unknown"))?;
+    let home = user.dir;
+    if !clean_absolute(&home) {
+        return Err(invalid("owner home must be absolute"));
+    }
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
+fn granted_root(root: &Path, owner: &Path) -> Result<(), SandboxError> {
+    if !clean_absolute(root) || root.components().count() < 3 {
+        return Err(invalid("sandbox roots must be absolute, deep and plain"));
+    }
+    if owner.starts_with(root) {
+        return Err(invalid("sandbox roots must not contain the owner home"));
+    }
+    for private in [".codex", ".claude"] {
+        if root.starts_with(owner.join(private)) {
+            return Err(invalid("sandbox roots must not be owner harness homes"));
+        }
+    }
+    if !root.is_dir() || root.canonicalize()? != root {
+        return Err(invalid("sandbox roots must be existing canonical directories"));
+    }
+    Ok(())
+}
+
+fn clean_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && path.as_os_str().len() <= PATH_BYTES_MAX
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+        && path.to_str().is_some_and(|text| {
+            !text
+                .chars()
+                .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
+        })
+}
