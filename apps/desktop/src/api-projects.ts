@@ -242,7 +242,13 @@ export function assignedPool(pool: AccountPool, projectId: string): AccountPool 
   return { ...pool, projects, roles };
 }
 
-export type ReceiptState = { kind: "applied" } | { kind: "rejected"; code: string } | { kind: "unconfirmed" };
+/** Removes one project from a pool's assignments and keeps everything else.
+ * Inputs: the saved pool and the project id. Output: the new pool record. */
+export function unassignedPool(pool: AccountPool, projectId: string): AccountPool {
+  return pool.projects.includes(projectId) ? { ...pool, projects: pool.projects.filter((id) => id !== projectId) } : pool;
+}
+
+export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string } | { kind: "unconfirmed" };
 
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
@@ -379,15 +385,16 @@ export function loadProjects(): Promise<EngineResult<ProjectPage["items"]>> {
   });
 }
 
-/** Assigns a saved pool to a project as its master pool and checks the saved record.
- * Inputs: the project id, the pool id and a generation. Output: applied, or why not. */
-export async function assignPool(projectId: string, poolId: string, generation: number): Promise<EngineResult<ReceiptState>> {
+/** Assigns a saved pool to a project as its master pool, or removes that assignment,
+ * then reads the saved record back. Inputs: the project id, the pool id, a generation and
+ * whether to remove. Output: applied, or why not. */
+export async function assignPool(projectId: string, poolId: string, generation: number, remove = false): Promise<EngineResult<ReceiptState>> {
   return wrap("desktop_edit_model_access", async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
     const basis = await inspectModelAccess("pools", poolId);
     if (basis.record.kind !== "pool" || !basis.writable) throw { code: "invalid_pool" };
-    const pool = assignedPool(basis.record.pool, projectId);
+    const pool = remove ? unassignedPool(basis.record.pool, projectId) : assignedPool(basis.record.pool, projectId);
     if (JSON.stringify(pool) === JSON.stringify(basis.record.pool)) return { kind: "applied" } as ReceiptState;
     const state = receiptState(await editModelAccess(basis.ticket, { kind: "replace_pool", pool }, generation));
     if (state.kind !== "applied") return state;
