@@ -17,7 +17,7 @@ pub(crate) mod accounts;
 mod master_session;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    validate_configured_initial_conversation_receipt,
+    native_sign_in, validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
 #[cfg(test)]
