@@ -361,6 +361,7 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
                     edit: ModelAccessEdit::CreatePool {
                         pool: AccountPool {
                             id: CredentialRef::new("pool-one").unwrap(),
+                            name: None,
                             members: vec![router.id.clone()],
                             projects: vec![],
                             roles: vec![],
