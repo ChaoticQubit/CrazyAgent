@@ -220,7 +220,6 @@ impl Glyphs {
     }
 
     /// The provider mark shown before a provider name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "drawn by the Accounts and pool editor rows"))]
     /// Input: the plain provider name from the engine. Output: its glyph or
     /// monogram; an unknown provider gets a neutral dot.
     pub fn provider(&self, name: &str) -> &'static str {

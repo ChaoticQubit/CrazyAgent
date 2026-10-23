@@ -81,6 +81,7 @@ pub fn step(section: SettingsSection, forward: bool, ctx: &mut Ctx) -> Flow {
 pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
     match section {
         SettingsSection::Pools => Box::new(pools::Pools::new()),
+        SettingsSection::Accounts => Box::new(super::settings_accounts::Accounts::new()),
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
         other => Box::new(Pending::new(other)),
     }
@@ -89,7 +90,7 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
 /// Builds the Add account flow.
 /// Input: the context. Output: its first screen.
 pub fn open_add_account(_ctx: &mut Ctx) -> Box<dyn Screen> {
-    Box::new(Pending::new(SettingsSection::Accounts))
+    Box::new(super::settings_add_account::AddAccount::new())
 }
 
 /// Builds the New pool editor.
