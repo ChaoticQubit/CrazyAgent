@@ -131,7 +131,7 @@ impl Screen for Startup {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
-            Arrival::Connected => {
+            Arrival::Connected(_) => {
                 ctx.request(Request::Profile);
                 Flow::Handled
             }

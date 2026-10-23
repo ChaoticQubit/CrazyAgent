@@ -1,13 +1,16 @@
 use super::client::{ConversationJob, CreationJob, OwnerEvent, SetupQuery};
 use super::master_session;
+use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, ResearchJob, ResearchStatus, StoredSetup};
 use crate::protocol::{Command, CredentialRef, Cursor, ProjectId, StoredProject};
 
-/// A pool change asked for in Settings, Pools. The engine side builds the
-/// exact pool record, keeping an existing pool's projects and roles.
-/// Input: built by the pool list and editor. Output: one model access edit.
+/// A pool change asked for in Settings, Pools or a Project. The engine side
+/// builds the exact pool records, keeping an existing pool's projects and roles.
+/// Input: built by the pool list, the pool editor and the Project screen.
+/// Output: model access edits; `Assign` moves the project out of every other
+/// pool before adding it to the chosen one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
@@ -22,6 +25,23 @@ pub enum PoolChange {
     Remove {
         id: CredentialRef,
     },
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Project screen assigns pools")
+    )]
+    Assign {
+        pool: CredentialRef,
+        project: ProjectId,
+    },
+}
+
+/// The projects one pool serves, as saved in the settings document.
+/// Input: read from the engine's pool records. Output: lets the Project screen
+/// tell an assigned pool from a picked one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolScope {
+    pub pool: CredentialRef,
+    pub projects: Vec<CredentialRef>,
 }
 
 /// One account as lists show it: never a secret, only plain labels.
@@ -46,6 +66,7 @@ pub enum Request {
     Profile,
     SaveProfile { profile: OwnerProfile },
     Pools,
+    PoolProjects,
     Projects,
     EditPool { change: PoolChange },
     Setup(SetupQuery),
@@ -62,6 +83,7 @@ impl std::fmt::Debug for Request {
             Self::Profile => "Profile",
             Self::SaveProfile { .. } => "SaveProfile",
             Self::Pools => "Pools",
+            Self::PoolProjects => "PoolProjects",
             Self::Projects => "Projects",
             Self::EditPool { .. } => "EditPool",
             Self::Setup(_) => "Setup",
@@ -85,6 +107,7 @@ pub(in crate::tui) enum ShellRequest {
         generation: u64,
     },
     Pools,
+    PoolProjects,
     Projects,
     EditPool {
         change: PoolChange,
@@ -99,6 +122,7 @@ pub(in crate::tui) enum ShellEvent {
     Profile(Result<Option<OwnerProfile>, String>),
     ProfileSaved(Result<(), String>),
     Pools(Result<Vec<PoolSummary>, String>),
+    PoolProjects(Result<Vec<PoolScope>, String>),
     Projects(Result<Vec<ProjectCard>, String>),
     PoolEdited(Result<(), String>),
 }
@@ -110,11 +134,12 @@ pub(in crate::tui) enum ShellEvent {
     reason = "owner and wire replies are read by the project screens"
 )]
 pub enum Arrival {
-    Connected,
+    Connected(Option<OwnerConnectionIdentity>),
     Disconnected(String),
     Profile(Result<Option<OwnerProfile>, String>),
     ProfileSaved(Result<(), String>),
     Pools(Result<Vec<PoolSummary>, String>),
+    PoolProjects(Result<Vec<PoolScope>, String>),
     Projects(Result<Vec<ProjectCard>, String>),
     PoolEdited(Result<(), String>),
     Owner(Box<OwnerEvent>),
@@ -231,6 +256,7 @@ impl ShellEvent {
             ShellRequest::Profile => Self::Profile(Err(problem)),
             ShellRequest::SaveProfile { .. } => Self::ProfileSaved(Err(problem)),
             ShellRequest::Pools => Self::Pools(Err(problem)),
+            ShellRequest::PoolProjects => Self::PoolProjects(Err(problem)),
             ShellRequest::Projects => Self::Projects(Err(problem)),
             ShellRequest::EditPool { .. } => Self::PoolEdited(Err(problem)),
         }

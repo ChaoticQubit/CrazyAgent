@@ -404,14 +404,16 @@ impl Shell {
     pub fn arrive(&mut self, arrival: Arrival) {
         let was_ready = self.ctx.link == Link::Ready;
         match &arrival {
-            Arrival::Connected => {
+            Arrival::Connected(identity) => {
                 if self.ctx.link == Link::Reconnecting {
                     self.ctx
                         .say(Message::success("Connected to the engine again.", ""));
                 }
                 self.ctx.link = Link::Ready;
+                self.ctx.identity = identity.clone();
             }
             Arrival::Disconnected(problem) => {
+                self.ctx.identity = None;
                 let started = self
                     .stack
                     .first()
@@ -439,6 +441,12 @@ impl Shell {
                     Err(problem) => Load::Failed(problem.clone()),
                 }
             }
+            Arrival::PoolProjects(result) => {
+                self.ctx.store.pool_projects = match result {
+                    Ok(scopes) => Load::Ready(scopes.clone()),
+                    Err(problem) => Load::Failed(problem.clone()),
+                }
+            }
             Arrival::Projects(result) => match result {
                 Ok(cards) => {
                     self.ctx.store.projects = Load::Ready(cards.clone());
@@ -462,7 +470,7 @@ impl Shell {
             }
         }
         self.apply(top_flow);
-        if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected) {
+        if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.refresh();
         }
     }
@@ -904,7 +912,7 @@ mod tests {
             shell.ctx.message().unwrap().lead,
             "Lost the connection to the engine."
         );
-        shell.arrive(Arrival::Connected);
+        shell.arrive(Arrival::Connected(None));
         assert_eq!(shell.ctx.link, Link::Ready);
         assert_eq!(
             shell.ctx.message().unwrap().lead,
@@ -931,14 +939,14 @@ mod tests {
         assert!(shell.ctx.take_reconnect());
         assert_eq!(shell.ctx.link, Link::Connecting);
 
-        shell.arrive(Arrival::Connected);
+        shell.arrive(Arrival::Connected(None));
         assert!(drain(&mut shell).contains(&"Profile".to_owned()));
         shell.arrive(Arrival::Profile(Ok(None)));
         assert_eq!(shell.place(), Some(Place::Welcome));
         assert_eq!(shell.depth(), 1);
 
         let mut shell = Shell::new(ctx());
-        shell.arrive(Arrival::Connected);
+        shell.arrive(Arrival::Connected(None));
         let profile = OwnerProfile {
             name: "Mira".into(),
             role: String::new(),

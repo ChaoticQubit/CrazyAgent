@@ -168,6 +168,26 @@ impl Default for State {
 }
 
 impl State {
+    /// The current master transcript, read-only, for the Project screen.
+    /// Input: none. Output: the session, its turns and the latest owner input
+    /// once a read arrived; None before the first read.
+    #[expect(dead_code, reason = "the Project screen draws the master transcript")]
+    pub fn transcript(
+        &self,
+    ) -> Option<(
+        Option<&MasterSessionView>,
+        &[MasterTurnView],
+        Option<&ConversationEntry>,
+    )> {
+        self.view.as_ref().map(|view| {
+            (
+                view.session.as_ref(),
+                view.turns.as_slice(),
+                view.input.as_ref(),
+            )
+        })
+    }
+
     pub fn select(
         &mut self,
         identity: Option<OwnerConnectionIdentity>,

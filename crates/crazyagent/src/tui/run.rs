@@ -194,14 +194,19 @@ fn drive(
 
 /// Turns one owner worker event into a shell arrival.
 /// Input: the event. Output: the arrival screens react to.
-fn owner_arrival(event: OwnerEvent) -> Arrival {
+pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
     match event {
-        OwnerEvent::Access { ready: true, .. } => Arrival::Connected,
+        OwnerEvent::Access {
+            ready: true,
+            identity,
+            ..
+        } => Arrival::Connected(identity),
         OwnerEvent::Access { problem, .. } => Arrival::Disconnected(problem),
         OwnerEvent::Shell(event) => match *event {
             ShellEvent::Profile(result) => Arrival::Profile(result),
             ShellEvent::ProfileSaved(result) => Arrival::ProfileSaved(result),
             ShellEvent::Pools(result) => Arrival::Pools(result),
+            ShellEvent::PoolProjects(result) => Arrival::PoolProjects(result),
             ShellEvent::Projects(result) => Arrival::Projects(result),
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
@@ -222,6 +227,7 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
             generation: shell.ctx.next_generation(),
         }),
         Request::Pools => connection.shell(ShellRequest::Pools),
+        Request::PoolProjects => connection.shell(ShellRequest::PoolProjects),
         Request::Projects => connection.shell(ShellRequest::Projects),
         Request::EditPool { change } => connection.shell(ShellRequest::EditPool {
             change,
