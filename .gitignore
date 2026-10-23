@@ -13,3 +13,13 @@ credentials/
 *.key
 *.p12
 *.pfx
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.deepsec/
+*.md
+!/README.md
+!**/LICENSE*
+!**/tests/**/*.md
+!**/fixtures/**/*.md
