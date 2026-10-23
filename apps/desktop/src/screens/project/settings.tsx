@@ -1,8 +1,7 @@
 import { nextGeneration } from "../../api";
-import type { Result } from "../../api";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { assignPool, failureCopy, loadProjectMcpServers, loadProjectSkills, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
+import { assignPool, failureCopy, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
 import type { StoredSetup, TeamPlan } from "../../api-projects";
 import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -10,6 +9,7 @@ import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
 import { teamValid } from "../new-project/wizard";
 import { folderLabel } from "./overview";
+import { ProjectServers, ProjectSkills } from "./plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -92,19 +92,6 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
   </div>;
 }
 
-function ListSection({ title, load, what, body }: { title: string; load: () => Promise<Result<unknown>>; what: string; body: string }) {
-  const [result, setResult] = useState<Result<unknown>>();
-  useEffect(() => { void load().then(setResult); }, []);
-  return <div className="pj-stack">
-    <h2>{title}</h2>
-    <p className="pj-secondary">{body}</p>
-    {result === undefined && <p className="pj-muted" role="status">Loading...</p>}
-    {result?.kind === "not_ready" && <NotReady what={what} />}
-    {result?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(result.code)}</p>}
-    {result?.kind === "ok" && <p className="pj-muted">The engine answered, but this build can't show the list yet.</p>}
-  </div>;
-}
-
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const [confirming, setConfirming] = useState(false);
   const [note, setNote] = useState("");
@@ -162,10 +149,8 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "general" && needsSetup(() => <GeneralSection data={data} setup={setup!} />)}
       {active === "pool" && <PoolSection data={data} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
-      {active === "skills" && <ListSection title="Skills" load={() => loadProjectSkills(data.id)} what="per-project skills aren't in this build."
-        body="Global skills are available to every project; you can switch them off here. Project skills live in the project folder." />}
-      {active === "mcp" && <ListSection title="MCP servers" load={() => loadProjectMcpServers(data.id)} what="per-project MCP servers aren't in this build."
-        body="MCP servers give agents extra tools. The engine checks each server, and you approve it before agents can use it." />}
+      {active === "skills" && <ProjectSkills data={data} />}
+      {active === "mcp" && <ProjectServers data={data} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

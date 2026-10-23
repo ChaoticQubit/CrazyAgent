@@ -333,12 +333,58 @@ export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
-export function loadProjectSkills(id: string): Promise<Result<unknown>> {
-  return call<unknown>("desktop_project_skills", { id });
+export type PluginScope = { kind: "global" } | { kind: "project"; project_id: string };
+
+export type McpServerStatus = "waiting_for_approval" | "approved" | "off" | "cant_start";
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string;
+  scope: PluginScope;
+  scope_label: string;
+  enabled: boolean;
+  on_here: boolean | null;
+  source: string;
+  folder: string;
 }
 
-export function loadProjectMcpServers(id: string): Promise<Result<unknown>> {
-  return call<unknown>("desktop_project_mcp_servers", { id });
+export interface McpServerView {
+  id: string;
+  name: string;
+  scope: PluginScope;
+  scope_label: string;
+  runs: string;
+  enabled: boolean;
+  status: McpServerStatus;
+  status_label: string;
+  problem: string | null;
+  tools: string[];
+  on_here: boolean | null;
+}
+
+/** Reads the skills one project's agents can use, with whether each is on here.
+ * Input: the project id. Output: global and project skills in engine order. */
+export function loadProjectSkills(id: string): Promise<Result<SkillView[]>> {
+  return call<SkillView[]>("desktop_plugin_skills", { projectId: id });
+}
+
+/** Reads the MCP servers for one project with their plain status words.
+ * Input: the project id. Output: global and project servers in engine order. */
+export function loadProjectMcpServers(id: string): Promise<Result<McpServerView[]>> {
+  return call<McpServerView[]>("desktop_plugin_servers", { projectId: id });
+}
+
+/** Switches a skill or MCP server that is on for every project on or off for this one.
+ * Inputs: the project id, the skill or server id and the switch. Output: done or a failure. */
+export function switchProjectPlugin(id: string, plugin: string, on: boolean): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId: id, id: plugin, on });
+}
+
+/** Adds a skill folder that holds SKILL.md to this project only; the engine keeps its copy.
+ * Inputs: the project id and the folder's full path. Output: the new skill. */
+export function addProjectSkill(id: string, folder: string): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_add_skill", { scope: { kind: "project", project_id: id }, folder });
 }
 
 export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {

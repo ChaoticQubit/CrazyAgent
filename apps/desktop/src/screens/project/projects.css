@@ -101,6 +101,8 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-agent-row { display: grid; grid-template-columns: minmax(140px, 1fr) 120px minmax(0, 1.4fr) 64px auto; gap: 12px; align-items: center; }
 .pj-agent-row .pj-wt { grid-column: 1 / -1; }
 .pj-agent-row .pj-log { grid-column: 1 / -1; }
+.pj-plugin-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.pj-plugin-row > span:first-child { display: grid; gap: 4px; min-width: 0; }
 .pj-log-lines { max-height: 240px; overflow: auto; margin: 0; padding: 12px 12px 12px 16px; border-radius: var(--radius-control); background: var(--surface-2); font: 12px/18px var(--mono); list-style: none; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pj-empty { display: grid; gap: 4px; justify-items: start; padding: 24px 0; }
 
