@@ -10,6 +10,7 @@ pub mod coordination;
 pub mod engine;
 pub mod harnesses;
 pub mod isolation;
+pub mod launch_context;
 pub mod master_session;
 pub mod memory;
 pub mod model_gateway;

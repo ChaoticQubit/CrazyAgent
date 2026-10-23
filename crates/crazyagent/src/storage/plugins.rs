@@ -756,6 +756,20 @@ pub(crate) fn effective(
     Ok(plugins)
 }
 
+/// Reads the launch set of one project inside a caller's transaction, for launchers that
+/// hold their own engine database connection. Inputs: the transaction, the engine root and
+/// the project. Output: the effective set with secret values read, or `plugin_project_unknown`.
+pub(crate) fn launch_set(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &ProjectId,
+) -> Result<LaunchPlugins, EngineError> {
+    if !project_exists(tx, project)? {
+        return Err(error("plugin_project_unknown"));
+    }
+    launch(root, effective(tx, root, project)?)
+}
+
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
     for server in plugins.servers {
@@ -1013,10 +1027,7 @@ fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValu
             ResultValue::Effective(Box::new(effective(tx, root, &project)?))
         }
         Command::Launch { project } => {
-            if !project_exists(tx, &project)? {
-                return Err(error("plugin_project_unknown"));
-            }
-            ResultValue::Launch(Box::new(launch(root, effective(tx, root, &project)?)?))
+            ResultValue::Launch(Box::new(launch_set(tx, root, &project)?))
         }
     })
 }
