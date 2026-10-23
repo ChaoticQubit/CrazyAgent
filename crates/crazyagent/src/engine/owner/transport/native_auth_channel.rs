@@ -1109,14 +1109,26 @@ impl Authority {
                 dispatch
             };
             self.native_auth_changed.notify_waiters();
-            if let Some(dispatch) = dispatch {
-                engine
+            if let Some(dispatch) = dispatch
+                && let Err(error) = engine
                     .native_auth_job(|reply| Job::NativeAuthCustodyLost(dispatch, reply))
-                    .await?;
+                    .await
+                && custody_loss_undelivered(&error)
+            {
+                return Err(error);
             }
             return task_error.map_or(Ok(()), Err);
         }
     }
+}
+
+/// Tells whether recording a lost custody may not have reached the storage actor.
+/// Input: the error from that job. Output: true when the job was not queued or its
+/// reply never arrived. False when storage answered with a refusal, which means the
+/// dispatch scope already changed and its durable fence stays in place for recovery.
+fn custody_loss_undelivered(error: &EngineError) -> bool {
+    error.0 == "owner_queue_not_submitted"
+        || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
 
 impl Drop for Authority {
