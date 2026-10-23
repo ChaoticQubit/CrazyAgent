@@ -1,5 +1,6 @@
 use crazyagent::config::resolve_config;
 use crazyagent::engine::bootstrap::EngineService;
+use crazyagent::memory::{KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
     ContextKind, Platform, ProjectSetup, ResearchKind, ResearchStatus,
 };
@@ -10,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 11] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -20,6 +21,8 @@ const COMMANDS: [&str; 9] = [
     "desktop_save_research_to_memory",
     "desktop_add_project_documents",
     "desktop_delete_project_context",
+    "desktop_project_memories",
+    "desktop_review_memory",
 ];
 
 #[test]
@@ -148,24 +151,63 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         .await?;
     assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
     assert_eq!(saved.intent.kind, "research_memory");
+    let memories = bridge.project_memories(&id, None).await?;
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].status, KnowledgeStatus::Provisional);
+    assert!(
+        memories[0].text.contains("Small but loyal."),
+        "{memories:?}"
+    );
+    let approved = bridge
+        .review_memory(
+            &id,
+            &memories[0].id,
+            memories[0].version,
+            ReviewDecision::Keep,
+            3,
+        )
+        .await?;
+    assert!(
+        matches!(approved.outcome, ActionOutcome::Applied),
+        "{approved:?}"
+    );
+    assert_eq!(approved.intent.kind, "memory_review");
+    let memories = bridge.project_memories(&id, None).await?;
+    assert_eq!(
+        memories
+            .iter()
+            .map(|m| (&m.status, m.human_reviewed))
+            .collect::<Vec<_>>(),
+        [(&KnowledgeStatus::Confirmed, true)]
+    );
+    let stale = bridge
+        .review_memory(&id, &memories[0].id, 1, ReviewDecision::Reject, 4)
+        .await?;
+    assert!(
+        matches!(stale.outcome, ActionOutcome::Rejected),
+        "{stale:?}"
+    );
 
     std::fs::write(sources.join("later.md"), "More notes.")?;
     let added = bridge
         .add_project_documents(
             &id,
             vec![sources.join("later.md").to_str().unwrap().to_owned()],
-            3,
+            5,
         )
         .await?;
     assert!(matches!(added.outcome, ActionOutcome::Applied), "{added:?}");
     assert_eq!(added.intent.kind, "project_documents");
     let deleted = bridge
-        .delete_project_context(&id, "context/research/market_research.md".into(), 4)
+        .delete_project_context(&id, "context/research/market_research.md".into(), 6)
         .await?;
-    assert!(matches!(deleted.outcome, ActionOutcome::Applied), "{deleted:?}");
+    assert!(
+        matches!(deleted.outcome, ActionOutcome::Applied),
+        "{deleted:?}"
+    );
     assert_eq!(deleted.intent.kind, "project_context_delete");
     let protected = bridge
-        .delete_project_context(&id, "context/brief.md".into(), 5)
+        .delete_project_context(&id, "context/brief.md".into(), 7)
         .await?;
     assert_eq!(protected.rejection, Some("context_item_protected"));
     assert_eq!(
@@ -188,7 +230,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         .setup_project(
             spec,
             setup(vec![sources.join("link.txt").to_str().unwrap().to_owned()]),
-            6,
+            8,
         )
         .await?;
     assert!(matches!(rejected.outcome, ActionOutcome::Rejected));

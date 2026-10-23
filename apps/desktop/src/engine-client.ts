@@ -207,7 +207,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "master";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "master";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -363,6 +363,36 @@ export function saveResearchToMemory(
 
 export function addProjectDocuments(id: string, documents: string[], generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_add_project_documents", { id, documents, generation });
+}
+
+export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
+
+export type MemoryItem = {
+  id: string;
+  version: number;
+  text: string;
+  status: MemoryStatus;
+  human_reviewed: boolean;
+};
+
+export type MemoryDecision =
+  | { decision: "Keep" }
+  | { decision: "Edit"; text: string }
+  | { decision: "Reject" }
+  | { decision: "Remove" };
+
+export function projectMemories(id: string, after: string | null = null): Promise<MemoryItem[]> {
+  return invoke<MemoryItem[]>("desktop_project_memories", { id, after });
+}
+
+export function reviewMemory(
+  id: string,
+  memory: string,
+  version: number,
+  decision: MemoryDecision,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
 }
 
 export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {

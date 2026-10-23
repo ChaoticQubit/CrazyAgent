@@ -1689,6 +1689,28 @@ impl App {
         })
     }
 
+    /// Queues one memory review; Keep is the one-click approval of saved research.
+    /// Takes the project, memory entry id, the version shown and the decision.
+    /// Returns an error in limited mode or while another setup request waits.
+    pub fn request_memory_review(
+        &mut self,
+        project: ProjectId,
+        entry_id: RequestId,
+        version: u64,
+        decision: crate::memory::ReviewDecision,
+    ) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Memory review disabled in limited mode".into());
+        }
+        self.request_project_setup(SetupQuery::ReviewMemory {
+            project,
+            entry_id,
+            version,
+            decision,
+            generation: self.declaration.generation,
+        })
+    }
+
     pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {
         self.setup_query.take()
     }

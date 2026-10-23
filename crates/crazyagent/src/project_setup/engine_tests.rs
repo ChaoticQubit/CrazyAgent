@@ -1,10 +1,8 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
-};
-use crate::memory::{HumanReview, KnowledgeStatus, ReviewDecision};
+use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
+use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -379,21 +377,7 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
-    let inbox = owner
-        .read(OwnerRead::Knowledge {
-            review: HumanReview::Inbox {
-                project_id: project.clone(),
-                after: None,
-            },
-        })
-        .await
-        .unwrap();
-    let OwnerData::Domain { outcome } = inbox.data else {
-        panic!("knowledge inbox required");
-    };
-    let Outcome::Knowledge { entries } = *outcome else {
-        panic!("knowledge entries required");
-    };
+    let entries = owner.project_memories(project.clone(), None).await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].status, KnowledgeStatus::Provisional);
     assert!(
@@ -402,27 +386,24 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
             .starts_with("## Size\nAbout 2 million households.")
     );
     let entry = entries[0].id.clone();
-    owner
-        .read(OwnerRead::ProjectSetup {
-            project_id: project.clone(),
-        })
-        .await
-        .unwrap();
-    owner
-        .begin_mutation(
-            OwnerMutation::Knowledge {
-                review: HumanReview::Review {
-                    entry_id: entry,
-                    version: 1,
-                    decision: ReviewDecision::Keep,
-                },
-            },
-            8,
-        )
-        .unwrap();
     assert_eq!(
-        result(owner.send_pending().await.unwrap()),
+        result(
+            owner
+                .review_memory(project.clone(), entry, 1, ReviewDecision::Keep, 8)
+                .await
+                .unwrap()
+        ),
         OwnerResult::Applied
+    );
+    assert_eq!(
+        owner
+            .project_memories(project.clone(), None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| (&entry.status, entry.human_reviewed))
+            .collect::<Vec<_>>(),
+        [(&KnowledgeStatus::Confirmed, true)]
     );
     let status: String = rusqlite::Connection::open_with_flags(
         engine.root.path().join("engine.db"),

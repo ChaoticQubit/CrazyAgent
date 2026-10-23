@@ -463,6 +463,17 @@ pub enum SetupQuery {
         action: SetupAction,
         generation: u64,
     },
+    Memories {
+        project: ProjectId,
+        after: Option<crate::protocol::RequestId>,
+    },
+    ReviewMemory {
+        project: ProjectId,
+        entry_id: crate::protocol::RequestId,
+        version: u64,
+        decision: crate::memory::ReviewDecision,
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +484,7 @@ pub enum SetupView {
     Context(ProjectContext),
     Item(ContextChunk),
     Changed(crate::engine::owner::OwnerResult),
+    Memories(Vec<crate::memory::KnowledgeEntry>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

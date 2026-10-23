@@ -450,6 +450,9 @@ impl NativeBridge {
             OwnerMutation::DeleteProjectContext { project_id, .. } => {
                 ("project_context_delete", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::Knowledge {
+                review: crazyagent::memory::HumanReview::Review { .. },
+            } => ("memory_review", None, None),
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
@@ -873,6 +876,8 @@ fn rejection_code(code: &str) -> &'static str {
         "project_folder_missing" => "project_folder_missing",
         "context_item_protected" => "context_item_protected",
         "context_item_missing" => "context_item_missing",
+        "knowledge_entry_missing" => "knowledge_entry_missing",
+        "knowledge_version_conflict" => "knowledge_version_conflict",
         _ => "owner_rejected",
     }
 }

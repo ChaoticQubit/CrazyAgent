@@ -1,9 +1,11 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure, native_project_id};
 use crazyagent::engine::owner::OwnerMutation;
+use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob, ResearchKind,
     StoredSetup,
 };
+use crazyagent::protocol::RequestId;
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use serde::Serialize;
 
@@ -11,6 +13,27 @@ use serde::Serialize;
 pub struct ResearchJobs {
     pub project_id: String,
     pub jobs: Vec<ResearchJob>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryItem {
+    pub id: String,
+    pub version: u64,
+    pub text: String,
+    pub status: KnowledgeStatus,
+    pub human_reviewed: bool,
+}
+
+impl From<KnowledgeEntry> for MemoryItem {
+    fn from(entry: KnowledgeEntry) -> Self {
+        Self {
+            id: entry.id.as_str().to_owned(),
+            version: entry.version,
+            text: entry.text,
+            status: entry.status,
+            human_reviewed: entry.human_reviewed,
+        }
+    }
 }
 
 fn read_failure(code: &str) -> BridgeError {
@@ -21,6 +44,7 @@ fn read_failure(code: &str) -> BridgeError {
         "context_path_invalid" => "context_path_invalid",
         "context_item_missing" => "context_item_missing",
         "context_offset_invalid" => "context_offset_invalid",
+        "project_missing" => "project_missing",
         _ => "owner_read_failed",
     })
 }
@@ -200,6 +224,59 @@ impl NativeBridge {
                 OwnerMutation::AddProjectDocuments {
                     project_id,
                     documents,
+                },
+                generation,
+            )
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Lists a project's memories, including research saved for approval.
+    /// Takes the project id and the last memory id already shown, if any.
+    /// Returns at most one engine batch with plain status names.
+    pub async fn project_memories(
+        &mut self,
+        id: &str,
+        after: Option<&str>,
+    ) -> Result<Vec<MemoryItem>, BridgeError> {
+        let project_id = project(id)?;
+        let after = after
+            .map(|after| RequestId::new(after).map_err(|_| failure("invalid_memory")))
+            .transpose()?;
+        let entries = self
+            .controller()?
+            .project_memories(project_id, after)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        Ok(entries.into_iter().map(MemoryItem::from).collect())
+    }
+
+    /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.
+    /// Takes the project id, memory id, the version shown, the decision and the client generation.
+    /// Returns the actual commit receipt; a stale version is a plain rejection.
+    pub async fn review_memory(
+        &mut self,
+        id: &str,
+        memory: &str,
+        version: u64,
+        decision: ReviewDecision,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        let entry_id = RequestId::new(memory).map_err(|_| failure("invalid_memory"))?;
+        self.controller()?
+            .project_memories(project_id, None)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::Knowledge {
+                    review: crazyagent::memory::HumanReview::Review {
+                        entry_id,
+                        version,
+                        decision,
+                    },
                 },
                 generation,
             )

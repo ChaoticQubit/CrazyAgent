@@ -1,9 +1,10 @@
 use super::*;
+use crate::memory::{HumanReview, KnowledgeEntry, ReviewDecision};
 use crate::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob, ResearchKind,
     StoredSetup,
 };
-use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 
 impl OwnerController {
     /// Reads the New Project choices and the smart team defaults for a pool and toggles.
@@ -172,6 +173,49 @@ impl OwnerController {
         self.project_setup(project_id.clone()).await?;
         self.begin_mutation(
             OwnerMutation::DeleteProjectContext { project_id, path },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Lists a project's memories, including research saved for approval, in id order.
+    /// Takes the project id and the last entry id already shown, if any.
+    /// Returns at most one engine batch of current entry versions.
+    pub async fn project_memories(
+        &mut self,
+        project_id: ProjectId,
+        after: Option<RequestId>,
+    ) -> Result<Vec<KnowledgeEntry>, EngineError> {
+        let review = HumanReview::Inbox { project_id, after };
+        match self.read(OwnerRead::Knowledge { review }).await?.data {
+            OwnerData::Domain { outcome } => match *outcome {
+                Outcome::Knowledge { entries } => Ok(entries),
+                _ => Err(EngineError("controller_read_response".into())),
+            },
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.
+    /// Takes the project id, entry id, the version shown, the decision and the client generation.
+    /// Returns the actual owner response; a stale version is a plain rejection.
+    pub async fn review_memory(
+        &mut self,
+        project_id: ProjectId,
+        entry_id: RequestId,
+        version: u64,
+        decision: ReviewDecision,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_memories(project_id, None).await?;
+        self.begin_mutation(
+            OwnerMutation::Knowledge {
+                review: HumanReview::Review {
+                    entry_id,
+                    version,
+                    decision,
+                },
+            },
             generation,
         )?;
         self.send_pending().await

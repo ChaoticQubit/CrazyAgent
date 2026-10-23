@@ -64,6 +64,24 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::Memories { project, after } => SetupView::Memories(
+                controller
+                    .project_memories(project, after)
+                    .await
+                    .map_err(problem)?,
+            ),
+            SetupQuery::ReviewMemory {
+                project,
+                entry_id,
+                version,
+                decision,
+                generation,
+            } => changed(
+                controller
+                    .review_memory(project, entry_id, version, decision, generation)
+                    .await
+                    .map_err(problem)?,
+            )?,
             SetupQuery::Change { action, generation } => {
                 let response = match action {
                     SetupAction::Create { .. } => {
@@ -93,16 +111,19 @@ impl NativeOwner {
                     }
                 }
                 .map_err(problem)?;
-                match response {
-                    OwnerResponse::Applied { operation }
-                    | OwnerResponse::Committed { operation } => {
-                        SetupView::Changed(operation.result)
-                    }
-                    OwnerResponse::Rejected { code } => return Err(bounded_problem(&code)),
-                    _ => return Err("setup_change_outcome_unknown".into()),
-                }
+                changed(response)?
             }
         })
+    }
+}
+
+fn changed(response: OwnerResponse) -> Result<SetupView, String> {
+    match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            Ok(SetupView::Changed(operation.result))
+        }
+        OwnerResponse::Rejected { code } => Err(bounded_problem(&code)),
+        _ => Err("setup_change_outcome_unknown".into()),
     }
 }
 
@@ -263,6 +284,71 @@ mod tests {
                 .map(|item| item.path.as_str())
                 .collect::<Vec<_>>(),
             ["context/brief.md", "context/documents/notes.md"]
+        );
+        std::fs::write(
+            std::path::Path::new(&context.folder).join("context/research/competitor_research.md"),
+            "# Competitors\n\nTwo terminal note apps.\n",
+        )
+        .unwrap();
+        app.request_setup_change(SetupAction::SaveToMemory {
+            project_id: project.clone(),
+            research: ResearchKind::CompetitorResearch,
+            section: None,
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        app.request_project_setup(SetupQuery::Memories {
+            project: project.clone(),
+            after: None,
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        let Some((_, SetupView::Memories(memories))) = &app.setup_view else {
+            panic!("memories view required");
+        };
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].status,
+            crate::memory::KnowledgeStatus::Provisional
+        );
+        let (entry, version) = (memories[0].id.clone(), memories[0].version);
+        app.request_memory_review(
+            project.clone(),
+            entry,
+            version,
+            crate::memory::ReviewDecision::Keep,
+        )
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        assert!(matches!(
+            &app.setup_view,
+            Some((
+                SetupQuery::ReviewMemory { .. },
+                SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+            ))
+        ));
+        let Ok(SetupView::Memories(memories)) = native
+            .project_setup(SetupQuery::Memories {
+                project: project.clone(),
+                after: None,
+            })
+            .await
+            .result
+        else {
+            panic!("memories required");
+        };
+        assert_eq!(
+            memories
+                .iter()
+                .map(|m| (&m.status, m.human_reviewed))
+                .collect::<Vec<_>>(),
+            [(&crate::memory::KnowledgeStatus::Confirmed, true)]
         );
         app.request_setup_change(SetupAction::DeleteContext {
             project_id: project.clone(),

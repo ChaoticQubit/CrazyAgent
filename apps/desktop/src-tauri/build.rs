@@ -19,6 +19,8 @@ fn main() {
         "desktop_save_research_to_memory",
         "desktop_add_project_documents",
         "desktop_delete_project_context",
+        "desktop_project_memories",
+        "desktop_review_memory",
         "desktop_open_project",
         "desktop_history",
         "desktop_send_message",

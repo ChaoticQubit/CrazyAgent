@@ -9,10 +9,12 @@ use bridge::{
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
 };
+use bridge::project_setup::MemoryItem;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
 };
+use crazyagent::memory::ReviewDecision;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
@@ -224,6 +226,35 @@ async fn desktop_add_project_documents(
     main_window(&window)?;
     lock(&state)?
         .add_project_documents(&id, documents, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_project_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    after: Option<String>,
+) -> Result<Vec<MemoryItem>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .project_memories(&id, after.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn desktop_review_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    memory: String,
+    version: u64,
+    decision: ReviewDecision,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .review_memory(&id, &memory, version, decision, generation)
         .await
 }
 
@@ -571,6 +602,8 @@ pub fn run() {
             desktop_save_research_to_memory,
             desktop_add_project_documents,
             desktop_delete_project_context,
+            desktop_project_memories,
+            desktop_review_memory,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
