@@ -4,15 +4,18 @@ use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -21,6 +24,10 @@ const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 const TOOLS_ON_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const CODEX_KEY_VARIABLE: &str = "CRAZYAGENT_API_KEY";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+pub const DURABLE_INPUT: &str = "input";
+pub const DURABLE_OUTPUT: &str = "output.log";
+const MKFIFO: &str = "/usr/bin/mkfifo";
+const TAIL_POLL: Duration = Duration::from_millis(20);
 const CODEX_TOOLS_OFF: [&str; 12] = [
     "sandbox_mode=\"read-only\"",
     "approval_policy=\"never\"",
@@ -78,6 +85,10 @@ impl Secret {
             return Err(failure("launch_secret_invalid"));
         }
         Ok(Self(value))
+    }
+
+    pub(crate) fn duplicate(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -157,7 +168,7 @@ impl Default for LaunchLimits {
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
 /// account, optional model, tools switch, the project sandbox profile and limits.
-/// Tools on is refused unless a sandbox profile is given.
+/// Every launch is refused unless a sandbox profile is given.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -249,15 +260,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => {
-            let mut command = Command::new(SANDBOX_EXEC);
-            command.arg("-f").arg(profile).arg(&request.executable);
-            command
-        }
-        None => Command::new(&request.executable),
-    };
+    let profile = request
+        .sandbox_profile
+        .as_ref()
+        .ok_or_else(|| failure("launch_sandbox_required"))?;
+    let mut command = Command::new(SANDBOX_EXEC);
     command
+        .arg("-f")
+        .arg(profile)
+        .arg(&request.executable)
         .args(&arguments)
         .env_clear()
         .env("HOME", home)
@@ -283,6 +294,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
+    assert_eq!(command.get_program(), SANDBOX_EXEC);
     assert!(command.get_args().all(|argument| {
         request
             .account
@@ -437,8 +449,8 @@ fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
         Some(profile) if !profile.is_absolute() || !profile.is_file() => {
             return Err(failure("launch_sandbox_profile_unavailable"));
         }
-        None if request.tools => return Err(failure("launch_tools_require_sandbox")),
-        _ => {}
+        Some(_) => {}
+        None => return Err(failure("launch_sandbox_required")),
     }
     let limits = request.limits;
     if limits.run_time.is_zero()
@@ -790,7 +802,7 @@ impl Driver {
 /// The process leads its own process group so stop reaches every descendant.
 pub struct Session {
     child: Child,
-    stdin: Option<ChildStdin>,
+    stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
     queue: VecDeque<LaunchEvent>,
@@ -807,7 +819,7 @@ impl Session {
     /// Input: the launch request. Output: a running session, or a plain refusal code.
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
         let command = command(&request)?;
-        Self::spawn(request, command, None)
+        Self::spawn(request, command, None, None)
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -820,66 +832,89 @@ impl Session {
     ) -> Result<Self, LaunchError> {
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
-        Self::spawn(request, command, Some(installed))
+        Self::spawn(request, command, Some(installed), None)
+    }
+
+    /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
+    /// reading and writing, so it never sees end of input when the engine dies, and its
+    /// output goes to a private log whose lock it holds for as long as any process of its
+    /// group lives. Input: the request, the project context for a project agent and the
+    /// agent's empty 0700 state directory. Output: a running session, or a plain refusal.
+    pub fn start_durable(
+        request: LaunchRequest,
+        context: Option<AgentContext>,
+        state: &Path,
+    ) -> Result<Self, LaunchError> {
+        let (command, installed) = match &context {
+            Some(context) => {
+                let (command, installed) = command_with_context(&request, context)?;
+                (command, Some(installed))
+            }
+            None => (command(&request)?, None),
+        };
+        drop(context);
+        let io = DurableIo::create(state)?;
+        Self::spawn(request, command, installed, Some(io))
     }
 
     fn spawn(
         request: LaunchRequest,
         mut command: Command,
         context: Option<Installed>,
+        durable: Option<DurableIo>,
     ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
-        let mut child = command
-            .spawn()
-            .map_err(|_| failure("launch_spawn_failed"))?;
-        let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| failure("launch_stdio_unavailable"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| failure("launch_stdio_unavailable"))?;
-        let (sender, lines) = channel();
         let output_bytes = request.limits.output_bytes;
-        std::thread::Builder::new()
-            .name("harness-stdout".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                let mut total = 0_usize;
-                loop {
-                    let mut line = Vec::new();
-                    let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
-                    match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
-                        Ok(0) | Err(_) => {
-                            let _ = sender.send(Line::Closed);
-                            return;
-                        }
-                        Ok(count) => {
-                            total = total.saturating_add(count);
-                            if total > output_bytes
-                                || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n'))
-                            {
-                                let _ = sender.send(Line::Overflow);
-                                return;
-                            }
-                            if sender.send(Line::Bytes(line)).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            })
-            .map_err(|_| failure("launch_reader_unavailable"))?;
-        std::thread::Builder::new()
-            .name("harness-stderr".into())
-            .spawn(move || {
-                let mut stderr = stderr;
-                let mut buffer = [0_u8; 4096];
-                while matches!(stderr.read(&mut buffer), Ok(count) if count > 0) {}
-            })
-            .map_err(|_| failure("launch_reader_unavailable"))?;
+        let (sender, lines) = channel();
+        let mut child;
+        let stdin;
+        match durable {
+            Some(io) => {
+                command
+                    .stdin(Stdio::from(io.child_input))
+                    .stdout(Stdio::from(io.child_output))
+                    .stderr(Stdio::null());
+                child = command
+                    .spawn()
+                    .map_err(|_| failure("launch_spawn_failed"))?;
+                drop(command);
+                stdin = Some(io.input);
+                let (output, probe) = (io.output, io.probe);
+                std::thread::Builder::new()
+                    .name("harness-output".into())
+                    .spawn(move || tail(output, probe, sender, output_bytes))
+                    .map_err(|_| failure("launch_reader_unavailable"))?;
+            }
+            None => {
+                child = command
+                    .spawn()
+                    .map_err(|_| failure("launch_spawn_failed"))?;
+                stdin = child
+                    .stdin
+                    .take()
+                    .map(|pipe| File::from(OwnedFd::from(pipe)));
+                let stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| failure("launch_stdio_unavailable"))?;
+                let stderr = child
+                    .stderr
+                    .take()
+                    .ok_or_else(|| failure("launch_stdio_unavailable"))?;
+                std::thread::Builder::new()
+                    .name("harness-stdout".into())
+                    .spawn(move || forward(stdout, sender, output_bytes))
+                    .map_err(|_| failure("launch_reader_unavailable"))?;
+                std::thread::Builder::new()
+                    .name("harness-stderr".into())
+                    .spawn(move || {
+                        let mut stderr = stderr;
+                        let mut buffer = [0_u8; 4096];
+                        while matches!(stderr.read(&mut buffer), Ok(count) if count > 0) {}
+                    })
+                    .map_err(|_| failure("launch_reader_unavailable"))?;
+            }
+        }
         let mut session = Self {
             child,
             stdin,
@@ -1032,6 +1067,155 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.stop_group();
+    }
+}
+
+struct DurableIo {
+    child_input: File,
+    input: File,
+    child_output: File,
+    output: File,
+    probe: File,
+}
+
+impl DurableIo {
+    fn create(state: &Path) -> Result<Self, LaunchError> {
+        validate_home(state).map_err(|_| failure("launch_state_unsafe"))?;
+        let input = state.join(DURABLE_INPUT);
+        let output = state.join(DURABLE_OUTPUT);
+        for path in [&input, &output] {
+            match std::fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Err(failure("launch_state_in_use")),
+            }
+        }
+        let made = Command::new(MKFIFO)
+            .arg("-m")
+            .arg("600")
+            .arg(&input)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| failure("launch_state_unavailable"))?;
+        let fifo =
+            std::fs::symlink_metadata(&input).map_err(|_| failure("launch_state_unavailable"))?;
+        if !made.success()
+            || !fifo.file_type().is_fifo()
+            || fifo.uid() != rustix::process::geteuid().as_raw()
+            || fifo.mode() & 0o7777 != 0o600
+        {
+            return Err(failure("launch_state_unsafe"));
+        }
+        let open = |path: &Path, flags: OFlags, mode: Mode| {
+            rustix::fs::open(path, flags | OFlags::NOFOLLOW | OFlags::CLOEXEC, mode)
+                .map(File::from)
+                .map_err(|_| failure("launch_state_unavailable"))
+        };
+        let child_input = open(input.as_path(), OFlags::RDWR, Mode::empty())?;
+        let writer = open(input.as_path(), OFlags::WRONLY, Mode::empty())?;
+        let child_output = open(
+            output.as_path(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::APPEND,
+            Mode::RUSR | Mode::WUSR,
+        )?;
+        rustix::fs::flock(&child_output, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| failure("launch_state_in_use"))?;
+        let reader = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
+        let probe = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
+        assert!(holder_alive(&probe));
+        Ok(Self {
+            child_input,
+            input: writer,
+            child_output,
+            output: reader,
+            probe,
+        })
+    }
+}
+
+/// Reports whether any process still holds the lock a durable harness took on its output
+/// log, which it and its whole process group inherit. Input: a read-only open of the log.
+/// Output: true while a holder lives; the probe's own lock is released before returning.
+pub fn holder_alive(probe: &File) -> bool {
+    match rustix::fs::flock(probe, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            let _ = rustix::fs::flock(probe, FlockOperation::Unlock);
+            false
+        }
+        Err(error) => error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN,
+    }
+}
+
+fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
+    let mut reader = BufReader::new(stdout);
+    let mut total = 0_usize;
+    loop {
+        let mut line = Vec::new();
+        let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
+        match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => {
+                let _ = sender.send(Line::Closed);
+                return;
+            }
+            Ok(count) => {
+                total = total.saturating_add(count);
+                if total > output_bytes
+                    || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n'))
+                {
+                    let _ = sender.send(Line::Overflow);
+                    return;
+                }
+                if sender.send(Line::Bytes(line)).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
+    let mut reader = BufReader::new(output);
+    let mut line = Vec::new();
+    let mut total = 0_usize;
+    let mut draining = false;
+    loop {
+        assert!(line.len() <= LINE_BYTES_MAX);
+        let limit = u64::try_from(LINE_BYTES_MAX + 1 - line.len()).unwrap_or(1);
+        let count = match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
+            Ok(count) => count,
+            Err(_) => {
+                let _ = sender.send(Line::Closed);
+                return;
+            }
+        };
+        total = total.saturating_add(count);
+        if total > output_bytes || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n')) {
+            let _ = sender.send(Line::Overflow);
+            return;
+        }
+        if line.last() == Some(&b'\n') {
+            if sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+                return;
+            }
+            continue;
+        }
+        if count > 0 {
+            continue;
+        }
+        if draining {
+            if !line.is_empty() && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+                return;
+            }
+            let _ = sender.send(Line::Closed);
+            return;
+        }
+        if holder_alive(&probe) {
+            std::thread::sleep(TAIL_POLL);
+        } else {
+            draining = true;
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
+use crate::sandbox::{InstalledSandbox, SANDBOX_EXEC};
 use process::{CodexHostOutput, CodexHostProcess};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -31,6 +32,7 @@ pub(in crate::engine) struct CodexHost {
 impl CodexHost {
     pub(in crate::engine) async fn spawn(
         command: Command,
+        sandbox: InstalledSandbox,
         profile: NativeProfileUse,
         action: NativeAction,
         account_ref: CredentialRef,
@@ -39,6 +41,11 @@ impl CodexHost {
     ) -> Result<Self, EngineError> {
         let protocol = CodexHostProtocol::new(action, account_ref)?;
         let (command, cwd) = prepare_command(command, &profile)?;
+        let command = sandbox
+            .wrap(&command)
+            .map_err(|_| EngineError("codex_host_sandbox_refused".into()))?;
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
         let process = CodexHostProcess::spawn_guarded(command, &budget, Some(profile)).await?;
         let mut host = Self {
             protocol,

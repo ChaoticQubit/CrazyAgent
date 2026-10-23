@@ -1,18 +1,19 @@
-import { harnessCatalog } from "../../api";
+import { harnessCatalog, nextGeneration } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
-import { loadContext, loadPools, loadProjects, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadContext, loadPools, loadProjects, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
 import { SessionContext } from "../../state";
-import { Menu, PageHeader, Tabs, formatRoute, type IconName } from "../../ui";
+import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { ConversationTab } from "./conversation";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
-import { shouldPoll } from "./research";
+import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { useTeam } from "./team";
 import "./projects.css";
 
 export const TABS = [
@@ -38,6 +39,7 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   const notify = (message: string) => { if (session) session.showToast(message); else setToast(message); };
   const [round, setRound] = useState(0);
   const [poolRound, setPoolRound] = useState(0);
+  const [team, reloadTeam] = useTeam(id);
   const current = useRef(id);
   current.current = id;
 
@@ -95,20 +97,53 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
     notify,
     reload: () => { setNow(Date.now()); setRound((value) => value + 1); },
     reloadPools: () => setPoolRound((value) => value + 1),
+    team,
+    reloadTeam,
   };
   return { data, toast, session };
 }
 
 function ProjectMenu({ data }: { data: ProjectData }) {
+  const [pausing, setPausing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const team = data.team.result;
+  const summary = pauseSummary(team?.kind === "ok" ? team.value.tasks : []);
+  const researching = (valueOf(data.research)?.jobs ?? []).some((job) => job.status === "running");
+
   async function reveal() {
     const result = await revealProjectFolder(data.id);
     if (result.kind !== "ok") data.notify(result.kind === "not_ready" ? "Not ready yet: Show folder in Finder isn't in this build." : "Couldn't open the folder.");
   }
-  return <Menu label="Project actions" items={[
-    { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
-    { label: "Pause all agents", icon: "circle-pause", onSelect: () => data.notify("Not ready yet: pausing agents isn't in this build.") },
-    { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
-  ]} />;
+  function askPause() {
+    if (team === undefined) return data.notify("Still loading the team. Try again in a moment.");
+    if (team.kind === "not_ready") return data.notify("Not ready yet: pausing agents isn't in this build.");
+    if (team.kind === "error") return data.notify(`Couldn't load the team. ${failureCopy(team.code)}`);
+    if (summary.count === 0) return data.notify(summary.line);
+    setPausing(true);
+  }
+  async function pause() {
+    setBusy(true);
+    const result = await cancelTeamTask(data.id, null, nextGeneration());
+    setBusy(false);
+    setPausing(false);
+    data.reloadTeam();
+    if (result.kind !== "ok") return data.notify(result.kind === "not_ready" ? "Not ready yet: pausing agents isn't in this build." : failureCopy(result.code));
+    const state = receiptState(result.value);
+    if (state.kind === "applied") return data.notify("Paused. Running tasks are stopping and waiting tasks are cancelled.");
+    data.notify(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
+  }
+  return <>
+    <Menu label="Project actions" items={[
+      { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
+      { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
+      { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
+    ]} />
+    <ConfirmDialog open={pausing} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
+      onCancel={() => setPausing(false)} onConfirm={() => void pause()}>
+      {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
+      {researching ? " Research agents keep running." : ""}
+    </ConfirmDialog>
+  </>;
 }
 
 function hashSection(): string | undefined {

@@ -1,15 +1,19 @@
-use super::new_project::{Phase, PoolChoice, Reply, Wizard};
+use super::new_project::{HarnessChoice, HarnessState, Phase, PoolChoice, Reply, Wizard};
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
 use super::project_page::ProjectPage;
-use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
+use super::settings_accounts::{plain, settings_event};
+use super::settings_harnesses::{control_sentence, control_word};
+use super::{Flow, Place, ProjectTab, Screen};
 use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
+use crate::harnesses::{HarnessEntry, HarnessStatus};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{
     CreationEvent, CreationJob, CreationSubmission, MutationDelivery, OwnerEvent,
 };
-use crate::tui::ctx::Ctx;
+use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, PoolChange, Request};
@@ -141,6 +145,25 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
         .collect()
 }
 
+/// Builds the Team step's harness choices from the engine's harness catalog.
+/// Takes the catalog entries in owner priority order.
+/// Returns one choice per entry with its state and, when control is limited, the engine's sentence.
+pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<HarnessChoice> {
+    entries
+        .iter()
+        .map(|entry| HarnessChoice {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            state: match entry.status {
+                HarnessStatus::Ready => HarnessState::Ready,
+                HarnessStatus::NotInstalled => HarnessState::NotInstalled,
+                HarnessStatus::Limited { .. } => HarnessState::CantStart,
+            },
+            limited: (control_word(entry) == "Limited control").then(|| control_sentence(entry)),
+        })
+        .collect()
+}
+
 /// The New project wizard as a shell screen.
 /// Holds the wizard, its last drawn view and the catalog read it waits for.
 /// Engine reads go through the shell queue; creation waits for the owner connection identity.
@@ -148,6 +171,8 @@ pub(in crate::tui) struct NewProjectPage {
     wizard: Wizard,
     view: View,
     creation: Option<Creation>,
+    checking: bool,
+    asked: bool,
 }
 
 struct Creation {
@@ -190,9 +215,42 @@ impl NewProjectPage {
             wizard,
             view: View::default(),
             creation: None,
+            checking: false,
+            asked: false,
         };
         page.redraw(ctx);
         page
+    }
+
+    fn ask_harnesses(&mut self, asked: bool, ctx: &mut Ctx) {
+        self.asked |= asked;
+        if !self.checking {
+            self.checking = true;
+            ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
+    }
+
+    fn harnesses_arrived(&mut self, result: &Result<Vec<HarnessEntry>, String>, ctx: &mut Ctx) {
+        let asked = std::mem::take(&mut self.asked);
+        self.checking = false;
+        match result {
+            Ok(entries) => {
+                let choices = harness_choices_from(entries);
+                let ready = choices
+                    .iter()
+                    .filter(|choice| choice.state == HarnessState::Ready)
+                    .count();
+                ctx.store.harnesses = Load::Ready((ready, choices.len()));
+                self.wizard.set_harnesses(choices);
+                if asked {
+                    ctx.say(Message::success("Harnesses checked.", ""));
+                }
+            }
+            Err(code) if asked => {
+                ctx.say(Message::error("Could not check harnesses.", plain(code)));
+            }
+            Err(_) => {}
+        }
     }
 
     fn redraw(&mut self, ctx: &Ctx) {
@@ -213,7 +271,10 @@ impl NewProjectPage {
             Reply::Leave => Flow::Back,
             Reply::Background => Flow::Open(Place::Home),
             Reply::CreatePool => Flow::Open(Place::NewPool),
-            Reply::CheckHarnesses => Flow::Open(Place::Settings(SettingsSection::Harnesses)),
+            Reply::CheckHarnesses => {
+                self.ask_harnesses(true, ctx);
+                Flow::Handled
+            }
             Reply::Create(request) => {
                 let (spec, setup) = *request;
                 self.create(spec, setup, ctx);
@@ -418,6 +479,15 @@ impl Screen for NewProjectPage {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let Some(SettingsEvent::Harnesses(result)) = settings_event(arrival) {
+            self.harnesses_arrived(result, ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
+        if matches!(arrival, Arrival::Disconnected(_)) {
+            self.checking = false;
+            return Flow::Handled;
+        }
         match arrival {
             Arrival::Pools(Ok(pools)) => self.set_pools(pools),
             Arrival::PoolEdited(result) => {
@@ -453,6 +523,9 @@ impl Screen for NewProjectPage {
 
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Pools);
+        if self.wizard.harnesses.is_none() {
+            self.ask_harnesses(false, ctx);
+        }
         self.ask_catalog(ctx);
         self.redraw(ctx);
     }

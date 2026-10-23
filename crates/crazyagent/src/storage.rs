@@ -690,7 +690,7 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
     })
 }
 
-fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
+pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
@@ -1992,6 +1992,15 @@ fn owner_read(
         OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
             context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
         },
+        OwnerRead::ResearchLog { project_id, job } => {
+            crate::project_setup::project_job(&tx, project_id, *job)?
+                .ok_or_else(|| error("research_job_missing"))?;
+            OwnerData::ResearchLog {
+                project_id: project_id.clone(),
+                job: *job,
+                lines: crate::project_setup::research_log(path, *job)?,
+            }
+        }
         OwnerRead::ProjectContextItem {
             project_id,
             path,

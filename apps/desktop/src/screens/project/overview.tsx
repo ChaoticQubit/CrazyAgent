@@ -12,7 +12,6 @@ import { homePath } from "../settings/harnesses";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
-import { useTeam } from "./team";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -49,8 +48,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [summaries] = useLoad(poolSummaries, [data.id]);
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
-  const [team] = useTeam(data.id);
-  const teamWaiting = team.result?.kind === "ok" ? teamWaitingLine(team.result.value.tasks) : null;
+  const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
     const result = await retryResearch(data.id, job.id, nextGeneration());

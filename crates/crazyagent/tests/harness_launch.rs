@@ -42,7 +42,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         account,
         model: Some(LOCAL_MODEL.into()),
         tools: false,
-        sandbox_profile: None,
+        sandbox_profile: Some(project_profile(work, home)),
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
             ..LaunchLimits::default()
@@ -107,6 +107,15 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         );
     }
     assert!(args.ends_with(&["app-server".into(), "--listen".into(), "stdio://".into()]));
+    assert_eq!(built.get_program(), "/usr/bin/sandbox-exec");
+    assert_eq!(
+        args[..3],
+        [
+            "-f".to_owned(),
+            work.path().join("project.sb").to_str().unwrap().to_owned(),
+            installed("codex").to_str().unwrap().to_owned()
+        ]
+    );
     let home_text = home.path().to_str().unwrap().to_owned();
     assert_eq!(
         environment(&built),
@@ -205,7 +214,8 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     assert!(!args.contains(&"--bare".to_owned()));
     let mut on = request("claude-code", home.path(), work.path(), subscription());
     on.tools = true;
-    assert_eq!(command(&on).unwrap_err().0, "launch_tools_require_sandbox");
+    on.sandbox_profile = None;
+    assert_eq!(command(&on).unwrap_err().0, "launch_sandbox_required");
     on.sandbox_profile = Some(profile.clone());
     let wrapped = command(&on).unwrap();
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
@@ -254,6 +264,53 @@ fn codex_tools_on_runs_without_its_own_sandbox_inside_the_project_sandbox() {
     assert!(
         args.iter()
             .any(|argument| argument.contains("base_url=\"http://127.0.0.1:11434/v1\""))
+    );
+}
+
+#[test]
+fn no_launch_starts_without_the_project_sandbox_profile() {
+    let home = private_dir("ca-launch-home-");
+    let work = private_dir("ca-launch-work-");
+    for harness in ["codex", "claude-code"] {
+        for tools in [false, true] {
+            let mut bare = request(
+                harness,
+                home.path(),
+                work.path(),
+                url_account(home.path(), OLLAMA_OPENAI),
+            );
+            bare.tools = tools;
+            assert!(command(&bare).is_ok(), "{harness} {tools}");
+            bare.sandbox_profile = None;
+            assert_eq!(
+                command(&bare).unwrap_err().0,
+                "launch_sandbox_required",
+                "{harness} {tools}"
+            );
+            for unusable in [
+                PathBuf::from("project.sb"),
+                work.path().join("missing.sb"),
+                work.path().to_path_buf(),
+            ] {
+                bare.sandbox_profile = Some(unusable);
+                assert_eq!(
+                    command(&bare).unwrap_err().0,
+                    "launch_sandbox_profile_unavailable",
+                    "{harness} {tools}"
+                );
+            }
+        }
+    }
+    let mut session = request(
+        "codex",
+        home.path(),
+        work.path(),
+        url_account(home.path(), OLLAMA_OPENAI),
+    );
+    session.sandbox_profile = None;
+    assert_eq!(
+        Session::start(session).err().unwrap().0,
+        "launch_sandbox_required"
     );
 }
 

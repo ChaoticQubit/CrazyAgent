@@ -14,6 +14,7 @@ mod project_setup;
 mod team;
 mod owner_setup;
 mod accounts;
+mod agents;
 mod plugins;
 mod memory;
 pub use account_profile::PendingAccountProfile;

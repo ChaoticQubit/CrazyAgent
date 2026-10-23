@@ -17,6 +17,9 @@ const ABOUT = "A mobile app that tracks daily habits and reminds people to keep 
 const MESSAGE = "Reply with one short sentence: what should we build first?";
 const SETTLED_TURN = /The master stopped|Stopped|Not signed in|Sign-in is out of date|Settings changed/;
 const RESEARCH_WORDS = ["Queued", "Needs a pool", "Running", "Done", "Failed"];
+const HANDOFF = "Hand one task to a sub-agent: compare three popular habit tracking apps and write context/notes/apps.md with one paragraph each.";
+const AGENT_WORDS = ["Starting", "Ready", "Running", "Stopped", "Failed"];
+const LIVE_TASK = ["Queued", "Needs a pool", "Running"];
 let projectId = "";
 
 function page(selector, action = "ready", value = "") {
@@ -63,7 +66,7 @@ async function until(condition, timeout, label) {
   try {
     await browser.waitUntil(condition, { timeout, interval: 1000 });
   } catch {
-    throw new Error(`${label}; on screen: ${JSON.stringify(await text("[role=alert]"))}; at ${await hash()}`);
+    throw new Error(`${typeof label === "function" ? label() : label}; on screen: ${JSON.stringify(await text("[role=alert]"))}; at ${await hash()}`);
   }
 }
 
@@ -98,8 +101,42 @@ async function researchSettledIn(words, timeout, label) {
   await until(async () => {
     rows = await researchRow();
     return rows.length === 1 && words.includes(rows[0].status);
-  }, timeout, `${label}; research rows ${JSON.stringify(rows)}`);
+  }, timeout, () => `${label}; research rows ${JSON.stringify(rows)}`);
   return rows[0];
+}
+
+function team() {
+  return browser.execute(() => {
+    const cells = (row) => [...row.children].map((cell) => cell.textContent.trim());
+    const title = document.querySelector("#pj-team-title");
+    return {
+      shown: Boolean(title && title.getClientRects().length),
+      working: title?.parentElement?.querySelector(".pj-secondary")?.textContent.trim() ?? "",
+      agents: [...document.querySelectorAll(".pj-table tbody tr")].map(cells),
+      tasks: [...document.querySelectorAll("ul[aria-label='Team tasks'] li")].map((row) => ({
+        status: row.querySelector(".badge")?.textContent.trim() ?? "",
+        from: row.querySelector(".pj-small")?.textContent.trim() ?? "",
+        prompt: row.querySelector("strong")?.textContent.trim() ?? "",
+      })),
+    };
+  });
+}
+
+async function sendToMaster(message, timeout) {
+  await click("#tab-conversation");
+  const before = await browser.execute(() => document.querySelectorAll("[data-testid=master-turn]").length);
+  await type("[data-testid=master-message]", message);
+  await click("[data-testid=send-master-message]");
+  let last = { count: 0, text: "", reply: "" };
+  await until(async () => {
+    last = await browser.execute(() => {
+      const turns = [...document.querySelectorAll("[data-testid=master-turn]")];
+      const turn = turns.at(-1);
+      return { count: turns.length, text: turn?.textContent ?? "", reply: turn?.querySelector("[data-testid=master-reply]")?.textContent.trim() ?? "" };
+    });
+    return last.count > before && (last.reply.length > 0 || SETTLED_TURN.test(last.text));
+  }, timeout, "master turn did not settle");
+  return last;
 }
 
 describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
@@ -219,18 +256,10 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
   });
 
   it("gets a real reply from the master conversation", async () => {
-    await click("#tab-conversation");
-    await type("[data-testid=master-message]", MESSAGE);
-    await click("[data-testid=send-master-message]");
-    let turn = "";
-    await until(async () => {
-      const turns = await browser.execute(() => [...document.querySelectorAll("[data-testid=master-turn]")].map((node) => node.textContent));
-      turn = turns.at(-1) ?? "";
-      return turns.length > 0 && ((await text("[data-testid=master-reply]")).trim().length > 0 || SETTLED_TURN.test(turn));
-    }, 660000, "master turn did not settle");
+    const turn = await sendToMaster(MESSAGE, 660000);
     await shot("10-master-reply");
-    assert.match(turn, new RegExp(MESSAGE.replace(/[.?:]/g, "\\$&")));
-    assert.ok((await text("[data-testid=master-reply]")).trim().length > 0, `real master reply required; turn: ${turn}`);
+    assert.match(turn.text, new RegExp(MESSAGE.replace(/[.?:]/g, "\\$&")));
+    assert.ok(turn.reply.length > 0, `real master reply required; turn: ${turn.text}`);
   });
 
   it("finishes the research and opens its report", async () => {
@@ -241,5 +270,49 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await until(async () => (await hash()).includes("/context?file="), 15000, "report did not open in the context tab");
     await until(async () => (await text(".pj-reader")).includes("Market research"), 30000, "report text did not load");
     await shot("11-research-report");
+  });
+
+  it("shows the master in the Team panel", async () => {
+    await click("#tab-agents");
+    let seen;
+    await until(async () => {
+      seen = await team();
+      return seen.shown && seen.agents.some((cells) => cells[0].startsWith("Master"));
+    }, 60000, () => `Team panel did not show the master; team ${JSON.stringify(seen)}`);
+    assert.match(seen.working, /^\d+ of \d+ agents working\.$/);
+    const master = seen.agents.find((cells) => cells[0].startsWith("Master"));
+    assert.equal(master.length, 5, "agent, harness, account, status and task columns");
+    assert.ok([CODEX_ACCOUNT, LOCAL_ACCOUNT].includes(master[2]), `master account ${master[2]}`);
+    assert.ok(AGENT_WORDS.includes(master[3]), `master status ${master[3]}`);
+    assert.doesNotMatch(await text("main"), /Not ready yet: the live team/);
+    await shot("12-team-panel");
+  });
+
+  it("pauses every agent after the master hands a task to a sub-agent", async () => {
+    await sendToMaster(HANDOFF, 660000);
+    await click("#tab-agents");
+    let seen;
+    await until(async () => {
+      seen = await team();
+      return seen.tasks.some((task) => task.from.startsWith("From the master to ") && LIVE_TASK.includes(task.status));
+    }, 300000, () => `no sub-agent task from the master; team ${JSON.stringify(seen)}`);
+    await shot("13-team-task");
+    await click("button[aria-label='Project actions']");
+    await click("text=Pause all agents");
+    await until(() => page("dialog[open] .btn.danger"), 15000, "Pause all did not ask to confirm");
+    await shot("14-pause-confirm");
+    await click("dialog[open] .btn.danger");
+    await until(async () => !(await page("dialog[open] .btn.danger")), 60000, "Pause all confirm did not close");
+    assert.doesNotMatch(await text("body"), /Not ready yet: pausing agents/);
+    await click("text=All (");
+    await until(async () => {
+      seen = await team();
+      return /^0 of \d+ agents working\.$/.test(seen.working) && seen.tasks.length > 0 &&
+        seen.tasks.every((task) => !LIVE_TASK.includes(task.status));
+    }, 120000, () => `agents kept working after Pause all; team ${JSON.stringify(seen)}`);
+    assert.ok(seen.tasks.some((task) => task.from.startsWith("From the master") && task.status === "Stopped"),
+      `the handed task stopped; tasks ${JSON.stringify(seen.tasks)}`);
+    assert.ok(seen.agents.every((cells) => cells[3] !== "Running"), `no agent running; agents ${JSON.stringify(seen.agents)}`);
+    await shot("15-paused");
   });
 });

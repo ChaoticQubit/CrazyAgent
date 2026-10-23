@@ -1,19 +1,20 @@
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
-use super::{Flow, Place, Screen, SettingsSection};
+use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::AccountSecret;
 use crate::plugins::{
     ARG_BYTES_MAX, ARGS_MAX, COMMAND_BYTES_MAX, SECRET_NAME_BYTES_MAX, SECRETS_PER_SERVER_MAX,
-    SERVER_NAME_BYTES_MAX, ServerSpec, ServerStatus, ServerView, SkillView, URL_BYTES_MAX,
+    SERVER_NAME_BYTES_MAX, Scope, ServerSpec, ServerStatus, ServerView, SkillView, URL_BYTES_MAX,
     validate_secret_name, validate_server_name,
 };
+use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{
-    cells, cut, join, list_row, pad, row, status, styled, thumb, with_bar, wrap,
+    cells, cut, indent, join, list_row, pad, row, status, styled, thumb, with_bar, wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, radio};
@@ -964,10 +965,12 @@ enum Focus {
 }
 
 /// Add skill and Add MCP server: a skill folder, or a server's name, command
-/// or URL and hidden secrets. Secret values go to the engine and are never shown.
-/// Input: keys. Output: one add request; the list again when it is done.
+/// or URL and hidden secrets, for every project or for one project. Secret
+/// values go to the engine and are never shown.
+/// Input: keys. Output: one add request; the list it came from when it is done.
 pub struct AddPlugin {
     kind: Kind,
+    project: Option<(ProjectId, String)>,
     folder: TextField,
     name: TextField,
     url: bool,
@@ -992,9 +995,38 @@ impl AddPlugin {
         Self::new(Kind::Server)
     }
 
+    /// The same form adding only for one project, returning to that project's
+    /// Settings tab.
+    /// Inputs: the form, the project and its name. Output: the form.
+    pub fn for_project(mut self, project: ProjectId, name: String) -> Self {
+        self.project = Some((project, name));
+        self
+    }
+
+    fn scope(&self) -> Scope {
+        match &self.project {
+            Some((project_id, _)) => Scope::Project {
+                project_id: project_id.clone(),
+            },
+            None => Scope::Global,
+        }
+    }
+
+    fn back(&self) -> Flow {
+        match &self.project {
+            Some((id, name)) => Flow::Open(Place::Project {
+                id: id.clone(),
+                name: name.clone(),
+                tab: ProjectTab::Settings,
+            }),
+            None => Flow::Replace(Box::new(Plugins::new())),
+        }
+    }
+
     fn new(kind: Kind) -> Self {
         Self {
             kind,
+            project: None,
             folder: TextField::new("Skill folder", FOLDER_CHARS_MAX)
                 .placeholder("~/Skills/frontend-design")
                 .note("The folder that holds SKILL.md. CrazyAgent keeps its own copy."),
@@ -1112,7 +1144,11 @@ impl AddPlugin {
                     return;
                 }
                 self.waiting = true;
-                send(ctx, SettingsJob::Plugin(PluginChange::AddSkill { folder }));
+                let scope = self.scope();
+                send(
+                    ctx,
+                    SettingsJob::Plugin(PluginChange::AddSkill { scope, folder }),
+                );
             }
             Kind::Server => {
                 let name = self.name.value().trim().to_owned();
@@ -1141,6 +1177,7 @@ impl AddPlugin {
                 send(
                     ctx,
                     SettingsJob::Plugin(PluginChange::AddServer {
+                        scope: self.scope(),
                         name,
                         spec,
                         secrets,
@@ -1170,7 +1207,11 @@ impl AddPlugin {
         match self.kind {
             Kind::Skill => {
                 lines.push(styled("Add skill", Role::Accent, theme));
-                lines.push(Line::raw("Every project can use it. Turn it off any time."));
+                lines.push(Line::raw(if self.project.is_some() {
+                    "Only this project can use it. Turn it off any time."
+                } else {
+                    "Every project can use it. Turn it off any time."
+                }));
                 lines.push(Line::default());
                 place(&mut lines, &self.folder, self.focus == Focus::Folder);
                 lines.push(Line::default());
@@ -1182,7 +1223,11 @@ impl AddPlugin {
             }
             Kind::Server => {
                 lines.push(styled("Add MCP server", Role::Accent, theme));
-                lines.push(Line::raw("Agents can use it only after you approve it."));
+                lines.push(Line::raw(if self.project.is_some() {
+                    "Only this project's agents can use it, after you approve it."
+                } else {
+                    "Agents can use it only after you approve it."
+                }));
                 lines.push(Line::default());
                 place(&mut lines, &self.name, self.focus == Focus::Name);
                 let kinds = format!(
@@ -1269,7 +1314,10 @@ impl Screen for AddPlugin {
             Kind::Skill => "Add skill",
             Kind::Server => "Add MCP server",
         };
-        vec!["Settings".into(), "Plugins and skills".into(), page.into()]
+        match &self.project {
+            Some((_, name)) => vec![name.clone(), "Settings".into(), page.into()],
+            None => vec!["Settings".into(), "Plugins and skills".into(), page.into()],
+        }
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
@@ -1293,7 +1341,7 @@ impl Screen for AddPlugin {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match key {
-            Key::Esc => return Flow::Replace(Box::new(Plugins::new())),
+            Key::Esc => return self.back(),
             Key::Tab | Key::Down => self.move_focus(true),
             Key::BackTab | Key::Up => self.move_focus(false),
             Key::Enter => match self.focus {
@@ -1330,11 +1378,18 @@ impl Screen for AddPlugin {
                     ),
                     "",
                 ));
-                Flow::Replace(Box::new(Plugins::new()))
+                self.back()
             }
             Ok(None) => {
-                ctx.say(Message::success("Skill added for every project.", ""));
-                Flow::Replace(Box::new(Plugins::new()))
+                ctx.say(Message::success(
+                    if self.project.is_some() {
+                        "Skill added for this project."
+                    } else {
+                        "Skill added for every project."
+                    },
+                    "",
+                ));
+                self.back()
             }
             Err(code) => {
                 let problem = plugin_plain(code);
@@ -1353,7 +1408,11 @@ impl Screen for AddPlugin {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4).max(8);
         let (content, cursor) = self.body(limit, ctx);
-        draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx)
+        if self.project.is_none() {
+            return draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx);
+        }
+        draw_lines(frame.buffer_mut(), area, &indent(content, 2));
+        cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + at.y))
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
@@ -1368,7 +1427,14 @@ impl Screen for AddPlugin {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Settings(SettingsSection::Plugins))
+        Some(match &self.project {
+            Some((id, name)) => Place::Project {
+                id: id.clone(),
+                name: name.clone(),
+                tab: ProjectTab::Settings,
+            },
+            None => Place::Settings(SettingsSection::Plugins),
+        })
     }
 }
 

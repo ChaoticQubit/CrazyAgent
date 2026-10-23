@@ -2,6 +2,7 @@ use super::{EngineError, cleanup_uncertain, failure};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::protocol::RequestId;
 use crate::rcli_host::{RcliMasterHost, RcliMasterLaunch, RcliMasterObservation};
+use crate::sandbox::InstalledSandbox;
 
 pub(super) struct RcliCustody {
     host: Option<RcliMasterHost>,
@@ -12,10 +13,11 @@ pub(super) struct RcliCustody {
 impl RcliCustody {
     pub(super) fn launch(
         launch: RcliMasterLaunch,
+        sandbox: InstalledSandbox,
         profile: NativeProfileUse,
     ) -> Result<Self, EngineError> {
         let mut custody = Self { host: None, profile: Some(profile), uncertain: false };
-        match RcliMasterHost::launch(launch) {
+        match RcliMasterHost::launch(launch, &sandbox) {
             Ok(host) => {
                 custody.host = Some(host);
                 assert!(custody.profile.is_some());

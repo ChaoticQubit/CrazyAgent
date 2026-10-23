@@ -1,8 +1,7 @@
 import { listAccounts, nextGeneration } from "../../api";
-import type { HarnessEntry, Result } from "../../api";
+import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
 import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState } from "../../api-projects";
-import type { TeamStatus } from "../../api-projects";
 import { useLoad } from "../../state";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
@@ -12,14 +11,9 @@ import { MarkdownView } from "./markdown";
 import { teamPanel } from "./research";
 import type { TeamFilter, TeamTaskRow } from "./research";
 import { NotReady } from "./shared";
-import type { ProjectData } from "./shared";
+import type { ProjectData, TeamRead } from "./shared";
 
 const TEAM_POLL_MS = 3000;
-
-export interface TeamRead {
-  result: Result<TeamStatus> | undefined;
-  at: number;
-}
 
 /** Reads the project's live team now and every few seconds while shown; stops asking when the
  * engine has no team command. Input: the project id. Output: the latest read with its time, and a reload. */
@@ -41,7 +35,7 @@ export function useTeam(id: string): [TeamRead, () => void] {
   return [team, () => setRound((value) => value + 1)];
 }
 
-/** Team panel for the project page: each agent's role, harness, account, status and current task,
+/** Team panel for the project page: each agent's role, working folder, harness, account, status and current task,
  * then the tasks the master or the owner handed to sub-agents with status and a result summary.
  * Inputs: the project data, the latest team read, the filter, the harness catalog and a reload.
  * Output: the panel, or a loading, Not ready yet or error line. */
@@ -84,7 +78,8 @@ export function TeamPanel({ data, team, filter, harnesses, reload }: {
       <thead><tr><th scope="col">Agent</th><th scope="col">Harness</th><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current task</th></tr></thead>
       <tbody>{panel.agents.map((row) => <tr key={row.key}>
         <th scope="row"><span className="pj-kind"><Icon name={row.role === "Master" ? "sparkles" : "bot"} size={16} />{displayText(row.name)}</span>
-          {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}</th>
+          {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
+          {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}</th>
         <td>{displayText(row.harness)}</td>
         <td>{displayText(row.account)}</td>
         <td><StatusBadge word={row.word} /></td>

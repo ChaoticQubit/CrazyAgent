@@ -90,6 +90,46 @@ impl NativeBridge {
             .await
     }
 
+    /// Pauses every agent of a project's team, or resumes it.
+    /// Takes the project id, true to pause or false to resume, and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_pause(
+        &mut self,
+        id: &str,
+        paused: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = if paused {
+            TeamAction::Pause { project_id }
+        } else {
+            TeamAction::Resume { project_id }
+        };
+        self.team_action(action, generation).await
+    }
+
+    /// Hands off one sub-agent task the master proposed in a reply but the engine has not created.
+    /// Takes the project id, the master reply id, the step number and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_hand_off(
+        &mut self,
+        id: &str,
+        reply: i64,
+        step: u8,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::HandOff {
+                project_id,
+                reply,
+                step,
+            },
+            generation,
+        )
+        .await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,

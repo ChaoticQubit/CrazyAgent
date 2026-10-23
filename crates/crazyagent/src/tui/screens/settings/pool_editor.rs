@@ -44,6 +44,7 @@ pub struct PoolEditor {
     filter: TextField,
     selected_only: bool,
     saving: bool,
+    start: (String, BTreeSet<CredentialRef>),
 }
 
 impl PoolEditor {
@@ -66,6 +67,7 @@ impl PoolEditor {
                 .map(|member| member.id.clone())
                 .collect();
         }
+        let start = (name.value().to_owned(), members.clone());
         Self {
             id: id.cloned(),
             name,
@@ -77,6 +79,7 @@ impl PoolEditor {
             filter: TextField::new("Filter", FILTER_CHARS_MAX),
             selected_only: false,
             saving: false,
+            start,
         }
     }
 
@@ -565,6 +568,14 @@ impl Screen for PoolEditor {
         self.saving || matches!(ctx.store.accounts, Load::Idle | Load::Loading)
     }
 
+    fn draft(&self) -> bool {
+        self.name.value() != self.start.0 || self.members != self.start.1
+    }
+
+    fn loss(&self) -> &'static str {
+        "Your pool changes will be lost."
+    }
+
     fn place(&self) -> Option<Place> {
         Some(match &self.id {
             Some(id) => Place::EditPool(id.clone()),
@@ -749,6 +760,25 @@ mod tests {
             }
             other => panic!("unexpected request {other:?}"),
         }
+    }
+
+    #[test]
+    fn unsaved_pool_changes_count_as_a_draft() {
+        let mut ctx = ctx(4);
+        let mut editor = PoolEditor::new(None, &ctx);
+        assert!(!editor.draft());
+        typed(&mut editor, "Main", &mut ctx);
+        assert!(editor.draft());
+        assert_eq!(editor.loss(), "Your pool changes will be lost.");
+        for _ in 0..4 {
+            editor.key(&Key::Backspace, &mut ctx);
+        }
+        assert!(!editor.draft(), "back where it started is no draft");
+        editor.key(&Key::Tab, &mut ctx);
+        editor.key(&Key::Char(' '), &mut ctx);
+        assert!(editor.draft(), "a picked account is a draft");
+        editor.key(&Key::Char(' '), &mut ctx);
+        assert!(!editor.draft());
     }
 
     #[test]

@@ -3,8 +3,10 @@ use super::master_process::HostProcess;
 use super::master_reply::{TurnCapture, has_turn};
 use super::{Control, ControlBody, Event, EventBody, EventSequence, HOST_PROTOCOL_VERSION, RawControl};
 use crate::protocol::{ProtocolError, RequestId};
+use crate::sandbox::{InstalledSandbox, SANDBOX_EXEC};
 use std::collections::BTreeSet;
 use std::io::Cursor;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,8 +50,19 @@ pub struct RcliMasterHost {
 }
 
 impl RcliMasterHost {
-    pub fn launch(launch: RcliMasterLaunch) -> Result<Self, ProtocolError> {
-        let process = HostProcess::spawn(launch.command()?)?;
+    pub fn launch(
+        launch: RcliMasterLaunch,
+        sandbox: &InstalledSandbox,
+    ) -> Result<Self, ProtocolError> {
+        let mut command = sandbox
+            .wrap(&launch.command()?)
+            .map_err(|_| error("rcli_master_sandbox_refused"))?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        let process = HostProcess::spawn(command)?;
         let sequence = EventSequence::new(launch.binding.session_id.clone(), launch.binding.instance_id.clone());
         let host = Self {
             launch, process, sequence, started: Instant::now(), ready: false, stopped: false,

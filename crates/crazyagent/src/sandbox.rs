@@ -11,6 +11,7 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
+const WORKTREES_MAX: usize = 8;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
@@ -93,6 +94,34 @@ pub enum SandboxRemote {
     AnyHost(u16),
 }
 
+impl SandboxRemote {
+    /// The destination a tools-off agent needs for one model endpoint: the URL's port on
+    /// loopback for a local server, otherwise that port on any host. Input: an http or
+    /// https URL. Output: the remote, or a refusal for another scheme, host or port.
+    pub fn for_endpoint(url: &str) -> Result<Self, SandboxError> {
+        let parsed = url::Url::parse(url).map_err(|_| invalid("endpoint URL is invalid"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(invalid("endpoint URL must be http or https"));
+        }
+        let port = parsed
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| invalid("endpoint port is missing"))?;
+        let loopback = match parsed.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => return Err(invalid("endpoint host is missing")),
+        };
+        assert_ne!(port, 0);
+        Ok(if loopback {
+            Self::Loopback(port)
+        } else {
+            Self::AnyHost(port)
+        })
+    }
+}
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -118,14 +147,15 @@ impl From<io::Error> for SandboxError {
 }
 
 /// The Seatbelt boundary for one agent of one project: writes only inside the
-/// project folder (never its `context/` or git hooks and config) and the agent's
-/// own home and temp dirs, reads of system paths plus those roots, and network
-/// per [`SandboxNetwork`].
+/// project folder (never its `context/` or git hooks and config), the agent's
+/// worktrees and its own home and temp dirs, reads of system paths plus those
+/// roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
     project_root: PathBuf,
     agent_home: PathBuf,
     agent_tmp: PathBuf,
+    worktrees: Vec<PathBuf>,
     read_roots: Vec<PathBuf>,
     network: SandboxNetwork,
 }
@@ -155,9 +185,23 @@ impl ProjectSandbox {
             project_root: project_root.to_path_buf(),
             agent_home: agent_home.to_path_buf(),
             agent_tmp: agent_tmp.to_path_buf(),
+            worktrees: Vec::new(),
             read_roots: Vec::new(),
             network,
         })
+    }
+
+    /// Adds one writable worktree the agent may also start in, for a checkout the
+    /// engine keeps outside the project folder. Input: a canonical existing folder.
+    /// Output: the widened sandbox, or a refusal for an unsafe or extra root.
+    pub fn allow_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.worktrees.len() >= WORKTREES_MAX {
+            return Err(invalid("too many worktrees"));
+        }
+        granted_root(worktree, &owner_home()?)?;
+        self.worktrees.push(worktree.to_path_buf());
+        assert!(self.worktrees.len() <= WORKTREES_MAX);
+        Ok(self)
     }
 
     /// Adds one extra read-only root, such as a harness install directory.
@@ -183,6 +227,14 @@ impl ProjectSandbox {
     /// The agent's managed temp directory.
     pub fn agent_tmp(&self) -> &Path {
         &self.agent_tmp
+    }
+
+    /// Every folder this sandbox lets the agent write: the project folder, its own
+    /// home and temp dirs, then its worktrees.
+    pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
+        [&self.project_root, &self.agent_home, &self.agent_tmp]
+            .into_iter()
+            .chain(self.worktrees.iter())
     }
 
     /// The Seatbelt profile text for this agent.
@@ -212,17 +264,16 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (literal \"{literal}\")"));
         }
         text.push_str(")\n");
-        let granted = [&self.project_root, &self.agent_home, &self.agent_tmp];
         text.push_str("(allow file-read-metadata");
-        for root in granted.iter().copied().chain(self.read_roots.iter()) {
+        for root in self.writable_roots().chain(self.read_roots.iter()) {
             text.push_str(&format!("\n  (path-ancestors \"{}\")", root.display()));
         }
         text.push_str(")\n(allow file-read* file-map-executable");
-        for root in granted.iter().copied().chain(self.read_roots.iter()) {
+        for root in self.writable_roots().chain(self.read_roots.iter()) {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
         }
         text.push_str(")\n(allow file-write*");
-        for root in granted {
+        for root in self.writable_roots() {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
         }
         text.push_str(")\n");
@@ -280,10 +331,7 @@ impl ProjectSandbox {
             .filter(|name| name.ends_with(".sb") && name.len() <= 128)
             .ok_or_else(|| invalid("profile name must end in .sb"))?;
         let target = parent.join(name);
-        if [&self.project_root, &self.agent_home, &self.agent_tmp]
-            .iter()
-            .any(|root| target.starts_with(root))
-        {
+        if self.writable_roots().any(|root| target.starts_with(root)) {
             return Err(invalid(
                 "profile must live outside the sandbox's writable roots",
             ));
@@ -337,8 +385,14 @@ impl ProjectSandbox {
             return Err(invalid("harness program must be an absolute plain path"));
         }
         let cwd = harness.get_current_dir().unwrap_or(&self.project_root);
-        if !clean_absolute(cwd) || !cwd.starts_with(&self.project_root) {
-            return Err(invalid("harness must start inside the project folder"));
+        if !clean_absolute(cwd)
+            || !std::iter::once(&self.project_root)
+                .chain(self.worktrees.iter())
+                .any(|root| cwd.starts_with(root))
+        {
+            return Err(invalid(
+                "harness must start inside the project folder or its worktree",
+            ));
         }
         let mut command = self.command(profile, program);
         command.args(harness.get_args()).current_dir(cwd);
@@ -352,6 +406,45 @@ impl ProjectSandbox {
             };
         }
         assert_eq!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
+}
+
+/// A project sandbox whose profile is already installed on disk. Launch paths take
+/// this instead of a bare command, so no agent process can start outside its
+/// Seatbelt boundary.
+#[derive(Debug)]
+pub struct InstalledSandbox {
+    sandbox: ProjectSandbox,
+    profile: PathBuf,
+}
+
+impl InstalledSandbox {
+    /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]).
+    /// Output: the sandbox bound to that profile, or the install refusal.
+    pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+        sandbox.install(profile)?;
+        assert!(profile.is_file());
+        Ok(Self {
+            sandbox,
+            profile: profile.to_path_buf(),
+        })
+    }
+
+    /// The sandbox this profile was generated from.
+    pub fn sandbox(&self) -> &ProjectSandbox {
+        &self.sandbox
+    }
+
+    /// The installed profile file `sandbox-exec` loads.
+    pub fn profile(&self) -> &Path {
+        &self.profile
+    }
+
+    /// Rebuilds a harness command to run under this profile; see [`ProjectSandbox::wrap`].
+    pub fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let command = self.sandbox.wrap(&self.profile, harness)?;
+        assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
         Ok(command)
     }
 }

@@ -178,6 +178,93 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Changes a project's name, description, stack, platforms, research, pool and team.
+    /// Takes the project id, the setup revision the owner edited, an optional new name, the
+    /// new setup and the client generation. Returns the actual owner response; an edit
+    /// based on an older revision is the plain rejection `stale_revision`.
+    pub async fn update_project_setup(
+        &mut self,
+        project_id: ProjectId,
+        expected_revision: u64,
+        name: Option<String>,
+        setup: ProjectSetup,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::UpdateProjectSetup {
+                project_id,
+                expected_revision,
+                name,
+                setup,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Removes a project from CrazyAgent; its research stops and its folder stays on disk.
+    /// Takes the project id and the client generation.
+    /// Returns the actual owner response; an open master conversation is a plain rejection.
+    pub async fn remove_project(
+        &mut self,
+        project_id: ProjectId,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Stops one research job; a running agent's process group is stopped by its runner.
+    /// Takes the project id, the job id and the client generation.
+    /// Returns the actual owner response; a finished job is a plain rejection.
+    pub async fn cancel_research(
+        &mut self,
+        project_id: ProjectId,
+        job: i64,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.research_jobs(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::CancelResearch { project_id, job },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Queues a failed or cancelled research job again.
+    /// Takes the project id, the job id and the client generation.
+    /// Returns the actual owner response; a job that is not stopped is a plain rejection.
+    pub async fn retry_research(
+        &mut self,
+        project_id: ProjectId,
+        job: i64,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.research_jobs(project_id.clone()).await?;
+        self.begin_mutation(OwnerMutation::RetryResearch { project_id, job }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Reads the last plain lines of one research job's agent output, with secrets hidden.
+    /// Takes the project id and the job id.
+    /// Returns at most RESEARCH_LOG_LINES_MAX lines, oldest first.
+    pub async fn research_log(
+        &mut self,
+        project_id: ProjectId,
+        job: i64,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .read(OwnerRead::ResearchLog { project_id, job })
+            .await?
+            .data
+        {
+            OwnerData::ResearchLog { lines, .. } => Ok(lines),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists a project's memories, including research saved for approval, in id order.
     /// Takes the project id and the last entry id already shown, if any.
     /// Returns at most one engine batch of current entry versions.

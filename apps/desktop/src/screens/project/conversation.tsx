@@ -8,7 +8,7 @@ import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
 import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
-import { Badge, NotReady, valueOf } from "./shared";
+import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
@@ -175,12 +175,14 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     </div>
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     <div className="pj-thread" ref={thread} aria-live="polite">
-      {turns.length === 0 && Object.keys(sent).length === 0 && <p className="pj-muted">Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</p>}
+      {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
+        Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
       {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
         {sent[turn.ordinal] !== undefined
           ? <div className="pj-msg-owner"><p>{displayText(sent[turn.ordinal])}</p></div>
           : <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>}
-        {turn.reply ? <div className="pj-msg-master" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div>
+        {turn.reply ? <div className="pj-msg-master"><ProjectMark />
+          <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.ordinal], now) : turnLine(turn)}</p>}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}

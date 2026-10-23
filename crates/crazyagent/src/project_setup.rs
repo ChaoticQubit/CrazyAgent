@@ -29,6 +29,41 @@ pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
 pub const CONTEXT_DIRECTORY: &str = "context";
 pub const PROJECTS_DIRECTORY: &str = "projects";
 const BRIEF_PARTIAL: &str = ".brief.partial";
+pub const RESEARCH_LOG_LINES_MAX: usize = 200;
+pub const RESEARCH_LOG_LINE_CHARS_MAX: usize = 400;
+pub const RESEARCH_LOG_BYTES_MAX: usize = 24 * 1024;
+const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
+const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
+const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
+const SECRET_MARKERS: [&str; 10] = [
+    "api_key",
+    "api-key",
+    "apikey",
+    "secret",
+    "password",
+    "authorization",
+    "bearer ",
+    "access_token",
+    "refresh_token",
+    "id_token",
+];
+const SECRET_PREFIXES: [&str; 13] = [
+    "sk-",
+    "sk_",
+    "pk_",
+    "rk_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "glpat-",
+    "AKIA",
+    "eyJ",
+];
+const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
+const HIDDEN_WORD: &str = "[hidden]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +348,8 @@ pub struct StoredSetup {
     pub documents: Vec<StoredDocument>,
     pub folder: String,
     pub created_ms: i64,
+    #[serde(default)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +363,8 @@ pub struct ProjectCatalog {
     pub document_bytes_max: u64,
     pub project_document_bytes_max: u64,
     pub default_team: TeamPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_team_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +498,10 @@ pub enum SetupQuery {
         path: String,
         offset: u64,
     },
+    Log {
+        project: ProjectId,
+        job: i64,
+    },
     Change {
         action: SetupAction,
         generation: u64,
@@ -491,6 +534,7 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     Item(ContextChunk),
+    Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
@@ -517,6 +561,23 @@ pub enum SetupAction {
     DeleteContext {
         project_id: ProjectId,
         path: String,
+    },
+    Update {
+        project_id: ProjectId,
+        expected_revision: u64,
+        name: Option<String>,
+        setup: ProjectSetup,
+    },
+    Remove {
+        project_id: ProjectId,
+    },
+    CancelResearch {
+        project_id: ProjectId,
+        job: i64,
+    },
+    RetryResearch {
+        project_id: ProjectId,
+        job: i64,
     },
 }
 
@@ -560,6 +621,26 @@ impl SetupAction {
                 }
                 Ok(())
             }
+            Self::Update { name, setup, .. } => {
+                let renamed = name.as_ref().map(|name| ProjectSpec {
+                    name: name.clone(),
+                    repositories: Vec::new(),
+                });
+                if renamed.is_some_and(|spec| spec.validate().is_err()) {
+                    return Err(failure("project_spec_bounds"));
+                }
+                if !setup.documents.is_empty() {
+                    return Err(failure("project_setup_bounds"));
+                }
+                setup.validate()
+            }
+            Self::Remove { .. } => Ok(()),
+            Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
+                if *job <= 0 {
+                    return Err(failure("research_job_missing"));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -586,6 +667,11 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
+
+const DEFAULT_TEAM_HARNESS: &str = "codex";
+const SIGNED_IN_TEAM_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
+const TEAM_NEEDS_POOL: &str = "Needs a pool";
+const TEAM_NEEDS_SIGN_IN: &str = "Needs a signed-in account";
 
 const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
     ("typescript", "TypeScript", TechGroup::Language),
@@ -663,6 +749,7 @@ pub fn catalog(
         document_bytes_max: DOCUMENT_BYTES_MAX,
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, research, signed_in),
+        default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -730,49 +817,18 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 
 /// Builds the smart team defaults for the New Project Team step.
 /// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
-/// Returns the best ready harness as master and one research agent per toggle, tools on.
+/// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
+/// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
-    let members: Vec<(u8, &str)> = pool
-        .and_then(|pool| {
-            let access = config.settings.model_access.as_ref()?;
-            let pool = access.pools.iter().find(|p| &p.id == pool)?;
-            Some(
-                access
-                    .connections
-                    .iter()
-                    .filter(|c| pool.members.contains(&c.id))
-                    .map(|c| {
-                        let tier = match c.auth {
-                            ModelAuthentication::NativeManaged { .. }
-                                if signed_in.contains(&c.id) =>
-                            {
-                                0
-                            }
-                            ModelAuthentication::NativeManaged { .. } => 2,
-                            _ => 1,
-                        };
-                        (tier, c.harness.as_str())
-                    })
-                    .collect(),
-            )
-        })
-        .unwrap_or_default();
-    let rank = |harness: &str| match harness {
-        "codex" => 0,
-        "claude" => 1,
-        _ => 2,
-    };
-    let master = members
-        .iter()
-        .filter(|(_, harness)| harness_valid(harness))
-        .min_by_key(|(tier, harness)| (*tier, rank(harness), *harness))
-        .map_or("codex", |(_, harness)| harness)
+    let master = best_signed_in_harness(config, pool, signed_in)
+        .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
+    assert!(master != "rcli" && harness_valid(&master));
     let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
     let sub_harnesses = if agents == 0 {
         Vec::new()
@@ -792,6 +848,60 @@ pub fn default_team(
     };
     assert!(team.validate().is_ok());
     team
+}
+
+/// Finds the best harness among the pool's signed-in managed connections that can lead a
+/// project and run its research. Takes the configuration, the chosen pool and the signed-in
+/// connections. Returns the harness id, Codex before Claude Code, or none without one.
+fn best_signed_in_harness<'a>(
+    config: &'a EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'a str> {
+    let access = config.settings.model_access.as_ref()?;
+    let pool = access.pools.iter().find(|p| Some(&p.id) == pool)?;
+    access
+        .connections
+        .iter()
+        .filter(|c| {
+            pool.members.contains(&c.id)
+                && signed_in.contains(&c.id)
+                && matches!(c.auth, ModelAuthentication::NativeManaged { .. })
+        })
+        .filter_map(|c| {
+            SIGNED_IN_TEAM_HARNESSES
+                .iter()
+                .position(|harness| *harness == c.harness.as_str())
+                .map(|rank| (rank, c.harness.as_str()))
+        })
+        .min()
+        .map(|(_, harness)| harness)
+}
+
+/// Says in plain words why the default team cannot start yet.
+/// Takes the configuration, the chosen pool and the signed-in connections.
+/// Returns "Needs a pool" without a pool that has members, "Needs a signed-in account" when no
+/// member can run the default harness, or none when the default team can start.
+pub fn default_team_status(
+    config: &EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'static str> {
+    let Some((access, chosen)) = pool
+        .and_then(|pool| {
+            let access = config.settings.model_access.as_ref()?;
+            Some((access, access.pools.iter().find(|p| &p.id == pool)?))
+        })
+        .filter(|(_, chosen)| !chosen.members.is_empty())
+    else {
+        return Some(TEAM_NEEDS_POOL);
+    };
+    let harness = best_signed_in_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
+    let ready = |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
+    match crate::research::accounts::pool_account(access, chosen, harness, &ready) {
+        Some(_) => None,
+        None => Some(TEAM_NEEDS_SIGN_IN),
+    }
 }
 
 fn extension_allowed(name: &str) -> bool {
@@ -979,22 +1089,47 @@ pub fn insert_jobs(
         ResearchStatus::NeedsPool
     };
     for (index, kind) in kinds.iter().enumerate() {
-        let (harness, tools) = harnesses[index % harnesses.len()];
-        tx.execute(
-            "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
-            VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                project.as_str(),
-                kind.name(),
-                harness,
-                tools,
-                status.stored(),
-                kind.report_path(),
-                now
-            ],
-        )
-        .map_err(error)?;
+        insert_job(
+            tx,
+            project,
+            *kind,
+            harnesses[index % harnesses.len()],
+            status,
+            now,
+        )?;
     }
+    Ok(())
+}
+
+/// Queues one research job for a project.
+/// Takes the transaction, project, research kind, the harness with its tools switch, the
+/// waiting status and the time. Returns any SQLite failure.
+fn insert_job(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    kind: ResearchKind,
+    (harness, tools): (&str, bool),
+    status: ResearchStatus,
+    now: i64,
+) -> Result<(), EngineError> {
+    assert!(matches!(
+        status,
+        ResearchStatus::Queued | ResearchStatus::NeedsPool
+    ));
+    tx.execute(
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+        VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            project.as_str(),
+            kind.name(),
+            harness,
+            tools,
+            status.stored(),
+            kind.report_path(),
+            now
+        ],
+    )
+    .map_err(error)?;
     Ok(())
 }
 
@@ -1348,6 +1483,24 @@ pub(crate) fn execute(
             documents,
         } => add_documents(tx, project_id, documents),
         SetupAction::DeleteContext { project_id, path } => delete_context(tx, project_id, path),
+        SetupAction::Update {
+            project_id,
+            expected_revision,
+            name,
+            setup,
+        } => update(
+            tx,
+            config,
+            project_id,
+            *expected_revision,
+            name.as_deref(),
+            setup,
+        ),
+        SetupAction::Remove { project_id } => remove(tx, project_id),
+        SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
+        SetupAction::RetryResearch { project_id, job } => {
+            retry_research(tx, config, project_id, *job)
+        }
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -1498,6 +1651,273 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Changes an existing project's name, description, stack, platforms, research, pool and team.
+/// Takes the transaction, configuration, project, the setup revision the owner edited, an
+/// optional new name and the new setup; documents keep their own add and delete actions.
+/// Returns Applied, or a plain rejection such as `stale_revision` after a concurrent change.
+fn update(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+    expected_revision: u64,
+    name: Option<&str>,
+    setup: &ProjectSetup,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if stored.revision != expected_revision {
+        return Ok(rejected("stale_revision"));
+    }
+    if setup.pool != stored.pool
+        && setup
+            .pool
+            .as_ref()
+            .is_some_and(|pool| !pool_exists(config, pool))
+    {
+        return Ok(rejected("pool_missing"));
+    }
+    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+        return Ok(rejected("project_folder_missing"));
+    };
+    if let Some(name) = name {
+        rename_project(tx, project_id, name)?;
+        stored.name = name.to_owned();
+    }
+    let previous = std::mem::take(&mut stored.research);
+    stored.about = setup.about.clone();
+    stored.tech_stack = setup
+        .tech_stack
+        .iter()
+        .map(|t| t.trim().to_owned())
+        .collect();
+    stored.platforms = setup.platforms.clone();
+    stored.research = setup.research.clone();
+    stored.pool = setup.pool.clone();
+    if let Some(team) = &setup.team {
+        stored.team = team.clone();
+    }
+    stored.team.validate()?;
+    stored.revision = expected_revision
+        .checked_add(1)
+        .ok_or_else(|| failure("project_setup_revision_limit"))?;
+    replan_jobs(
+        tx,
+        project_id,
+        &previous,
+        &stored.research,
+        &stored.team,
+        project_has_pool(config, project_id),
+    )?;
+    save_setup(tx, &stored)?;
+    write_brief(&context, &stored).map_err(failure)?;
+    assert!(stored.revision > expected_revision);
+    Ok(Outcome::Applied)
+}
+
+/// Renames a project in the project list.
+/// Takes the transaction, the project and an already validated name.
+/// Returns any storage failure; the project row must exist.
+fn rename_project(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    name: &str,
+) -> Result<(), EngineError> {
+    let body: String = tx
+        .query_row(
+            "SELECT body FROM projects WHERE id=?1",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let mut project: crate::protocol::StoredProject = serde_json::from_str(&body).map_err(error)?;
+    assert_eq!(&project.project_id, project_id);
+    project.spec.name = name.to_owned();
+    project
+        .spec
+        .validate()
+        .map_err(|_| failure("project_spec_bounds"))?;
+    let changed = tx
+        .execute(
+            "UPDATE projects SET body=?2 WHERE id=?1",
+            params![
+                project_id.as_str(),
+                serde_json::to_string(&project).map_err(error)?
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
+/// Brings a project's research jobs in line with its toggles after an owner edit.
+/// Takes the transaction, project, the toggles before and after, the team and pool state.
+/// Turned-off research stops, turned-on research is queued again or added, and waiting
+/// jobs move to the new team's harness; running and finished jobs keep theirs.
+fn replan_jobs(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    previous: &[ResearchKind],
+    kinds: &[ResearchKind],
+    team: &TeamPlan,
+    has_pool: bool,
+) -> Result<(), EngineError> {
+    let now = now_ms();
+    let jobs = load_jobs(tx, "project", &project.as_str())?;
+    for job in jobs.iter().filter(|job| !kinds.contains(&job.kind)) {
+        cancel_jobs(tx, "id", &job.id, now)?;
+    }
+    let harnesses = team.research_harnesses();
+    assert!(!harnesses.is_empty());
+    let waiting = effective(ResearchStatus::Queued, has_pool);
+    for (index, kind) in kinds.iter().enumerate() {
+        let (harness, tools) = harnesses[index % harnesses.len()];
+        let restartable = if previous.contains(kind) {
+            "'queued','needs_pool'"
+        } else {
+            "'queued','needs_pool','failed','cancelled'"
+        };
+        match jobs.iter().rev().find(|job| job.kind == *kind) {
+            None => insert_job(tx, project, *kind, (harness, tools), waiting, now)?,
+            Some(job) => {
+                tx.execute(
+                    &format!(
+                        "UPDATE research_jobs SET status=?2, harness=?3, tools=?4,
+                        attempts=CASE WHEN status IN ('failed','cancelled') THEN 0 ELSE attempts END,
+                        cancel_requested=0, error=NULL, claimer=NULL, finished_ms=NULL
+                        WHERE id=?1 AND status IN ({restartable})"
+                    ),
+                    params![job.id, waiting.stored(), harness, tools],
+                )
+                .map_err(error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stops active research: waiting jobs become Cancelled at once and running jobs are
+/// flagged, so their runner stops the agent's whole process group at its next heartbeat.
+/// Takes the transaction, the column to match (`id` or `project`), its value and the time.
+/// Returns how many jobs were still active.
+fn cancel_jobs(
+    tx: &Transaction<'_>,
+    filter: &str,
+    value: &dyn rusqlite::ToSql,
+    now: i64,
+) -> Result<usize, EngineError> {
+    assert!(filter == "id" || filter == "project");
+    tx.execute(
+        &format!(
+            "UPDATE research_jobs
+            SET status = CASE WHEN status = 'running' THEN 'running' ELSE 'cancelled' END,
+                cancel_requested = 1,
+                finished_ms = CASE WHEN status = 'running' THEN finished_ms ELSE ?2 END
+            WHERE {filter} = ?1 AND status IN ('queued', 'needs_pool', 'running')
+                AND cancel_requested = 0"
+        ),
+        [value, &now as &dyn rusqlite::ToSql],
+    )
+    .map_err(error)
+}
+
+/// Loads one research job when it belongs to the project.
+/// Takes a transaction, the project and the job id.
+/// Returns the job, or none for an unknown job or another project's job.
+pub(crate) fn project_job(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    id: i64,
+) -> Result<Option<ResearchJob>, EngineError> {
+    let job = load_jobs(tx, "id", &id)?.pop();
+    Ok(job.filter(|job| &job.project_id == project_id))
+}
+
+/// Stops one research job of a project; a running agent is stopped by its runner.
+/// Takes the transaction, project and job id. Returns Applied, `research_job_missing` for
+/// another project's job, or `research_job_finished` once nothing is left to stop.
+fn cancel_research(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    id: i64,
+) -> Result<Outcome, EngineError> {
+    let Some(job) = project_job(tx, project_id, id)? else {
+        return Ok(rejected("research_job_missing"));
+    };
+    if job.status == ResearchStatus::Running && job.cancel_requested {
+        return Ok(Outcome::Applied);
+    }
+    if cancel_jobs(tx, "id", &id, now_ms())? == 0 {
+        return Ok(rejected("research_job_finished"));
+    }
+    Ok(Outcome::Applied)
+}
+
+/// Queues a failed or cancelled research job again with a fresh attempt budget.
+/// Takes the transaction, configuration, project and job id. Returns Applied,
+/// `research_job_missing`, or `research_job_not_retryable` for a job that is not stopped.
+fn retry_research(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+    id: i64,
+) -> Result<Outcome, EngineError> {
+    let Some(job) = project_job(tx, project_id, id)? else {
+        return Ok(rejected("research_job_missing"));
+    };
+    if !matches!(
+        job.status,
+        ResearchStatus::Failed | ResearchStatus::Cancelled
+    ) {
+        return Ok(rejected("research_job_not_retryable"));
+    }
+    let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
+    let changed = tx
+        .execute(
+            "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+            cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+            finished_ms=NULL WHERE id=?1 AND status IN ('failed','cancelled')",
+            params![id, status.stored()],
+        )
+        .map_err(error)?;
+    if changed != 1 {
+        return Ok(rejected("research_job_not_retryable"));
+    }
+    Ok(Outcome::Applied)
+}
+
+/// Removes a project from CrazyAgent and leaves its folder on disk where it is.
+/// Takes the transaction and the project; its research stops as in `cancel_jobs`.
+/// Returns `project_master_open` while its master conversation is open, since ending it
+/// releases the master's worktree, and `invalid_project` for an unknown project.
+fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, EngineError> {
+    let (exists, master_open): (bool, bool) = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1),
+            EXISTS(SELECT 1 FROM master_sessions WHERE project=?1 AND phase='configured')",
+            [project_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    if !exists {
+        return Ok(rejected("invalid_project"));
+    }
+    if master_open {
+        return Ok(rejected("project_master_open"));
+    }
+    cancel_jobs(tx, "project", &project_id.as_str(), now_ms())?;
+    tx.execute(
+        "DELETE FROM project_setups WHERE project=?1",
+        [project_id.as_str()],
+    )
+    .map_err(error)?;
+    let removed = tx
+        .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
+        .map_err(error)?;
+    assert_eq!(removed, 1);
+    Ok(Outcome::Applied)
+}
+
 fn create(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -1601,6 +2021,7 @@ fn record(
             .ok_or_else(|| failure("project_folder_unwritable"))?
             .to_owned(),
         created_ms: now,
+        revision: 1,
     };
     tx.execute(
         "INSERT INTO project_setups VALUES (?1,?2)",
@@ -1810,6 +2231,164 @@ pub fn read_context(
     };
     assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
     Ok(chunk)
+}
+
+/// Reads the last plain lines of one research job's agent output, with secrets hidden.
+/// Takes the engine database path, whose folder holds the research runner's agent state,
+/// and the job id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and
+/// RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame; none before the first run.
+pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineError> {
+    assert!(job > 0);
+    let agents = database
+        .parent()
+        .ok_or_else(|| failure("runtime_parent_missing"))?
+        .join("research")
+        .join("agents");
+    let Ok(directory) = rustix::fs::open(
+        agents.as_path(),
+        open_flags() | OFlags::DIRECTORY,
+        Mode::empty(),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let Some(run) = latest_run(&agents, job)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(run) = open_directory(&directory, &run) else {
+        return Ok(Vec::new());
+    };
+    let mut lines = Vec::new();
+    for name in RESEARCH_LOG_FILES {
+        let Ok(fd) = rustix::fs::openat(&run, name, open_flags(), Mode::empty()) else {
+            continue;
+        };
+        let Ok((mut file, bytes)) = regular(fd, "research_log_unreadable") else {
+            continue;
+        };
+        let start = bytes.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).map_err(error)?;
+        let mut tail = Vec::new();
+        file.take(RESEARCH_LOG_TAIL_BYTES)
+            .read_to_end(&mut tail)
+            .map_err(error)?;
+        let text = String::from_utf8_lossy(&tail);
+        let mut rows = text.lines();
+        if start > 0 {
+            rows.next();
+        }
+        lines.extend(rows.filter_map(plain_log_line));
+    }
+    let mut kept = 0;
+    let mut bytes = 0;
+    for line in lines.iter().rev() {
+        if kept == RESEARCH_LOG_LINES_MAX || bytes + line.len() > RESEARCH_LOG_BYTES_MAX {
+            break;
+        }
+        kept += 1;
+        bytes += line.len();
+    }
+    let lines = lines.split_off(lines.len() - kept);
+    assert!(lines.len() <= RESEARCH_LOG_LINES_MAX);
+    assert!(lines.iter().map(String::len).sum::<usize>() <= RESEARCH_LOG_BYTES_MAX);
+    Ok(lines)
+}
+
+/// Names the newest run folder of a research job in the runner's agent state.
+/// Takes the agents folder and the job id; run folders are named job-<id>-<attempt> with an
+/// optional -<launch>. Returns the highest attempt and launch, or none before any run.
+fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
+    let prefix = format!("job-{job}-");
+    let mut latest: Option<((u32, u32), String)> = None;
+    for entry in std::fs::read_dir(agents)
+        .map_err(error)?
+        .take(RESEARCH_RUNS_SCANNED_MAX)
+    {
+        let Ok(name) = entry.map_err(error)?.file_name().into_string() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let mut parts = rest.split('-');
+        let attempt = parts.next().and_then(|part| part.parse::<u32>().ok());
+        let launch = parts
+            .next()
+            .map_or(Some(0), |part| part.parse::<u32>().ok());
+        let (Some(attempt), Some(launch), None) = (attempt, launch, parts.next()) else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|(order, _)| (attempt, launch) > *order)
+        {
+            latest = Some(((attempt, launch), name));
+        }
+    }
+    Ok(latest.map(|(_, name)| name))
+}
+
+/// Turns one raw agent log line into plain text with likely secrets hidden.
+/// Takes the raw line; a JSON event gives its message text and textless events are skipped.
+/// Returns the bounded plain line, or none for an empty or textless line.
+fn plain_log_line(raw: &str) -> Option<String> {
+    let text = match serde_json::from_str::<serde_json::Value>(raw.trim()) {
+        Ok(event) if event.is_object() => event_text(&event)?,
+        _ => raw.to_owned(),
+    };
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let line = redact(text);
+    if line.chars().count() <= RESEARCH_LOG_LINE_CHARS_MAX {
+        return Some(line);
+    }
+    let mut cut: String = line.chars().take(RESEARCH_LOG_LINE_CHARS_MAX).collect();
+    cut.push_str("...");
+    Some(cut)
+}
+
+fn event_text(event: &serde_json::Value) -> Option<String> {
+    [Some(event), event.get("item"), event.get("msg")]
+        .into_iter()
+        .flatten()
+        .find_map(|scope| {
+            ["text", "message", "command"]
+                .into_iter()
+                .find_map(|key| scope.get(key)?.as_str().map(str::to_owned))
+        })
+}
+
+/// Hides words and lines that look like credentials before a log line leaves the engine.
+/// Takes one plain line. Returns it with token-like words replaced, or a fixed notice for a
+/// line that names a credential field.
+fn redact(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return HIDDEN_LINE.into();
+    }
+    line.split(' ')
+        .map(|word| if secret_like(word) { HIDDEN_WORD } else { word })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn secret_like(word: &str) -> bool {
+    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    let prefixed = SECRET_PREFIXES
+        .iter()
+        .any(|prefix| core.starts_with(*prefix) && core.len() >= 16);
+    let opaque = core.len() >= 32
+        && core
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && core.bytes().any(|b| b.is_ascii_digit())
+        && core.bytes().any(|b| b.is_ascii_alphabetic());
+    prefixed || opaque
 }
 
 #[cfg(test)]

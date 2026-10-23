@@ -1129,6 +1129,8 @@ fn team(draw: &mut Draw) {
     ));
     if let Some((text, _)) = draw.note_for(Control::Team) {
         draw.note(&text, look.error);
+    } else if let Some(text) = wizard.limited_note().filter(|_| focus) {
+        draw.note(&text, look.warning);
     }
     draw.add(Row::default());
     let mut size = Row::of("Team size", look.heading).pad(12);
@@ -1217,24 +1219,28 @@ fn picker_box(
     let choices = wizard.harness_choices();
     let widths = [12, 15, 17];
     for (index, choice) in choices.iter().enumerate() {
-        let (status, style) = match &choice.state {
+        let (status, style) = match choice.state {
             HarnessState::Ready => (format!("{} Ready", look.glyph("\u{2713}")), look.success),
             HarnessState::NotInstalled => (
                 format!("{} Not installed", look.glyph("\u{2298}")),
                 look.muted,
             ),
-            HarnessState::Limited(_) => (format!("{} Ready", look.glyph("\u{2713}")), look.success),
-            HarnessState::Unknown => (String::new(), look.muted),
-        };
-        let extra = match &choice.state {
-            HarnessState::Limited(_) => Row::of(
-                format!("{} Limited control", look.glyph("\u{25e7}")),
+            HarnessState::CantStart => (
+                format!("{} Can't start", look.glyph("\u{2298}")),
                 look.warning,
             ),
-            _ => match wizard.pool_accounts(&choice.id) {
+            HarnessState::Unknown => (String::new(), look.muted),
+        };
+        let extra = if choice.limited.is_some() {
+            Row::of(
+                format!("{} Limited control", look.glyph("\u{25e7}")),
+                look.warning,
+            )
+        } else {
+            match wizard.pool_accounts(&choice.id) {
                 Some(count) if count > 0 => Row::of(format!("{count} in pool"), look.fg),
                 _ => Row::default(),
-            },
+            }
         };
         let row = columns(
             &widths,

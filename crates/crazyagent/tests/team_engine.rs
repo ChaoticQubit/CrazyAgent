@@ -323,12 +323,18 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
             "{worktree} is a git worktree"
         );
     }
-    assert!(
-        team.agents
-            .iter()
-            .any(|a| a.role == AgentRole::Master && a.worktree.is_none() && a.turns >= 2),
-        "{team:#?}"
+    let master = team
+        .agents
+        .iter()
+        .find(|a| a.role == AgentRole::Master && a.turns >= 2)
+        .unwrap_or_else(|| panic!("the master took both turns: {team:#?}"));
+    let worktree = master.worktree.as_deref().unwrap();
+    assert_eq!(
+        worktree,
+        format!("worktrees/agent-{}", master.id),
+        "the master works in its own worktree too"
     );
+    assert!(folder.join(worktree).join(".git").is_file());
 
     assert_eq!(
         owner.act(TeamAction::Delegate {
@@ -338,16 +344,63 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
         }),
         Outcome::Applied
     );
-    let running = owner.wait("the owner task starts", 10, |team| {
+    let owner_task_runs = |team: &TeamStatus| {
         team.tasks.iter().any(|t| {
             t.source == TaskSource::Owner
                 && t.status == TaskStatus::Running
                 && team
                     .agents
                     .iter()
-                    .any(|a| Some(a.id) == t.agent && a.process_group.is_some())
+                    .any(|a| Some(a.id) == t.agent && a.process_group.is_some() && a.status.live())
         })
+    };
+    let first = owner.wait("the owner task starts", 10, owner_task_runs);
+    let held_task = first
+        .tasks
+        .iter()
+        .find(|t| t.source == TaskSource::Owner)
+        .unwrap()
+        .clone();
+    let held_agent = first
+        .agents
+        .iter()
+        .find(|a| Some(a.id) == held_task.agent)
+        .unwrap()
+        .clone();
+    let held_group = held_agent.process_group.unwrap();
+    assert!(group_alive(held_group));
+    assert_eq!(
+        owner.act(TeamAction::Pause {
+            project_id: project.clone(),
+        }),
+        Outcome::Applied
+    );
+    let paused = owner.wait("the paused team stops", 2, |team| {
+        team.paused
+            && team.agents.iter().all(|a| !a.status.live())
+            && team
+                .tasks
+                .iter()
+                .any(|t| t.id == held_task.id && t.status == TaskStatus::Queued)
     });
+    assert!(
+        !group_alive(held_group),
+        "pause stopped the whole process group"
+    );
+    let waiting = paused.tasks.iter().find(|t| t.id == held_task.id).unwrap();
+    assert_eq!(
+        waiting.attempts,
+        held_task.attempts - 1,
+        "a pause does not spend the task's attempt"
+    );
+    assert_eq!(
+        owner.act(TeamAction::Resume {
+            project_id: project.clone(),
+        }),
+        Outcome::Applied
+    );
+    let running = owner.wait("the resumed task starts again", 10, owner_task_runs);
+    assert!(!running.paused);
     let task = running
         .tasks
         .iter()

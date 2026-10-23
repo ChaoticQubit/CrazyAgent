@@ -1,11 +1,12 @@
 mod research_support;
 
-use crazyagent::protocol::ProjectId;
+use crazyagent::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
+use crazyagent::protocol::CredentialRef;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
-use research_support::{EngineRuntime, claude, codex, managed_home};
+use research_support::{EngineRuntime, claude, codex};
 use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
@@ -26,7 +27,7 @@ fn local_model() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct Case {
-    runtime: EngineRuntime,
+    _runtime: EngineRuntime,
     project: PathBuf,
     state: PathBuf,
     database: PathBuf,
@@ -40,7 +41,7 @@ fn case(about: &str) -> Case {
         project,
         state: runtime.state.clone(),
         database: runtime.database.clone(),
-        runtime,
+        _runtime: runtime,
     }
 }
 
@@ -363,34 +364,6 @@ fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
     );
 }
 
-#[test]
-fn research_runs_on_a_signed_in_managed_codex_account() {
-    let home = managed_home("CRAZYAGENT_MANAGED_CODEX_HOME", "Codex");
-    let case = case("A mobile app that tracks daily habits.");
-    let jobs = ResearchJobs::open(&case.database).unwrap();
-    let id = jobs
-        .enqueue("project-a", "competitor_research", "codex", true)
-        .unwrap();
-    let run = runner(&case, limits(Duration::from_secs(900)))
-        .run_once(&project(
-            &case,
-            Some(ResearchAccount::ManagedCodex { home, model: None }),
-        ))
-        .unwrap()
-        .unwrap();
-    let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(run.status, ResearchStatus::Done, "{:?}", job.error);
-    let report = fs::read_to_string(
-        case.project
-            .join("context")
-            .join("research")
-            .join("competitor_research.md"),
-    )
-    .unwrap();
-    assert!(report.starts_with("# Competitor research\n"));
-    assert!(report.contains("https://"));
-}
-
 fn process_group_alive(group: u32) -> bool {
     let pid = rustix::process::Pid::from_raw(group as i32).unwrap();
     rustix::process::test_kill_process_group(pid).is_ok()
@@ -552,36 +525,6 @@ fn a_claude_job_without_claude_installed_fails_plainly() {
 }
 
 #[test]
-fn research_runs_on_a_signed_in_managed_claude_account() {
-    let home = managed_home("CRAZYAGENT_MANAGED_CLAUDE_HOME", "Claude Code");
-    let case = case("A mobile app that tracks daily habits.");
-    let jobs = ResearchJobs::open(&case.database).unwrap();
-    let id = jobs
-        .enqueue("project-a", "competitor_research", "claude", true)
-        .unwrap();
-    let run = runner(&case, limits(Duration::from_secs(900)))
-        .with_claude(&claude())
-        .unwrap()
-        .run_once(&project(
-            &case,
-            Some(ResearchAccount::ManagedClaude { home, model: None }),
-        ))
-        .unwrap()
-        .unwrap();
-    let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(run.status, ResearchStatus::Done, "{:?}", job.error);
-    let report = fs::read_to_string(
-        case.project
-            .join("context")
-            .join("research")
-            .join("competitor_research.md"),
-    )
-    .unwrap();
-    assert!(report.contains("Researched by Claude Code"));
-    assert!(report.contains("https://"));
-}
-
-#[test]
 fn a_job_interrupted_by_an_engine_stop_runs_again_after_a_restart() {
     let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
@@ -727,33 +670,43 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
 }
 
 #[test]
-fn a_managed_home_another_launch_holds_hands_the_job_back_without_spending_an_attempt() {
+fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
     let case = case("A site for a neighbourhood tool library.");
-    let home = case.runtime.private_home("managed-codex-home");
-    let connection = rusqlite::Connection::open(&case.database).unwrap();
-    let context =
-        crazyagent::launch_context::for_project(&connection, &ProjectId::new("project-a").unwrap())
-            .unwrap();
-    let held = context.install("codex", &home, true).unwrap();
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
         .unwrap();
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    let connection = ModelConnection {
+        id: reference("codex-connection"),
+        provider: reference("openai"),
+        harness: reference("codex"),
+        protocol: reference("native"),
+        account_ref: reference("codex-account"),
+        endpoint: ModelEndpoint::Native {},
+        model: ModelReference {
+            id: "native-default".into(),
+            author: reference("openai"),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: reference("codex-profile"),
+        },
+    };
     let run = runner(&case, limits(Duration::from_secs(5)))
         .run_once(&project(
             &case,
             Some(ResearchAccount::ManagedCodex {
-                home: home.clone(),
+                connection,
                 model: None,
             }),
         ))
         .unwrap()
         .unwrap();
     assert_eq!(run.job, id);
-    assert_eq!(run.status, ResearchStatus::Queued);
+    assert_eq!(run.status, ResearchStatus::NeedsPool);
     assert_eq!(run.process_group, None);
     let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(job.status, ResearchStatus::Queued);
+    assert_eq!(job.status.label(), "Needs a pool");
     assert_eq!(job.attempts, 0);
     assert!(!case.project.join("worktrees").exists());
     assert!(
@@ -763,9 +716,6 @@ fn a_managed_home_another_launch_holds_hands_the_job_back_without_spending_an_at
             .join(format!("job-{id}-1"))
             .exists()
     );
-    assert!(home.join("config.toml").is_file());
-    drop(held);
-    assert!(!home.join("config.toml").exists());
 }
 
 #[test]

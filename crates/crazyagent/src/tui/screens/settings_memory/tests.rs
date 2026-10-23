@@ -166,9 +166,66 @@ fn where_a_memory_came_from_is_plain() {
             ("Tidepool".to_owned(), "Saved for Tidepool only.".to_owned()),
         ]
     );
+    let selection = saved(
+        8,
+        "Readings arrive every 90 s.",
+        only("tidepool"),
+        MemoryOrigin::Selected {
+            path: "context/research/market_research.md".into(),
+        },
+    );
+    assert_eq!(source(&selection, &ctx), "Tidepool");
+    assert_eq!(saved_line(&selection, &ctx), "Saved for Tidepool only.");
     let mut unknown = memory_ctx(80, 24);
     unknown.store.projects = Load::Ready(Vec::new());
     assert_eq!(source(&memories()[2], &unknown), "A project");
+    let selected = |scope| {
+        saved(
+            9,
+            "Ship the page before the market opens.",
+            scope,
+            MemoryOrigin::Selected {
+                path: "context/brief.md".into(),
+            },
+        )
+    };
+    let kept = selected(only("ledgerline"));
+    assert_eq!(
+        (source(&kept, &ctx), saved_line(&kept, &ctx)),
+        (
+            "Ledgerline".to_owned(),
+            "Saved for Ledgerline only.".to_owned()
+        )
+    );
+    let everywhere = selected(MemoryScope::Global);
+    assert_eq!(
+        (source(&everywhere, &ctx), saved_line(&everywhere, &ctx)),
+        (
+            "You".to_owned(),
+            "Saved by you for every project.".to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_memory_selected_from_a_project_file_names_that_project() {
+    let ctx = memory_ctx(80, 24);
+    let selected = |scope| {
+        saved(
+            8,
+            "Readings arrive every 90 s.",
+            scope,
+            MemoryOrigin::Selected {
+                path: "context/research/market_research.md".into(),
+            },
+        )
+    };
+    let memory = selected(only("tidepool"));
+    assert_eq!(source(&memory, &ctx), "Tidepool");
+    assert_eq!(saved_line(&memory, &ctx), "Saved for Tidepool only.");
+    let global = selected(MemoryScope::Global);
+    assert_eq!(source(&global, &ctx), "You");
+    assert_eq!(saved_line(&global, &ctx), "Saved by you for every project.");
 }
 
 #[test]

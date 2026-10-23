@@ -1,13 +1,9 @@
 import type { ReactNode } from "react";
+import { BrandMark } from "./brand";
 import { Icon } from "./icon";
 import { formatRoute, type Route } from "./router";
 
-/** The CrazyAgent brand mark. Until the owner picks a brand concept this is the plain
- * "CrazyAgent" wordmark set in the UI font; swap the logo here only.
- * Input: large for the Welcome page. Output: the mark. */
-export function BrandMark({ large = false }: { large?: boolean }) {
-  return <span className={`brand-mark${large ? " large" : ""}`}>CrazyAgent</span>;
-}
+export { BrandMark };
 
 export type EngineState = "connecting" | "running" | "down";
 

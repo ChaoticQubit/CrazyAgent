@@ -70,15 +70,6 @@ impl EngineRuntime {
         assert!(folder.join("context").join("brief.md").is_file());
         folder
     }
-
-    /// A fresh 0700 directory under the runtime that stands in for an
-    /// engine-owned managed profile home nobody has signed in to.
-    pub fn private_home(&self, name: &str) -> PathBuf {
-        let home = self.root.join(name);
-        fs::create_dir(&home).unwrap();
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-        home.canonicalize().unwrap()
-    }
 }
 
 /// Creates projects through the owner client of a running engine.
@@ -163,17 +154,24 @@ pub fn claude() -> PathBuf {
         .expect("real claude binary required")
 }
 
-/// The signed-in managed profile home named by `variable`, or a panic with
-/// the plain BLOCKED message and the command the owner runs to unblock it.
-pub fn managed_home(variable: &str, harness: &str) -> PathBuf {
-    let Some(home) = std::env::var_os(variable) else {
+/// The runtime folder of a running engine where the owner signed in a
+/// managed account, and the project named by `variable` whose assigned pool
+/// holds it. Panics with the plain BLOCKED message and the steps the owner
+/// takes to unblock the paid run when either is not set.
+pub fn managed_project(variable: &str, harness: &str) -> (PathBuf, String) {
+    let blocked = || -> ! {
         panic!(
-            "BLOCKED: no signed-in managed {harness} account. Sign in to one in CrazyAgent, then run: {variable}=<its managed profile home> cargo test --locked --offline -p crazyagent --test research_runner -- --test-threads=1"
-        );
+            "BLOCKED: no signed-in managed {harness} account. Start CrazyAgent's engine with --writable-settings, --codex-executable and --claude-executable, sign in to a managed {harness} account, assign its pool to a project, then run: CRAZYAGENT_MANAGED_RUNTIME=<engine runtime folder> {variable}=<that project id> cargo test --locked --offline -p crazyagent --test research_managed"
+        )
     };
-    let home = PathBuf::from(home)
+    let runtime = std::env::var_os("CRAZYAGENT_MANAGED_RUNTIME").unwrap_or_else(|| blocked());
+    let project = std::env::var(variable).unwrap_or_else(|_| blocked());
+    let runtime = PathBuf::from(runtime)
         .canonicalize()
-        .unwrap_or_else(|_| panic!("BLOCKED: {variable} does not name an existing folder"));
-    assert!(home.is_dir(), "BLOCKED: {variable} must name a folder");
-    home
+        .unwrap_or_else(|_| panic!("BLOCKED: CRAZYAGENT_MANAGED_RUNTIME does not name a folder"));
+    assert!(
+        runtime.join("engine.db").is_file(),
+        "BLOCKED: CRAZYAGENT_MANAGED_RUNTIME has no engine.db"
+    );
+    (runtime, project)
 }

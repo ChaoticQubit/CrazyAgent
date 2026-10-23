@@ -1,4 +1,5 @@
 use super::{Flow, Place, Screen, open};
+use crate::tui::brand;
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
@@ -11,20 +12,29 @@ use ratatui::text::{Line, Span};
 
 /// The first screen: connects to the engine, then reads the profile and
 /// replaces itself with Welcome on first run or Home afterwards.
-/// Input: connection and profile arrivals. Output: "Connecting" with a spinner,
-/// or the full "Engine not running" screen with r and c.
+/// Input: connection and profile arrivals. Output: the brand mark over "Connecting"
+/// with a spinner, the full "Engine not running" screen with r and c, or "Could not
+/// read your profile" when the engine answered with a refusal.
 #[derive(Default)]
-pub struct Startup;
+pub struct Startup {
+    profile_failed: bool,
+}
 
 impl Startup {
     /// A new startup screen.
     /// Input: none. Output: the screen.
     pub fn new() -> Self {
-        Self
+        Self {
+            profile_failed: false,
+        }
     }
 
     fn down(ctx: &Ctx) -> bool {
         matches!(ctx.link, Link::Down(_))
+    }
+
+    fn stuck(&self, ctx: &Ctx) -> bool {
+        Self::down(ctx) || self.profile_failed
     }
 }
 
@@ -46,8 +56,9 @@ pub fn tilde(path: &str, home: Option<&str>) -> String {
 /// Support details copied with `c`: the socket path and versions, never secrets.
 /// Input: the context. Output: plain text lines.
 pub fn support_details(ctx: &Ctx) -> String {
-    let problem = match &ctx.link {
-        Link::Down(problem) => problem.as_str(),
+    let problem = match (&ctx.link, &ctx.store.profile) {
+        (Link::Down(problem), _) => problem.as_str(),
+        (_, Load::Failed(problem)) => problem.as_str(),
         _ => "none",
     };
     format!(
@@ -94,7 +105,7 @@ impl Screen for Startup {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if Self::down(ctx) {
+        if self.stuck(ctx) {
             vec![
                 hint("r", "Try again"),
                 hint("c", "Copy details for support"),
@@ -106,13 +117,18 @@ impl Screen for Startup {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if !Self::down(ctx) {
+        if !self.stuck(ctx) {
             return Flow::Handled;
         }
         match key {
-            Key::Char('r') => {
+            Key::Char('r') if Self::down(ctx) => {
                 ctx.link = Link::Connecting;
                 ctx.request(Request::Reconnect);
+                Flow::Handled
+            }
+            Key::Char('r') => {
+                self.profile_failed = false;
+                ctx.request(Request::Profile);
                 Flow::Handled
             }
             Key::Char('c') => {
@@ -132,6 +148,7 @@ impl Screen for Startup {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
             Arrival::Connected(_) => {
+                self.profile_failed = false;
                 ctx.request(Request::Profile);
                 Flow::Handled
             }
@@ -139,11 +156,7 @@ impl Screen for Startup {
             Arrival::Profile(Ok(None)) => Flow::Replace(open(&Place::Welcome, ctx)),
             Arrival::Profile(Err(problem)) => {
                 ctx.store.profile = Load::Failed(problem.clone());
-                ctx.say(Message::error(
-                    "Could not read your profile.",
-                    "Press r to try again.",
-                ));
-                ctx.link = Link::Down(problem.clone());
+                self.profile_failed = true;
                 Flow::Handled
             }
             _ => Flow::Handled,
@@ -169,21 +182,37 @@ impl Screen for Startup {
                     Span::raw(format!("  {}", tilde(&ctx.socket, ctx.home.as_deref()))),
                 ]),
             ]
-        } else {
+        } else if self.profile_failed {
             vec![
                 Line::default(),
                 Line::from(vec![
-                    Span::raw("  Connecting to CrazyAgent "),
-                    Span::styled(ctx.spinner(), theme.running),
+                    Span::raw("  "),
+                    Span::styled("Could not read your profile", theme.heading),
                 ]),
+                Line::default(),
+                Line::raw("  The engine is running but did not return your profile."),
+                Line::raw("  Press r to try again."),
             ]
+        } else {
+            let mut lines = vec![Line::default()];
+            lines.extend(brand::mark(theme, ctx.glyphs).into_iter().map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }));
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::raw("  Connecting to CrazyAgent "),
+                Span::styled(ctx.spinner(), theme.running),
+            ]));
+            lines
         };
         draw_lines(frame.buffer_mut(), area, &lines);
         None
     }
 
     fn busy(&self, ctx: &Ctx) -> bool {
-        !Self::down(ctx)
+        !self.stuck(ctx)
     }
 }
 

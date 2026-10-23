@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 11] = [
+const COMMANDS: [&str; 16] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -23,6 +23,11 @@ const COMMANDS: [&str; 11] = [
     "desktop_delete_project_context",
     "desktop_project_memories",
     "desktop_review_memory",
+    "desktop_update_project_setup",
+    "desktop_remove_project",
+    "desktop_cancel_research",
+    "desktop_retry_research",
+    "desktop_research_log",
 ];
 
 #[test]
@@ -235,6 +240,79 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         .await?;
     assert!(matches!(rejected.outcome, ActionOutcome::Rejected));
     assert_eq!(rejected.rejection, Some("document_not_a_regular_file"));
+
+    let job = jobs.jobs[0].id;
+    assert!(bridge.research_log(&id, job).await?.lines.is_empty());
+    let cancelled = bridge.cancel_research(&id, job, 9).await?;
+    assert!(
+        matches!(cancelled.outcome, ActionOutcome::Applied),
+        "{cancelled:?}"
+    );
+    assert_eq!(cancelled.intent.kind, "research_cancel");
+    let finished = bridge.cancel_research(&id, job, 10).await?;
+    assert_eq!(finished.rejection, Some("research_job_finished"));
+    let retried = bridge.retry_research(&id, job, 11).await?;
+    assert!(
+        matches!(retried.outcome, ActionOutcome::Applied),
+        "{retried:?}"
+    );
+    assert_eq!(retried.intent.kind, "research_retry");
+    assert_eq!(
+        bridge.research_jobs(&id).await?.jobs[0].status,
+        ResearchStatus::NeedsPool
+    );
+
+    let edited = ProjectSetup {
+        about: "Tracks shared chores for two.".into(),
+        ..setup(vec![])
+    };
+    let updated = bridge
+        .update_project_setup(
+            &id,
+            edited.clone(),
+            Some("Chore board two".into()),
+            None,
+            12,
+        )
+        .await?;
+    assert!(
+        matches!(updated.outcome, ActionOutcome::Applied),
+        "{updated:?}"
+    );
+    assert_eq!(updated.intent.kind, "project_setup_update");
+    let saved = bridge.project_setup(&id).await?.unwrap();
+    assert_eq!(
+        (saved.name.as_str(), saved.about.as_str(), saved.revision),
+        ("Chore board two", "Tracks shared chores for two.", 2)
+    );
+    assert!(
+        bridge
+            .projects(false)
+            .await?
+            .items
+            .iter()
+            .any(|row| row.id == id && row.name == "Chore board two")
+    );
+    let stale = bridge
+        .update_project_setup(&id, edited, None, Some(1), 13)
+        .await?;
+    assert_eq!(stale.rejection, Some("stale_revision"));
+
+    let removed = bridge.remove_project(&id, 14).await?;
+    assert!(
+        matches!(removed.outcome, ActionOutcome::Applied),
+        "{removed:?}"
+    );
+    assert_eq!(removed.intent.kind, "project_remove");
+    assert!(
+        bridge
+            .projects(false)
+            .await?
+            .items
+            .iter()
+            .all(|row| row.id != id)
+    );
+    assert!(Path::new(&stored.folder).join("context/brief.md").is_file());
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }

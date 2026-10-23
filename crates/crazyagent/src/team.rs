@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod runtime;
+pub mod tool;
 
 pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
@@ -255,6 +256,7 @@ impl MessageState {
 #[serde(rename_all = "snake_case")]
 pub enum DelegationPath {
     Reply,
+    Tool,
     Unavailable,
 }
 
@@ -266,6 +268,9 @@ impl DelegationPath {
         match self {
             Self::Reply => {
                 "Asks for sub-agents in its reply; the engine checks the team plan and creates the tasks"
+            }
+            Self::Tool => {
+                "Calls the engine's delegate tool or asks in its reply; the engine checks the team plan and creates the tasks"
             }
             Self::Unavailable => {
                 "Cannot lead sub-agents yet; you can still hand tasks to sub-agents yourself"
@@ -284,10 +289,11 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
 }
 
 /// Records how a master on this harness asks for sub-agents.
-/// Takes the team plan harness identifier.
-/// Returns the reply path for launchable harnesses, otherwise unavailable.
-pub fn delegation_path(harness: &str) -> DelegationPath {
+/// Takes the team plan harness identifier and the master's tools switch.
+/// Returns the tool path with tools on, the reply path with tools off, unavailable when it cannot launch.
+pub fn delegation_path(harness: &str, tools: bool) -> DelegationPath {
     match launch_harness(harness) {
+        Some(_) if tools => DelegationPath::Tool,
         Some(_) => DelegationPath::Reply,
         None => DelegationPath::Unavailable,
     }
@@ -312,6 +318,17 @@ pub enum TeamAction {
     KeepWarm {
         project_id: ProjectId,
         on: bool,
+    },
+    Pause {
+        project_id: ProjectId,
+    },
+    Resume {
+        project_id: ProjectId,
+    },
+    HandOff {
+        project_id: ProjectId,
+        reply: i64,
+        step: u8,
     },
 }
 
@@ -343,7 +360,13 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } => Ok(()),
+            Self::HandOff { reply, step, .. } => {
+                if *reply <= 0 || usize::from(*step) >= DELEGATIONS_PER_REPLY_MAX {
+                    return Err(failure("team_plan_step_missing"));
+                }
+                Ok(())
+            }
+            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
         }
     }
 
@@ -355,7 +378,10 @@ impl TeamAction {
             Self::Message { project_id, .. }
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
-            | Self::KeepWarm { project_id, .. } => project_id,
+            | Self::KeepWarm { project_id, .. }
+            | Self::Pause { project_id }
+            | Self::Resume { project_id }
+            | Self::HandOff { project_id, .. } => project_id,
         }
     }
 }
@@ -530,21 +556,27 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         let Some((target, task)) = line[DELEGATE_MARKER.len()..].split_once(':') else {
             continue;
         };
-        let target = target.trim().to_ascii_lowercase();
-        let task = task.trim().trim_matches('`').trim();
-        if !(target.is_empty() || (target.len() <= 64 && harness_name(&target))) {
-            continue;
+        if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
+            found.push(delegation);
         }
-        if !text_valid(task, TASK_PROMPT_BYTES_MAX) {
-            continue;
-        }
-        found.push(Delegation {
-            harness: (!target.is_empty()).then_some(target),
-            prompt: task.to_owned(),
-        });
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
     found
+}
+
+fn delegation(target: &str, task: &str) -> Option<Delegation> {
+    let target = target.trim().to_ascii_lowercase();
+    let task = task.trim();
+    if !(target.is_empty() || (target.len() <= 64 && harness_name(&target))) {
+        return None;
+    }
+    if !text_valid(task, TASK_PROMPT_BYTES_MAX) {
+        return None;
+    }
+    Some(Delegation {
+        harness: (!target.is_empty()).then_some(target),
+        prompt: task.to_owned(),
+    })
 }
 
 /// Creates the team runtime tables when the engine database opens.
@@ -608,6 +640,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
                 until_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_paused_projects (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
             );",
         )
         .map_err(error)
@@ -836,7 +872,117 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::Pause { .. } => {
+            tx.execute(
+                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
+                 ON CONFLICT(project) DO NOTHING",
+                params![project.as_str(), now],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::Resume { .. } => {
+            tx.execute(
+                "DELETE FROM team_paused_projects WHERE project=?1",
+                [project.as_str()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HandOff { reply, step, .. } => {
+            let Some(text) = master_reply(tx, project, Some(*reply))?.map(|(_, text)| text) else {
+                return Ok(rejected("team_plan_step_missing"));
+            };
+            let steps = plan_steps(tx, project, *reply, &text)?;
+            let Some(found) = steps.get(usize::from(*step)) else {
+                return Ok(rejected("team_plan_step_missing"));
+            };
+            if found.task.is_some() {
+                return Ok(rejected("team_plan_step_handed"));
+            }
+            Ok(
+                match admit(
+                    tx,
+                    access,
+                    &stored,
+                    found.harness.as_deref(),
+                    &found.prompt,
+                    TaskSource::Master,
+                    Some(*reply),
+                    now,
+                )? {
+                    Ok(_) => Outcome::Applied,
+                    Err(code) => rejected(code),
+                },
+            )
+        }
     }
+}
+
+fn master_reply(
+    connection: &Connection,
+    project: &ProjectId,
+    reply: Option<i64>,
+) -> Result<Option<(i64, String)>, EngineError> {
+    connection
+        .query_row(
+            "SELECT id,text FROM team_messages WHERE project=?1 AND author=?2 AND state=?3
+             AND (?4 IS NULL OR id=?4) ORDER BY id DESC LIMIT 1",
+            params![
+                project.as_str(),
+                MessageAuthor::Master.name(),
+                MessageState::Reply.name(),
+                reply
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)
+}
+
+/// Lists the sub-agent tasks a master reply proposed, each with the task handed off for it.
+/// Takes a connection, the project, the master reply id and its text.
+/// Returns at most eight steps in reply order; equal prompts match tasks in creation order.
+pub fn plan_steps(
+    connection: &Connection,
+    project: &ProjectId,
+    reply: i64,
+    text: &str,
+) -> Result<Vec<PlanStep>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id,prompt FROM team_tasks WHERE project=?1 AND turn=?2 ORDER BY id LIMIT ?3",
+        )
+        .map_err(error)?;
+    let mut tasks = statement
+        .query_map(
+            params![project.as_str(), reply, DELEGATIONS_PER_REPLY_MAX as i64],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(error)?
+        .map(|task| task.map(Some))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let steps: Vec<PlanStep> = parse_delegations(text)
+        .into_iter()
+        .enumerate()
+        .map(|(step, delegation)| PlanStep {
+            reply,
+            step: step as u8,
+            task: tasks
+                .iter_mut()
+                .find(|task| {
+                    task.as_ref()
+                        .is_some_and(|(_, prompt)| *prompt == delegation.prompt)
+                })
+                .and_then(Option::take)
+                .map(|(id, _)| id),
+            harness: delegation.harness,
+            prompt: delegation.prompt,
+        })
+        .collect();
+    assert!(steps.len() <= DELEGATIONS_PER_REPLY_MAX);
+    Ok(steps)
 }
 
 /// One team agent as the clients poll it.
@@ -903,17 +1049,29 @@ pub struct TeamHarness {
     pub runnable: bool,
 }
 
+/// One sub-agent task the master proposed in its latest reply, and the task handed off for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub reply: i64,
+    pub step: u8,
+    pub harness: Option<String>,
+    pub prompt: String,
+    pub task: Option<i64>,
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    pub paused: bool,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
     pub agents: Vec<TeamAgent>,
     pub tasks: Vec<TeamTask>,
     pub messages: Vec<TeamMessage>,
+    pub plan: Vec<PlanStep>,
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -997,6 +1155,19 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         .map_err(error)
 }
 
+/// Tells whether the owner paused the project's whole team.
+/// Takes a connection and the project.
+/// Returns true from a pause until the owner resumes the team.
+pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_paused_projects WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.
 /// Takes a connection and the stored setup.
 /// Returns bounded lists in creation order.
@@ -1045,14 +1216,15 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .count() as i64
     };
     let plan = &stored.team;
+    let master_path = delegation_path(&plan.master, plan.master_tools);
     let mut harnesses = vec![TeamHarness {
         harness: plan.master.clone(),
         role: AgentRole::Master,
         agents_max: 1,
         tools: plan.master_tools,
         live: live(AgentRole::Master, &plan.master),
-        delegation: Some(delegation_path(&plan.master)),
-        delegation_label: Some(delegation_path(&plan.master).label().into()),
+        delegation: Some(master_path),
+        delegation_label: Some(master_path.label().into()),
         runnable: launch_harness(&plan.master).is_some(),
     }];
     harnesses.extend(plan.sub_harnesses.iter().map(|slot| TeamHarness {
@@ -1065,16 +1237,22 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         delegation_label: None,
         runnable: launch_harness(&slot.harness).is_some(),
     }));
+    let steps = match master_reply(connection, project, None)? {
+        Some((reply, text)) => plan_steps(connection, project, reply, &text)?,
+        None => Vec::new(),
+    };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        paused: paused(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,
         agents,
         tasks,
         messages,
+        plan: steps,
     })
 }
 

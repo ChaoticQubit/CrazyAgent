@@ -1,4 +1,4 @@
-use super::new_project::{display_path, harness_name, team_summary};
+use super::new_project::{display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
@@ -970,8 +970,65 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -> 
         if job.attempts > 1 {
             lines.push(entry("Tries", job.attempts.to_string()));
         }
+        lines.push(Row::default());
+        lines.push(Row::of("Activity", look.heading));
+        for (at, text, style) in activity(job, look) {
+            let at = at.map(|at| clock(at, screen.offset)).unwrap_or_default();
+            lines.push(Row::of(at, look.muted).pad(7).push(text, style));
+        }
     }
     (lines, None, help)
+}
+
+/// Lists what the engine recorded for one research job, oldest first.
+/// Takes the job and the look; only times and counts the engine stored are used.
+/// Returns each step's time when known, its plain text and its style.
+pub(in crate::tui) fn activity(
+    job: &ResearchJob,
+    look: &Look,
+) -> Vec<(Option<i64>, String, Style)> {
+    let mut steps = vec![(Some(job.created_ms), "Queued".to_owned(), look.fg)];
+    if job.status == ResearchStatus::NeedsPool {
+        steps.push((None, "Waiting for a pool".to_owned(), look.warning));
+    }
+    if let Some(at) = job.started_ms {
+        let harness = harness_name(&job.harness, None);
+        let text = match job.attempts {
+            0 | 1 => format!("Started on {harness}"),
+            tries => format!("Started on {harness}, try {tries}"),
+        };
+        steps.push((Some(at), text, look.fg));
+    }
+    if job.status == ResearchStatus::Running {
+        if let Some(at) = job.heartbeat_ms {
+            steps.push((
+                Some(at),
+                format!(
+                    "Still working, {} of output so far",
+                    size_label(job.output_bytes)
+                ),
+                look.fg,
+            ));
+        }
+        if job.cancel_requested {
+            steps.push((
+                None,
+                "Stop asked, waiting for the agent to end".to_owned(),
+                look.warning,
+            ));
+        }
+    }
+    if let Some(at) = job.finished_ms {
+        let (text, style) = match job.status {
+            ResearchStatus::Done => ("Finished, report written", look.success),
+            ResearchStatus::Failed => ("Failed", look.error),
+            ResearchStatus::Cancelled => ("Stopped", look.muted),
+            _ => ("Finished", look.fg),
+        };
+        steps.push((Some(at), text.to_owned(), style));
+    }
+    assert!(!steps.is_empty() && steps.len() <= 6);
+    steps
 }
 
 fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row) {

@@ -10,9 +10,10 @@ use bridge::{
     ProjectPage,
 };
 use bridge::picker::Pick;
-use bridge::project_setup::MemoryItem;
+use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
+use crazyagent::agents::AgentView;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::engine::owner::{
@@ -468,6 +469,95 @@ async fn desktop_team_keep_warm(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)?.team_keep_warm(&id, on, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_pause(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paused: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_pause(&id, paused, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_hand_off(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    reply: i64,
+    step: u8,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .team_hand_off(&id, reply, step, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_update_project_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    setup: ProjectSetup,
+    name: Option<String>,
+    revision: Option<u64>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .update_project_setup(&id, setup, name, revision, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_remove_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_project(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_cancel_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.cancel_research(&id, job, generation).await
+}
+
+#[tauri::command]
+async fn desktop_retry_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.retry_research(&id, job, generation).await
+}
+
+#[tauri::command]
+async fn desktop_research_log(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+) -> Result<ResearchLog, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.research_log(&id, job).await
 }
 
 #[tauri::command]
@@ -960,6 +1050,46 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_agents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<AgentView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.agents(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_stop_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AgentView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.stop_agent(id).await
+}
+
+#[tauri::command]
+async fn desktop_interrupt_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.interrupt_agent(id).await
+}
+
+#[tauri::command]
+async fn desktop_restart_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AgentView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.restart_agent(id).await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
     Ok(match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
@@ -1133,6 +1263,13 @@ pub fn run() {
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_pause,
+            desktop_team_hand_off,
+            desktop_update_project_setup,
+            desktop_remove_project,
+            desktop_cancel_research,
+            desktop_retry_research,
+            desktop_research_log,
             desktop_project_memories,
             desktop_review_memory,
             desktop_memories,
@@ -1195,6 +1332,10 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_agents,
+            desktop_stop_agent,
+            desktop_interrupt_agent,
+            desktop_restart_agent,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,

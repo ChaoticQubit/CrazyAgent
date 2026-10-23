@@ -8,6 +8,30 @@ pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "v1-tui-projects plugs the project plugins view into the project Settings tab"
+    )
+)]
+pub(in crate::tui) mod project_plugins;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "v1-tui-projects plugs the live research view into the project screen"
+    )
+)]
+pub(in crate::tui) mod project_research;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "v1-tui-projects plugs the live team view into the project screen"
+    )
+)]
+pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
 pub mod settings;
@@ -17,7 +41,6 @@ pub mod settings_harnesses;
 pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
-pub mod stub;
 pub mod welcome;
 
 #[cfg(test)]
@@ -125,6 +148,10 @@ impl ProjectTab {
         }
     }
 }
+
+/// The sentence Quit shows when a New project draft would be lost, whether the
+/// wizard is open or its draft was kept after leaving it.
+pub const DRAFT_LOSS: &str = "Your new project draft will be lost.";
 
 /// A place the owner can go to; the registry builds its screen.
 /// Input: from Go to, Home and Settings. Output: `open` returns its screen.
@@ -251,7 +278,7 @@ pub trait Screen {
     /// The sentence Quit shows for this screen's unsaved work.
     /// Input: none. Output: a plain sentence; read only while `draft` is true.
     fn loss(&self) -> &'static str {
-        "Your new project draft will be lost."
+        DRAFT_LOSS
     }
 
     /// The place this screen stands for, used by Go to to avoid duplicates.

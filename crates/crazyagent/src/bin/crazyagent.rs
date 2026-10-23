@@ -14,6 +14,7 @@ const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
+crazyagent team-mcp DROP_FILE\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -68,6 +69,28 @@ fn main() -> ExitCode {
         .is_some_and(|arg| arg == "native-auth-custodian")
     {
         return match run_native_auth_custodian(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::team::tool::SERVER_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent team-mcp DROP_FILE".to_owned())
+        } else {
+            crazyagent::team::tool::serve(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                Path::new(&args[1]),
+            )
+            .map_err(|e| e.to_string())
+        };
+        return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -341,6 +364,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         Path::new(&args[2]),
                         Path::new(&args[3]),
                         executables,
+                        std::env::current_exe().ok().as_deref(),
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {

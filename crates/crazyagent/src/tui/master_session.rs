@@ -174,10 +174,6 @@ impl State {
     /// The current master transcript, read-only, for the Project screen.
     /// Input: none. Output: the session, its turns and the latest owner input
     /// once a read arrived; None before the first read.
-    #[allow(
-        dead_code,
-        reason = "used by the Project screens on feat/v1-tui-projects; drop after integration"
-    )]
     pub fn transcript(
         &self,
     ) -> Option<(

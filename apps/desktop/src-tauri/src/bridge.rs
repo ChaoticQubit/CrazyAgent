@@ -18,6 +18,7 @@ use std::time::Duration;
 mod account_profile;
 mod account_setup;
 mod accounts;
+mod agents;
 mod harnesses;
 pub mod master;
 pub mod memory;
@@ -461,6 +462,18 @@ impl NativeBridge {
             }
             OwnerMutation::Team { action } => {
                 ("team", Some(action.project().as_str().to_owned()), None)
+            }
+            OwnerMutation::UpdateProjectSetup { project_id, .. } => {
+                ("project_setup_update", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::RemoveProject { project_id } => {
+                ("project_remove", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::CancelResearch { project_id, .. } => {
+                ("research_cancel", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::RetryResearch { project_id, .. } => {
+                ("research_retry", Some(project_id.as_str().to_owned()), None)
             }
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },
@@ -928,6 +941,11 @@ fn rejection_code(code: &str) -> &'static str {
         "master_turn_not_current" => "master_turn_not_current",
         "knowledge_entry_missing" => "knowledge_entry_missing",
         "knowledge_version_conflict" => "knowledge_version_conflict",
+        "invalid_project" => "invalid_project",
+        "project_master_open" => "project_master_open",
+        "research_job_missing" => "research_job_missing",
+        "research_job_finished" => "research_job_finished",
+        "research_job_not_retryable" => "research_job_not_retryable",
         _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),
     }
 }

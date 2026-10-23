@@ -5,8 +5,9 @@ use super::frame::{
     too_small,
 };
 use super::keys::{Global, Key, global};
+use super::screens::new_project_page::kept_draft;
 use super::screens::startup::Startup;
-use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
+use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::Arrival;
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::Role;
@@ -255,6 +256,7 @@ impl Shell {
             .rev()
             .find(|screen| screen.draft())
             .map(|screen| screen.loss())
+            .or_else(|| kept_draft().map(|_| DRAFT_LOSS))
     }
 
     fn ask_quit(&mut self) {
@@ -485,7 +487,9 @@ impl Shell {
                 }
                 Err(_) => {}
             },
-            Arrival::Owner(_) => super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx),
+            Arrival::Owner(_) => {
+                super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx)
+            }
             _ => {}
         }
         let count = self.stack.len();
@@ -964,6 +968,75 @@ mod tests {
             shell.busy_since, None,
             "the next busy spell starts quiet again"
         );
+    }
+
+    #[test]
+    fn a_profile_read_failure_says_so_and_r_reads_it_again() {
+        let mut shell = Shell::new(ctx());
+        shell.arrive(Arrival::Connected(None));
+        assert!(drain(&mut shell).contains(&"Profile".to_owned()));
+        shell.arrive(Arrival::Profile(Err("owner_profile_read".into())));
+        assert_eq!(
+            shell.ctx.link,
+            Link::Ready,
+            "the engine answered, so it is not down"
+        );
+        assert!(matches!(shell.ctx.store.profile, Load::Failed(_)));
+        assert!(!shell.busy(), "no spinner while waiting for the owner");
+        assert_eq!(shell.place(), None);
+        shell.key(Key::Char('r'));
+        assert_eq!(drain(&mut shell), vec!["Profile".to_owned()]);
+        assert!(shell.busy());
+        shell.arrive(Arrival::Profile(Ok(None)));
+        assert_eq!(shell.place(), Some(Place::Welcome));
+    }
+
+    #[test]
+    fn quit_on_welcome_asks_once_something_is_typed() {
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an empty welcome form quits at once");
+
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Char('M'));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => {
+                assert_eq!(ask.loss, Some("Your profile will not be saved."))
+            }
+            _ => panic!("typed profile asks first"),
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        assert!(shell.quitting(), "Quit still quits");
+    }
+
+    #[test]
+    fn quit_asks_while_a_new_project_draft_is_kept_after_leaving_the_wizard() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        assert_eq!(shell.place(), Some(Place::NewProject));
+        shell.key(Key::Esc);
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "an empty wizard keeps no draft");
+
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        for character in "Fieldnotes".chars() {
+            shell.key(Key::Char(character));
+        }
+        shell.key(Key::Esc);
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+        assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(ask.loss, Some(DRAFT_LOSS)),
+            _ => panic!("a kept draft asks first"),
+        }
+        assert!(!shell.quitting());
     }
 
     #[test]
