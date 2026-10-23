@@ -192,7 +192,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
           <div className="pj-row"><Button size="small" icon="folder-open" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</Button>
             <Button size="small" icon="plus" onClick={() => void chooseDocuments()}>Add documents</Button></div>
           {adding && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); if (adding.path.trim()) void addDocuments([adding.path.trim()]); }}>
-            <label htmlFor="pj-add-doc" className="pj-small">The file picker isn't in this build. Full path of a file on this Mac:</label>
+            <label htmlFor="pj-add-doc" className="pj-small">{adding.error ? "Or type the full path of a file on this Mac:" : "The file picker isn't in this build. Full path of a file on this Mac:"}</label>
             <input id="pj-add-doc" className="pj-input" value={adding.path} onChange={(event) => setAdding({ ...adding, path: event.target.value, error: "" })} />
             {adding.error && <p className="pj-error" role="alert">{displayText(adding.error)}</p>}
             <span className="pj-row"><Button type="submit" size="small" variant="primary" pending={adding.busy} pendingLabel="Adding..." disabled={!adding.path.trim()}>Add file</Button>
