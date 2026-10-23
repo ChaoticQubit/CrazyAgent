@@ -484,6 +484,9 @@ impl NativeBridge {
                 crazyagent::memory::library::LibraryAction::Remember { project_id, .. } => {
                     ("memory_remember", Some(project_id.as_str().to_owned()), None)
                 }
+                crazyagent::memory::library::LibraryAction::SaveSelection {
+                    project_id, ..
+                } => ("memory_selection", Some(project_id.as_str().to_owned()), None),
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
@@ -916,6 +919,9 @@ fn rejection_code(code: &str) -> &'static str {
         "project_folder_missing" => "project_folder_missing",
         "context_item_protected" => "context_item_protected",
         "context_item_missing" => "context_item_missing",
+        "context_path_invalid" => "context_path_invalid",
+        "context_item_unreadable" => "context_item_unreadable",
+        "master_turn_not_current" => "master_turn_not_current",
         "knowledge_entry_missing" => "knowledge_entry_missing",
         "knowledge_version_conflict" => "knowledge_version_conflict",
         _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),

@@ -285,7 +285,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "master" | "owner_profile";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -478,8 +478,9 @@ export type SavedMemory = {
   text: string;
   scope: "global" | "project";
   project_id: string | null;
-  origin: "written" | "promoted";
+  origin: "written" | "promoted" | "selected";
   from_project_id: string | null;
+  source_path: string | null;
 };
 
 export type SavedMemoryPage = {
@@ -489,7 +490,7 @@ export type SavedMemoryPage = {
 
 export type ApprovedMemory = {
   scope: "global" | "project";
-  kind: "note" | "promoted" | "research";
+  kind: "note" | "promoted" | "research" | "selection";
   text: string;
 };
 
@@ -540,6 +541,10 @@ export function rememberResearch(
   generation: number,
 ): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_remember_research", { project, research, section, generation });
+}
+
+export function saveSelectionToMemory(id: string, path: string, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_save_selection_to_memory", { id, path, text, generation });
 }
 
 export function forgetMemory(project: string, memory: string, generation: number): Promise<IntentReceipt> {
@@ -891,6 +896,10 @@ export function openMaster(ticket: string, generation: number): Promise<IntentRe
 
 export function closeMaster(ticket: string, sessionId: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_close_master", { ticket, sessionId, generation });
+}
+
+export function cancelMasterTurn(ticket: string, session: string, turn: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_cancel_master_turn", { ticket, session, turn, generation });
 }
 
 export function submitMaster(ticket: string, sessionId: string, text: string, generation: number): Promise<IntentReceipt> {
