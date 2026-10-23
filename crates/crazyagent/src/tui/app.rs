@@ -1669,6 +1669,26 @@ impl App {
         Ok(())
     }
 
+    /// Queues one change to an existing project's setup: save research to memory, add documents or delete a context item.
+    /// Takes the setup action; project creation stays on queue_project_setup.
+    /// Returns an error in limited mode, for an invalid action or while another setup request waits.
+    pub fn request_setup_change(
+        &mut self,
+        action: crate::project_setup::SetupAction,
+    ) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Project changes disabled in limited mode".into());
+        }
+        if matches!(action, crate::project_setup::SetupAction::Create { .. }) {
+            return Err("Create projects with queue_project_setup".into());
+        }
+        action.validate().map_err(|e| e.0)?;
+        self.request_project_setup(SetupQuery::Change {
+            action,
+            generation: self.declaration.generation,
+        })
+    }
+
     pub(super) fn take_setup_query(&mut self) -> Option<SetupQuery> {
         self.setup_query.take()
     }

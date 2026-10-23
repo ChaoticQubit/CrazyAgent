@@ -22,6 +22,8 @@
     "allow-desktop-project-context",
     "allow-desktop-project-context-item",
     "allow-desktop-save-research-to-memory",
+    "allow-desktop-add-project-documents",
+    "allow-desktop-delete-project-context",
     "allow-desktop-open-project",
     "allow-desktop-history",
     "allow-desktop-send-message",

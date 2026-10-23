@@ -179,4 +179,55 @@ impl NativeBridge {
             .map_err(|_| failure("owner_not_ready"))?;
         self.deliver_intent(false).await
     }
+
+    /// Copies more owner-picked documents into an existing project folder.
+    /// Takes the project id, absolute source paths and the client generation.
+    /// Returns the actual commit receipt; duplicates and oversized files are plain rejections.
+    pub async fn add_project_documents(
+        &mut self,
+        id: &str,
+        documents: Vec<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::AddProjectDocuments {
+                    project_id,
+                    documents,
+                },
+                generation,
+            )
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Deletes one document or research report from a project folder; the brief stays.
+    /// Takes the project id, the item path relative to the folder and the client generation.
+    /// Returns the actual commit receipt; links, folders and absent items are plain rejections.
+    pub async fn delete_project_context(
+        &mut self,
+        id: &str,
+        path: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::DeleteProjectContext { project_id, path },
+                generation,
+            )
+            .map_err(|_| failure("owner_not_ready"))?;
+        self.deliver_intent(false).await
+    }
 }

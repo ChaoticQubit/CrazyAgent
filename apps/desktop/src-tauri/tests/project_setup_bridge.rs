@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 9] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -18,6 +18,8 @@ const COMMANDS: [&str; 7] = [
     "desktop_project_context",
     "desktop_project_context_item",
     "desktop_save_research_to_memory",
+    "desktop_add_project_documents",
+    "desktop_delete_project_context",
 ];
 
 #[test]
@@ -147,12 +149,46 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
     assert_eq!(saved.intent.kind, "research_memory");
 
+    std::fs::write(sources.join("later.md"), "More notes.")?;
+    let added = bridge
+        .add_project_documents(
+            &id,
+            vec![sources.join("later.md").to_str().unwrap().to_owned()],
+            3,
+        )
+        .await?;
+    assert!(matches!(added.outcome, ActionOutcome::Applied), "{added:?}");
+    assert_eq!(added.intent.kind, "project_documents");
+    let deleted = bridge
+        .delete_project_context(&id, "context/research/market_research.md".into(), 4)
+        .await?;
+    assert!(matches!(deleted.outcome, ActionOutcome::Applied), "{deleted:?}");
+    assert_eq!(deleted.intent.kind, "project_context_delete");
+    let protected = bridge
+        .delete_project_context(&id, "context/brief.md".into(), 5)
+        .await?;
+    assert_eq!(protected.rejection, Some("context_item_protected"));
+    assert_eq!(
+        bridge
+            .project_context(&id)
+            .await?
+            .items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "context/brief.md",
+            "context/documents/brief.txt",
+            "context/documents/later.md"
+        ]
+    );
+
     std::os::unix::fs::symlink(sources.join("brief.txt"), sources.join("link.txt"))?;
     let rejected = bridge
         .setup_project(
             spec,
             setup(vec![sources.join("link.txt").to_str().unwrap().to_owned()]),
-            3,
+            6,
         )
         .await?;
     assert!(matches!(rejected.outcome, ActionOutcome::Rejected));

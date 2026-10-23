@@ -139,4 +139,41 @@ impl OwnerController {
         )?;
         self.send_pending().await
     }
+
+    /// Copies more owner-picked documents into an existing project and refreshes its brief.
+    /// Takes the project id, absolute source paths and the client generation.
+    /// Returns the actual owner response; a duplicate or oversized document is a plain rejection.
+    pub async fn add_project_documents(
+        &mut self,
+        project_id: ProjectId,
+        documents: Vec<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::AddProjectDocuments {
+                project_id,
+                documents,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Deletes one document or research report from a project folder; the brief is protected.
+    /// Takes the project id, the item path relative to the project folder and the client generation.
+    /// Returns the actual owner response; links, folders and absent items are plain rejections.
+    pub async fn delete_project_context(
+        &mut self,
+        project_id: ProjectId,
+        path: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::DeleteProjectContext { project_id, path },
+            generation,
+        )?;
+        self.send_pending().await
+    }
 }

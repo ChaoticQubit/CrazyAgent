@@ -214,6 +214,34 @@ async fn desktop_save_research_to_memory(
 }
 
 #[tauri::command]
+async fn desktop_add_project_documents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    documents: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_project_documents(&id, documents, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_delete_project_context(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .delete_project_context(&id, path, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_open_project(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -541,6 +569,8 @@ pub fn run() {
             desktop_project_context,
             desktop_project_context_item,
             desktop_save_research_to_memory,
+            desktop_add_project_documents,
+            desktop_delete_project_context,
             desktop_open_project,
             desktop_history,
             desktop_send_message,

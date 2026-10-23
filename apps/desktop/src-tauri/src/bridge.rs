@@ -444,6 +444,12 @@ impl NativeBridge {
             OwnerMutation::SaveResearchToMemory { project_id, .. } => {
                 ("research_memory", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::AddProjectDocuments { project_id, .. } => {
+                ("project_documents", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::DeleteProjectContext { project_id, .. } => {
+                ("project_context_delete", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
@@ -864,6 +870,9 @@ fn rejection_code(code: &str) -> &'static str {
         "research_section_missing" => "research_section_missing",
         "memory_text_too_long" => "memory_text_too_long",
         "memory_entry_exists" => "memory_entry_exists",
+        "project_folder_missing" => "project_folder_missing",
+        "context_item_protected" => "context_item_protected",
+        "context_item_missing" => "context_item_missing",
         _ => "owner_rejected",
     }
 }

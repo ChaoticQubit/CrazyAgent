@@ -207,7 +207,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "master";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "master";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -359,6 +359,14 @@ export function saveResearchToMemory(
   generation: number,
 ): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
+}
+
+export function addProjectDocuments(id: string, documents: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_project_documents", { id, documents, generation });
+}
+
+export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

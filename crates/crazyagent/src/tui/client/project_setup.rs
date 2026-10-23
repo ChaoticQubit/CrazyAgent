@@ -1,4 +1,5 @@
 use super::*;
+use crate::project_setup::SetupAction;
 pub(in crate::tui) use crate::project_setup::{SetupQuery, SetupView};
 
 pub(in crate::tui) struct SetupEvent {
@@ -63,6 +64,44 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::Change { action, generation } => {
+                let response = match action {
+                    SetupAction::Create { .. } => {
+                        return Err("project_setup_create_uses_creation".into());
+                    }
+                    SetupAction::SaveToMemory {
+                        project_id,
+                        research,
+                        section,
+                    } => {
+                        controller
+                            .save_research_to_memory(project_id, research, section, generation)
+                            .await
+                    }
+                    SetupAction::AddDocuments {
+                        project_id,
+                        documents,
+                    } => {
+                        controller
+                            .add_project_documents(project_id, documents, generation)
+                            .await
+                    }
+                    SetupAction::DeleteContext { project_id, path } => {
+                        controller
+                            .delete_project_context(project_id, path, generation)
+                            .await
+                    }
+                }
+                .map_err(problem)?;
+                match response {
+                    OwnerResponse::Applied { operation }
+                    | OwnerResponse::Committed { operation } => {
+                        SetupView::Changed(operation.result)
+                    }
+                    OwnerResponse::Rejected { code } => return Err(bounded_problem(&code)),
+                    _ => return Err("setup_change_outcome_unknown".into()),
+                }
+            }
         })
     }
 }
@@ -185,6 +224,67 @@ mod tests {
             panic!("context item required");
         };
         assert_eq!(chunk.text.as_deref(), Some("item,size\nlogin,small\n"));
+
+        std::fs::write(sources.path().join("notes.md"), "# Notes\n").unwrap();
+        for action in [
+            SetupAction::AddDocuments {
+                project_id: project.clone(),
+                documents: vec![sources.path().join("notes.md").to_str().unwrap().into()],
+            },
+            SetupAction::DeleteContext {
+                project_id: project.clone(),
+                path: "context/documents/scope.csv".into(),
+            },
+        ] {
+            app.request_setup_change(action.clone()).unwrap();
+            let query = app.take_setup_query().unwrap();
+            let event = native.project_setup(query).await;
+            app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+            let Some((SetupQuery::Change { action: shown, .. }, SetupView::Changed(result))) =
+                &app.setup_view
+            else {
+                panic!("change view required");
+            };
+            assert_eq!(shown, &action);
+            assert_eq!(result, &crate::engine::owner::OwnerResult::Applied);
+        }
+        let context = native
+            .project_setup(SetupQuery::Context {
+                project: project.clone(),
+            })
+            .await;
+        let Ok(SetupView::Context(context)) = context.result else {
+            panic!("context required");
+        };
+        assert_eq!(
+            context
+                .items
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            ["context/brief.md", "context/documents/notes.md"]
+        );
+        app.request_setup_change(SetupAction::DeleteContext {
+            project_id: project.clone(),
+            path: "context/brief.md".into(),
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        assert!(matches!(
+            &app.setup_view,
+            Some((_, SetupView::Changed(crate::engine::owner::OwnerResult::Rejected { code })))
+                if code == "context_item_protected"
+        ));
+        assert!(
+            app.request_setup_change(SetupAction::DeleteContext {
+                project_id: project.clone(),
+                path: "../engine.db".into(),
+            })
+            .is_err()
+        );
+
         let catalog = native
             .project_setup(SetupQuery::Catalog {
                 pool: None,

@@ -2,11 +2,11 @@ use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use rustix::fs::{FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 pub const ABOUT_BYTES_MAX: usize = 8192;
@@ -28,6 +28,7 @@ pub const CONTEXT_CHUNK_BYTES: usize = 8192;
 pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
 pub const CONTEXT_DIRECTORY: &str = "context";
 pub const PROJECTS_DIRECTORY: &str = "projects";
+const BRIEF_PARTIAL: &str = ".brief.partial";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -458,6 +459,10 @@ pub enum SetupQuery {
         path: String,
         offset: u64,
     },
+    Change {
+        action: SetupAction,
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -467,6 +472,7 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     Item(ContextChunk),
+    Changed(crate::engine::owner::OwnerResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +487,14 @@ pub enum SetupAction {
         project_id: ProjectId,
         research: ResearchKind,
         section: Option<String>,
+    },
+    AddDocuments {
+        project_id: ProjectId,
+        documents: Vec<String>,
+    },
+    DeleteContext {
+        project_id: ProjectId,
+        path: String,
     },
 }
 
@@ -499,6 +513,28 @@ impl SetupAction {
                     s.trim().is_empty() || s.len() > 256 || s.chars().any(char::is_control)
                 }) {
                     return Err(failure("research_section_invalid"));
+                }
+                Ok(())
+            }
+            Self::AddDocuments { documents, .. } => ProjectSetup {
+                about: String::new(),
+                tech_stack: Vec::new(),
+                platforms: Vec::new(),
+                research: Vec::new(),
+                pool: None,
+                team: None,
+                documents: documents.clone(),
+            }
+            .validate()
+            .and_then(|()| {
+                if documents.is_empty() {
+                    return Err(failure("documents_empty"));
+                }
+                Ok(())
+            }),
+            Self::DeleteContext { path, .. } => {
+                if path.len() > 512 || context_kind(path).is_none() {
+                    return Err(failure("context_path_invalid"));
                 }
                 Ok(())
             }
@@ -747,6 +783,10 @@ fn open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC
 }
 
+fn create_flags() -> OFlags {
+    OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
 fn open_regular(path: &Path) -> Result<(std::fs::File, u64), &'static str> {
     let fd = rustix::fs::open(path, open_flags(), Mode::empty()).map_err(|e| match e {
         rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR => "document_not_found",
@@ -776,27 +816,47 @@ pub fn copy_documents(
     destination: &Path,
     budget: u64,
 ) -> Result<Vec<StoredDocument>, &'static str> {
+    let directory = rustix::fs::open(destination, open_flags() | OFlags::DIRECTORY, Mode::empty())
+        .map_err(|_| "project_folder_unwritable")?;
+    copy_into(sources, &directory, &[], budget)
+}
+
+fn copy_into(
+    sources: &[String],
+    directory: &rustix::fd::OwnedFd,
+    kept: &[StoredDocument],
+    budget: u64,
+) -> Result<Vec<StoredDocument>, &'static str> {
     let mut stored: Vec<StoredDocument> = Vec::new();
-    let result = copy_each(sources, destination, budget, &mut stored);
+    let result = copy_each(sources, directory, kept, budget, &mut stored);
     if result.is_err() {
-        for document in &stored {
-            let _ = std::fs::remove_file(destination.join(&document.name));
-        }
-        let _ = std::fs::remove_file(destination.join(".partial"));
+        remove_documents(directory, &stored);
     }
     result.map(|()| stored)
 }
 
+fn remove_documents(directory: &rustix::fd::OwnedFd, documents: &[StoredDocument]) {
+    for document in documents {
+        let _ = rustix::fs::unlinkat(directory, document.name.as_str(), AtFlags::empty());
+    }
+}
+
+fn present(directory: &rustix::fd::OwnedFd, name: &str) -> bool {
+    rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
+}
+
 fn copy_each(
     sources: &[String],
-    destination: &Path,
+    directory: &rustix::fd::OwnedFd,
+    kept: &[StoredDocument],
     budget: u64,
     stored: &mut Vec<StoredDocument>,
 ) -> Result<(), &'static str> {
-    if sources.len() > DOCUMENTS_MAX {
+    if sources.len() + kept.len() > DOCUMENTS_MAX {
         return Err("documents_too_many");
     }
-    let mut names = BTreeSet::new();
+    let mut names: BTreeSet<String> = kept.iter().map(|d| d.name.to_lowercase()).collect();
     let mut total: u64 = 0;
     for source in sources {
         let path = Path::new(source);
@@ -822,16 +882,14 @@ fn copy_each(
         if total.saturating_add(bytes) > budget {
             return Err("project_documents_too_large");
         }
-        let target = destination.join(name);
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&target)
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::AlreadyExists => "document_name_duplicate",
-                _ => "project_folder_unwritable",
-            })?;
+        let mut output = std::fs::File::from(
+            rustix::fs::openat(directory, name, create_flags(), Mode::RUSR | Mode::WUSR).map_err(
+                |e| match e {
+                    rustix::io::Errno::EXIST => "document_name_duplicate",
+                    _ => "project_folder_unwritable",
+                },
+            )?,
+        );
         stored.push(StoredDocument {
             name: name.to_owned(),
             bytes,
@@ -1156,7 +1214,7 @@ fn projects_root(database: &Path) -> Result<PathBuf, EngineError> {
     Ok(root)
 }
 
-fn brief(name: &str, setup: &ProjectSetup, documents: &[StoredDocument]) -> String {
+fn brief(stored: &StoredSetup) -> String {
     let list = |items: Vec<String>| {
         if items.is_empty() {
             "- None\n".to_owned()
@@ -1165,35 +1223,37 @@ fn brief(name: &str, setup: &ProjectSetup, documents: &[StoredDocument]) -> Stri
         }
     };
     format!(
-        "# {name}\n\n## About\n\n{}\n\n## Tech stack\n\n{}\n## Target platforms\n\n{}\n## Research\n\n{}\n## Documents\n\n{}",
-        if setup.about.trim().is_empty() {
+        "# {}\n\n## About\n\n{}\n\n## Tech stack\n\n{}\n## Target platforms\n\n{}\n## Research\n\n{}\n## Documents\n\n{}",
+        stored.name,
+        if stored.about.trim().is_empty() {
             "Not described yet."
         } else {
-            setup.about.trim()
+            stored.about.trim()
         },
         list(
-            setup
+            stored
                 .tech_stack
                 .iter()
                 .map(|t| t.trim().to_owned())
                 .collect()
         ),
         list(
-            setup
+            stored
                 .platforms
                 .iter()
                 .map(|p| p.label().to_owned())
                 .collect()
         ),
         list(
-            setup
+            stored
                 .research
                 .iter()
                 .map(|r| format!("{} -> {}", r.label(), r.report_path()))
                 .collect()
         ),
         list(
-            documents
+            stored
+                .documents
                 .iter()
                 .map(|d| format!("{CONTEXT_DIRECTORY}/documents/{}", d.name))
                 .collect()
@@ -1201,7 +1261,25 @@ fn brief(name: &str, setup: &ProjectSetup, documents: &[StoredDocument]) -> Stri
     )
 }
 
-fn stage(staging: &Path, name: &str, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, Outcome> {
+fn write_brief(context: &rustix::fd::OwnedFd, stored: &StoredSetup) -> Result<(), &'static str> {
+    let unwritable = |_| "project_folder_unwritable";
+    let _ = rustix::fs::unlinkat(context, BRIEF_PARTIAL, AtFlags::empty());
+    let mut file = std::fs::File::from(
+        rustix::fs::openat(
+            context,
+            BRIEF_PARTIAL,
+            create_flags(),
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(unwritable)?,
+    );
+    file.write_all(brief(stored).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "project_folder_unwritable")?;
+    rustix::fs::renameat(context, BRIEF_PARTIAL, context, "brief.md").map_err(unwritable)
+}
+
+fn stage(staging: &Path, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, Outcome> {
     let builder = || {
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
@@ -1221,22 +1299,12 @@ fn stage(staging: &Path, name: &str, setup: &ProjectSetup) -> Result<Vec<StoredD
             .create(staging.join(directory))
             .map_err(|_| unwritable())?;
     }
-    let documents = copy_documents(
+    copy_documents(
         &setup.documents,
         &staging.join("context/documents"),
         PROJECT_DOCUMENT_BYTES_MAX,
     )
-    .map_err(|code| Outcome::Rejected { code: code.into() })?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(staging.join("context/brief.md"))
-        .map_err(|_| unwritable())?;
-    file.write_all(brief(name, setup, &documents).as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|_| unwritable())?;
-    Ok(documents)
+    .map_err(|code| Outcome::Rejected { code: code.into() })
 }
 
 /// Executes a host-only project setup action inside the owner transaction.
@@ -1256,6 +1324,11 @@ pub(crate) fn execute(
             spec,
             setup,
         } => create(tx, config, database, project_id, spec, setup),
+        SetupAction::AddDocuments {
+            project_id,
+            documents,
+        } => add_documents(tx, project_id, documents),
+        SetupAction::DeleteContext { project_id, path } => delete_context(tx, project_id, path),
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -1286,6 +1359,90 @@ pub(crate) fn execute(
             )
         }
     }
+}
+
+fn save_setup(tx: &Transaction<'_>, stored: &StoredSetup) -> Result<(), EngineError> {
+    let changed = tx
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![
+                stored.project_id.as_str(),
+                serde_json::to_string(stored).map_err(error)?
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
+fn add_documents(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    sources: &[String],
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+        return Ok(rejected("project_folder_missing"));
+    };
+    let Ok(directory) = open_directory(&context, "documents") else {
+        return Ok(rejected("project_folder_missing"));
+    };
+    stored
+        .documents
+        .retain(|document| present(&directory, &document.name));
+    let used: u64 = stored.documents.iter().map(|d| d.bytes).sum();
+    let budget = PROJECT_DOCUMENT_BYTES_MAX.saturating_sub(used);
+    let added = match copy_into(sources, &directory, &stored.documents, budget) {
+        Ok(added) => added,
+        Err(code) => return Ok(rejected(code)),
+    };
+    stored.documents.extend(added.iter().cloned());
+    assert!(stored.documents.len() <= DOCUMENTS_MAX);
+    let saved =
+        save_setup(tx, &stored).and_then(|()| write_brief(&context, &stored).map_err(failure));
+    if saved.is_err() {
+        remove_documents(&directory, &added);
+    }
+    saved.map(|()| Outcome::Applied)
+}
+
+fn delete_context(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    path: &str,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    let kind = context_kind(path).ok_or_else(|| failure("context_path_invalid"))?;
+    if kind == ContextKind::Brief {
+        return Ok(rejected("context_item_protected"));
+    }
+    let (directory, name) = path
+        .strip_prefix("context/")
+        .and_then(|rest| rest.split_once('/'))
+        .ok_or_else(|| failure("context_path_invalid"))?;
+    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+        return Ok(rejected("context_item_missing"));
+    };
+    let Ok(parent) = open_directory(&context, directory) else {
+        return Ok(rejected("context_item_missing"));
+    };
+    if !present(&parent, name) {
+        return Ok(rejected("context_item_missing"));
+    }
+    rustix::fs::unlinkat(&parent, name, AtFlags::empty()).map_err(error)?;
+    assert!(!present(&parent, name));
+    if kind == ContextKind::Document {
+        stored
+            .documents
+            .retain(|document| document.name != name && present(&parent, &document.name));
+        save_setup(tx, &stored)?;
+        write_brief(&context, &stored).map_err(failure)?;
+    }
+    Ok(Outcome::Applied)
 }
 
 fn rejected(code: &str) -> Outcome {
@@ -1334,7 +1491,7 @@ fn create(
     if std::fs::symlink_metadata(&staging).is_ok() {
         std::fs::remove_dir_all(&staging).map_err(error)?;
     }
-    let documents = match stage(&staging, &spec.name, setup) {
+    let documents = match stage(&staging, setup) {
         Ok(documents) => documents,
         Err(outcome) => {
             let _ = std::fs::remove_dir_all(&staging);
@@ -1346,6 +1503,10 @@ fn create(
     )
     .and_then(|outcome| {
         if outcome == Outcome::Applied {
+            let stored =
+                load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
+            let context = open_beneath(&staging, &[CONTEXT_DIRECTORY]).map_err(error)?;
+            write_brief(&context, &stored).map_err(failure)?;
             std::fs::rename(&staging, &folder).map_err(error)?;
         }
         Ok(outcome)
@@ -1468,6 +1629,14 @@ fn open_directory(
     )
 }
 
+fn open_beneath(folder: &Path, directories: &[&str]) -> rustix::io::Result<rustix::fd::OwnedFd> {
+    let mut fd = rustix::fs::open(folder, open_flags() | OFlags::DIRECTORY, Mode::empty())?;
+    for directory in directories {
+        fd = open_directory(&fd, directory)?;
+    }
+    Ok(fd)
+}
+
 fn read_beneath(
     folder: &Path,
     relative: &str,
@@ -1476,12 +1645,8 @@ fn read_beneath(
 ) -> Result<(Vec<u8>, u64), &'static str> {
     context_kind(relative).ok_or("context_path_invalid")?;
     let missing = |_| "context_item_missing";
-    let mut fd = rustix::fs::open(folder, open_flags() | OFlags::DIRECTORY, Mode::empty())
-        .map_err(missing)?;
     let parts: Vec<&str> = relative.split('/').collect();
-    for directory in &parts[..parts.len() - 1] {
-        fd = open_directory(&fd, directory).map_err(missing)?;
-    }
+    let fd = open_beneath(folder, &parts[..parts.len() - 1]).map_err(missing)?;
     let file = rustix::fs::openat(&fd, parts[parts.len() - 1], open_flags(), Mode::empty())
         .map_err(missing)?;
     let (mut file, bytes) = regular(file, "context_item_missing")?;

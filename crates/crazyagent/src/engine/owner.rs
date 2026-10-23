@@ -130,6 +130,14 @@ pub enum OwnerMutation {
         research: crate::project_setup::ResearchKind,
         section: Option<String>,
     },
+    AddProjectDocuments {
+        project_id: ProjectId,
+        documents: Vec<String>,
+    },
+    DeleteProjectContext {
+        project_id: ProjectId,
+        path: String,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -213,6 +221,25 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     research: *research,
                     section: section.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::AddProjectDocuments {
+                project_id,
+                documents,
+            } => {
+                let action = crate::project_setup::SetupAction::AddDocuments {
+                    project_id: project_id.clone(),
+                    documents: documents.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::DeleteProjectContext { project_id, path } => {
+                let action = crate::project_setup::SetupAction::DeleteContext {
+                    project_id: project_id.clone(),
+                    path: path.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
