@@ -1,4 +1,4 @@
- CrazyAgent  /  Home  /  New project  /  Pool
+ [◆▪◆▪] CrazyAgent  /  Home  /  New project  /  Pool
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   New project             │ Pool
                           │ Agents in this project use accounts from one pool.

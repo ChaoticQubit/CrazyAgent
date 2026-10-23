@@ -3,41 +3,15 @@ use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
 use super::new_project_view::{Look, Row, Screen, spread, wizard_screen};
 use crate::project_setup::ResearchKind;
+use crate::tui::frame::header;
+use crate::tui::glyphs::{ASCII, UNICODE};
+use crate::tui::theme::{Appearance, Colors, Depth, Theme};
 use crossterm::event::KeyCode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-
-fn header(width: usize, crumbs: &[String], status: Option<&Row>, look: &Look) -> Row {
-    let right = status
-        .map(|status| status.clone().push(" ", Style::new()))
-        .unwrap_or_default();
-    let mut options = vec![crumbs.to_vec()];
-    if crumbs.len() > 2 {
-        let mut short = vec!["\u{2026}".to_owned()];
-        short.extend(crumbs[crumbs.len() - 2..].iter().cloned());
-        options.push(short);
-    }
-    if crumbs.len() > 1 {
-        options.push(vec![
-            "\u{2026}".to_owned(),
-            crumbs[crumbs.len() - 1].clone(),
-        ]);
-    }
-    let mut left = Row::default();
-    for option in options {
-        left = Row::of(" ", Style::new()).push("CrazyAgent", look.heading);
-        for crumb in option {
-            left = left.push("  /  ", look.muted).push(crumb, look.fg);
-        }
-        if left.width() + right.width() < width {
-            break;
-        }
-    }
-    spread(width, left, right)
-}
 
 fn help_line(width: usize, items: &[(&'static str, &'static str)], look: &Look) -> Row {
     let separator = if width >= 100 { "   " } else { "  " };
@@ -78,12 +52,13 @@ pub(super) fn compose(
         "body has {} rows, room for {body}",
         screen.rows.len()
     );
-    let mut rows = vec![
-        header(columns, &screen.crumbs, screen.status.as_ref(), look),
-        Row::of("\u{2500}".repeat(columns), look.muted),
-    ];
+    let theme = Theme::new(Depth::NoColor, Colors::Dark, Appearance::Dark);
+    let glyphs = if look.ascii { &ASCII } else { &UNICODE };
+    let status = screen.status.clone().map(Row::line).unwrap_or_default();
+    let top = header(columns, &screen.crumbs, status, &theme, glyphs);
+    let mut rows = vec![Row::of("\u{2500}".repeat(columns), look.muted)];
     rows.extend(screen.rows.iter().cloned().map(|row| row.pad(columns)));
-    while rows.len() < 2 + body {
+    while rows.len() < 1 + body {
         rows.push(Row::default().pad(columns));
     }
     rows.push(if message.is_empty() {
@@ -92,7 +67,9 @@ pub(super) fn compose(
         Row::of(format!(" {message}"), look.fg).pad(columns)
     });
     rows.push(help_line(columns, &screen.help, look));
-    let lines: Vec<Line<'static>> = rows.into_iter().map(Row::line).collect();
+    let lines: Vec<Line<'static>> = std::iter::once(top)
+        .chain(rows.into_iter().map(Row::line))
+        .collect();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))

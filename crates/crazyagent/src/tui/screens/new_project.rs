@@ -157,9 +157,18 @@ impl PoolChoice {
     pub fn accounts_for(&self, harness: &str) -> usize {
         self.harnesses
             .iter()
-            .find(|(id, _)| id == harness)
-            .map_or(0, |(_, count)| *count)
+            .filter(|(id, _)| same_harness(id, harness))
+            .map(|(_, count)| *count)
+            .sum()
     }
+}
+
+/// Says whether two harness ids name the same harness.
+/// Takes ids from a pool, a team plan or the catalog; "claude" and "claude-code" are one harness.
+/// Returns true when the engine resolves both to the same catalog entry, or the ids are equal.
+pub(in crate::tui) fn same_harness(a: &str, b: &str) -> bool {
+    let catalog_id = |id: &str| crate::harnesses::spec(id).map(|spec| spec.id);
+    a == b || catalog_id(a).is_some_and(|id| catalog_id(b) == Some(id))
 }
 
 /// Builds the pool choices from the engine's effective settings.
@@ -200,25 +209,26 @@ pub(in crate::tui) fn pool_choices(config: &EffectiveConfig) -> Vec<PoolChoice> 
         .collect()
 }
 
-/// States whether a harness can lead or run agents on this machine.
-/// Unknown is used until the engine's harness catalog is available.
-/// Limited carries the plain reason.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// States whether a harness is on this machine and CrazyAgent can start it.
+/// CantStart is installed without a CrazyAgent launcher; Unknown is used until the engine's catalog arrives.
+/// The catalog's own words decide; the wizard never guesses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum HarnessState {
     Ready,
     NotInstalled,
-    Limited(String),
+    CantStart,
     Unknown,
 }
 
 /// One harness the Team step can pick.
-/// Holds the engine id, the plain name and its state.
+/// Holds the engine id, the plain name, its state and the engine's limited-control sentence, if any.
 /// Not installed harnesses are listed but cannot be picked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct HarnessChoice {
     pub id: String,
     pub name: String,
     pub state: HarnessState,
+    pub limited: Option<String>,
 }
 
 /// Says which team row the harness picker fills.
@@ -404,6 +414,59 @@ impl Wizard {
         if let Some(picker) = self.picker.as_mut() {
             picker.cursor = 0;
         }
+        self.fit_team();
+    }
+
+    fn fit_team(&mut self) {
+        if self.team_edited {
+            return;
+        }
+        let (Some(harnesses), Some(team)) = (&self.harnesses, &self.team) else {
+            return;
+        };
+        let missing = |id: &str| {
+            harnesses
+                .iter()
+                .any(|h| same_harness(&h.id, id) && h.state == HarnessState::NotInstalled)
+        };
+        let ready = || harnesses.iter().filter(|h| h.state == HarnessState::Ready);
+        let Some(best) = ready()
+            .find(|h| self.pool_accounts(&h.id).is_some_and(|count| count > 0))
+            .or_else(|| ready().next())
+            .map(|h| h.id.clone())
+        else {
+            return;
+        };
+        let mut fitted = team.clone();
+        if missing(&fitted.master) {
+            fitted.master = best.clone();
+        }
+        for slot in &mut fitted.sub_harnesses {
+            if missing(&slot.harness) {
+                slot.harness = best.clone();
+            }
+        }
+        if &fitted != team {
+            assert_eq!(fitted.total_agents(), team.total_agents());
+            self.set_team(fitted);
+        }
+    }
+
+    /// Gives the limited-control sentence of the harness on the focused team row.
+    /// Takes the wizard; only the engine catalog has these sentences.
+    /// Returns "<harness>: Limited control: <reason>." or none.
+    pub fn limited_note(&self) -> Option<String> {
+        let team = self.team.as_ref()?;
+        let id = match self.team_row {
+            0 => &team.master,
+            row => &team.sub_harnesses.get(row - 1)?.harness,
+        };
+        let choice = self
+            .harnesses
+            .as_ref()?
+            .iter()
+            .find(|h| same_harness(&h.id, id))?;
+        Some(format!("{}: {}", choice.name, choice.limited.as_ref()?))
     }
 
     /// Gives the controls of the current step in Tab order.
@@ -504,6 +567,7 @@ impl Wizard {
                 let current = key == (self.pool.clone(), self.research_sorted());
                 if current && !self.team_edited {
                     self.set_team(catalog.default_team.clone());
+                    self.fit_team();
                 }
                 self.catalog = Some(catalog);
                 self.catalog_for = Some(key);
@@ -629,7 +693,7 @@ impl Wizard {
             for id in std::iter::once(&team.master)
                 .chain(team.sub_harnesses.iter().map(|slot| &slot.harness))
             {
-                if !ids.contains(id) {
+                if !ids.iter().any(|known| same_harness(known, id)) {
                     ids.push(id.clone());
                 }
             }
@@ -639,6 +703,7 @@ impl Wizard {
                 name: harness_name(&id, None),
                 id,
                 state: HarnessState::Unknown,
+                limited: None,
             })
             .collect()
     }
@@ -720,7 +785,7 @@ impl Wizard {
                 .find(|id| {
                     harnesses
                         .iter()
-                        .any(|h| &&h.id == id && h.state == HarnessState::NotInstalled)
+                        .any(|h| same_harness(&h.id, id) && h.state == HarnessState::NotInstalled)
                 });
             if let Some(id) = missing {
                 return Err(Note::error(
@@ -1546,7 +1611,7 @@ impl Wizard {
 /// Takes the engine id and the harness catalog when known.
 /// Returns the catalog name, a known product name, or the id itself.
 pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) -> String {
-    if let Some(choice) = catalog.and_then(|c| c.iter().find(|h| h.id == id)) {
+    if let Some(choice) = catalog.and_then(|c| c.iter().find(|h| same_harness(&h.id, id))) {
         return choice.name.clone();
     }
     match id {
