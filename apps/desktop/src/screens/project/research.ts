@@ -49,7 +49,7 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const ran = job.started_ms === null ? "" : elapsed((job.finished_ms ?? now) - job.started_ms);
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
-    case "queued": return { ...base, status: "Queued", tone: "info", progress: "Waiting to start", active: true };
+    case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
     case "needs_pool": return { ...base, status: "Needs a pool", tone: "warn", progress: "Waiting for a pool" };
     case "running": return {
       ...base, status: "Running", tone: "info", elapsed: ran, active: true,
