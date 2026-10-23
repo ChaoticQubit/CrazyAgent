@@ -2,7 +2,7 @@ use crazyagent::accounts::{AccountDraft, AccountStatus, AccountView, Provider, S
 use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::*;
-use crazyagent::protocol::{CredentialRef, PROTOCOL_VERSION, RequestId};
+use crazyagent::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, RequestId};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -580,5 +580,87 @@ async fn one_thousand_accounts_are_created_and_listed_within_bounds() {
         creation < Duration::from_secs(120),
         "creating 1000 accounts took {creation:?}"
     );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_accounts_start_the_managed_sign_in_and_follow_its_phase() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let (_, identity) = OwnerClient::discover(
+        fixture.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    for (provider, method, name) in [
+        (
+            Provider::Claude,
+            NativeAuthMethod::ClaudeOfficial,
+            "Work Claude",
+        ),
+        (
+            Provider::Chatgpt,
+            NativeAuthMethod::CodexDeviceCode,
+            "Work ChatGPT",
+        ),
+    ] {
+        let account = client
+            .add_account(
+                draft(provider, SignInMethod::Subscription, name, None, None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.status_label, "Not signed in");
+        let read = client
+            .request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: RequestId::new(format!("read-{}", account.id.as_str())).unwrap(),
+                expected_revision: Cursor::new(0),
+                operation: OwnerOperation::Read {
+                    query: OwnerRead::ModelAccessRecord {
+                        collection: ModelAccessCollection::Connections,
+                        id: account.id.clone(),
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let OwnerResponse::Read { state } = read.response else {
+            panic!("connection read required")
+        };
+        let OwnerData::ModelAccessRecord {
+            source_hash,
+            record: ModelAccessRecord::Connection { connection },
+            ..
+        } = state.data
+        else {
+            panic!("the account must be a config connection the sign-in can bind to")
+        };
+        let reply = client
+            .start_native_auth(NativeAuthStart {
+                request_id: RequestId::new(format!("start-{}", account.id.as_str())).unwrap(),
+                scope: NativeAuthScope {
+                    expected_database_instance: identity.database_instance().to_owned(),
+                    connection: account.id.clone(),
+                    expected_config_id: state.config_id,
+                    expected_source_hash: source_hash,
+                },
+                method,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.fact.binding.connection, connection);
+        assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
+        let listed = all_accounts(&client).await;
+        let shown = listed
+            .iter()
+            .find(|listed| listed.id == account.id)
+            .unwrap();
+        assert_eq!(shown.name, name);
+        assert_eq!(shown.status_label, "Not signed in");
+    }
     fixture.stop().await;
 }
