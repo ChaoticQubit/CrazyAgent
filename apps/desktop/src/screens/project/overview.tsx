@@ -11,10 +11,11 @@ const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
 };
 
-/** Shows a project folder path with "~" for the macOS home folder.
- * Input: the absolute path. Output: the display path. */
+/** Shows a project folder path with "~" for the macOS home folder and long engine ids
+ * cut to eight characters. Input: the absolute path. Output: the display path. */
 export function folderLabel(path: string): string {
-  return tildePath(path, /^\/Users\/[^/]+/u.exec(path)?.[0] ?? "");
+  const short = path.split("/").map((part) => part.replace(/^(.*?[^0-9a-f]|)([0-9a-f]{8})[0-9a-f]{8,}$/u, "$1$2...")).join("/");
+  return tildePath(short, /^\/Users\/[^/]+/u.exec(short)?.[0] ?? "");
 }
 
 /** Overview tab: what needs the owner, research progress, recent activity and project facts.
@@ -58,7 +59,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}
       {data.setup?.kind === "ok" && data.setup.value === null && <p className="pj-muted">This project was created before project setup. It has no folder, research or team details.</p>}
       <dl>
-        {setup && <div><dt>Project folder</dt><dd className="pj-mono">{displayText(folderLabel(setup.folder))}</dd></div>}
+        {setup && <div><dt>Project folder</dt><dd className="pj-mono" title={setup.folder}>{displayText(folderLabel(setup.folder))}</dd></div>}
         {setup && <div><dt>Tech stack</dt><dd className="pj-chips">{setup.tech_stack.length ? setup.tech_stack.map((item) => <span className="pj-chip" key={item}>{displayText(item)}</span>) : <span className="pj-muted">None</span>}</dd></div>}
         {setup && <div><dt>Platforms</dt><dd>{setup.platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform).join(", ") || "None"}</dd></div>}
         <div><dt>Pool</dt><dd>{data.assigned

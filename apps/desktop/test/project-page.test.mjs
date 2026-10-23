@@ -143,6 +143,10 @@ test("project folders under the home folder show a tilde", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
   assert.equal(overview.folderLabel("/Users/mira/Library/CrazyAgent/projects/p-1"), "~/Library/CrazyAgent/projects/p-1");
   assert.equal(overview.folderLabel("/private/var/p-1"), "/private/var/p-1");
+  const id = "project-3895cf3bd08cc3079f7602b664bff2aba118e9468c086704878b37cdd0555e03";
+  assert.equal(overview.folderLabel(`/Users/mira/Library/CrazyAgent/projects/${id}`), "~/Library/CrazyAgent/projects/project-3895cf3b...");
+  assert.doesNotMatch(overview.folderLabel(`/Users/mira/${id}/projects/${id}`), /[0-9a-f]{12}/);
+  assert.equal(overview.folderLabel("/Users/mira/Projects/a-folder-name-of-exactly-32-chars"), "~/Projects/a-folder-name-of-exactly-32-chars");
 });
 
 test("context files get an icon for their type, and unknown types a plain file", () => {

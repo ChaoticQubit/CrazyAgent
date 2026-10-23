@@ -104,9 +104,9 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-seg button[aria-checked="true"] { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--elev-1); }
 .pj-empty { display: grid; gap: 4px; justify-items: start; padding: 24px 0; }
 
-.pj-convo { display: grid; grid-template-rows: auto auto minmax(240px, 1fr) auto auto auto; gap: 12px; height: calc(100vh - 200px); min-height: 420px; }
+.pj-convo { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; }
 .pj-convo-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.pj-thread { overflow: auto; display: grid; gap: 16px; align-content: start; padding: 4px 2px; }
+.pj-thread { flex: 1; min-height: 240px; overflow: auto; display: grid; gap: 16px; align-content: start; padding: 4px 2px; }
 .pj-turn { display: grid; gap: 8px; }
 .pj-msg-owner { justify-self: end; max-width: 75%; padding: 8px 12px; border-radius: var(--radius-panel); background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pj-msg-master { min-width: 0; }

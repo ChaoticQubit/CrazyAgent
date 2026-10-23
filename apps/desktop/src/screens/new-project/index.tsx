@@ -251,7 +251,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
                   return <button type="button" key={option.id} className={`pj-chip-toggle ${on ? "on" : ""}`} aria-pressed={on}
                     onClick={() => setDraft({ ...draft, stack: on ? draft.stack.filter((item) => item.toLowerCase() !== option.label.toLowerCase()) : addStack(draft.stack, option.label).stack })}>{option.label}</button>;
                 })}</div></div>;
-            }) : <p className="pj-help">The tech stack list isn't ready yet. Add your own entries.</p>}
+            }) : catalog === undefined ? <p className="pj-help" role="status">Loading the tech stack list...</p>
+              : <p className="pj-help">The tech stack list isn't available. Add your own entries.</p>}
           </fieldset>
           <fieldset className="pj-field">
             <legend>Target platforms</legend>
@@ -312,7 +313,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>
-          {harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build. Codex and Claude Code are shown; installed status isn't checked." />}
+          {harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build, so installed status isn't checked." />}
           {draft.team ? <TeamEditor prefix="np" team={draft.team} harnesses={harnessValue} pool={chosenPool} research={draft.research}
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}

@@ -132,7 +132,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
       {data.context?.kind === "not_ready" && <NotReady what="the project folder view isn't in this build." />}
       {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context.code)}</p>}
       {context && <>
-        <div className="pj-stack-s pj-tree-root"><span className="pj-mono">{displayText(folderLabel(context.folder))}</span>
+        <div className="pj-stack-s pj-tree-root"><span className="pj-mono" title={context.folder}>{displayText(folderLabel(context.folder))}</span>
           <div><button type="button" className="btn" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</button></div></div>
         <ul>
           <li><button type="button" className="pj-titem pin" aria-current={chosen === "@memory" || undefined} onClick={() => setSelected("@memory")}><Icon name="brain" size={14} />Project memory</button></li>
