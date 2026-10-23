@@ -6,8 +6,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,22 @@ const MODEL_BYTES_MAX: usize = 256;
 const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
+const RUNS_PER_ATTEMPT_MAX: u32 = 100;
+const LINKS_HEADING: &str = "## Links and references";
+const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+const CLAUDE_ARGUMENTS: [&str; 11] = [
+    "--print",
+    "--output-format",
+    "text",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--setting-sources",
+    "",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--no-session-persistence",
+];
 
 /// Bounds every research run obeys.
 #[derive(Debug, Clone)]
@@ -46,16 +62,64 @@ impl Default for ResearchLimits {
     }
 }
 
+/// The coding agents research can run on, named by a job's harness id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResearchHarness {
+    Codex,
+    ClaudeCode,
+}
+
+impl ResearchHarness {
+    /// Maps a team plan or connection harness id to a research harness.
+    /// Takes the id, such as `codex`, `claude` or `claude-code`.
+    /// Returns `None` for a harness research cannot run on.
+    pub fn of(id: &str) -> Option<Self> {
+        match id {
+            "codex" => Some(Self::Codex),
+            "claude" | "claude-code" => Some(Self::ClaudeCode),
+            _ => None,
+        }
+    }
+
+    /// The plain product name written into reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+        }
+    }
+}
+
 /// The pool account a research agent runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResearchAccount {
-    /// An OpenAI-compatible URL or a local model server, with no key.
+    /// An OpenAI-compatible URL or a local model server, with no key, for Codex.
     Endpoint { base_url: String, model: String },
     /// A signed-in managed Codex profile directory owned by the engine.
     ManagedCodex {
         home: PathBuf,
         model: Option<String>,
     },
+    /// An Anthropic Messages URL or local model server, with no key, for
+    /// Claude Code.
+    AnthropicEndpoint { base_url: String, model: String },
+    /// A signed-in managed Claude profile directory owned by the engine.
+    ManagedClaude {
+        home: PathBuf,
+        model: Option<String>,
+    },
+}
+
+impl ResearchAccount {
+    /// The only harness that can drive this account.
+    pub fn harness(&self) -> ResearchHarness {
+        match self {
+            Self::Endpoint { .. } | Self::ManagedCodex { .. } => ResearchHarness::Codex,
+            Self::AnthropicEndpoint { .. } | Self::ManagedClaude { .. } => {
+                ResearchHarness::ClaudeCode
+            }
+        }
+    }
 }
 
 /// The project a runner works for: its id, its folder and the account picked
@@ -116,16 +180,18 @@ impl From<io::Error> for RunError {
     }
 }
 
-/// Claims queued research jobs and runs each one as a sandboxed Codex agent
-/// in its own git worktree under the project folder, then writes the agent's
-/// report to `context/research/<kind>.md`.
+/// Claims queued research jobs and runs each one as a sandboxed Codex or
+/// Claude Code agent in its own git worktree under the project folder, then
+/// writes the agent's report to `context/research/<kind>.md`.
 pub struct ResearchRunner {
     database: PathBuf,
     state: PathBuf,
     codex: PathBuf,
+    claude: Option<PathBuf>,
     limits: ResearchLimits,
     claimer: String,
     stopping: AtomicBool,
+    setup: Mutex<()>,
 }
 
 enum Ending {
@@ -176,10 +242,25 @@ impl ResearchRunner {
             database: database.to_path_buf(),
             state: state.to_path_buf(),
             codex: codex.to_path_buf(),
+            claude: None,
             limits,
             claimer: format!("runner-{}-{nanos}", std::process::id()),
             stopping: AtomicBool::new(false),
+            setup: Mutex::new(()),
         })
+    }
+
+    /// Lets the runner run Claude Code jobs with the absolute `claude`
+    /// executable. Returns the runner, or an error for a relative or missing
+    /// path.
+    pub fn with_claude(mut self, claude: &Path) -> Result<Self, RunError> {
+        if !claude.is_absolute() || !claude.is_file() {
+            return Err(RunError::Invalid(
+                "claude executable must be absolute".into(),
+            ));
+        }
+        self.claude = Some(claude.to_path_buf());
+        Ok(self)
     }
 
     /// The job store this runner claims from.
@@ -210,11 +291,12 @@ impl ResearchRunner {
         self.run_claimed(&jobs, job, project).map(Some)
     }
 
-    /// Claims every job the per-project limit allows right now and runs each
-    /// on its own thread.
+    /// Claims every job of `project` for the account's harness that the
+    /// per-project limit allows right now and runs each on its own thread.
     pub fn spawn_ready(
         self: &Arc<Self>,
         project: String,
+        harness: &str,
         root: PathBuf,
         account: Option<ResearchAccount>,
     ) -> Vec<JoinHandle<Result<ResearchRun, RunError>>> {
@@ -223,7 +305,8 @@ impl ResearchRunner {
             return handles;
         };
         while !self.is_stopping()
-            && let Ok(Some(job)) = jobs.claim(&project, &self.claimer, self.limits.running_max)
+            && let Ok(Some(job)) =
+                jobs.claim_harness(&project, harness, &self.claimer, self.limits.running_max)
         {
             let runner = self.clone();
             let project = project.clone();
@@ -260,7 +343,7 @@ impl ResearchRunner {
             report,
             process_group,
         };
-        if job.harness != "codex" {
+        let Some(harness) = ResearchHarness::of(&job.harness) else {
             jobs.fail(
                 job.id,
                 &self.claimer,
@@ -268,14 +351,27 @@ impl ResearchRunner {
                 1,
             )?;
             return Ok(run(ResearchStatus::Failed, None, None));
-        }
-        let Some(account) = &project.account else {
+        };
+        let Some(account) = project
+            .account
+            .as_ref()
+            .filter(|account| account.harness() == harness)
+        else {
             jobs.needs_pool(job.id, &self.claimer)?;
             return Ok(run(ResearchStatus::NeedsPool, None, None));
         };
+        if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
+            jobs.fail(
+                job.id,
+                &self.claimer,
+                "This harness is not installed on this computer",
+                1,
+            )?;
+            return Ok(run(ResearchStatus::Failed, None, None));
+        }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
-                let report = match self.publish(&job, project.root, &output) {
+                let report = match self.publish(&job, harness, project.root, &output) {
                     Ok(report) => report,
                     Err(reason) => {
                         let status =
@@ -333,18 +429,27 @@ impl ResearchRunner {
         if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
-        let name = format!("job-{}-{}", job.id, job.attempts);
+        let (name, worktree) = self.free_run(&root, job)?;
         let agent = self.state.join("agents").join(&name);
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
         let home = match account {
-            ResearchAccount::Endpoint { .. } => {
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => {
                 let home = agent.join("home");
                 private_directory(&home)?;
                 home
             }
-            ResearchAccount::ManagedCodex { home, .. } => home.canonicalize()?,
+            ResearchAccount::ManagedCodex { home, .. }
+            | ResearchAccount::ManagedClaude { home, .. } => home.canonicalize()?,
+        };
+        let harness = account.harness();
+        let executable = match harness {
+            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::ClaudeCode => self
+                .claude
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
         };
         let network = if job.tools {
             SandboxNetwork::Open
@@ -352,41 +457,35 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
-        if let Some(install) = self.codex.canonicalize()?.parent() {
+        if let Some(install) = executable.canonicalize()?.parent() {
             sandbox = sandbox.allow_read(install)?;
         }
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
+        let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
-        let worktree = root
-            .join("worktrees")
-            .join(format!("research-{}-{}-{}", job.kind, job.id, job.attempts));
         add_worktree(&sandbox, &profile, &worktree)?;
+        drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
-        let output = tmp.join("report.md");
-        let mut codex = sandbox.command(&profile, &self.codex);
-        codex
-            .arg("exec")
-            .args(["--skip-git-repo-check", "--color", "never", "--json"])
-            .arg("-C")
-            .arg(&worktree)
-            .arg("-o")
-            .arg(&output)
-            .arg("-s")
-            .arg(if job.tools {
-                "danger-full-access"
-            } else {
-                "read-only"
-            })
-            .env("CODEX_HOME", &home)
-            .current_dir(&worktree);
-        account_arguments(&mut codex, account)?;
-        codex
-            .arg("-")
+        write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
+        let mut command = sandbox.command(&profile, executable);
+        let (output, stdout_log) = match harness {
+            ResearchHarness::Codex => {
+                let output = tmp.join("report.md");
+                codex_arguments(&mut command, &worktree, &output, &home, job.tools, account)?;
+                (output, "events.jsonl")
+            }
+            ResearchHarness::ClaudeCode => {
+                claude_arguments(&mut command, &home, &tmp, job.tools, account)?;
+                (agent.join("output.md"), "output.md")
+            }
+        };
+        command
+            .current_dir(&worktree)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = codex.spawn()?;
+        let mut child = command.spawn()?;
         let group = child.id();
         assert!(group > 1);
         let counted = Arc::new(AtomicU64::new(0));
@@ -396,7 +495,7 @@ impl ResearchRunner {
                     .stdout
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
-                "events.jsonl",
+                stdout_log,
             ),
             (
                 child
@@ -464,9 +563,37 @@ impl ResearchRunner {
         Ok(ending)
     }
 
+    /// Names this launch of a job so it never reuses the agent state or the
+    /// worktree of an earlier launch, such as one an engine stop interrupted
+    /// without spending its attempt. Takes the project folder and the job.
+    /// Returns the agent state name and the worktree path, or an error after
+    /// `RUNS_PER_ATTEMPT_MAX` launches of the same attempt.
+    fn free_run(&self, root: &Path, job: &ResearchJob) -> Result<(String, PathBuf), RunError> {
+        for launch in 0..RUNS_PER_ATTEMPT_MAX {
+            let suffix = if launch == 0 {
+                String::new()
+            } else {
+                format!("-{launch}")
+            };
+            let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
+            let worktree = root.join("worktrees").join(format!(
+                "research-{}-{}-{}{suffix}",
+                job.kind, job.id, job.attempts
+            ));
+            let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
+            if !taken(&self.state.join("agents").join(&name)) && !taken(&worktree) {
+                return Ok((name, worktree));
+            }
+        }
+        Err(RunError::Invalid(
+            "too many launches of one research attempt".into(),
+        ))
+    }
+
     fn publish(
         &self,
         job: &ResearchJob,
+        harness: ResearchHarness,
         root: &Path,
         output: &Path,
     ) -> Result<PathBuf, &'static str> {
@@ -476,15 +603,18 @@ impl ResearchRunner {
         if body.is_empty() {
             return Err("Agent returned no report");
         }
-        let report = render_report(&kind_label(&job.kind), "Codex", body);
+        let report = render_report(&kind_label(&job.kind), harness.label(), body);
         write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
     }
 }
 
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
-        ResearchAccount::ManagedCodex { .. } => Ok(SandboxRemote::AnyHost(443)),
-        ResearchAccount::Endpoint { base_url, .. } => {
+        ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
+            Ok(SandboxRemote::AnyHost(443))
+        }
+        ResearchAccount::Endpoint { base_url, .. }
+        | ResearchAccount::AnthropicEndpoint { base_url, .. } => {
             let url = endpoint_url(base_url)?;
             let port = url
                 .port_or_known_default()
@@ -532,7 +662,28 @@ fn valid_model(model: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte))
 }
 
-fn account_arguments(command: &mut Command, account: &ResearchAccount) -> Result<(), RunError> {
+fn codex_arguments(
+    command: &mut Command,
+    worktree: &Path,
+    output: &Path,
+    home: &Path,
+    tools: bool,
+    account: &ResearchAccount,
+) -> Result<(), RunError> {
+    command
+        .arg("exec")
+        .args(["--skip-git-repo-check", "--color", "never", "--json"])
+        .arg("-C")
+        .arg(worktree)
+        .arg("-o")
+        .arg(output)
+        .arg("-s")
+        .arg(if tools {
+            "danger-full-access"
+        } else {
+            "read-only"
+        })
+        .env("CODEX_HOME", home);
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;
@@ -562,8 +713,85 @@ fn account_arguments(command: &mut Command, account: &ResearchAccount) -> Result
                 command.arg("-m").arg(model);
             }
         }
+        ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
+            return Err(RunError::Invalid("account does not fit Codex".into()));
+        }
+    }
+    command.arg("-");
+    Ok(())
+}
+
+/// Adds Claude Code's print-mode arguments and environment for one research
+/// run: no MCP servers, settings sources, hooks or saved sessions, tools on or
+/// off, and the account as either a managed config directory or a keyless
+/// Anthropic endpoint in bare mode that never reads the keychain.
+/// Takes the command, the agent home and temp dir, the tools switch and the
+/// account. Returns an error for an account that does not fit Claude Code.
+fn claude_arguments(
+    command: &mut Command,
+    home: &Path,
+    tmp: &Path,
+    tools: bool,
+    account: &ResearchAccount,
+) -> Result<(), RunError> {
+    command
+        .args(CLAUDE_ARGUMENTS)
+        .env("CLAUDE_CONFIG_DIR", home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home)
+        .env("CLAUDE_CODE_TMPDIR", tmp)
+        .env("TERM", "dumb")
+        .env("DISABLE_TELEMETRY", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+    if tools {
+        command
+            .args([
+                "--tools",
+                "default",
+                "--permission-mode",
+                "bypassPermissions",
+            ])
+            .env("SHELL", "/bin/zsh");
+    } else {
+        command.args(["--tools", "", "--disable-slash-commands"]);
+    }
+    match account {
+        ResearchAccount::AnthropicEndpoint { base_url, model } => {
+            let url = endpoint_url(base_url)?;
+            if !valid_model(model) {
+                return Err(RunError::Invalid("endpoint model name".into()));
+            }
+            command
+                .arg("--bare")
+                .arg("--model")
+                .arg(model)
+                .env("ANTHROPIC_API_KEY", LOCAL_PLACEHOLDER_KEY)
+                .env("ANTHROPIC_BASE_URL", url.as_str().trim_end_matches('/'))
+                .env("ANTHROPIC_SMALL_FAST_MODEL", model);
+        }
+        ResearchAccount::ManagedClaude { model, .. } => {
+            if let Some(model) = model {
+                if !valid_model(model) {
+                    return Err(RunError::Invalid("managed model name".into()));
+                }
+                command.arg("--model").arg(model);
+            }
+        }
+        ResearchAccount::Endpoint { .. } | ResearchAccount::ManagedCodex { .. } => {
+            return Err(RunError::Invalid("account does not fit Claude Code".into()));
+        }
     }
     Ok(())
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
@@ -818,13 +1046,26 @@ fn kind_task(kind: &str, label: &str) -> String {
 }
 
 fn render_report(label: &str, harness: &str, body: &str) -> String {
+    let mut has_links = false;
+    let body: Vec<&str> = body
+        .lines()
+        .map(|line| {
+            if line.trim().eq_ignore_ascii_case(LINKS_HEADING) {
+                has_links = true;
+                LINKS_HEADING
+            } else {
+                line
+            }
+        })
+        .collect();
+    let body = body.join("\n");
     let mut report = format!(
         "# {label}\n\nResearched by {harness} on {}.\n\n{body}\n",
         utc_date(SystemTime::now())
     );
-    if !body.to_lowercase().contains("## links and references") {
-        report.push_str("\n## Links and references\n\n");
-        let links = links_in(body);
+    if !has_links {
+        report.push_str(&format!("\n{LINKS_HEADING}\n\n"));
+        let links = links_in(&body);
         if links.is_empty() {
             report.push_str("No links were returned by the agent.\n");
         }
@@ -950,6 +1191,20 @@ mod tests {
             "Body\n\n## Links and references\n- [A](https://a.example)",
         );
         assert_eq!(kept.matches("## Links and references").count(), 1);
+        let lower = render_report(
+            "Market research",
+            "Codex",
+            "Body\n\n### Links and References\n- [A](https://a.example/y)",
+        );
+        assert!(lower.contains("\n## Links and references\n\n- <https://a.example/y>\n"));
+        let capital = render_report(
+            "Market research",
+            "Codex",
+            "Body\n\n  ## Links and References  \n- [A](https://a.example/z)",
+        );
+        assert_eq!(capital.matches("## Links and references\n").count(), 1);
+        assert!(!capital.contains("References"));
+        assert!(capital.contains("- [A](https://a.example/z)"));
         let empty = render_report("Market research", "Codex", "Body only");
         assert!(empty.contains("No links were returned by the agent."));
     }

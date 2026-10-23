@@ -194,6 +194,29 @@ impl ResearchJobs {
         claimer: &str,
         running_max: u32,
     ) -> Result<Option<ResearchJob>, JobError> {
+        self.claim_where(project, None, claimer, running_max)
+    }
+
+    /// Like [`ResearchJobs::claim`], but only takes a job for `harness`; the
+    /// running limit still counts every harness of the project.
+    pub fn claim_harness(
+        &self,
+        project: &str,
+        harness: &str,
+        claimer: &str,
+        running_max: u32,
+    ) -> Result<Option<ResearchJob>, JobError> {
+        bounded(harness, HARNESS_BYTES_MAX)?;
+        self.claim_where(project, Some(harness), claimer, running_max)
+    }
+
+    fn claim_where(
+        &self,
+        project: &str,
+        harness: Option<&str>,
+        claimer: &str,
+        running_max: u32,
+    ) -> Result<Option<ResearchJob>, JobError> {
         bounded(claimer, CLAIMER_BYTES_MAX)?;
         if !(1..=RUNNING_MAX).contains(&running_max) {
             return Err(JobError::Invalid("running limit must be 1..64"));
@@ -209,18 +232,20 @@ impl ResearchJobs {
                          error = NULL, output_bytes = 0
                      WHERE id = (SELECT id FROM research_jobs
                                  WHERE project = ?1 AND status = 'queued'
+                                   AND (?5 IS NULL OR harness = ?5)
                                  ORDER BY id LIMIT 1)
                        AND (SELECT count(*) FROM research_jobs
                             WHERE project = ?1 AND status = 'running') < ?4
                      RETURNING {COLUMNS}"
                 ),
-                params![project, claimer, now, running_max],
+                params![project, claimer, now, running_max, harness],
                 job_from_row,
             )
             .optional()?;
         if let Some(job) = &job {
             assert_eq!(job.status, ResearchStatus::Running);
             assert_eq!(job.claimer.as_deref(), Some(claimer));
+            assert!(harness.is_none_or(|harness| job.harness == harness));
             assert!(job.attempts >= 1);
         }
         Ok(job)
@@ -301,26 +326,32 @@ impl ResearchJobs {
         )
     }
 
-    /// Requeues every job of `project` that waited for a pool.
-    pub fn resume_waiting(&self, project: &str) -> Result<usize, JobError> {
+    /// Requeues every job of `project` for `harness` that waited for a pool.
+    pub fn resume_waiting(&self, project: &str, harness: &str) -> Result<usize, JobError> {
         Ok(self.connection.execute(
             "UPDATE research_jobs SET status = 'queued', error = NULL
-             WHERE project = ?1 AND status = 'needs_pool'",
-            params![project],
+             WHERE project = ?1 AND harness = ?2 AND status = 'needs_pool'",
+            params![project, harness],
         )?)
     }
 
-    /// Parks every queued or waiting job of `project` until its pool can run
-    /// research, recording `detail` as the plain reason when there is one.
-    pub fn park_waiting(&self, project: &str, detail: Option<&str>) -> Result<usize, JobError> {
+    /// Parks every queued or waiting job of `project` for `harness` until its
+    /// pool can run that harness, recording `detail` as the plain reason when
+    /// there is one.
+    pub fn park_waiting(
+        &self,
+        project: &str,
+        harness: &str,
+        detail: Option<&str>,
+    ) -> Result<usize, JobError> {
         if let Some(detail) = detail {
             bounded(detail, ERROR_BYTES_MAX)?;
         }
         Ok(self.connection.execute(
-            "UPDATE research_jobs SET status = 'needs_pool', error = ?2
-             WHERE project = ?1 AND status IN ('queued', 'needs_pool')
-               AND (status = 'queued' OR error IS NOT ?2)",
-            params![project, detail],
+            "UPDATE research_jobs SET status = 'needs_pool', error = ?3
+             WHERE project = ?1 AND harness = ?2 AND status IN ('queued', 'needs_pool')
+               AND (status = 'queued' OR error IS NOT ?3)",
+            params![project, harness, detail],
         )?)
     }
 
@@ -335,16 +366,19 @@ impl ResearchJobs {
         )
     }
 
-    /// Projects that have queued or waiting research, at most 1000.
-    pub fn projects_with_work(&self) -> Result<Vec<String>, JobError> {
+    /// Each project and harness pair with queued or waiting research, in
+    /// order, at most 1000.
+    pub fn work(&self) -> Result<Vec<(String, String)>, JobError> {
         let mut statement = self.connection.prepare(
-            "SELECT DISTINCT project FROM research_jobs
-             WHERE status IN ('queued', 'needs_pool') ORDER BY project LIMIT 1000",
+            "SELECT DISTINCT project, harness FROM research_jobs
+             WHERE status IN ('queued', 'needs_pool') ORDER BY project, harness LIMIT 1000",
         )?;
-        let projects = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+        let work = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(projects)
+        Ok(work)
     }
 
     /// Requests cancellation: a waiting job is cancelled at once, a running job

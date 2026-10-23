@@ -1,9 +1,10 @@
-use super::runner::ResearchAccount;
+use super::runner::{ResearchAccount, ResearchHarness};
 use crate::config::{ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::protocol::CredentialRef;
 use std::path::{Path, PathBuf};
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
+const ANTHROPIC_PROTOCOL: &str = "anthropic-messages";
 
 /// The account a research job should run on, or why it has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,23 +67,36 @@ fn usable(
     harness: &str,
     managed_home: &impl Fn(&CredentialRef) -> Option<PathBuf>,
 ) -> Option<ResearchAccount> {
-    if harness != "codex" {
-        return None;
-    }
+    let harness = ResearchHarness::of(harness)?;
+    let anthropic = connection.protocol.as_str() == ANTHROPIC_PROTOCOL;
+    let model =
+        || (connection.model.id != ACCOUNT_DEFAULT_MODEL).then(|| connection.model.id.clone());
     match (&connection.endpoint, &connection.auth) {
-        (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => {
-            Some(ResearchAccount::Endpoint {
+        (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => match harness {
+            ResearchHarness::Codex if !anthropic => Some(ResearchAccount::Endpoint {
                 base_url: url.clone(),
                 model: connection.model.id.clone(),
-            })
-        }
+            }),
+            ResearchHarness::ClaudeCode if anthropic => Some(ResearchAccount::AnthropicEndpoint {
+                base_url: url.clone(),
+                model: connection.model.id.clone(),
+            }),
+            _ => None,
+        },
         (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref })
-            if connection.harness.as_str() == "codex" =>
+            if ResearchHarness::of(connection.harness.as_str()) == Some(harness) =>
         {
             let home = managed_home(profile_ref)?;
-            let model =
-                (connection.model.id != ACCOUNT_DEFAULT_MODEL).then(|| connection.model.id.clone());
-            Some(ResearchAccount::ManagedCodex { home, model })
+            Some(match harness {
+                ResearchHarness::Codex => ResearchAccount::ManagedCodex {
+                    home,
+                    model: model(),
+                },
+                ResearchHarness::ClaudeCode => ResearchAccount::ManagedClaude {
+                    home,
+                    model: model(),
+                },
+            })
         }
         _ => None,
     }
@@ -116,9 +130,10 @@ impl SettingsResolver {
         })
     }
 
-    /// The project's folder and account pick, or `None` when the project has
-    /// no plain folder yet or the settings cannot be read.
-    pub fn resolve(&self, project: &str) -> Option<(PathBuf, AccountPick)> {
+    /// The project's folder and the account `harness` would run on, or
+    /// `None` when the project has no plain folder yet or the settings cannot
+    /// be read.
+    pub fn resolve(&self, project: &str, harness: &str) -> Option<(PathBuf, AccountPick)> {
         CredentialRef::new(project).ok()?;
         let folder = self.projects_root.join(project);
         let metadata = std::fs::symlink_metadata(&folder).ok()?;
@@ -127,6 +142,6 @@ impl SettingsResolver {
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
-        Some((folder, pick_account(&access, project, "codex", |_| None)))
+        Some((folder, pick_account(&access, project, harness, |_| None)))
     }
 }

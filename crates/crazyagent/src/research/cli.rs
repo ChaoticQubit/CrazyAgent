@@ -99,7 +99,7 @@ pub fn run(args: &[OsString]) -> Result<(), String> {
     let resolver = {
         let project = project.clone();
         let root = root.clone();
-        move |id: &str| (id == project).then(|| (root.clone(), pick.clone()))
+        move |id: &str, _harness: &str| (id == project).then(|| (root.clone(), pick.clone()))
     };
     let service = ResearchService::start(runner, resolver, Duration::from_millis(250));
     let deadline =

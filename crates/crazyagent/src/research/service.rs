@@ -1,6 +1,8 @@
 use super::accounts::{AccountPick, SettingsResolver};
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
-use super::runner::{ResearchLimits, ResearchRun, ResearchRunner, RunError, kind_label};
+use super::runner::{
+    ResearchHarness, ResearchLimits, ResearchRun, ResearchRunner, RunError, kind_label,
+};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,9 +65,10 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
         .collect())
 }
 
-/// Background loop that keeps every project's research moving: it parks
-/// jobs whose project has no usable pool account, resumes them once one is
-/// assigned, and starts queued jobs up to the per-project limit.
+/// Background loop that keeps every project's research moving: for each
+/// project and job harness it parks jobs whose pool has no account that
+/// harness can use, resumes them once one is assigned, and starts queued jobs
+/// up to the per-project limit.
 pub struct ResearchService {
     runner: Arc<ResearchRunner>,
     stop: Arc<AtomicBool>,
@@ -73,12 +76,12 @@ pub struct ResearchService {
 }
 
 impl ResearchService {
-    /// Starts the loop. `resolve` maps a project id to its folder and the
-    /// account picked from its pool, or `None` for a project the engine does
-    /// not know yet.
+    /// Starts the loop. `resolve` maps a project id and a job harness to the
+    /// project folder and the account picked for that harness from its pool,
+    /// or `None` for a project the engine does not know yet.
     pub fn start<F>(runner: Arc<ResearchRunner>, resolve: F, tick: Duration) -> Self
     where
-        F: Fn(&str) -> Option<(PathBuf, AccountPick)> + Send + 'static,
+        F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)> + Send + 'static,
     {
         assert!(!tick.is_zero());
         let stop = Arc::new(AtomicBool::new(false));
@@ -117,7 +120,7 @@ impl Drop for ResearchService {
 
 fn serve<F>(runner: &Arc<ResearchRunner>, resolve: &F, tick: Duration, stop: &AtomicBool)
 where
-    F: Fn(&str) -> Option<(PathBuf, AccountPick)>,
+    F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
 {
     let mut runs: Vec<JoinHandle<Result<ResearchRun, RunError>>> = Vec::new();
     let Ok(jobs) = ResearchJobs::open(runner.database()) else {
@@ -125,21 +128,25 @@ where
     };
     while !stop.load(Ordering::SeqCst) {
         let _ = jobs.recover_stale(STALE_MS);
-        for project in jobs.projects_with_work().unwrap_or_default() {
+        for (project, harness) in jobs.work().unwrap_or_default() {
             if stop.load(Ordering::SeqCst) || runs.len() >= RUNS_MAX {
                 break;
             }
-            match resolve(&project) {
+            match resolve(&project, &harness) {
                 None => {}
+                Some((root, _)) if ResearchHarness::of(&harness).is_none() => {
+                    let _ = jobs.resume_waiting(&project, &harness);
+                    runs.extend(runner.spawn_ready(project, &harness, root, None));
+                }
                 Some((_, AccountPick::NeedsPool)) => {
-                    let _ = jobs.park_waiting(&project, None);
+                    let _ = jobs.park_waiting(&project, &harness, None);
                 }
                 Some((_, pick @ AccountPick::NoUsableAccount)) => {
-                    let _ = jobs.park_waiting(&project, Some(pick.label()));
+                    let _ = jobs.park_waiting(&project, &harness, Some(pick.label()));
                 }
                 Some((root, AccountPick::Account { account, .. })) => {
-                    let _ = jobs.resume_waiting(&project);
-                    runs.extend(runner.spawn_ready(project, root, Some(account)));
+                    let _ = jobs.resume_waiting(&project, &harness);
+                    runs.extend(runner.spawn_ready(project, &harness, root, Some(account)));
                 }
             }
         }
@@ -160,6 +167,7 @@ pub fn start_for_engine(
     global: &Path,
     project: &Path,
     codex: &Path,
+    claude: Option<&Path>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -186,12 +194,17 @@ pub fn start_for_engine(
     if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("engine database must be a private file".into());
     }
-    let runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
+    let mut runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
         .map_err(|error| error.to_string())?;
+    if let Some(claude) = claude {
+        runner = runner
+            .with_claude(claude)
+            .map_err(|error| error.to_string())?;
+    }
     let resolver = SettingsResolver::new(global, project, &projects)?;
     Ok(ResearchService::start(
         Arc::new(runner),
-        move |id: &str| resolver.resolve(id),
+        move |id: &str, harness: &str| resolver.resolve(id, harness),
         ENGINE_TICK,
     ))
 }
