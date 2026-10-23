@@ -406,3 +406,40 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
         session.stop();
     }
 }
+
+fn project_profile(work: &Path, home: &Path) -> PathBuf {
+    let profile = work.join("project.sb");
+    let rules = format!(
+        "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"{}\") (subpath \"{}\"))\n",
+        std::fs::canonicalize(work).unwrap().display(),
+        std::fs::canonicalize(home).unwrap().display()
+    );
+    std::fs::write(&profile, rules).unwrap();
+    profile
+}
+
+#[test]
+fn live_tools_on_turn_completes_inside_the_project_sandbox() {
+    let _owner = LOCAL_MODEL_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (harness, base_url) in [("codex", OLLAMA_OPENAI), ("claude-code", OLLAMA_ANTHROPIC)] {
+        let home = private_dir("ca-launch-tools-");
+        let work = private_dir("ca-launch-work-");
+        let mut on = request(
+            harness,
+            home.path(),
+            work.path(),
+            url_account(home.path(), base_url),
+        );
+        on.tools = true;
+        on.sandbox_profile = Some(project_profile(work.path(), home.path()));
+        let mut session = Session::start(on).unwrap();
+        let (_, events) = run_turn(&mut session, "Reply with one short greeting.");
+        assert!(
+            events.contains(&LaunchEvent::TurnFinished { success: true }),
+            "{harness}: {events:?}"
+        );
+        session.stop();
+    }
+}

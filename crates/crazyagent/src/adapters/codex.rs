@@ -206,6 +206,7 @@ enum Operation {
     AccountLogout,
     ThreadStart {
         cwd: String,
+        tools: bool,
     },
     TurnStart,
     Interrupt {
@@ -410,7 +411,10 @@ impl CodexProtocol {
         }
         let cwd = valid_path(cwd).ok_or(ProtocolError::InvalidInput)?;
         let bytes = self.request(
-            Operation::ThreadStart { cwd: cwd.into() },
+            Operation::ThreadStart {
+                cwd: cwd.into(),
+                tools: sandbox == "danger-full-access",
+            },
             json!({
                 "cwd":cwd,"approvalPolicy":approval,
                 "approvalsReviewer":"user","sandbox":sandbox
@@ -811,14 +815,20 @@ impl CodexProtocol {
                 self.phase = State::Initialized;
                 Ok(Some(Event::Initialized))
             }
-            Operation::ThreadStart { cwd } => {
+            Operation::ThreadStart { cwd, tools } => {
+                let (approval, sandbox) = if *tools {
+                    ("never", "dangerFullAccess")
+                } else {
+                    ("on-request", "readOnly")
+                };
                 if result["cwd"] != *cwd
-                    || result["approvalPolicy"] != "on-request"
+                    || result["approvalPolicy"] != approval
                     || result["approvalsReviewer"] != "user"
-                    || result["sandbox"]["type"] != "readOnly"
-                    || result["sandbox"]
-                        .get("networkAccess")
-                        .is_some_and(|v| v != false)
+                    || result["sandbox"]["type"] != sandbox
+                    || (!*tools
+                        && result["sandbox"]
+                            .get("networkAccess")
+                            .is_some_and(|v| v != false))
                 {
                     return Err(ProtocolError::InvalidMessage);
                 }
@@ -1055,7 +1065,7 @@ impl CodexProtocol {
                 .login_completed(&params)
                 .map(|control| Some(Event::AuthControl(control))),
             "thread/started" => {
-                if let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() {
+                if let Some((_, Operation::ThreadStart { cwd, .. })) = self.pending.clone() {
                     return self.observe_thread(&params["thread"], &cwd);
                 }
                 let id = identifier(&params["thread"]["id"])?;
