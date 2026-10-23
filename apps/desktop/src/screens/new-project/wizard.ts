@@ -293,7 +293,7 @@ export function stepComplete(step: StepId, draft: ProjectDraft, existing: string
     case "basics": return Object.keys(basicsErrors(draft, existing)).length === 0;
     case "documents": return true;
     case "work": return true;
-    case "pool": return draft.poolChosen;
+    case "pool": return true;
     case "team": return draft.team !== null && teamValid(draft.team, harnesses);
   }
 }

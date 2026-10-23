@@ -117,7 +117,11 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   }, [draft.pool, draft.research.join(","), harnesses?.kind]);
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape" && !discarding) { event.preventDefault(); setDiscarding(true); } };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setDiscarding(!discarding);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [discarding]);
