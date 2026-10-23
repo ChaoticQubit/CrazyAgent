@@ -9,9 +9,11 @@ use bridge::{
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
 };
+use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountSecret, ModelAccessCollection, NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
+    NativeAuthMethod,
 };
 use crazyagent::protocol::ProjectSpec;
 use std::sync::Arc;
@@ -341,6 +343,78 @@ async fn desktop_read_account_profile(
 }
 
 #[tauri::command]
+async fn desktop_account_catalog(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<ProviderEntry>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.account_catalog().await
+}
+
+#[tauri::command]
+async fn desktop_list_accounts(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    after: Option<String>,
+    limit: u16,
+) -> Result<AccountPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.list_accounts(after, limit).await
+}
+
+#[tauri::command]
+async fn desktop_add_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    draft: AccountDraft,
+    key: Option<String>,
+) -> Result<AccountView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.add_account(draft, key).await
+}
+
+#[tauri::command]
+async fn desktop_rename_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<AccountView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.rename_account(&id, name).await
+}
+
+#[tauri::command]
+async fn desktop_remove_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_account(&id).await
+}
+
+#[tauri::command]
+async fn desktop_check_account(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<AccountCheck, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.check_account(&id).await
+}
+
+#[tauri::command]
+async fn desktop_local_models(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    url: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.local_models(url).await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -476,6 +550,13 @@ pub fn run() {
             desktop_cancel_native_auth,
             desktop_logout_native_auth,
             desktop_submit_claude_auth_code,
+            desktop_account_catalog,
+            desktop_list_accounts,
+            desktop_add_account,
+            desktop_rename_account,
+            desktop_remove_account,
+            desktop_check_account,
+            desktop_local_models,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

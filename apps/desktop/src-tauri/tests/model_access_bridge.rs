@@ -90,6 +90,12 @@ impl Harness {
                 (ModelAccessCollection::Pools, Some(pool.id.as_str()))
             }
             ModelAccessEdit::RemovePool { id } => (ModelAccessCollection::Pools, Some(id.as_str())),
+            ModelAccessEdit::AddConnectedAccount { .. } => {
+                (ModelAccessCollection::Connections, None)
+            }
+            ModelAccessEdit::RemoveConnectedAccount { id } => {
+                (ModelAccessCollection::Connections, Some(id.as_str()))
+            }
         };
         let ticket = if let Some(id) = id {
             self.bridge

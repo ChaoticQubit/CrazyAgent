@@ -426,3 +426,91 @@ export function closeMaster(ticket: string, sessionId: string, generation: numbe
 export function submitMaster(ticket: string, sessionId: string, text: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_submit_master", { ticket, sessionId, text, generation });
 }
+
+export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
+
+export type SignInMethod = "subscription" | "api_key" | "url";
+
+export type AccountField = "hidden" | "optional" | "required";
+
+export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";
+
+export interface SignInMethodEntry {
+  method: SignInMethod;
+  label: string;
+  url: AccountField;
+  url_preset: string | null;
+  key: AccountField;
+  model: AccountField;
+}
+
+export interface ProviderEntry {
+  provider: AccountProvider;
+  name: string;
+  methods: SignInMethodEntry[];
+}
+
+export interface AccountDraft {
+  provider: AccountProvider;
+  method: SignInMethod;
+  name: string;
+  url?: string | null;
+  model?: string | null;
+}
+
+export interface AccountView {
+  id: string;
+  name: string;
+  provider: AccountProvider;
+  provider_name: string;
+  method: SignInMethod;
+  method_label: string;
+  url: string | null;
+  model: string | null;
+  status: AccountStatus;
+  status_label: string;
+}
+
+export interface AccountPage {
+  accounts: AccountView[];
+  next: string | null;
+}
+
+export interface AccountCheck {
+  account: AccountView;
+  models: string[];
+}
+
+/** Reads the provider catalog the add-account menu renders: providers in display order,
+ * each with its plain sign-in methods. Output: the catalog from the engine. */
+export function accountCatalog(): Promise<ProviderEntry[]> {
+  return invoke<ProviderEntry[]>("desktop_account_catalog");
+}
+
+/** Reads one page of accounts with plain statuses. Inputs: the previous page's `next`
+ * (or null) and a page size of 1 to 200. Output: accounts and the next cursor. */
+export function listAccounts(after: string | null = null, limit = 200): Promise<AccountPage> {
+  return invoke<AccountPage>("desktop_list_accounts", { after, limit });
+}
+
+/** Adds one account from a catalog choice. The key, when given, goes to the engine once
+ * and is never kept by the page. Output: the new account. */
+export function addAccount(draft: AccountDraft, key?: string): Promise<AccountView> {
+  return invoke<AccountView>("desktop_add_account", { draft, key: key || null });
+}
+
+export function renameAccount(id: string, name: string): Promise<AccountView> {
+  return invoke<AccountView>("desktop_rename_account", { id, name });
+}
+
+export function removeAccount(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_account", { id });
+}
+
+export function checkAccount(id: string): Promise<AccountCheck> {
+  return invoke<AccountCheck>("desktop_check_account", { id });
+}
+
+export function localModels(url: string): Promise<string[]> {
+  return invoke<string[]>("desktop_local_models", { url });
+}
