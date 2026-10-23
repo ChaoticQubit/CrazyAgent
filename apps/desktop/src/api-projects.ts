@@ -168,6 +168,11 @@ const copy: Record<string, string> = {
   research_report_missing: "This report hasn't been written yet.",
   research_section_missing: "That section isn't in the report anymore.",
   research_section_invalid: "That section can't be saved. Pick another heading.",
+  documents_empty: "Pick at least one file.",
+  invalid_memory: "This memory no longer exists. The list was reloaded.",
+  knowledge_entry_missing: "This memory no longer exists. The list was reloaded.",
+  context_item_protected: "The brief can't be deleted.",
+  knowledge_version_conflict: "This memory changed since you opened it. The list was reloaded.",
   context_item_missing: "This file isn't in the project folder anymore.",
   context_item_unreadable: "This file can't be read.",
   context_path_invalid: "This file can't be opened here.",
@@ -257,6 +262,46 @@ export async function loadContextText(id: string, path: string): Promise<Result<
 
 export function saveResearchToMemory(id: string, research: ResearchKind, section: string | null, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
+}
+
+export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
+
+export interface MemoryItem {
+  id: string;
+  version: number;
+  text: string;
+  status: MemoryStatus;
+  human_reviewed: boolean;
+}
+
+export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
+
+export const MEMORY_PAGES_MAX = 20;
+
+/** Reads a project's memories, research saved for approval included, page by page.
+ * Inputs: the project id and the last memory id already shown, or null.
+ * Output: one engine batch of memories. */
+export function loadProjectMemories(id: string, after: string | null): Promise<Result<MemoryItem[]>> {
+  return call<MemoryItem[]>("desktop_project_memories", { id, after });
+}
+
+/** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.
+ * Inputs: project id, memory id, the version shown, the decision and a generation.
+ * Output: the engine receipt. */
+export function reviewMemory(id: string, memory: string, version: number, decision: MemoryDecision, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
+}
+
+/** Deletes one document or research report from the project folder.
+ * Inputs: project id, the path inside the folder and a generation. Output: the receipt. */
+export function deleteContextItem(id: string, path: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
+}
+
+/** Copies more documents into an existing project folder.
+ * Inputs: project id, absolute file paths and a generation. Output: the receipt. */
+export function addProjectDocuments(id: string, documents: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_add_project_documents", { id, documents, generation });
 }
 
 export function pickDocuments(): Promise<Result<string[]>> {

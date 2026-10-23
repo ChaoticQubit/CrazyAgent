@@ -1,11 +1,12 @@
+import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { failureCopy } from "../../api-projects";
+import { failureCopy, loadProjectMemories } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { activity, ago, researchRow, tildePath } from "./research";
+import { activity, ago, memoryGroups, researchRow, suggestedLine, tildePath } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -29,11 +30,19 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const rows = jobs.map((job) => ({ job, row: researchRow(job, data.now) }));
   const allDone = jobs.length > 0 && jobs.every((job) => job.status === "done");
   const events = activity(jobs, data.name, setup?.created_ms ?? null);
+  const [suggested, setSuggested] = useState(0);
+  useEffect(() => {
+    let live = true;
+    void loadProjectMemories(data.id, null).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value).suggested.length : 0); });
+    return () => { live = false; };
+  }, [data.id, data.now]);
   return <div className="pj-overview">
     <div className="pj-stack">
-      {waiting && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
-        <div className="pj-need"><span>Research is waiting for a pool.</span>
-          <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>
+      {(waiting || suggested > 0) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
+        {waiting && <div className="pj-need"><span>Research is waiting for a pool.</span>
+          <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>}
+        {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
+          <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}

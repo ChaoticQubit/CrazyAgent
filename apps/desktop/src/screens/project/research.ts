@@ -1,5 +1,5 @@
 import type { IconName, Tone } from "../../ui";
-import type { ResearchJob } from "../../api-projects";
+import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
@@ -128,4 +128,33 @@ export function fileIcon(path: string): IconName {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const dot = name.lastIndexOf(".");
   return dot > 0 ? FILE_ICONS[name.slice(dot + 1).toLowerCase()] ?? "file" : "file";
+}
+
+/** Splits a project's memories into the ones waiting for the owner and the saved ones;
+ * rejected, removed and retracted memories are not shown.
+ * Input: memories from the engine. Output: Suggested and Saved lists in engine order. */
+export function memoryGroups(items: MemoryItem[]): { suggested: MemoryItem[]; saved: MemoryItem[] } {
+  return {
+    suggested: items.filter((item) => item.status === "Provisional"),
+    saved: items.filter((item) => item.status === "Confirmed"),
+  };
+}
+
+/** Tells whether the owner may delete a context file; the brief always stays.
+ * Input: the context item. Output: true for documents and research reports. */
+export function deletable(item: ContextItem): boolean {
+  return item.kind === "document" || item.kind === "research";
+}
+
+/** The delete confirmation title for a context file.
+ * Input: the file path. Output: the question naming the file. */
+export function deleteQuestion(path: string): string {
+  return `Delete ${path.slice(path.lastIndexOf("/") + 1)}?`;
+}
+
+/** The Overview's Needs you line for suggested memories.
+ * Input: how many wait, at least one. Output: one plain sentence. */
+export function suggestedLine(count: number): string {
+  if (!(Number.isInteger(count) && count > 0)) throw new Error("suggestedLine needs a positive count");
+  return count === 1 ? "1 suggested memory waits for you to save or dismiss it." : `${count} suggested memories wait for you to save or dismiss them.`;
 }

@@ -158,3 +158,26 @@ test("context files get an icon for their type, and unknown types a plain file",
   assert.equal(research.fileIcon("context/documents/spec.pdf"), "file");
   assert.equal(research.fileIcon("context/documents/README"), "file");
 });
+
+test("project memories split into Suggested and Saved and hide what the owner threw away", () => {
+  const item = (id, status, human_reviewed = false) => ({ id, version: 1, text: `fact ${id}`, status, human_reviewed });
+  const groups = research.memoryGroups([
+    item("m1", "Provisional"), item("m2", "Confirmed", true), item("m3", "Rejected", true),
+    item("m4", "Removed", true), item("m5", "Retracted"), item("m6", "Provisional"), item("m7", "Confirmed", false),
+  ]);
+  assert.deepEqual(groups.suggested.map((entry) => entry.id), ["m1", "m6"]);
+  assert.deepEqual(groups.saved.map((entry) => entry.id), ["m2", "m7"]);
+  assert.deepEqual(research.memoryGroups([]), { suggested: [], saved: [] });
+});
+
+test("deleting a context file uses the engine path and never the brief", () => {
+  assert.equal(research.deletable({ path: "context/research/market_research.md", kind: "research", bytes: 1 }), true);
+  assert.equal(research.deletable({ path: "context/documents/hours.csv", kind: "document", bytes: 1 }), true);
+  assert.equal(research.deletable({ path: "context/brief.md", kind: "brief", bytes: 1 }), false);
+  assert.equal(research.deleteQuestion("context/research/market_research.md"), "Delete market_research.md?");
+});
+
+test("the Needs you line for suggested memories counts them in plain words", () => {
+  assert.equal(research.suggestedLine(1), "1 suggested memory waits for you to save or dismiss it.");
+  assert.equal(research.suggestedLine(3), "3 suggested memories wait for you to save or dismiss them.");
+});

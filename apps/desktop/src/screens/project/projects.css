@@ -155,3 +155,4 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-kind > .icon { color: var(--text-2); flex: none; }
 .pj-folder { display: flex; align-items: center; gap: 6px; }
 .pj-title-skeleton { display: inline-block; width: 220px; vertical-align: middle; }
+.pj-memory { display: grid; gap: 8px; }

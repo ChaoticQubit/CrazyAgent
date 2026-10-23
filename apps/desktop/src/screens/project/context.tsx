@@ -1,15 +1,16 @@
 import { call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { failureCopy, loadContextText, receiptState, saveResearchToMemory } from "../../api-projects";
+import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
-import { Icon, StatusBadge } from "../../ui";
+import { Button, ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
 import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
-import { fileIcon } from "./research";
+import { ProjectMemory } from "./memory";
+import { deletable, deleteQuestion, fileIcon } from "./research";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -46,6 +47,7 @@ function hashParam(name: string): string | null {
 }
 
 const TEXT_TYPES = ["md", "txt", "csv"];
+const MEMORY = "@memory";
 const extension = (path: string) => path.slice(path.lastIndexOf(".") + 1).toLowerCase();
 
 function Group({ title, items, selected, onSelect, running }: {
@@ -68,6 +70,8 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
   const [saveState, setSaveState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   const [actionNote, setActionNote] = useState("");
+  const [deleting, setDeleting] = useState<{ path: string; busy: boolean } | null>(null);
+  const [adding, setAdding] = useState<{ path: string; busy: boolean; error: string } | null>(null);
   const open = useLinkOpener(data.notify);
   const live = useRef(selected);
   live.current = selected;
@@ -81,7 +85,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     setFile(undefined);
     setSaving(null);
     setActionNote("");
-    if (!chosen) return;
+    if (!chosen || chosen === MEMORY) return;
     const path = chosen;
     const read = () => void loadContextText(data.id, path).then((result) => { if ((live.current ?? path) === path) setFile(result); });
     read();
@@ -112,13 +116,45 @@ export function ContextTab({ data }: { data: ProjectData }) {
     }
     setSaveState({ busy: false, error: "" });
     setSaving(null);
-    data.notify("Saved to memory as Suggested. Approve it in Settings, Memory.");
+    data.notify("Saved to memory as Suggested. Approve it in Project memory.");
   }
 
   async function fileAction(command: string, label: string) {
     if (!chosen) return;
     const result = await call<unknown>(command, { id: data.id, path: chosen });
     setActionNote(result.kind === "ok" ? "" : result.kind === "not_ready" ? `Not ready yet: ${label} isn't in this build.` : failureCopy(result.code));
+  }
+
+  async function confirmDelete() {
+    if (!deleting) return;
+    const path = deleting.path;
+    setDeleting({ path, busy: true });
+    const result = await deleteContextItem(data.id, path, nextGeneration());
+    setDeleting(null);
+    if (result.kind !== "ok") return setActionNote(result.kind === "not_ready" ? "Not ready yet: deleting files isn't in this build." : failureCopy(result.code));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setActionNote(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again.");
+    data.notify(`${path.slice(path.lastIndexOf("/") + 1)} deleted.`);
+    setSelected(null);
+    data.navigate(`/projects/${encodeURIComponent(data.id)}/context`);
+    data.reload();
+  }
+
+  async function addDocuments(paths: string[]) {
+    setAdding({ path: "", busy: true, error: "" });
+    const result = await addProjectDocuments(data.id, paths, nextGeneration());
+    if (result.kind !== "ok") return setAdding({ path: paths.join(""), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setAdding({ path: paths.join(""), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
+    setAdding(null);
+    data.notify(paths.length === 1 ? "Document added." : `${paths.length} documents added.`);
+    data.reload();
+  }
+
+  async function chooseDocuments() {
+    const picked = await pickDocuments();
+    if (picked.kind === "ok") { if (picked.value.length) void addDocuments(picked.value); return; }
+    setAdding({ path: "", busy: false, error: picked.kind === "not_ready" ? "" : failureCopy(picked.code) });
   }
 
   const select = (path: string) => {
@@ -133,9 +169,17 @@ export function ContextTab({ data }: { data: ProjectData }) {
       {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context.code)}</p>}
       {context && <>
         <div className="pj-stack-s pj-tree-root"><span className="pj-mono" title={context.folder}>{displayText(folderLabel(context.folder))}</span>
-          <div><button type="button" className="btn" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</button></div></div>
+          <div className="pj-row"><Button size="small" icon="folder-open" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</Button>
+            <Button size="small" icon="plus" onClick={() => void chooseDocuments()}>Add documents</Button></div>
+          {adding && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); if (adding.path.trim()) void addDocuments([adding.path.trim()]); }}>
+            <label htmlFor="pj-add-doc" className="pj-small">The file picker isn't in this build. Full path of a file on this Mac:</label>
+            <input id="pj-add-doc" className="pj-input" value={adding.path} onChange={(event) => setAdding({ ...adding, path: event.target.value, error: "" })} />
+            {adding.error && <p className="pj-error" role="alert">{displayText(adding.error)}</p>}
+            <span className="pj-row"><Button type="submit" size="small" variant="primary" pending={adding.busy} pendingLabel="Adding..." disabled={!adding.path.trim()}>Add file</Button>
+              <Button size="small" variant="quiet" onClick={() => setAdding(null)}>Cancel</Button></span>
+          </form>}</div>
         <ul>
-          <li><button type="button" className="pj-titem pin" aria-current={chosen === "@memory" || undefined} onClick={() => setSelected("@memory")}><Icon name="brain" size={14} />Project memory</button></li>
+          <li><button type="button" className="pj-titem pin" aria-current={chosen === MEMORY || undefined} onClick={() => select(MEMORY)}><Icon name="brain" size={14} />Project memory</button></li>
           <li><span className="pj-folder"><Icon name="folder" size={13} />context/</span><ul>
             {items.filter((entry) => entry.kind === "brief").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="file-text" size={14} />brief.md</button></li>)}
             <Group title="documents/" items={items.filter((entry) => entry.kind === "document")} selected={chosen} onSelect={select} running={running} />
@@ -145,20 +189,23 @@ export function ContextTab({ data }: { data: ProjectData }) {
       </>}
     </nav>
     <div className="pj-reader">
-      {chosen === "@memory" && <><div className="pj-reader-tb"><h2>Project memory</h2></div>
-        <NotReady what="the project memory list isn't in this build. Saved and suggested memories show in Settings, Memory." /></>}
-      {chosen !== "@memory" && !item && context && <div className="pj-empty"><h3>{items.length ? "Pick a file" : "Nothing here yet"}</h3>
+      {chosen === MEMORY && <ProjectMemory data={data} />}
+      {chosen !== MEMORY && !item && context && <div className="pj-empty"><h3>{items.length ? "Pick a file" : "Nothing here yet"}</h3>
         <p className="pj-secondary">Research reports appear here as agents finish.</p></div>}
-      {chosen !== "@memory" && item && <>
+      {chosen !== MEMORY && item && <>
         <div className="pj-reader-tb">
           <h2 className="pj-mono">{displayText(item.path)}</h2>
           <span className="pj-row">
             {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
             <button type="button" className="btn" onClick={() => void fileAction("desktop_open_context_item", "Open in default app")}>Open in default app</button>
-            {item.kind !== "brief" && <button type="button" className="btn danger-text" onClick={() => void fileAction("desktop_delete_context_item", "Delete")}>Delete</button>}
+            {deletable(item) && <button type="button" className="btn danger-text" onClick={() => setDeleting({ path: item.path, busy: false })}>Delete</button>}
           </span>
         </div>
         {actionNote && <p className="pj-note warn" role="status">{actionNote}</p>}
+        <ConfirmDialog open={deleting !== null} title={deleteQuestion(deleting?.path ?? item.path)} confirmLabel="Delete" pending={deleting?.busy}
+          onCancel={() => setDeleting(null)} onConfirm={() => void confirmDelete()}>
+          It's removed from the project folder. Agents stop using it.
+        </ConfirmDialog>
         {writing && <p className="pj-note">{displayText(jobs.find((job) => job.report_path === chosen)?.kind_label ?? "Research")} is still writing this file. It updates as it goes.</p>}
         {saving && <div className="pj-popover" role="dialog" aria-labelledby="pj-save-title">
           <h3 id="pj-save-title">Save to memory</h3>
