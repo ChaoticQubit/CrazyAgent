@@ -1052,7 +1052,7 @@ impl AddAccount {
                     }
                 }
                 match view.phase {
-                    NativeAuthPhase::AuthenticatedObserved => return self.done_from_sign_in(ctx),
+                    NativeAuthPhase::AuthenticatedObserved => self.done_from_sign_in(ctx),
                     NativeAuthPhase::UnauthenticatedObserved
                     | NativeAuthPhase::Failed
                     | NativeAuthPhase::Cancelled

@@ -114,8 +114,8 @@ fn put(row: &str, column: usize, text: &str, room: usize) -> String {
 fn engine_rows(rows: &mut [String], from: usize, saved_at: usize) {
     rows[4] = rows[4].replacen("  41 saved", "   7 saved", 1);
     rows[8] = put(&rows[8], saved_at, "", 5);
-    for row in 9..=15 {
-        rows[row] = put(&rows[row], saved_at, "", 6);
+    for row in rows.iter_mut().skip(9).take(7) {
+        *row = put(row, saved_at, "", 6);
     }
     for row in [9, 14] {
         rows[row] = put(&rows[row], from, "You", 7);

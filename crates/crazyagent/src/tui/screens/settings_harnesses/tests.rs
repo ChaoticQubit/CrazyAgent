@@ -90,8 +90,8 @@ fn harness_list_frames_match_the_design() {
     engine_table(&mut expected, 8, 37, 56, 62);
     expected[19] = put(&expected[19], 15, &path, 103);
     expected[20] = expected[21].clone();
-    for row in 21..=23 {
-        expected[row] = " ".repeat(120);
+    for row in expected.iter_mut().skip(21).take(3) {
+        *row = " ".repeat(120);
     }
     assert_eq!(render(&mut shell, 120, 36), expected);
 }
