@@ -7,7 +7,9 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
-use crate::tui::text::{cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, width, with_bar, wrap};
+use crate::tui::text::{
+    cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, width, with_bar, wrap,
+};
 use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -16,7 +18,8 @@ use ratatui::text::{Line, Span};
 const LABEL_WIDTH: usize = 13;
 const DETAIL_ROWS: usize = 6;
 const CHROME_ROWS: usize = 4 + 1;
-const SUBTITLE: &str = "Agents run inside these tools. CrazyAgent finds them on this Mac and never installs them.";
+const SUBTITLE: &str =
+    "Agents run inside these tools. CrazyAgent finds them on this Mac and never installs them.";
 
 /// The Status cell word of a harness.
 /// Input: the catalog entry. Output: "Ready", "Not installed", or "Can't start"
@@ -45,7 +48,9 @@ pub fn control_word(entry: &HarnessEntry) -> &'static str {
 /// short list, or "Not known yet" when the engine names none.
 pub fn works_with(kinds: &[AccountKind]) -> String {
     let has = |kind: AccountKind| kinds.contains(&kind);
-    let keyed = has(AccountKind::ApiKey) && has(AccountKind::OpenAiCompatibleUrl) && has(AccountKind::Local);
+    let keyed = has(AccountKind::ApiKey)
+        && has(AccountKind::OpenAiCompatibleUrl)
+        && has(AccountKind::Local);
     match (has(AccountKind::Subscription), keyed) {
         (true, true) => "Any account".into(),
         (false, true) => "Any API key or URL".into(),
@@ -60,7 +65,11 @@ pub fn works_with(kinds: &[AccountKind]) -> String {
             .filter(|(kind, _)| has(*kind))
             .map(|(_, word)| word)
             .collect();
-            if words.is_empty() { "Not known yet".into() } else { words.join(", ") }
+            if words.is_empty() {
+                "Not known yet".into()
+            } else {
+                words.join(", ")
+            }
         }
     }
 }
@@ -80,7 +89,8 @@ pub fn control_sentence(entry: &HarnessEntry) -> String {
     }
     match entry.status {
         HarnessStatus::Ready => {
-            "Full control. Runs without a window, streams progress, and tools can be turned off.".into()
+            "Full control. Runs without a window, streams progress, and tools can be turned off."
+                .into()
         }
         _ => "Unknown until it is installed and CrazyAgent can start it.".into(),
     }
@@ -139,7 +149,10 @@ impl Harnesses {
     }
 
     fn installed(&self) -> usize {
-        self.entries.iter().filter(|entry| entry.executable.is_some()).count()
+        self.entries
+            .iter()
+            .filter(|entry| entry.executable.is_some())
+            .count()
     }
 
     fn window(&self, ctx: &Ctx) -> usize {
@@ -160,21 +173,30 @@ impl Harnesses {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
         let label = |name: &str, value: String| {
-            join([pad(styled(name, Role::Heading, theme), LABEL_WIDTH, glyphs), Line::raw(value)])
+            join([
+                pad(styled(name, Role::Heading, theme), LABEL_WIDTH, glyphs),
+                Line::raw(value),
+            ])
         };
         let name = styled(entry.name.clone(), Role::Accent, theme);
         let head = if matches!(entry.status, HarnessStatus::Ready) {
             name
         } else {
             let room = (width(&entry.name) + 2).max(LABEL_WIDTH);
-            join([pad(name, room, glyphs), status(status_word(entry), theme, glyphs)])
+            join([
+                pad(name, room, glyphs),
+                status(status_word(entry), theme, glyphs),
+            ])
         };
         let mut lines = vec![head];
         let sentence = control_sentence(entry);
         match &entry.executable {
             Some(path) => {
                 let room = limit.saturating_sub(LABEL_WIDTH).max(8);
-                lines.push(label("Found at", cut(&path.display().to_string(), room, glyphs.ellipsis)));
+                lines.push(label(
+                    "Found at",
+                    cut(&path.display().to_string(), room, glyphs.ellipsis),
+                ));
                 for (index, part) in wrap(&sentence, room).into_iter().enumerate() {
                     if index == 0 {
                         lines.push(label("Control", part));
@@ -185,7 +207,9 @@ impl Harnesses {
             }
             None => {
                 lines.extend(wrap(&sentence, limit.max(8)).into_iter().map(Line::raw));
-                lines.push(Line::raw("Install it yourself, then press r to check again."));
+                lines.push(Line::raw(
+                    "Install it yourself, then press r to check again.",
+                ));
             }
         }
         lines.truncate(DETAIL_ROWS);
@@ -202,7 +226,11 @@ impl Harnesses {
                 return vec![
                     styled("Harnesses", Role::Accent, theme),
                     Line::default(),
-                    status(&format!("Failed to load harnesses. {}", plain(code)), theme, glyphs),
+                    status(
+                        &format!("Failed to load harnesses. {}", plain(code)),
+                        theme,
+                        glyphs,
+                    ),
                     Line::raw("Press r to try again."),
                 ];
             }
@@ -230,7 +258,11 @@ impl Harnesses {
             glyphs,
         )];
         if wide {
-            lines.extend(wrap(SUBTITLE, limit).into_iter().map(|part| styled(part, Role::Muted, theme)));
+            lines.extend(
+                wrap(SUBTITLE, limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
+            );
             lines.push(Line::default());
         }
         let count = self.entries.len();
@@ -240,7 +272,15 @@ impl Harnesses {
         let heads = ["Harness", "Status", "Control", "Works with"];
         lines.push(join([
             Line::raw("  "),
-            restyle(cells(&widths, heads.into_iter().map(Line::raw).collect(), 2, glyphs), theme.muted),
+            restyle(
+                cells(
+                    &widths,
+                    heads.into_iter().map(Line::raw).collect(),
+                    2,
+                    glyphs,
+                ),
+                theme.muted,
+            ),
         ]));
         let selected = self.selected.min(count.saturating_sub(1));
         let mut offset = self.offset.min(count.saturating_sub(window));
@@ -262,7 +302,14 @@ impl Harnesses {
                     status(control_word(entry), theme, glyphs),
                     Line::raw(works_with(&entry.account_kinds)),
                 ];
-                list_row(cells(&widths, values, 2, glyphs), row_limit, index == selected, true, theme, glyphs)
+                list_row(
+                    cells(&widths, values, 2, glyphs),
+                    row_limit,
+                    index == selected,
+                    true,
+                    theme,
+                    glyphs,
+                )
             })
             .collect();
         if count > window {
@@ -335,11 +382,17 @@ impl Screen for Harnesses {
                 self.entries = entries.clone();
                 self.load = Load::Ready(());
                 self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-                let ready = self.entries.iter().filter(|entry| entry.status == HarnessStatus::Ready).count();
+                let ready = self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.status == HarnessStatus::Ready)
+                    .count();
                 ctx.store.harnesses = Load::Ready((ready, self.entries.len()));
             }
             Err(code) if self.entries.is_empty() => self.load = Load::Failed(code.clone()),
-            Err(code) if asked => ctx.say(Message::error("Could not check harnesses.", plain(code))),
+            Err(code) if asked => {
+                ctx.say(Message::error("Could not check harnesses.", plain(code)))
+            }
             Err(_) => {}
         }
         Flow::Handled

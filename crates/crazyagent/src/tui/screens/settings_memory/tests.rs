@@ -51,13 +51,48 @@ fn only(project: &str) -> MemoryScope {
 
 fn memories() -> Vec<SavedMemory> {
     vec![
-        saved(7, "Mira prefers Postgres for new services.", MemoryScope::Global, MemoryOrigin::Written),
-        saved(6, "Buoy firmware sends readings every 90 s in CBOR.", MemoryScope::Global, promoted("tidepool")),
-        saved(5, "Most labs already use ERDDAP for ocean data access.", only("tidepool"), MemoryOrigin::Written),
-        saved(4, "Studios bill monthly, and most want PDF invoices.", MemoryScope::Global, promoted("ledgerline")),
-        saved(3, "Field teams work offline for up to five days.", only("fieldnotes"), MemoryOrigin::Written),
-        saved(2, "Keep agent replies short unless asked for detail.", MemoryScope::Global, MemoryOrigin::Written),
-        saved(1, "Use Tauri, not Electron, for desktop apps.", only("ledgerline"), MemoryOrigin::Written),
+        saved(
+            7,
+            "Mira prefers Postgres for new services.",
+            MemoryScope::Global,
+            MemoryOrigin::Written,
+        ),
+        saved(
+            6,
+            "Buoy firmware sends readings every 90 s in CBOR.",
+            MemoryScope::Global,
+            promoted("tidepool"),
+        ),
+        saved(
+            5,
+            "Most labs already use ERDDAP for ocean data access.",
+            only("tidepool"),
+            MemoryOrigin::Written,
+        ),
+        saved(
+            4,
+            "Studios bill monthly, and most want PDF invoices.",
+            MemoryScope::Global,
+            promoted("ledgerline"),
+        ),
+        saved(
+            3,
+            "Field teams work offline for up to five days.",
+            only("fieldnotes"),
+            MemoryOrigin::Written,
+        ),
+        saved(
+            2,
+            "Keep agent replies short unless asked for detail.",
+            MemoryScope::Global,
+            MemoryOrigin::Written,
+        ),
+        saved(
+            1,
+            "Use Tauri, not Electron, for desktop apps.",
+            only("ledgerline"),
+            MemoryOrigin::Written,
+        ),
     ]
 }
 
@@ -120,8 +155,14 @@ fn where_a_memory_came_from_is_plain() {
     assert_eq!(
         lines,
         [
-            ("You".to_owned(), "Saved by you for every project.".to_owned()),
-            ("Tidepool".to_owned(), "Saved from Tidepool for every project.".to_owned()),
+            (
+                "You".to_owned(),
+                "Saved by you for every project.".to_owned()
+            ),
+            (
+                "Tidepool".to_owned(),
+                "Saved from Tidepool for every project.".to_owned()
+            ),
             ("Tidepool".to_owned(), "Saved for Tidepool only.".to_owned()),
         ]
     );
@@ -174,10 +215,15 @@ fn delete_asks_first_then_sends_one_change_and_reloads() {
     assert!(screen.busy(&ctx));
     screen.key(&Key::Char('d'), &mut ctx);
     assert!(screen.modal(&ctx).is_none(), "one delete at a time");
-    let deleted = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::MemoryDeleted(Ok(()))))));
+    let deleted = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::MemoryDeleted(Ok(())),
+    ))));
     screen.arrive(&deleted, &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "Memory deleted.");
-    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))), "the list reloads");
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(_))),
+        "the list reloads"
+    );
 }
 
 #[test]
@@ -196,7 +242,9 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
         },
         other => panic!("settings request expected, got {other:?}"),
     }
-    let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::Memories(Ok(memories()))))));
+    let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Memories(Ok(memories())),
+    ))));
     screen.arrive(&reply, &mut ctx);
     assert_eq!(ctx.store.memory, Load::Ready(7));
     let mut more = projects();

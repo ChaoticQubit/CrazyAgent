@@ -8,7 +8,9 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, Request};
-use crate::tui::text::{cells, cut, join, list_row, restyle, row, status, styled, thumb, width, with_bar, wrap};
+use crate::tui::text::{
+    cells, cut, join, list_row, restyle, row, status, styled, thumb, width, with_bar, wrap,
+};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons};
 use ratatui::Frame;
@@ -20,7 +22,8 @@ const HEAD_ROWS: usize = 5;
 const CHROME_ROWS: usize = 4 + 1;
 const DETAIL_ROWS: usize = 3;
 const MODAL_WIDTH: u16 = 66;
-const SUBTITLE: &str = "Long-term memory every project can use. Nothing is saved without your click.";
+const SUBTITLE: &str =
+    "Long-term memory every project can use. Nothing is saved without your click.";
 const EMPTY: &str = "When agents find something worth keeping, the project shows it under \"Save to memory\". One click saves it here, and every project can use it.";
 
 fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
@@ -36,9 +39,8 @@ fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
 /// note the owner wrote for every project.
 pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
-        (MemoryOrigin::Promoted { project_id, .. }, _) | (_, MemoryScope::Project { project_id }) => {
-            project_name(project_id, ctx)
-        }
+        (MemoryOrigin::Promoted { project_id, .. }, _)
+        | (_, MemoryScope::Project { project_id }) => project_name(project_id, ctx),
         (MemoryOrigin::Written, MemoryScope::Global) => "You".into(),
     }
 }
@@ -47,9 +49,14 @@ pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
 /// Inputs: the memory and context. Output: "Saved by you for every project." and so on.
 pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
-        (_, MemoryScope::Project { project_id }) => format!("Saved for {} only.", project_name(project_id, ctx)),
+        (_, MemoryScope::Project { project_id }) => {
+            format!("Saved for {} only.", project_name(project_id, ctx))
+        }
         (MemoryOrigin::Promoted { project_id, .. }, MemoryScope::Global) => {
-            format!("Saved from {} for every project.", project_name(project_id, ctx))
+            format!(
+                "Saved from {} for every project.",
+                project_name(project_id, ctx)
+            )
         }
         (MemoryOrigin::Written, MemoryScope::Global) => "Saved by you for every project.".into(),
     }
@@ -58,7 +65,12 @@ pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
 /// The memory scopes the page reads: global memory, then each known project.
 /// Input: the context. Output: the scopes.
 pub fn scopes(ctx: &Ctx) -> Vec<MemoryScope> {
-    let projects = ctx.store.projects.ready().map(Vec::as_slice).unwrap_or_default();
+    let projects = ctx
+        .store
+        .projects
+        .ready()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     std::iter::once(MemoryScope::Global)
         .chain(projects.iter().map(|card| MemoryScope::Project {
             project_id: card.id.clone(),
@@ -157,7 +169,9 @@ impl Memory {
     }
 
     fn focused(&self, ctx: &Ctx) -> Option<SavedMemory> {
-        self.visible(ctx).get(self.selected).map(|memory| (*memory).clone())
+        self.visible(ctx)
+            .get(self.selected)
+            .map(|memory| (*memory).clone())
     }
 
     fn window(ctx: &Ctx) -> usize {
@@ -193,7 +207,11 @@ impl Memory {
                     vec![
                         styled("Memory", Role::Accent, theme),
                         Line::default(),
-                        status(&format!("Failed to load memories. {}", plain(code)), theme, glyphs),
+                        status(
+                            &format!("Failed to load memories. {}", plain(code)),
+                            theme,
+                            glyphs,
+                        ),
                         Line::raw("Press r to try again."),
                     ],
                     None,
@@ -229,14 +247,25 @@ impl Memory {
             styled(format!("{} saved", self.memories.len()), Role::Muted, theme),
             glyphs,
         )];
-        lines.push(styled(cut(SUBTITLE, limit, glyphs.ellipsis), Role::Muted, theme));
+        lines.push(styled(
+            cut(SUBTITLE, limit, glyphs.ellipsis),
+            Role::Muted,
+            theme,
+        ));
         let mut cursor = None;
         if self.filtering {
-            let shown = cut(self.filter.value(), limit.saturating_sub(3), glyphs.ellipsis);
+            let shown = cut(
+                self.filter.value(),
+                limit.saturating_sub(3),
+                glyphs.ellipsis,
+            );
             cursor = Some(Position::new(2 + width(&shown) as u16, 2));
             lines.push(join([styled("/ ", Role::Accent, theme), Line::raw(shown)]));
         } else if self.filter.is_empty() {
-            lines.push(join([Line::raw("/  "), styled("Filter", Role::Muted, theme)]));
+            lines.push(join([
+                Line::raw("/  "),
+                styled("Filter", Role::Muted, theme),
+            ]));
         } else {
             lines.push(Line::raw(format!("/ {}", self.filter.value())));
         }
@@ -244,7 +273,15 @@ impl Memory {
         let widths = Self::widths(ctx.wide());
         lines.push(join([
             Line::raw("  "),
-            restyle(cells(&widths, vec![Line::raw("Memory"), Line::raw("From")], 2, glyphs), theme.muted),
+            restyle(
+                cells(
+                    &widths,
+                    vec![Line::raw("Memory"), Line::raw("From")],
+                    2,
+                    glyphs,
+                ),
+                theme.muted,
+            ),
         ]));
         let visible = self.visible(ctx);
         let count = visible.len();
@@ -263,8 +300,18 @@ impl Memory {
             .skip(offset)
             .take(window)
             .map(|(index, memory)| {
-                let values = vec![Line::raw(memory.text.clone()), Line::raw(source(memory, ctx))];
-                list_row(cells(&widths, values, 2, glyphs), row_limit, index == selected, !self.filtering, theme, glyphs)
+                let values = vec![
+                    Line::raw(memory.text.clone()),
+                    Line::raw(source(memory, ctx)),
+                ];
+                list_row(
+                    cells(&widths, values, 2, glyphs),
+                    row_limit,
+                    index == selected,
+                    !self.filtering,
+                    theme,
+                    glyphs,
+                )
             })
             .collect();
         if count > window {
@@ -425,7 +472,9 @@ impl Screen for Memory {
                         ctx.store.memory = Load::Ready(self.memories.len());
                     }
                     Err(code) if self.memories.is_empty() => self.load = Load::Failed(code.clone()),
-                    Err(code) if asked => ctx.say(Message::error("Could not refresh memories.", plain(code))),
+                    Err(code) if asked => {
+                        ctx.say(Message::error("Could not refresh memories.", plain(code)))
+                    }
                     Err(_) => {}
                 }
             }
@@ -436,7 +485,9 @@ impl Screen for Memory {
                         ctx.say(Message::success("Memory deleted.", ""));
                         self.reload(ctx);
                     }
-                    Err(code) => ctx.say(Message::error("Could not delete this memory.", plain(code))),
+                    Err(code) => {
+                        ctx.say(Message::error("Could not delete this memory.", plain(code)))
+                    }
                 }
             }
             _ => {}
@@ -451,7 +502,10 @@ impl Screen for Memory {
         match self.mode {
             Mode::List => None,
             Mode::View => {
-                let mut body: Vec<Line<'static>> = wrap(&memory.text, room).into_iter().map(Line::raw).collect();
+                let mut body: Vec<Line<'static>> = wrap(&memory.text, room)
+                    .into_iter()
+                    .map(Line::raw)
+                    .collect();
                 body.push(Line::default());
                 body.push(status(&saved_line(&memory, ctx), theme, ctx.glyphs));
                 Some((
@@ -468,14 +522,25 @@ impl Screen for Memory {
                 let reach = match &memory.scope {
                     MemoryScope::Global => "Agents in every project stop getting it.".to_owned(),
                     MemoryScope::Project { project_id } => {
-                        format!("Agents in {} stop getting it.", project_name(project_id, ctx))
+                        format!(
+                            "Agents in {} stop getting it.",
+                            project_name(project_id, ctx)
+                        )
                     }
                 };
                 let mut body = vec![Line::raw("Delete this memory for good?"), Line::default()];
-                body.push(styled(cut(&memory.text, room, ctx.glyphs.ellipsis), Role::Muted, theme));
+                body.push(styled(
+                    cut(&memory.text, room, ctx.glyphs.ellipsis),
+                    Role::Muted,
+                    theme,
+                ));
                 body.extend(wrap(&reach, room).into_iter().map(Line::raw));
                 body.push(Line::default());
-                body.push(buttons(&["Cancel", "Delete"], Some(usize::from(delete_focused)), theme));
+                body.push(buttons(
+                    &["Cancel", "Delete"],
+                    Some(usize::from(delete_focused)),
+                    theme,
+                ));
                 let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
                 Some((
                     Modal {
@@ -484,7 +549,11 @@ impl Screen for Memory {
                         body,
                         top: None,
                     },
-                    vec![hint(&arrows, "Choose"), hint("Enter", "Confirm"), hint("Esc", "Cancel")],
+                    vec![
+                        hint(&arrows, "Choose"),
+                        hint("Enter", "Confirm"),
+                        hint("Esc", "Cancel"),
+                    ],
                 ))
             }
         }

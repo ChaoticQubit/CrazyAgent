@@ -23,7 +23,11 @@ fn found() -> Found {
         std::fs::write(&path, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let entries = catalog(&Search::new(vec![root.path().to_path_buf()], None, Vec::new()));
+    let entries = catalog(&Search::new(
+        vec![root.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
     let codex = root.path().join("codex");
     Found {
         _root: root,
@@ -102,7 +106,10 @@ fn a_harness_that_is_not_installed_says_how_to_add_it() {
     }
     let mut expected = fixture("harness-limited-80", &[]);
     engine_table(&mut expected, 6, 35, 54, 24);
-    expected[17] = format!("{:<80}", "  Limited control: tools are allowed or denied only through Cursor's");
+    expected[17] = format!(
+        "{:<80}",
+        "  Limited control: tools are allowed or denied only through Cursor's"
+    );
     expected[18] = format!("{:<80}", "  permission file.");
     assert_eq!(render(&mut shell, 80, 24), expected);
 }
@@ -111,13 +118,25 @@ fn a_harness_that_is_not_installed_says_how_to_add_it() {
 fn every_engine_harness_scrolls_in_a_short_window() {
     let found = found();
     assert_eq!(found.entries.len(), crate::harnesses::specs().len());
-    let mut shell = Shell::with(harness_ctx(80, 24), Box::new(Harnesses::with(found.entries.clone())));
+    let mut shell = Shell::with(
+        harness_ctx(80, 24),
+        Box::new(Harnesses::with(found.entries.clone())),
+    );
     shell.key(Key::End);
     let rows = render(&mut shell, 80, 24);
     let last = &found.entries[found.entries.len() - 1].name;
-    assert!(rows[14].contains(&format!("> {}", cut(last, 12, "…"))), "{}", rows[14]);
+    assert!(
+        rows[14].contains(&format!("> {}", cut(last, 12, "…"))),
+        "{}",
+        rows[14]
+    );
     assert!(rows[4].contains(&format!("2 of {} installed", found.entries.len())));
-    assert!(rows[6..15].iter().all(|row| row.chars().nth(77) != Some(' ')), "scroll bar shows");
+    assert!(
+        rows[6..15]
+            .iter()
+            .all(|row| row.chars().nth(77) != Some(' ')),
+        "scroll bar shows"
+    );
 }
 
 #[test]
@@ -131,29 +150,44 @@ fn check_again_asks_the_engine_and_the_reply_updates_the_counts() {
     assert!(screen.busy(&ctx));
     screen.key(&Key::Char('r'), &mut ctx);
     assert_eq!(ctx.queued(), 0, "one check at a time");
-    let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::Harnesses(Ok(
-        found.entries.clone(),
-    ))))));
+    let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Harnesses(Ok(found.entries.clone())),
+    ))));
     screen.arrive(&reply, &mut ctx);
     assert!(!screen.busy(&ctx));
     assert_eq!(ctx.store.harnesses, Load::Ready((2, found.entries.len())));
     screen.key(&Key::Char('r'), &mut ctx);
     assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
-    let failed = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::Harnesses(Err(
-        "controller_pending_intent".into(),
-    ))))));
+    let failed = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Harnesses(Err("controller_pending_intent".into())),
+    ))));
     screen.arrive(&failed, &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "Could not check harnesses.");
-    assert_eq!(screen.entries.len(), found.entries.len(), "a failed check keeps the list");
+    assert_eq!(
+        screen.entries.len(),
+        found.entries.len(),
+        "a failed check keeps the list"
+    );
 }
 
 #[test]
 fn words_follow_the_engine_catalog() {
     let found = found();
     let codex = &found.entries[0];
-    assert_eq!((status_word(codex), control_word(codex)), ("Ready", "Full control"));
-    let mut cursor = found.entries.iter().find(|entry| entry.id == "cursor-agent").unwrap().clone();
-    assert_eq!((status_word(&cursor), control_word(&cursor)), ("Not installed", "Limited control"));
+    assert_eq!(
+        (status_word(codex), control_word(codex)),
+        ("Ready", "Full control")
+    );
+    let mut cursor = found
+        .entries
+        .iter()
+        .find(|entry| entry.id == "cursor-agent")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (status_word(&cursor), control_word(&cursor)),
+        ("Not installed", "Limited control")
+    );
     cursor.executable = Some(found.codex.clone());
     cursor.status = HarnessStatus::Limited {
         reason: "installed, but CrazyAgent cannot start it yet".into(),
@@ -163,7 +197,11 @@ fn words_follow_the_engine_catalog() {
         control_sentence(&cursor),
         "Limited control: installed, but CrazyAgent cannot start it yet; tools are allowed or denied only through Cursor's permission file."
     );
-    let opencode = found.entries.iter().find(|entry| entry.id == "opencode").unwrap();
+    let opencode = found
+        .entries
+        .iter()
+        .find(|entry| entry.id == "opencode")
+        .unwrap();
     assert_eq!(control_word(opencode), "Unknown");
     assert_eq!(works_with(&[]), "Not known yet");
     assert_eq!(works_with(&[AccountKind::Local]), "Local model");

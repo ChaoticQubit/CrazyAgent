@@ -1,12 +1,19 @@
 use super::settings::draw_page;
-use crate::config::POOL_MEMBERS_MAX;
-use super::settings_accounts::{Accounts, plain, provider_cell, provider_word, send, settings_event};
+use super::settings_accounts::{
+    Accounts, plain, provider_cell, provider_word, send, settings_event,
+};
 use super::{Flow, Screen, SettingsSection};
-use crate::accounts::{AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry, SignInMethod};
+use crate::accounts::{
+    AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry,
+    SignInMethod,
+};
+use crate::config::POOL_MEMBERS_MAX;
 use crate::engine::owner::{AccountSecret, NativeAuthMethod, NativeAuthPhase};
 use crate::protocol::CredentialRef;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
-use crate::tui::client::settings::{SettingsEvent, SettingsJob, SignInJob, SignInTicket, SignInView};
+use crate::tui::client::settings::{
+    SettingsEvent, SettingsJob, SignInJob, SignInTicket, SignInView,
+};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
@@ -91,7 +98,9 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
                 "Use an API key",
                 "Pay per use with an Anthropic key.",
             )),
-            (_, SignInMethod::ApiKey) => out.push(choice(None, "Use an API key", "Pay per use with a key.")),
+            (_, SignInMethod::ApiKey) => {
+                out.push(choice(None, "Use an API key", "Pay per use with a key."))
+            }
             (_, SignInMethod::Url) => out.push(choice(
                 None,
                 "Connect a URL",
@@ -100,7 +109,10 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
         }
     }
     if entry.provider == Provider::Chatgpt
-        && entry.methods.iter().any(|method| method.method == SignInMethod::Subscription)
+        && entry
+            .methods
+            .iter()
+            .any(|method| method.method == SignInMethod::Subscription)
     {
         out.push(Choice {
             provider: Provider::Chatgpt,
@@ -129,7 +141,10 @@ pub fn key_problem(provider: Provider, chars: usize, required: bool) -> Option<S
         return required.then(|| "Paste the API key.".to_owned());
     }
     (chars < KEY_CHARS_MIN).then(|| {
-        format!("This is too short for {} key. Paste the whole key.", key_owner(provider))
+        format!(
+            "This is too short for {} key. Paste the whole key.",
+            key_owner(provider)
+        )
     })
 }
 
@@ -170,7 +185,10 @@ fn copy(text: &str) -> Result<(), String> {
         .write_all(text.as_bytes())
         .map_err(|error| error.to_string())?;
     let status = child.wait().map_err(|error| error.to_string())?;
-    status.success().then_some(()).ok_or_else(|| "clipboard_failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "clipboard_failed".into())
 }
 
 /// Opens an https page in the default browser.
@@ -187,7 +205,10 @@ pub fn open_page(url: &str) -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .status()
         .map_err(|error| error.to_string())?;
-    status.success().then_some(()).ok_or_else(|| "page_failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "page_failed".into())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -226,13 +247,16 @@ impl Form {
         let key = (entry.key != Field::Hidden).then(|| {
             let field = TextField::secret("API key", KEY_CHARS_MAX).counted();
             if entry.key == Field::Optional {
-                field.right("Optional").placeholder("Leave empty if the server has no key")
+                field
+                    .right("Optional")
+                    .placeholder("Leave empty if the server has no key")
             } else {
                 field.note("Kept by the CrazyAgent engine. Never shown again.")
             }
         });
         let model = (entry.model != Field::Hidden).then(|| {
-            TextField::new("Model", MODEL_CHARS_MAX).placeholder("The model name your provider lists")
+            TextField::new("Model", MODEL_CHARS_MAX)
+                .placeholder("The model name your provider lists")
         });
         Self {
             choice,
@@ -292,7 +316,10 @@ impl Form {
             return false;
         }
         self.models = Load::Loading;
-        send(ctx, SettingsJob::Accounts(AccountsRequest::LocalModels { url: text }));
+        send(
+            ctx,
+            SettingsJob::Accounts(AccountsRequest::LocalModels { url: text }),
+        );
         true
     }
 
@@ -303,7 +330,11 @@ impl Form {
             ok &= url.error.is_none();
         }
         if let Some(key) = &mut self.key {
-            key.error = key_problem(self.choice.provider, key.len(), self.entry.key == Field::Required);
+            key.error = key_problem(
+                self.choice.provider,
+                key.len(),
+                self.entry.key == Field::Required,
+            );
             ok &= key.error.is_none();
         }
         if self.listing().is_none()
@@ -319,13 +350,19 @@ impl Form {
     fn draft(&self) -> AccountDraft {
         let model = match self.listing() {
             Some(models) => models.get(self.model_selected).cloned(),
-            None => self.model.as_ref().map(|field| field.value().trim().to_owned()),
+            None => self
+                .model
+                .as_ref()
+                .map(|field| field.value().trim().to_owned()),
         };
         AccountDraft {
             provider: self.choice.provider,
             method: self.choice.method,
             name: self.name.value().trim().to_owned(),
-            url: self.url.as_ref().map(|field| field.value().trim().to_owned()),
+            url: self
+                .url
+                .as_ref()
+                .map(|field| field.value().trim().to_owned()),
             model: model.filter(|model| !model.is_empty()),
         }
     }
@@ -333,7 +370,11 @@ impl Form {
     fn lines(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
         let width = limit.min(FIELD_WIDTH_MAX);
-        let title = if self.choice.method == SignInMethod::Url { "Connect a URL" } else { "Use an API key" };
+        let title = if self.choice.method == SignInMethod::Url {
+            "Connect a URL"
+        } else {
+            "Use an API key"
+        };
         let mut lines = vec![
             styled(title, Role::Accent, theme),
             Line::raw(provider_word(self.choice.provider)),
@@ -375,11 +416,17 @@ impl Form {
                     ));
                     lines.push(styled(
                         "Default model",
-                        if focus == Slot::Model { Role::Accent } else { Role::Heading },
+                        if focus == Slot::Model {
+                            Role::Accent
+                        } else {
+                            Role::Heading
+                        },
                         theme,
                     ));
                     let first = self.model_selected.saturating_sub(MODELS_SHOWN_MAX - 1);
-                    for (index, name) in models.iter().enumerate().skip(first).take(MODELS_SHOWN_MAX) {
+                    for (index, name) in
+                        models.iter().enumerate().skip(first).take(MODELS_SHOWN_MAX)
+                    {
                         lines.push(list_row(
                             Line::raw(name.clone()),
                             width,
@@ -404,7 +451,11 @@ impl Form {
         } else {
             "Save key"
         };
-        lines.push(buttons(&[label], (focus == Slot::Button).then_some(0), theme));
+        lines.push(buttons(
+            &[label],
+            (focus == Slot::Button).then_some(0),
+            theme,
+        ));
         (lines, cursor)
     }
 }
@@ -461,7 +512,10 @@ impl SignIn {
 
     fn lines(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
-        let mut lines = vec![styled(self.choice.title, Role::Accent, theme), Line::default()];
+        let mut lines = vec![
+            styled(self.choice.title, Role::Accent, theme),
+            Line::default(),
+        ];
         let mut cursor = None;
         let waiting = Line::from(vec![
             Span::styled(ctx.spinner(), theme.running),
@@ -475,10 +529,15 @@ impl SignIn {
                     lines.push(Line::default());
                     lines.push(Line::raw("Browser didn't open? Press o to open it again."));
                     lines.push(Line::default());
-                    let accepts = self.view.as_ref().is_some_and(|view| view.claude_prompt.is_some());
+                    let accepts = self
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.claude_prompt.is_some());
                     if accepts {
                         let top = lines.len() as u16;
-                        let (field, at) = self.code.lines(limit.min(FIELD_WIDTH_MAX), true, theme, ctx.glyphs);
+                        let (field, at) =
+                            self.code
+                                .lines(limit.min(FIELD_WIDTH_MAX), true, theme, ctx.glyphs);
                         cursor = at.map(|at| Position::new(at.x, top + at.y));
                         lines.extend(field);
                         lines.push(Line::default());
@@ -489,12 +548,17 @@ impl SignIn {
                 }
             }
             Some(NativeAuthMethod::CodexExisting) => {
-                lines.push(Line::raw("Checking the account Codex is signed in to on this Mac."));
+                lines.push(Line::raw(
+                    "Checking the account Codex is signed in to on this Mac.",
+                ));
                 lines.push(Line::default());
             }
             _ => {
                 let view = self.view.as_ref();
-                match (view.and_then(|v| v.page.clone()), view.and_then(|v| v.device_code.clone())) {
+                match (
+                    view.and_then(|v| v.page.clone()),
+                    view.and_then(|v| v.device_code.clone()),
+                ) {
                     (Some(page), Some(code)) => {
                         lines.push(Line::raw("1. Open this page on any device"));
                         lines.push(Line::raw(format!("   {page}")));
@@ -522,11 +586,13 @@ impl SignIn {
                 for part in wrap(problem, limit) {
                     lines.push(styled(part, Role::Error, theme));
                 }
-                lines.push(Line::raw(if self.choice.native == Some(NativeAuthMethod::CodexDeviceCode) {
-                    "Press n for a new code."
-                } else {
-                    "Press n to try again."
-                }));
+                lines.push(Line::raw(
+                    if self.choice.native == Some(NativeAuthMethod::CodexDeviceCode) {
+                        "Press n for a new code."
+                    } else {
+                        "Press n to try again."
+                    },
+                ));
             }
             None => lines.push(waiting),
         }
@@ -576,18 +642,31 @@ impl Done {
         }
         lines.push(Line::default());
         let top = lines.len() as u16;
-        let (field, at) = self.name.lines(limit.min(FIELD_WIDTH_MAX), self.focus == DoneFocus::Name, theme, ctx.glyphs);
+        let (field, at) = self.name.lines(
+            limit.min(FIELD_WIDTH_MAX),
+            self.focus == DoneFocus::Name,
+            theme,
+            ctx.glyphs,
+        );
         let cursor = at.map(|at| Position::new(at.x, top + at.y));
         lines.extend(field);
         lines.push(Line::default());
         lines.push(styled(
             "Add to pools",
-            if self.focus == DoneFocus::Pools { Role::Accent } else { Role::Heading },
+            if self.focus == DoneFocus::Pools {
+                Role::Accent
+            } else {
+                Role::Heading
+            },
             theme,
         ));
         match ctx.store.pools.ready() {
             Some(pools) if pools.is_empty() => {
-                lines.push(styled("No pools yet. Create one in Settings, Pools.", Role::Muted, theme));
+                lines.push(styled(
+                    "No pools yet. Create one in Settings, Pools.",
+                    Role::Muted,
+                    theme,
+                ));
             }
             Some(pools) => {
                 for (index, pool) in pools.iter().enumerate() {
@@ -617,7 +696,11 @@ impl Done {
         }
         lines.push(Line::default());
         lines.push(join([
-            buttons(&["Done"], (self.focus == DoneFocus::Button).then_some(0), theme),
+            buttons(
+                &["Done"],
+                (self.focus == DoneFocus::Button).then_some(0),
+                theme,
+            ),
             Line::raw("   a  Add another account"),
         ]));
         (lines, cursor)
@@ -625,8 +708,13 @@ impl Done {
 }
 
 enum Stage {
-    Provider { selected: usize },
-    Method { entry: ProviderEntry, selected: usize },
+    Provider {
+        selected: usize,
+    },
+    Method {
+        entry: ProviderEntry,
+        selected: usize,
+    },
     Form(Box<Form>),
     SignIn(Box<SignIn>),
     Done(Box<Done>),
@@ -748,7 +836,12 @@ impl AddAccount {
             .entries()
             .iter()
             .find(|entry| entry.provider == choice.provider)
-            .and_then(|entry| entry.methods.iter().find(|method| method.method == choice.method))
+            .and_then(|entry| {
+                entry
+                    .methods
+                    .iter()
+                    .find(|method| method.method == choice.method)
+            })
             .cloned();
         let Some(entry) = entry else {
             ctx.say(Message::error("This sign-in method is not ready yet.", ""));
@@ -764,7 +857,10 @@ impl AddAccount {
                 model: None,
             };
             self.stage = Stage::SignIn(Box::new(SignIn::new(choice, None, true)));
-            send(ctx, SettingsJob::Accounts(AccountsRequest::Add { draft, key: None }));
+            send(
+                ctx,
+                SettingsJob::Accounts(AccountsRequest::Add { draft, key: None }),
+            );
             return;
         }
         let mut form = Form::new(choice, entry);
@@ -785,8 +881,16 @@ impl AddAccount {
     }
 
     fn back_to_choice(&mut self, provider: Provider) {
-        let entry = self.entries().iter().find(|entry| entry.provider == provider).cloned();
-        let index = self.entries().iter().position(|entry| entry.provider == provider).unwrap_or(0);
+        let entry = self
+            .entries()
+            .iter()
+            .find(|entry| entry.provider == provider)
+            .cloned();
+        let index = self
+            .entries()
+            .iter()
+            .position(|entry| entry.provider == provider)
+            .unwrap_or(0);
         self.stage = match entry {
             Some(entry) if choices(&entry).len() > 1 => Stage::Method { entry, selected: 0 },
             _ => Stage::Provider { selected: index },
@@ -811,21 +915,31 @@ impl AddAccount {
             return;
         }
         if !form.check() {
-            ctx.say(Message::error("Some fields need a fix.", "See the notes under them."));
+            ctx.say(Message::error(
+                "Some fields need a fix.",
+                "See the notes under them.",
+            ));
             return;
         }
         let key = match &mut form.key {
             Some(field) if !field.is_empty() => match AccountSecret::new(field.take_secret()) {
                 Ok(secret) => Some(secret),
                 Err(_) => {
-                    field.error = Some("This key cannot be saved. Paste the whole key on one line.".into());
+                    field.error =
+                        Some("This key cannot be saved. Paste the whole key on one line.".into());
                     return;
                 }
             },
             _ => None,
         };
         self.waiting = Waiting::Add;
-        send(ctx, SettingsJob::Accounts(AccountsRequest::Add { draft: form.draft(), key }));
+        send(
+            ctx,
+            SettingsJob::Accounts(AccountsRequest::Add {
+                draft: form.draft(),
+                key,
+            }),
+        );
     }
 
     fn finish(&mut self, ctx: &mut Ctx) -> Flow {
@@ -873,12 +987,22 @@ impl AddAccount {
         let Some(account) = sign_in.account.clone() else {
             return;
         };
-        let plan = view.as_ref().and_then(|view| view.plan.clone()).map(|plan| {
-            let mut letters = plan.chars();
-            let first = letters.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
-            let brand = if account.provider == Provider::Chatgpt { "ChatGPT" } else { "Claude" };
-            format!("{brand} {first}{}", letters.as_str())
-        });
+        let plan = view
+            .as_ref()
+            .and_then(|view| view.plan.clone())
+            .map(|plan| {
+                let mut letters = plan.chars();
+                let first = letters
+                    .next()
+                    .map(|c| c.to_uppercase().collect::<String>())
+                    .unwrap_or_default();
+                let brand = if account.provider == Provider::Chatgpt {
+                    "ChatGPT"
+                } else {
+                    "Claude"
+                };
+                format!("{brand} {first}{}", letters.as_str())
+            });
         let email = view.as_ref().and_then(|view| view.email.clone());
         let detail = match (&email, &plan) {
             (Some(email), Some(plan)) => vec![format!("Signed in as {email} ({plan}).")],
@@ -892,11 +1016,22 @@ impl AddAccount {
             _ => account.name.clone(),
         };
         self.stage = Stage::Done(Box::new(Done::new(account, "Signed in", detail, &name)));
-        ctx.say(Message::success(if self.again { "Signed in." } else { "Account added." }, ""));
+        ctx.say(Message::success(
+            if self.again {
+                "Signed in."
+            } else {
+                "Account added."
+            },
+            "",
+        ));
         ctx.request(Request::Pools);
     }
 
-    fn sign_in_reply(&mut self, result: &Result<(SignInTicket, SignInView), String>, ctx: &mut Ctx) {
+    fn sign_in_reply(
+        &mut self,
+        result: &Result<(SignInTicket, SignInView), String>,
+        ctx: &mut Ctx,
+    ) {
         let Stage::SignIn(sign_in) = &mut self.stage else {
             return;
         };
@@ -910,7 +1045,10 @@ impl AddAccount {
                 {
                     sign_in.opened = true;
                     if open_page(page).is_err() {
-                        ctx.say(Message::warning("The browser did not open.", "Press o to open the page."));
+                        ctx.say(Message::warning(
+                            "The browser did not open.",
+                            "Press o to open the page.",
+                        ));
                     }
                 }
                 match view.phase {
@@ -921,7 +1059,9 @@ impl AddAccount {
                     | NativeAuthPhase::Unavailable => {
                         sign_in.problem = Some(sign_in_problem(sign_in.choice.native, view));
                     }
-                    NativeAuthPhase::Starting | NativeAuthPhase::CheckingAccount | NativeAuthPhase::Uncertain
+                    NativeAuthPhase::Starting
+                    | NativeAuthPhase::CheckingAccount
+                    | NativeAuthPhase::Uncertain
                         if sign_in.reads < FAST_READS_MAX =>
                     {
                         sign_in.reads += 1;
@@ -953,7 +1093,12 @@ impl AddAccount {
                     ("Connected", Vec::new())
                 };
                 let name = account.name.clone();
-                self.stage = Stage::Done(Box::new(Done::new(account.clone(), headline, detail, &name)));
+                self.stage = Stage::Done(Box::new(Done::new(
+                    account.clone(),
+                    headline,
+                    detail,
+                    &name,
+                )));
                 ctx.say(Message::success("Account added.", ""));
                 ctx.request(Request::Pools);
             }
@@ -983,7 +1128,8 @@ impl AddAccount {
                     };
                     form.model_selected = 0;
                     if let (Load::Failed(_), Some(url)) = (&form.models, form.url.as_mut()) {
-                        url.error = Some("Could not reach this address. Is the server running?".into());
+                        url.error =
+                            Some("Could not reach this address. Is the server running?".into());
                     }
                 }
             }
@@ -995,8 +1141,12 @@ impl AddAccount {
                 self.waiting = Waiting::Nothing;
                 self.sign_in_reply(result, ctx);
             }
-            (Waiting::Finish, SettingsEvent::Accounts(result) ) => self.finished(result.as_ref().err(), ctx),
-            (Waiting::Finish, SettingsEvent::PoolsJoined(result)) => self.finished(result.as_ref().err(), ctx),
+            (Waiting::Finish, SettingsEvent::Accounts(result)) => {
+                self.finished(result.as_ref().err(), ctx)
+            }
+            (Waiting::Finish, SettingsEvent::PoolsJoined(result)) => {
+                self.finished(result.as_ref().err(), ctx)
+            }
             _ => {}
         }
     }
@@ -1056,7 +1206,11 @@ impl AddAccount {
             }
             Key::Esc => {
                 let provider = entry.provider;
-                let index = self.entries().iter().position(|entry| entry.provider == provider).unwrap_or(0);
+                let index = self
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.provider == provider)
+                    .unwrap_or(0);
                 self.stage = Stage::Provider { selected: index };
             }
             _ => {}
@@ -1091,7 +1245,9 @@ impl AddAccount {
                     (form.model_selected + 1).min(count.saturating_sub(1))
                 };
             }
-            Key::Enter if slot == Slot::Button || form.focus + 2 == slots.len() => self.submit_form(ctx),
+            Key::Enter if slot == Slot::Button || form.focus + 2 == slots.len() => {
+                self.submit_form(ctx)
+            }
             Key::Enter => {
                 if slot == Slot::Url && form.probe(ctx) {
                     self.waiting = Waiting::Models;
@@ -1103,7 +1259,9 @@ impl AddAccount {
                     Slot::Name => Some(&mut form.name),
                     Slot::Url => form.url.as_mut(),
                     Slot::Key => form.key.as_mut(),
-                    Slot::Model if form.models.ready().is_none_or(Vec::is_empty) => form.model.as_mut(),
+                    Slot::Model if form.models.ready().is_none_or(Vec::is_empty) => {
+                        form.model.as_mut()
+                    }
                     _ => None,
                 };
                 if let Some(field) = field
@@ -1162,18 +1320,33 @@ impl AddAccount {
                 if let Some(page) = sign_in.page()
                     && open_page(page).is_err()
                 {
-                    ctx.say(Message::error("Could not open the page.", "Copy it from the screen."));
+                    ctx.say(Message::error(
+                        "Could not open the page.",
+                        "Copy it from the screen.",
+                    ));
                 }
             }
             Key::Char('c') if !claude => {
-                if let Some(code) = sign_in.view.as_ref().and_then(|view| view.device_code.clone()) {
+                if let Some(code) = sign_in
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.device_code.clone())
+                {
                     match copy(&code) {
                         Ok(()) => ctx.say(Message::success("Code copied.", "")),
-                        Err(_) => ctx.say(Message::error("Could not copy the code.", "Type it from the screen.")),
+                        Err(_) => ctx.say(Message::error(
+                            "Could not copy the code.",
+                            "Type it from the screen.",
+                        )),
                     }
                 }
             }
-            Key::Enter if claude && accepts.is_some() && !sign_in.code.is_empty() && self.waiting == Waiting::Nothing => {
+            Key::Enter
+                if claude
+                    && accepts.is_some()
+                    && !sign_in.code.is_empty()
+                    && self.waiting == Waiting::Nothing =>
+            {
                 let Some(ticket) = sign_in.ticket.clone() else {
                     return Flow::Handled;
                 };
@@ -1191,7 +1364,10 @@ impl AddAccount {
                             }),
                         );
                     }
-                    Err(_) => sign_in.code.error = Some("This code cannot be used. Paste the whole code.".into()),
+                    Err(_) => {
+                        sign_in.code.error =
+                            Some("This code cannot be used. Paste the whole code.".into())
+                    }
                 }
             }
             other if claude && accepts.is_some() => {
@@ -1235,7 +1411,9 @@ impl AddAccount {
                     _ => DoneFocus::Name,
                 }
             }
-            Key::Up if done.focus == DoneFocus::Pools => done.selected = done.selected.saturating_sub(1),
+            Key::Up if done.focus == DoneFocus::Pools => {
+                done.selected = done.selected.saturating_sub(1)
+            }
             Key::Down if done.focus == DoneFocus::Pools => {
                 done.selected = (done.selected + 1).min(pools.len().saturating_sub(1));
             }
@@ -1296,10 +1474,16 @@ impl AddAccount {
                             ));
                         }
                         lines.push(Line::default());
-                        lines.push(Line::raw("Add as many accounts as you like. One pool can mix providers."));
+                        lines.push(Line::raw(
+                            "Add as many accounts as you like. One pool can mix providers.",
+                        ));
                     }
                     Load::Failed(code) => {
-                        lines.push(status(&format!("Failed to load providers. {}", plain(code)), theme, ctx.glyphs));
+                        lines.push(status(
+                            &format!("Failed to load providers. {}", plain(code)),
+                            theme,
+                            ctx.glyphs,
+                        ));
                         lines.push(Line::raw("Press r to try again."));
                     }
                     _ => lines.push(Line::from(vec![
@@ -1336,7 +1520,9 @@ impl AddAccount {
 
 fn plain_sign_in(code: &str) -> &'static str {
     match code {
-        "native_auth_claude_input_outcome_unknown" => "The code may not have reached Claude. Wait a moment, then try again.",
+        "native_auth_claude_input_outcome_unknown" => {
+            "The code may not have reached Claude. Wait a moment, then try again."
+        }
         "native_auth_method_mismatch" => "This account cannot use that sign-in method.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
         other => crate::tui::native_auth::public_problem(other),
@@ -1362,7 +1548,11 @@ fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> Strin
 
 impl Screen for AddAccount {
     fn crumbs(&self) -> Vec<String> {
-        let mut crumbs = vec!["Settings".to_owned(), "Accounts".to_owned(), "Add account".to_owned()];
+        let mut crumbs = vec![
+            "Settings".to_owned(),
+            "Accounts".to_owned(),
+            "Add account".to_owned(),
+        ];
         match &self.stage {
             Stage::Provider { .. } => {}
             Stage::Method { entry, .. } => crumbs.push(provider_word(entry.provider).into()),
@@ -1380,17 +1570,29 @@ impl Screen for AddAccount {
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         match &self.stage {
             Stage::Provider { .. } | Stage::Method { .. } => {
-                vec![hint(&vertical, "Move"), hint("Enter", "Choose"), hint("Esc", "Back")]
+                vec![
+                    hint(&vertical, "Move"),
+                    hint("Enter", "Choose"),
+                    hint("Esc", "Back"),
+                ]
             }
             Stage::Form(form) if form.unreachable() => {
-                vec![hint("Enter", "Check again"), hint("Tab", "Next field"), hint("Esc", "Back")]
+                vec![
+                    hint("Enter", "Check again"),
+                    hint("Tab", "Next field"),
+                    hint("Esc", "Back"),
+                ]
             }
             Stage::Form(form) if form.choice.method == SignInMethod::Url => {
                 let mut hints = Vec::new();
                 if form.listing().is_some() {
                     hints.push(hint(&vertical, "Choose model"));
                 }
-                hints.extend([hint("Tab", "Next"), hint("Enter", "Save account"), hint("Esc", "Back")]);
+                hints.extend([
+                    hint("Tab", "Next"),
+                    hint("Enter", "Save account"),
+                    hint("Esc", "Back"),
+                ]);
                 hints
             }
             Stage::Form(_) => vec![
@@ -1407,9 +1609,15 @@ impl Screen for AddAccount {
                 };
                 vec![hint("n", label), hint("Esc", "Cancel sign-in")]
             }
-            Stage::SignIn(sign_in) if sign_in.choice.native == Some(NativeAuthMethod::ClaudeOfficial) => {
+            Stage::SignIn(sign_in)
+                if sign_in.choice.native == Some(NativeAuthMethod::ClaudeOfficial) =>
+            {
                 let mut hints = Vec::new();
-                if sign_in.view.as_ref().is_some_and(|view| view.claude_prompt.is_some()) {
+                if sign_in
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.claude_prompt.is_some())
+                {
                     hints.push(hint("Enter", "Submit code"));
                 }
                 hints.push(hint("o", "Open page"));
@@ -1417,10 +1625,16 @@ impl Screen for AddAccount {
                 hints.push(hint("Esc", "Cancel sign-in"));
                 hints
             }
-            Stage::SignIn(sign_in) if sign_in.choice.native == Some(NativeAuthMethod::CodexExisting) => {
+            Stage::SignIn(sign_in)
+                if sign_in.choice.native == Some(NativeAuthMethod::CodexExisting) =>
+            {
                 vec![hint("Esc", "Cancel sign-in")]
             }
-            Stage::SignIn(_) => vec![hint("o", "Open page"), hint("c", "Copy code"), hint("Esc", "Cancel sign-in")],
+            Stage::SignIn(_) => vec![
+                hint("o", "Open page"),
+                hint("c", "Copy code"),
+                hint("Esc", "Cancel sign-in"),
+            ],
             Stage::Done(_) => vec![
                 hint("Space", "Select pool"),
                 hint("Enter", "Done"),
@@ -1464,7 +1678,11 @@ impl Screen for AddAccount {
         }
         ctx.request(Request::Pools);
         if let Stage::SignIn(sign_in) = &self.stage {
-            if sign_in.ticket.is_none() && !sign_in.created && sign_in.problem.is_none() && self.waiting == Waiting::Nothing {
+            if sign_in.ticket.is_none()
+                && !sign_in.created
+                && sign_in.problem.is_none()
+                && self.waiting == Waiting::Nothing
+            {
                 self.start_sign_in(ctx);
             } else {
                 self.read_sign_in(ctx);

@@ -12,7 +12,13 @@ use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
 
 pub(crate) fn ctx(width: u16, height: u16) -> Ctx {
-    let mut ctx = Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new());
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
     ctx.width = width;
     ctx.height = height;
     ctx.tick = 4;
@@ -60,7 +66,11 @@ pub(crate) fn fixture(name: &str, swaps: &[(&str, &str)]) -> Vec<String> {
                 let from_width = crate::tui::text::width(from);
                 let to_width = crate::tui::text::width(to);
                 if row.contains(from) && to_width <= from_width {
-                    row = row.replacen(from, &format!("{to}{}", " ".repeat(from_width - to_width)), 1);
+                    row = row.replacen(
+                        from,
+                        &format!("{to}{}", " ".repeat(from_width - to_width)),
+                        1,
+                    );
                 }
             }
             row
@@ -78,7 +88,12 @@ pub(crate) fn check(name: &str, actual: &[String], swaps: &[(&str, &str)], rows:
         .unwrap_or(&all)
         .iter()
         .filter(|row| expected[**row] != actual[**row])
-        .map(|row| format!("row {row}\n want |{}|\n got  |{}|", expected[*row], actual[*row]))
+        .map(|row| {
+            format!(
+                "row {row}\n want |{}|\n got  |{}|",
+                expected[*row], actual[*row]
+            )
+        })
         .collect();
     assert!(wrong.is_empty(), "{name} differs:\n{}", wrong.join("\n"));
 }
@@ -92,7 +107,13 @@ fn id(text: &str) -> CredentialRef {
     CredentialRef::new(text).unwrap()
 }
 
-fn account(index: usize, name: &str, provider: Provider, method: SignInMethod, status: AccountStatus) -> AccountView {
+fn account(
+    index: usize,
+    name: &str,
+    provider: Provider,
+    method: SignInMethod,
+    status: AccountStatus,
+) -> AccountView {
     AccountView {
         id: id(&format!("acct-{index:03}")),
         name: name.into(),
@@ -108,40 +129,192 @@ fn account(index: usize, name: &str, provider: Provider, method: SignInMethod, s
 }
 
 const NAMED: [(&str, Provider, SignInMethod, AccountStatus, &[&str]); 24] = [
-    ("Claude Pro - personal", Provider::Claude, SignInMethod::Subscription, AccountStatus::NotSignedIn, &["Research"]),
-    ("ChatGPT Plus - spare 4", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::NotSignedIn, &[]),
-    ("LM Studio on mini", Provider::Local, SignInMethod::Url, AccountStatus::Unreachable, &["Local only"]),
-    ("Anthropic API - team", Provider::AnthropicApi, SignInMethod::ApiKey, AccountStatus::KeySaved, &["Main"]),
-    ("ChatGPT Plus - spare 1", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main", "Research"]),
-    ("ChatGPT Plus - spare 2", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("ChatGPT Plus - spare 3", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Research"]),
-    ("ChatGPT Pro - main", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("ChatGPT Team - seat 01", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("ChatGPT Team - seat 02", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("ChatGPT Team - seat 03", Provider::Chatgpt, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Max - work", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("Claude Max - work 2", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &["Research"]),
-    ("Claude Team - seat 01", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("Claude Team - seat 02", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("Claude Team - seat 03", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &["Main"]),
-    ("Claude Team - seat 04", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 05", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 06", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 07", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 08", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 09", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 10", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
-    ("Claude Team - seat 11", Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn, &[]),
+    (
+        "Claude Pro - personal",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::NotSignedIn,
+        &["Research"],
+    ),
+    (
+        "ChatGPT Plus - spare 4",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::NotSignedIn,
+        &[],
+    ),
+    (
+        "LM Studio on mini",
+        Provider::Local,
+        SignInMethod::Url,
+        AccountStatus::Unreachable,
+        &["Local only"],
+    ),
+    (
+        "Anthropic API - team",
+        Provider::AnthropicApi,
+        SignInMethod::ApiKey,
+        AccountStatus::KeySaved,
+        &["Main"],
+    ),
+    (
+        "ChatGPT Plus - spare 1",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main", "Research"],
+    ),
+    (
+        "ChatGPT Plus - spare 2",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "ChatGPT Plus - spare 3",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Research"],
+    ),
+    (
+        "ChatGPT Pro - main",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "ChatGPT Team - seat 01",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "ChatGPT Team - seat 02",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "ChatGPT Team - seat 03",
+        Provider::Chatgpt,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Max - work",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "Claude Max - work 2",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Research"],
+    ),
+    (
+        "Claude Team - seat 01",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "Claude Team - seat 02",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "Claude Team - seat 03",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &["Main"],
+    ),
+    (
+        "Claude Team - seat 04",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 05",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 06",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 07",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 08",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 09",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 10",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
+    (
+        "Claude Team - seat 11",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+        &[],
+    ),
 ];
 
 pub(crate) fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary>) {
     let mut accounts: Vec<AccountView> = NAMED
         .iter()
         .enumerate()
-        .map(|(index, (name, provider, method, status, _))| account(index, name, *provider, *method, *status))
+        .map(|(index, (name, provider, method, status, _))| {
+            account(index, name, *provider, *method, *status)
+        })
         .collect();
     if let Some(name) = extra {
-        accounts.push(account(24, name, Provider::Claude, SignInMethod::Subscription, AccountStatus::SignedIn));
+        accounts.push(account(
+            24,
+            name,
+            Provider::Claude,
+            SignInMethod::Subscription,
+            AccountStatus::SignedIn,
+        ));
     }
     let start = accounts.len();
     for index in start..240 {
@@ -190,7 +363,11 @@ pub(crate) fn list_ctx(width: u16, height: u16, pools: Vec<PoolSummary>) -> Ctx 
 fn accounts_needing_attention_come_first_then_names() {
     let (accounts, pools) = dataset(None);
     let ctx = list_ctx(120, 36, pools);
-    let order: Vec<&str> = sorted(&accounts, &ctx).iter().take(6).map(|account| account.name.as_str()).collect();
+    let order: Vec<&str> = sorted(&accounts, &ctx)
+        .iter()
+        .take(6)
+        .map(|account| account.name.as_str())
+        .collect();
     assert_eq!(
         order,
         [
@@ -210,7 +387,12 @@ fn account_list_frames_match_the_design() {
         let (accounts, pools) = dataset(None);
         let ctx = list_ctx(width, height, pools);
         let mut shell = Shell::with(ctx, Box::new(Accounts::with(accounts)));
-        check(&format!("accounts-{width}"), &render(&mut shell, width, height), &[STRIP], None);
+        check(
+            &format!("accounts-{width}"),
+            &render(&mut shell, width, height),
+            &[STRIP],
+            None,
+        );
     }
 }
 
@@ -231,7 +413,11 @@ fn filtering_keeps_matching_rows_and_counts_them() {
     );
     shell.key(Key::Esc);
     let rows = render(&mut shell, 80, 24);
-    assert!(rows[21].starts_with("  Showing 1-12 of 240."), "{}", rows[21]);
+    assert!(
+        rows[21].starts_with("  Showing 1-12 of 240."),
+        "{}",
+        rows[21]
+    );
 }
 
 #[test]
@@ -246,7 +432,10 @@ fn list_keys_open_add_account_details_and_selection() {
     let (accounts, pools) = dataset(None);
     let mut ctx = list_ctx(80, 24, pools);
     let mut screen = Accounts::with(accounts);
-    assert!(matches!(screen.key(&Key::Char('a'), &mut ctx), Flow::Open(Place::AddAccount)));
+    assert!(matches!(
+        screen.key(&Key::Char('a'), &mut ctx),
+        Flow::Open(Place::AddAccount)
+    ));
     screen.key(&Key::Char(' '), &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "1 selected.");
     screen.key(&Key::Char('f'), &mut ctx);
@@ -270,7 +459,9 @@ fn a_full_load_fills_the_list_and_the_shared_rows() {
     assert_eq!(shell.ctx.store.accounts, Load::Loading);
     assert!(screen.busy(&shell.ctx));
     let loaded = |result: Result<Vec<AccountView>, String>| {
-        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::AllAccounts(result)))))
+        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+            SettingsEvent::AllAccounts(result),
+        ))))
     };
     shell.arrive(loaded(Ok(accounts.clone())));
     screen.arrive(&loaded(Ok(accounts.clone())), &mut shell.ctx);
@@ -281,11 +472,21 @@ fn a_full_load_fills_the_list_and_the_shared_rows() {
     assert_eq!(rows[2].provider, "Local model");
     assert_eq!(rows[2].status, "Can't reach this URL");
     screen.shown(&mut shell.ctx);
-    screen.arrive(&loaded(Err("controller_pending_intent".into())), &mut shell.ctx);
+    screen.arrive(
+        &loaded(Err("controller_pending_intent".into())),
+        &mut shell.ctx,
+    );
     shell.arrive(loaded(Err("controller_pending_intent".into())));
-    assert_eq!(screen.accounts.len(), 240, "a failed refresh keeps the rows");
+    assert_eq!(
+        screen.accounts.len(),
+        240,
+        "a failed refresh keeps the rows"
+    );
     assert_eq!(shell.ctx.store.accounts.ready().map(Vec::len), Some(240));
-    assert_eq!(shell.ctx.message().unwrap().lead, "Could not refresh accounts.");
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        "Could not refresh accounts."
+    );
 }
 
 #[test]
@@ -313,9 +514,9 @@ fn removing_an_account_in_a_pool_is_refused_with_the_reason() {
 fn add_shell(width: u16, height: u16) -> Shell {
     let ctx = list_ctx(width, height, dataset(None).1);
     let mut shell = Shell::with(ctx, Box::new(AddAccount::new()));
-    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(SettingsEvent::Accounts(Ok(
-        AccountsReply::Catalog(catalog()),
-    )))))));
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Accounts(Ok(AccountsReply::Catalog(catalog()))),
+    )))));
     shell
 }
 
@@ -323,14 +524,29 @@ fn add_shell(width: u16, height: u16) -> Shell {
 fn add_account_provider_and_method_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = add_shell(width, height);
-        check(&format!("add-provider-{width}"), &render(&mut shell, width, height), &[STRIP], None);
+        check(
+            &format!("add-provider-{width}"),
+            &render(&mut shell, width, height),
+            &[STRIP],
+            None,
+        );
         shell.key(Key::Enter);
-        check(&format!("add-method-chatgpt-{width}"), &render(&mut shell, width, height), &[STRIP], None);
+        check(
+            &format!("add-method-chatgpt-{width}"),
+            &render(&mut shell, width, height),
+            &[STRIP],
+            None,
+        );
     }
     let mut shell = add_shell(80, 24);
     shell.key(Key::Down);
     shell.key(Key::Enter);
-    check("add-method-claude-80", &render(&mut shell, 80, 24), &[], None);
+    check(
+        "add-method-claude-80",
+        &render(&mut shell, 80, 24),
+        &[],
+        None,
+    );
 }
 
 #[test]
@@ -349,19 +565,32 @@ fn api_key_form_masks_the_key_and_counts_it() {
     check(
         "add-key-80",
         &rows,
-        &[("Stored in your macOS Keychain. Never shown again.", "Kept by the CrazyAgent engine. Never shown again.")],
+        &[(
+            "Stored in your macOS Keychain. Never shown again.",
+            "Kept by the CrazyAgent engine. Never shown again.",
+        )],
         Some(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 23]),
     );
-    assert!(rows.iter().all(|row| !row.contains("kkk")), "the key never shows");
+    assert!(
+        rows.iter().all(|row| !row.contains("kkk")),
+        "the key never shows"
+    );
 }
 
 #[test]
 fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
-    let entry = catalog().into_iter().find(|entry| entry.provider == Provider::Chatgpt).unwrap();
+    let entry = catalog()
+        .into_iter()
+        .find(|entry| entry.provider == Provider::Chatgpt)
+        .unwrap();
     let titles: Vec<&str> = choices(&entry).iter().map(|choice| choice.title).collect();
     assert_eq!(
         titles,
-        ["Sign in with ChatGPT", "Use an API key", "Use the Codex sign-in on this Mac"]
+        [
+            "Sign in with ChatGPT",
+            "Use an API key",
+            "Use the Codex sign-in on this Mac"
+        ]
     );
     assert_eq!(
         key_problem(Provider::OpenaiApi, 9, true).as_deref(),

@@ -10,7 +10,9 @@ use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::glyphs::Glyphs;
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, Arrival, Request};
-use crate::tui::text::{cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, with_bar, wrap};
+use crate::tui::text::{
+    cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, with_bar, wrap,
+};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons};
 use ratatui::Frame;
@@ -76,7 +78,10 @@ pub fn sign_in_word(account: &AccountView) -> &'static str {
 /// Says whether an account needs the owner.
 /// Input: the status. Output: true for Not signed in and Can't reach this URL.
 pub fn needs_attention(status: AccountStatus) -> bool {
-    matches!(status, AccountStatus::NotSignedIn | AccountStatus::Unreachable)
+    matches!(
+        status,
+        AccountStatus::NotSignedIn | AccountStatus::Unreachable
+    )
 }
 
 fn attention_rank(status: AccountStatus) -> u8 {
@@ -111,7 +116,12 @@ pub fn sorted<'a>(accounts: &'a [AccountView], ctx: &Ctx) -> Vec<&'a AccountView
     rows.sort_by_cached_key(|account| {
         let attention = attention_rank(account.status);
         let pooled = attention < 2 && pool_names(&account.id, ctx).is_empty();
-        (attention, pooled, account.name.to_lowercase(), account.id.as_str().to_owned())
+        (
+            attention,
+            pooled,
+            account.name.to_lowercase(),
+            account.id.as_str().to_owned(),
+        )
     });
     rows
 }
@@ -249,11 +259,17 @@ impl Accounts {
     }
 
     fn rows_visible(ctx: &Ctx) -> usize {
-        (ctx.height as usize).saturating_sub(4 + 2 + CHROME_ROWS).max(1)
+        (ctx.height as usize)
+            .saturating_sub(4 + 2 + CHROME_ROWS)
+            .max(1)
     }
 
     fn widths(wide: bool) -> Vec<usize> {
-        if wide { vec![24, 17, 16, 22, 26] } else { vec![23, 17, 22, 5] }
+        if wide {
+            vec![24, 17, 16, 22, 26]
+        } else {
+            vec![23, 17, 22, 5]
+        }
     }
 
     fn cells_of(&self, account: &AccountView, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -332,7 +348,11 @@ impl Accounts {
                     vec![
                         styled("Accounts", Role::Accent, theme),
                         Line::default(),
-                        status(&format!("Failed to load accounts. {}", plain(code)), theme, ctx.glyphs),
+                        status(
+                            &format!("Failed to load accounts. {}", plain(code)),
+                            theme,
+                            ctx.glyphs,
+                        ),
                         Line::raw("Press r to try again."),
                     ],
                     None,
@@ -383,7 +403,10 @@ impl Accounts {
         )];
         if attention > 0 {
             right.push(Span::raw("   "));
-            right.push(Span::styled(format!("{attention} need attention"), theme.warning));
+            right.push(Span::styled(
+                format!("{attention} need attention"),
+                theme.warning,
+            ));
         }
         let mut lines = vec![row(
             limit,
@@ -393,13 +416,21 @@ impl Accounts {
         )];
         let mut cursor = None;
         if self.filtering {
-            let shown = cut(self.filter.value(), limit.saturating_sub(3), ctx.glyphs.ellipsis);
+            let shown = cut(
+                self.filter.value(),
+                limit.saturating_sub(3),
+                ctx.glyphs.ellipsis,
+            );
             cursor = Some(Position::new(2 + crate::tui::text::width(&shown) as u16, 1));
             lines.push(join([styled("/ ", Role::Accent, theme), Line::raw(shown)]));
         } else if self.filter.is_empty() {
             lines.push(join([
                 Line::raw("/  "),
-                styled("Filter by name, provider, status or pool", Role::Muted, theme),
+                styled(
+                    "Filter by name, provider, status or pool",
+                    Role::Muted,
+                    theme,
+                ),
             ]));
         } else {
             lines.push(Line::raw(format!("/ {}", self.filter.value())));
@@ -414,7 +445,15 @@ impl Accounts {
         };
         lines.push(join([
             Line::raw("  "),
-            restyle(cells(&widths, heads.into_iter().map(Line::raw).collect(), 2, ctx.glyphs), theme.muted),
+            restyle(
+                cells(
+                    &widths,
+                    heads.into_iter().map(Line::raw).collect(),
+                    2,
+                    ctx.glyphs,
+                ),
+                theme.muted,
+            ),
         ]));
         let visible = self.visible(ctx);
         let window = Self::rows_visible(ctx);
@@ -438,7 +477,14 @@ impl Accounts {
                 if marked {
                     content = restyle(content, theme.selection_dim);
                 }
-                list_row(content, row_limit, index == selected, !self.filtering, theme, ctx.glyphs)
+                list_row(
+                    content,
+                    row_limit,
+                    index == selected,
+                    !self.filtering,
+                    theme,
+                    ctx.glyphs,
+                )
             })
             .collect();
         let shown_rows = rows.len();
@@ -475,13 +521,25 @@ impl Accounts {
 pub fn plain(code: &str) -> &'static str {
     match code {
         "account_not_found" => "This account no longer exists.",
-        "account_in_pool" | "account_in_use" => "This account is in a pool. Remove it from the pool first.",
-        "account_name_bounds" | "account_name_invalid" => "Use a name of 1 to 96 characters, without control characters.",
+        "account_in_pool" | "account_in_use" => {
+            "This account is in a pool. Remove it from the pool first."
+        }
+        "account_name_bounds" | "account_name_invalid" => {
+            "Use a name of 1 to 96 characters, without control characters."
+        }
         "account_secret_invalid" => "This key cannot be saved. Paste the whole key on one line.",
-        "account_url_invalid" | "account_url_bounds" => "This address is not a valid http or https URL.",
-        "account_unreachable" | "account_url_unreachable" => "Could not reach this address. Is the server running?",
-        "model_access_read_only" => "Settings are read-only in this engine. Start it with writable settings.",
-        "trusted_connection_unavailable" | "controller_disconnected" => "The engine connection is not ready yet.",
+        "account_url_invalid" | "account_url_bounds" => {
+            "This address is not a valid http or https URL."
+        }
+        "account_unreachable" | "account_url_unreachable" => {
+            "Could not reach this address. Is the server running?"
+        }
+        "model_access_read_only" => {
+            "Settings are read-only in this engine. Start it with writable settings."
+        }
+        "trusted_connection_unavailable" | "controller_disconnected" => {
+            "The engine connection is not ready yet."
+        }
         "controller_pending_intent" => "Another change is still finishing. Try again in a moment.",
         other => crate::config::plain_problem(other).unwrap_or("The engine could not do this."),
     }
@@ -501,13 +559,24 @@ impl Screen for Accounts {
             ];
         }
         if matches!(self.load, Load::Ready(())) && self.accounts.is_empty() {
-            return vec![hint("Enter", "Add account"), sections_hint(ctx.glyphs), hint("Esc", "Home")];
+            return vec![
+                hint("Enter", "Add account"),
+                sections_hint(ctx.glyphs),
+                hint("Esc", "Home"),
+            ];
         }
         vec![
             hint("a", "Add account"),
             hint("Enter", "Open"),
             hint("/", "Filter"),
-            hint("f", if self.attention_only { "All accounts" } else { "Needs attention" }),
+            hint(
+                "f",
+                if self.attention_only {
+                    "All accounts"
+                } else {
+                    "Needs attention"
+                },
+            ),
             hint("Space", "Select"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
@@ -542,12 +611,18 @@ impl Screen for Accounts {
                 Flow::Handled
             }
             Key::Char(' ') => {
-                let id = self.visible(ctx).get(self.selected).map(|account| account.id.clone());
+                let id = self
+                    .visible(ctx)
+                    .get(self.selected)
+                    .map(|account| account.id.clone());
                 if let Some(id) = id {
                     if !self.marked.remove(&id) {
                         self.marked.insert(id);
                     }
-                    ctx.say(Message::success(&format!("{} selected.", self.marked.len()), ""));
+                    ctx.say(Message::success(
+                        &format!("{} selected.", self.marked.len()),
+                        "",
+                    ));
                 }
                 Flow::Handled
             }
@@ -595,7 +670,9 @@ impl Screen for Accounts {
         match result {
             Ok(accounts) => self.loaded(accounts, ctx),
             Err(code) if self.accounts.is_empty() => self.load = Load::Failed(code.clone()),
-            Err(code) if asked => ctx.say(Message::error("Could not refresh accounts.", plain(code))),
+            Err(code) if asked => {
+                ctx.say(Message::error("Could not refresh accounts.", plain(code)))
+            }
             Err(_) => {}
         }
         Flow::Handled
@@ -680,11 +757,17 @@ impl AccountDetails {
             SignInMethod::ApiKey => Some(Action::ReplaceKey),
             SignInMethod::Url => Some(Action::CheckAgain),
         };
-        first.into_iter().chain([Action::Rename, Action::Remove]).collect()
+        first
+            .into_iter()
+            .chain([Action::Rename, Action::Remove])
+            .collect()
     }
 
     fn back(&mut self) -> Flow {
-        let list = self.list.take().map_or_else(|| Box::new(Accounts::new()), |list| list);
+        let list = self
+            .list
+            .take()
+            .map_or_else(|| Box::new(Accounts::new()), |list| list);
         Flow::Replace(list)
     }
 
@@ -765,7 +848,10 @@ impl AccountDetails {
     pub fn body(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
         let label = |name: &str, value: Line<'static>| {
-            join([pad(styled(name, Role::Heading, theme), LABEL_WIDTH, ctx.glyphs), value])
+            join([
+                pad(styled(name, Role::Heading, theme), LABEL_WIDTH, ctx.glyphs),
+                value,
+            ])
         };
         let mut lines = vec![
             row(
@@ -775,7 +861,10 @@ impl AccountDetails {
                 ctx.glyphs,
             ),
             Line::default(),
-            label("Provider", Line::raw(provider_cell(self.account.provider, ctx.glyphs))),
+            label(
+                "Provider",
+                Line::raw(provider_cell(self.account.provider, ctx.glyphs)),
+            ),
             label(
                 "Sign-in",
                 Line::raw(match (self.account.method, self.account.provider) {
@@ -791,7 +880,10 @@ impl AccountDetails {
             lines.push(label(
                 "Key",
                 if saved {
-                    join([status("Key saved", theme, ctx.glyphs), styled("  kept by the engine", Role::Muted, theme)])
+                    join([
+                        status("Key saved", theme, ctx.glyphs),
+                        styled("  kept by the engine", Role::Muted, theme),
+                    ])
                 } else {
                     status("Not signed in", theme, ctx.glyphs)
                 },
@@ -804,16 +896,26 @@ impl AccountDetails {
         let pools = pool_names(&self.account.id, ctx);
         lines.push(label(
             "Pools",
-            Line::raw(if pools.is_empty() { "None".to_owned() } else { pools.join(", ") }),
+            Line::raw(if pools.is_empty() {
+                "None".to_owned()
+            } else {
+                pools.join(", ")
+            }),
         ));
         lines.push(label("Used by", Line::raw(self.used_by(ctx))));
         lines.push(Line::default());
-        if self.account.status == AccountStatus::NotSignedIn && self.account.method == SignInMethod::Subscription {
-            lines.push(Line::raw("The sign-in expired or never finished. Sign in again to keep using this account."));
+        if self.account.status == AccountStatus::NotSignedIn
+            && self.account.method == SignInMethod::Subscription
+        {
+            lines.push(Line::raw(
+                "The sign-in expired or never finished. Sign in again to keep using this account.",
+            ));
             lines.push(Line::default());
         }
         if self.account.status == AccountStatus::Unreachable {
-            lines.push(Line::raw("Could not reach this address. Is the server running?"));
+            lines.push(Line::raw(
+                "Could not reach this address. Is the server running?",
+            ));
             lines.push(Line::default());
         }
         let mut cursor = None;
@@ -827,7 +929,8 @@ impl AccountDetails {
                 lines.push(buttons(&["Save name", "Cancel"], None, theme));
             }
             _ => {
-                let labels: Vec<&str> = self.actions().iter().map(|action| action.label()).collect();
+                let labels: Vec<&str> =
+                    self.actions().iter().map(|action| action.label()).collect();
                 lines.push(buttons(&labels, Some(self.focus), theme));
             }
         }
@@ -890,14 +993,26 @@ impl AccountDetails {
 
 impl Screen for AccountDetails {
     fn crumbs(&self) -> Vec<String> {
-        vec!["Settings".into(), "Accounts".into(), self.account.name.clone()]
+        vec![
+            "Settings".into(),
+            "Accounts".into(),
+            self.account.name.clone(),
+        ]
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         match self.mode {
-            DetailMode::Rename(_) => vec![hint("Enter", "Save name"), hint("Ctrl-U", "Clear"), hint("Esc", "Cancel")],
-            _ => vec![hint(&arrows, "Choose"), hint("Enter", "Select"), hint("Esc", "Back")],
+            DetailMode::Rename(_) => vec![
+                hint("Enter", "Save name"),
+                hint("Ctrl-U", "Clear"),
+                hint("Esc", "Cancel"),
+            ],
+            _ => vec![
+                hint(&arrows, "Choose"),
+                hint("Enter", "Select"),
+                hint("Esc", "Back"),
+            ],
         }
     }
 
@@ -950,7 +1065,10 @@ impl Screen for AccountDetails {
             Ok(AccountsReply::Checked(check)) => {
                 self.account = check.account.clone();
                 if check.account.status == AccountStatus::Unreachable {
-                    ctx.say(Message::error("Could not reach this address.", "Is the server running?"));
+                    ctx.say(Message::error(
+                        "Could not reach this address.",
+                        "Is the server running?",
+                    ));
                 } else {
                     ctx.say(Message::success(
                         &format!("Connected. {} models found.", check.models.len()),
@@ -974,14 +1092,23 @@ impl Screen for AccountDetails {
             return None;
         };
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
-        let mut body = vec![Line::raw(format!("Remove {}?", self.account.name)), Line::default()];
+        let mut body = vec![
+            Line::raw(format!("Remove {}?", self.account.name)),
+            Line::default(),
+        ];
         let note = match self.account.method {
-            SignInMethod::ApiKey => "It is in no pool, so no agent uses it. Its saved key is deleted too.",
+            SignInMethod::ApiKey => {
+                "It is in no pool, so no agent uses it. Its saved key is deleted too."
+            }
             _ => "It is in no pool, so no agent uses it.",
         };
         body.extend(wrap(note, 50).into_iter().map(Line::raw));
         body.push(Line::default());
-        body.push(buttons(&["Cancel", "Remove"], Some(usize::from(remove_focused)), &ctx.theme));
+        body.push(buttons(
+            &["Cancel", "Remove"],
+            Some(usize::from(remove_focused)),
+            &ctx.theme,
+        ));
         Some((
             Modal {
                 width: 54,
@@ -989,7 +1116,11 @@ impl Screen for AccountDetails {
                 body,
                 top: None,
             },
-            vec![hint(&arrows, "Choose"), hint("Enter", "Confirm"), hint("Esc", "Cancel")],
+            vec![
+                hint(&arrows, "Choose"),
+                hint("Enter", "Confirm"),
+                hint("Esc", "Cancel"),
+            ],
         ))
     }
 
