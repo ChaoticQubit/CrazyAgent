@@ -870,6 +870,57 @@ fn publish(
     save_entry(tx, &config.settings.knowledge, &entry)
 }
 
+/// Records an owner-selected research excerpt as a provisional project knowledge entry.
+/// Takes the project, the research source name, the bounded excerpt and the revision.
+/// Returns Applied with an entry the owner confirms through the existing Review Keep.
+pub(crate) fn propose_research(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    source: &str,
+    text: &str,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    if !text_valid(text, config.settings.knowledge.text_bytes_max) {
+        return reject("memory_text_too_long");
+    }
+    let digest = hash(format!("{}\n{source}\n{text}", project.as_str()).as_bytes());
+    let id = RequestId::new(format!("research-{}", &digest[..32])).map_err(error)?;
+    if load_entry(tx, &id)?.is_some() {
+        return reject("memory_entry_exists");
+    }
+    let principal = Principal {
+        id: RequestId::new(format!("owner-{source}")).map_err(error)?,
+        project_id: project.clone(),
+        task_id: TaskId::new("project-research").map_err(error)?,
+        session_id: SessionId::new("project-research").map_err(error)?,
+        role: KnowledgeRole::Curator,
+    };
+    let activity = ActivityInput {
+        id: id.clone(),
+        source_id: id.clone(),
+        category: CaptureCategory::ToolOutput,
+        text: text.into(),
+        gaps: Vec::new(),
+    };
+    let nomination = NominationInput {
+        id: id.clone(),
+        activity_ids: vec![id.clone()],
+        text: text.into(),
+    };
+    for outcome in [
+        capture(tx, config, &principal, &activity)?,
+        nominate(tx, config, &principal, &nomination)?,
+    ] {
+        if outcome != Outcome::Applied {
+            return Ok(outcome);
+        }
+    }
+    let outcome = publish(tx, config, &principal, &id, &id, text, revision)?;
+    assert!(outcome != Outcome::Applied || load_entry(tx, &id)?.is_some());
+    Ok(outcome)
+}
+
 fn nominate_global(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,

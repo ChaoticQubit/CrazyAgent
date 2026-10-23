@@ -120,6 +120,16 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         spec: ProjectSpec,
     },
+    SetupProject {
+        project_id: ProjectId,
+        spec: ProjectSpec,
+        setup: crate::project_setup::ProjectSetup,
+    },
+    SaveResearchToMemory {
+        project_id: ProjectId,
+        research: crate::project_setup::ResearchKind,
+        section: Option<String>,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -180,6 +190,32 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     spec: spec.clone(),
                 }
+            }
+            Self::SetupProject {
+                project_id,
+                spec,
+                setup,
+            } => {
+                let action = crate::project_setup::SetupAction::Create {
+                    project_id: project_id.clone(),
+                    spec: spec.clone(),
+                    setup: setup.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SaveResearchToMemory {
+                project_id,
+                research,
+                section,
+            } => {
+                let action = crate::project_setup::SetupAction::SaveToMemory {
+                    project_id: project_id.clone(),
+                    research: *research,
+                    section: section.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
             }
             Self::ModelAccess {
                 expected_config_id,
@@ -317,6 +353,24 @@ pub enum OwnerRead {
     CurrentBrief {
         project_id: ProjectId,
     },
+    ProjectCatalog {
+        pool: Option<CredentialRef>,
+        research: Vec<crate::project_setup::ResearchKind>,
+    },
+    ProjectSetup {
+        project_id: ProjectId,
+    },
+    ResearchJobs {
+        project_id: ProjectId,
+    },
+    ProjectContext {
+        project_id: ProjectId,
+    },
+    ProjectContextItem {
+        project_id: ProjectId,
+        path: String,
+        offset: u64,
+    },
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -370,7 +424,22 @@ impl OwnerRead {
             | Self::Baseline { .. }
             | Self::Capabilities
             | Self::ConversationHistory { .. }
-            | Self::CurrentBrief { .. } => return Ok(None),
+            | Self::CurrentBrief { .. }
+            | Self::ProjectSetup { .. }
+            | Self::ResearchJobs { .. }
+            | Self::ProjectContext { .. } => return Ok(None),
+            Self::ProjectCatalog { research, .. } => {
+                if research.len() > crate::project_setup::ResearchKind::ALL.len() {
+                    return Err(failure("research_duplicate"));
+                }
+                return Ok(None);
+            }
+            Self::ProjectContextItem { path, .. } => {
+                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                    return Err(failure("context_path_invalid"));
+                }
+                return Ok(None);
+            }
             Self::Setting { name } => {
                 if name.is_empty() || name.len() > 96 {
                     return Err(failure("owner_setting_name_bounds"));
@@ -657,6 +726,23 @@ pub enum OwnerData {
     CurrentBrief {
         project_id: ProjectId,
         brief: Option<crate::conversation::ConversationEntry>,
+    },
+    ProjectCatalog {
+        catalog: Box<crate::project_setup::ProjectCatalog>,
+    },
+    ProjectSetup {
+        project_id: ProjectId,
+        setup: Option<Box<crate::project_setup::StoredSetup>>,
+    },
+    ResearchJobs {
+        project_id: ProjectId,
+        jobs: Vec<crate::project_setup::ResearchJob>,
+    },
+    ProjectContext {
+        context: crate::project_setup::ProjectContext,
+    },
+    ProjectContextItem {
+        chunk: crate::project_setup::ContextChunk,
     },
     Page {
         items: Vec<OwnerSummary>,

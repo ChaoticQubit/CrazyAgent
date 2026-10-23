@@ -1,0 +1,1505 @@
+use crate::config::{EffectiveConfig, ModelAuthentication};
+use crate::engine::EngineError;
+use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rustix::fs::{FileType, Mode, OFlags};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+
+pub const ABOUT_BYTES_MAX: usize = 8192;
+pub const TECH_ENTRIES_MAX: usize = 32;
+pub const TECH_ENTRY_BYTES_MAX: usize = 64;
+pub const DOCUMENTS_MAX: usize = 16;
+pub const DOCUMENT_PATH_BYTES_MAX: usize = 1024;
+pub const DOCUMENT_NAME_BYTES_MAX: usize = 255;
+pub const DOCUMENT_BYTES_MAX: u64 = 50 * 1024 * 1024;
+pub const PROJECT_DOCUMENT_BYTES_MAX: u64 = 200 * 1024 * 1024;
+pub const DOCUMENT_EXTENSIONS: [&str; 8] =
+    ["pdf", "md", "txt", "docx", "csv", "png", "jpg", "jpeg"];
+pub const HARNESS_BYTES_MAX: usize = 64;
+pub const SUB_HARNESSES_MAX: usize = 8;
+pub const HARNESS_AGENTS_MAX: u8 = 32;
+pub const TEAM_AGENTS_MAX: u8 = 64;
+pub const CONTEXT_ITEMS_MAX: usize = 64;
+pub const CONTEXT_CHUNK_BYTES: usize = 8192;
+pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
+pub const CONTEXT_DIRECTORY: &str = "context";
+pub const PROJECTS_DIRECTORY: &str = "projects";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    Website,
+    MobileApp,
+    DesktopApp,
+    Cli,
+    ApiBackend,
+    Other,
+}
+
+impl Platform {
+    pub const ALL: [Platform; 6] = [
+        Self::Website,
+        Self::MobileApp,
+        Self::DesktopApp,
+        Self::Cli,
+        Self::ApiBackend,
+        Self::Other,
+    ];
+
+    /// Names the platform in plain language for every client.
+    /// Takes the platform value.
+    /// Returns its short label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Website => "Website",
+            Self::MobileApp => "Mobile app",
+            Self::DesktopApp => "Desktop app",
+            Self::Cli => "CLI",
+            Self::ApiBackend => "API or backend",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchKind {
+    MarketResearch,
+    CompetitorResearch,
+    DesignResearch,
+    FrontEndDesign,
+    TechStackResearch,
+}
+
+impl ResearchKind {
+    pub const ALL: [ResearchKind; 5] = [
+        Self::MarketResearch,
+        Self::CompetitorResearch,
+        Self::DesignResearch,
+        Self::FrontEndDesign,
+        Self::TechStackResearch,
+    ];
+
+    /// Names the research toggle in plain language for every client.
+    /// Takes the research kind.
+    /// Returns its short label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MarketResearch => "Market research",
+            Self::CompetitorResearch => "Competitor research",
+            Self::DesignResearch => "Design research",
+            Self::FrontEndDesign => "Front-end design",
+            Self::TechStackResearch => "Tech stack research",
+        }
+    }
+
+    /// Gives the stable storage and file name of the research kind.
+    /// Takes the research kind.
+    /// Returns the snake case name used for jobs and report files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MarketResearch => "market_research",
+            Self::CompetitorResearch => "competitor_research",
+            Self::DesignResearch => "design_research",
+            Self::FrontEndDesign => "front_end_design",
+            Self::TechStackResearch => "tech_stack_research",
+        }
+    }
+
+    /// Parses a stored research kind name.
+    /// Takes the snake case name.
+    /// Returns the kind, or none for an unknown name.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// Gives the report path of this kind relative to the project folder.
+    /// Takes the research kind.
+    /// Returns `context/research/<kind>.md`.
+    pub fn report_path(self) -> String {
+        format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TechGroup {
+    Language,
+    Framework,
+    Database,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TechOption {
+    pub id: String,
+    pub label: String,
+    pub group: TechGroup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabeledOption<T> {
+    pub kind: T,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessSlot {
+    pub harness: String,
+    pub agents: u8,
+    pub tools: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamPlan {
+    pub master: String,
+    pub master_tools: bool,
+    pub sub_harnesses: Vec<HarnessSlot>,
+    pub min_agents: u8,
+    pub max_agents: u8,
+}
+
+impl TeamPlan {
+    /// Validates harness identifiers, agent counts and the agent range.
+    /// Takes an untrusted team plan.
+    /// Returns a plain rejection code when any bound fails.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if !harness_valid(&self.master) {
+            return Err(failure("team_harness_invalid"));
+        }
+        if self.sub_harnesses.len() > SUB_HARNESSES_MAX {
+            return Err(failure("team_harnesses_too_many"));
+        }
+        for slot in &self.sub_harnesses {
+            if !harness_valid(&slot.harness) {
+                return Err(failure("team_harness_invalid"));
+            }
+            if !(1..=HARNESS_AGENTS_MAX).contains(&slot.agents) {
+                return Err(failure("team_agent_count_invalid"));
+            }
+        }
+        let total = self.total_agents();
+        if self.min_agents == 0
+            || self.min_agents > self.max_agents
+            || self.max_agents > TEAM_AGENTS_MAX
+            || total < u32::from(self.min_agents)
+            || total > u32::from(self.max_agents)
+        {
+            return Err(failure("team_agent_range_invalid"));
+        }
+        Ok(())
+    }
+
+    /// Counts the master and every sub-harness agent.
+    /// Takes the team plan.
+    /// Returns the total number of agents the plan describes.
+    pub fn total_agents(&self) -> u32 {
+        1 + self
+            .sub_harnesses
+            .iter()
+            .map(|slot| u32::from(slot.agents))
+            .sum::<u32>()
+    }
+
+    fn research_harnesses(&self) -> Vec<&str> {
+        let slots: Vec<&str> = self
+            .sub_harnesses
+            .iter()
+            .flat_map(|slot| std::iter::repeat_n(slot.harness.as_str(), usize::from(slot.agents)))
+            .collect();
+        if slots.is_empty() {
+            vec![self.master.as_str()]
+        } else {
+            slots
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSetup {
+    pub about: String,
+    pub tech_stack: Vec<String>,
+    pub platforms: Vec<Platform>,
+    pub research: Vec<ResearchKind>,
+    pub pool: Option<CredentialRef>,
+    pub team: Option<TeamPlan>,
+    pub documents: Vec<String>,
+}
+
+impl ProjectSetup {
+    /// Validates every field of a new project request without touching the filesystem.
+    /// Takes an untrusted setup from a client.
+    /// Returns a plain rejection code when any bound fails.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if self.about.len() > ABOUT_BYTES_MAX
+            || self
+                .about
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(failure("project_about_invalid"));
+        }
+        if self.tech_stack.len() > TECH_ENTRIES_MAX {
+            return Err(failure("tech_stack_too_long"));
+        }
+        let mut seen = BTreeSet::new();
+        for entry in &self.tech_stack {
+            if entry.trim().is_empty()
+                || entry.len() > TECH_ENTRY_BYTES_MAX
+                || entry.chars().any(char::is_control)
+                || !seen.insert(entry.trim().to_lowercase())
+            {
+                return Err(failure("tech_stack_entry_invalid"));
+            }
+        }
+        if self.platforms.iter().collect::<BTreeSet<_>>().len() != self.platforms.len() {
+            return Err(failure("platforms_duplicate"));
+        }
+        if self.research.iter().collect::<BTreeSet<_>>().len() != self.research.len() {
+            return Err(failure("research_duplicate"));
+        }
+        if self.documents.len() > DOCUMENTS_MAX {
+            return Err(failure("documents_too_many"));
+        }
+        for path in &self.documents {
+            if path.len() > DOCUMENT_PATH_BYTES_MAX
+                || path.chars().any(char::is_control)
+                || !Path::new(path).is_absolute()
+            {
+                return Err(failure("document_path_invalid"));
+            }
+        }
+        if let Some(team) = &self.team {
+            team.validate()?;
+        }
+        assert!(self.platforms.len() <= Platform::ALL.len());
+        assert!(self.research.len() <= ResearchKind::ALL.len());
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredDocument {
+    pub name: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSetup {
+    pub project_id: ProjectId,
+    pub name: String,
+    pub about: String,
+    pub tech_stack: Vec<String>,
+    pub platforms: Vec<Platform>,
+    pub research: Vec<ResearchKind>,
+    pub pool: Option<CredentialRef>,
+    pub team: TeamPlan,
+    pub documents: Vec<StoredDocument>,
+    pub folder: String,
+    pub created_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCatalog {
+    pub tech_stack: Vec<TechOption>,
+    pub platforms: Vec<LabeledOption<Platform>>,
+    pub research: Vec<LabeledOption<ResearchKind>>,
+    pub document_extensions: Vec<String>,
+    pub documents_max: usize,
+    pub document_bytes_max: u64,
+    pub project_document_bytes_max: u64,
+    pub default_team: TeamPlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchStatus {
+    Queued,
+    NeedsPool,
+    Running,
+    Done,
+    Failed,
+}
+
+impl ResearchStatus {
+    /// Names the job status in plain language.
+    /// Takes the status.
+    /// Returns its label, for example "Needs a pool".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::NeedsPool => "Needs a pool",
+            Self::Running => "Running",
+            Self::Done => "Done",
+            Self::Failed => "Failed",
+        }
+    }
+
+    fn stored(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::NeedsPool => "needs_pool",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, EngineError> {
+        [
+            Self::Queued,
+            Self::NeedsPool,
+            Self::Running,
+            Self::Done,
+            Self::Failed,
+        ]
+        .into_iter()
+        .find(|status| status.stored() == value)
+        .ok_or_else(|| failure("research_status_corrupt"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchJob {
+    pub id: String,
+    pub project_id: ProjectId,
+    pub kind: ResearchKind,
+    pub kind_label: String,
+    pub status: ResearchStatus,
+    pub status_label: String,
+    pub report_path: String,
+    pub harness: String,
+    pub attempts: u32,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    pub started_ms: Option<i64>,
+    pub finished_ms: Option<i64>,
+    pub failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextKind {
+    Brief,
+    Document,
+    Research,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextItem {
+    pub path: String,
+    pub kind: ContextKind,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectContext {
+    pub project_id: ProjectId,
+    pub folder: String,
+    pub items: Vec<ContextItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextChunk {
+    pub path: String,
+    pub bytes: u64,
+    pub offset: u64,
+    pub text: Option<String>,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SetupAction {
+    Create {
+        project_id: ProjectId,
+        spec: ProjectSpec,
+        setup: ProjectSetup,
+    },
+    SaveToMemory {
+        project_id: ProjectId,
+        research: ResearchKind,
+        section: Option<String>,
+    },
+}
+
+impl SetupAction {
+    /// Validates the action before it reaches storage.
+    /// Takes an untrusted owner action.
+    /// Returns a plain rejection code when any bound fails.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        match self {
+            Self::Create { spec, setup, .. } => {
+                spec.validate().map_err(|e| failure(&e.0))?;
+                setup.validate()
+            }
+            Self::SaveToMemory { section, .. } => {
+                if section.as_ref().is_some_and(|s| {
+                    s.trim().is_empty() || s.len() > 256 || s.chars().any(char::is_control)
+                }) {
+                    return Err(failure("research_section_invalid"));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn failure(code: &str) -> EngineError {
+    EngineError(code.into())
+}
+
+fn error(value: impl std::fmt::Display) -> EngineError {
+    EngineError(value.to_string())
+}
+
+fn harness_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= HARNESS_BYTES_MAX
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
+    ("typescript", "TypeScript", TechGroup::Language),
+    ("javascript", "JavaScript", TechGroup::Language),
+    ("python", "Python", TechGroup::Language),
+    ("rust", "Rust", TechGroup::Language),
+    ("go", "Go", TechGroup::Language),
+    ("java", "Java", TechGroup::Language),
+    ("kotlin", "Kotlin", TechGroup::Language),
+    ("swift", "Swift", TechGroup::Language),
+    ("csharp", "C#", TechGroup::Language),
+    ("ruby", "Ruby", TechGroup::Language),
+    ("php", "PHP", TechGroup::Language),
+    ("react", "React", TechGroup::Framework),
+    ("nextjs", "Next.js", TechGroup::Framework),
+    ("vue", "Vue", TechGroup::Framework),
+    ("svelte", "Svelte", TechGroup::Framework),
+    ("angular", "Angular", TechGroup::Framework),
+    ("react-native", "React Native", TechGroup::Framework),
+    ("flutter", "Flutter", TechGroup::Framework),
+    ("tauri", "Tauri", TechGroup::Framework),
+    ("electron", "Electron", TechGroup::Framework),
+    ("django", "Django", TechGroup::Framework),
+    ("fastapi", "FastAPI", TechGroup::Framework),
+    ("rails", "Ruby on Rails", TechGroup::Framework),
+    ("spring", "Spring", TechGroup::Framework),
+    ("postgresql", "PostgreSQL", TechGroup::Database),
+    ("mysql", "MySQL", TechGroup::Database),
+    ("sqlite", "SQLite", TechGroup::Database),
+    ("mongodb", "MongoDB", TechGroup::Database),
+    ("redis", "Redis", TechGroup::Database),
+    ("supabase", "Supabase", TechGroup::Database),
+];
+
+/// Serves the curated New Project choices and the smart team defaults.
+/// Takes the effective configuration, the chosen pool and the chosen research toggles.
+/// Returns the catalog, or `pool_missing` for a pool that does not exist.
+pub fn catalog(
+    config: &EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    research: &[ResearchKind],
+) -> Result<ProjectCatalog, &'static str> {
+    if pool.is_some_and(|pool| !pool_exists(config, pool)) {
+        return Err("pool_missing");
+    }
+    if research.len() > ResearchKind::ALL.len() {
+        return Err("research_duplicate");
+    }
+    let catalog = ProjectCatalog {
+        tech_stack: TECH_CATALOG
+            .iter()
+            .map(|(id, label, group)| TechOption {
+                id: (*id).into(),
+                label: (*label).into(),
+                group: *group,
+            })
+            .collect(),
+        platforms: Platform::ALL
+            .into_iter()
+            .map(|kind| LabeledOption {
+                kind,
+                label: kind.label().into(),
+            })
+            .collect(),
+        research: ResearchKind::ALL
+            .into_iter()
+            .map(|kind| LabeledOption {
+                kind,
+                label: kind.label().into(),
+            })
+            .collect(),
+        document_extensions: DOCUMENT_EXTENSIONS.iter().map(|e| (*e).into()).collect(),
+        documents_max: DOCUMENTS_MAX,
+        document_bytes_max: DOCUMENT_BYTES_MAX,
+        project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
+        default_team: default_team(config, pool, research),
+    };
+    assert!(catalog.default_team.validate().is_ok());
+    Ok(catalog)
+}
+
+fn pool_exists(config: &EffectiveConfig, pool: &CredentialRef) -> bool {
+    config
+        .settings
+        .model_access
+        .as_ref()
+        .is_some_and(|access| access.pools.iter().any(|p| &p.id == pool))
+}
+
+/// Reports whether a pool with members is explicitly assigned to the project.
+/// Takes the effective configuration and the project.
+/// Returns true only for an assignment present in the settings document.
+pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
+    config.settings.model_access.as_ref().is_some_and(|access| {
+        access.pools.iter().any(|pool| {
+            !pool.members.is_empty() && pool.projects.iter().any(|p| p.as_str() == project.as_str())
+        })
+    })
+}
+
+/// Builds the smart team defaults for the New Project Team step.
+/// Takes the configuration, the chosen pool and the chosen research toggles.
+/// Returns the best signed-in harness as master and one research agent per toggle, tools on.
+pub fn default_team(
+    config: &EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    research: &[ResearchKind],
+) -> TeamPlan {
+    let members: Vec<(bool, &str)> = pool
+        .and_then(|pool| {
+            let access = config.settings.model_access.as_ref()?;
+            let pool = access.pools.iter().find(|p| &p.id == pool)?;
+            Some(
+                access
+                    .connections
+                    .iter()
+                    .filter(|c| pool.members.contains(&c.id))
+                    .map(|c| {
+                        (
+                            matches!(c.auth, ModelAuthentication::NativeManaged { .. }),
+                            c.harness.as_str(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let rank = |harness: &str| match harness {
+        "codex" => 0,
+        "claude" => 1,
+        _ => 2,
+    };
+    let master = members
+        .iter()
+        .filter(|(_, harness)| harness_valid(harness))
+        .min_by_key(|(signed_in, harness)| (!signed_in, rank(harness), *harness))
+        .map_or("codex", |(_, harness)| harness)
+        .to_owned();
+    let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
+    let sub_harnesses = if agents == 0 {
+        Vec::new()
+    } else {
+        vec![HarnessSlot {
+            harness: master.clone(),
+            agents,
+            tools: true,
+        }]
+    };
+    let team = TeamPlan {
+        master,
+        master_tools: true,
+        sub_harnesses,
+        min_agents: 1,
+        max_agents: 1 + agents,
+    };
+    assert!(team.validate().is_ok());
+    team
+}
+
+fn extension_allowed(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DOCUMENT_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+fn open_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC
+}
+
+fn open_regular(path: &Path) -> Result<(std::fs::File, u64), &'static str> {
+    let fd = rustix::fs::open(path, open_flags(), Mode::empty()).map_err(|e| match e {
+        rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR => "document_not_found",
+        rustix::io::Errno::LOOP => "document_not_a_regular_file",
+        _ => "document_unreadable",
+    })?;
+    regular(fd, "document_not_a_regular_file")
+}
+
+fn regular(
+    fd: rustix::fd::OwnedFd,
+    code: &'static str,
+) -> Result<(std::fs::File, u64), &'static str> {
+    let stat = rustix::fs::fstat(&fd).map_err(|_| "document_unreadable")?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(code);
+    }
+    let bytes = u64::try_from(stat.st_size).map_err(|_| "document_unreadable")?;
+    Ok((std::fs::File::from(fd), bytes))
+}
+
+/// Copies owner-picked documents into a project's document folder without executing anything.
+/// Takes absolute source paths, the destination folder and the byte budget left for the project.
+/// Returns the stored names and sizes, or a plain rejection code after removing partial copies.
+pub fn copy_documents(
+    sources: &[String],
+    destination: &Path,
+    budget: u64,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    let mut stored: Vec<StoredDocument> = Vec::new();
+    let result = copy_each(sources, destination, budget, &mut stored);
+    if result.is_err() {
+        for document in &stored {
+            let _ = std::fs::remove_file(destination.join(&document.name));
+        }
+        let _ = std::fs::remove_file(destination.join(".partial"));
+    }
+    result.map(|()| stored)
+}
+
+fn copy_each(
+    sources: &[String],
+    destination: &Path,
+    budget: u64,
+    stored: &mut Vec<StoredDocument>,
+) -> Result<(), &'static str> {
+    if sources.len() > DOCUMENTS_MAX {
+        return Err("documents_too_many");
+    }
+    let mut names = BTreeSet::new();
+    let mut total: u64 = 0;
+    for source in sources {
+        let path = Path::new(source);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| {
+                !n.starts_with('.')
+                    && n.len() <= DOCUMENT_NAME_BYTES_MAX
+                    && !n.chars().any(char::is_control)
+            })
+            .ok_or("document_name_invalid")?;
+        if !extension_allowed(name) {
+            return Err("document_type_not_allowed");
+        }
+        if !names.insert(name.to_lowercase()) {
+            return Err("document_name_duplicate");
+        }
+        let (file, bytes) = open_regular(path)?;
+        if bytes > DOCUMENT_BYTES_MAX {
+            return Err("document_too_large");
+        }
+        if total.saturating_add(bytes) > budget {
+            return Err("project_documents_too_large");
+        }
+        let target = destination.join(name);
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => "document_name_duplicate",
+                _ => "project_folder_unwritable",
+            })?;
+        stored.push(StoredDocument {
+            name: name.to_owned(),
+            bytes,
+        });
+        let copied = std::io::copy(&mut file.take(bytes + 1), &mut output)
+            .map_err(|_| "document_unreadable")?;
+        if copied != bytes {
+            return Err("document_changed_while_copying");
+        }
+        output.sync_all().map_err(|_| "project_folder_unwritable")?;
+        total += bytes;
+        assert!(total <= budget);
+    }
+    assert_eq!(stored.len(), sources.len());
+    Ok(())
+}
+
+/// Creates the research tables when the engine database opens.
+/// Takes the engine connection.
+/// Returns any SQLite failure.
+pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS project_setups (project TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS research_jobs (
+                id TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('queued','needs_pool','running','done','failed')),
+                report_path TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                claimed_by TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_ms INTEGER NOT NULL,
+                updated_ms INTEGER NOT NULL,
+                started_ms INTEGER,
+                finished_ms INTEGER,
+                failure TEXT,
+                UNIQUE(project, kind));
+            CREATE INDEX IF NOT EXISTS research_jobs_status ON research_jobs(status, created_ms, id);",
+        )
+        .map_err(error)
+}
+
+fn job_id(project: &ProjectId, kind: ResearchKind) -> String {
+    let digest = crate::memory::hash(format!("{}\n{}", project.as_str(), kind.name()).as_bytes());
+    format!("research-{}", &digest[..24])
+}
+
+/// Queues one research job per toggle for a project.
+/// Takes the transaction, project, toggles, team plan, current pool assignment and time.
+/// Returns any SQLite failure; jobs start as Queued with a pool and Needs a pool without one.
+pub fn insert_jobs(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    kinds: &[ResearchKind],
+    team: &TeamPlan,
+    has_pool: bool,
+    now: i64,
+) -> Result<(), EngineError> {
+    let harnesses = team.research_harnesses();
+    assert!(!harnesses.is_empty());
+    let status = if has_pool {
+        ResearchStatus::Queued
+    } else {
+        ResearchStatus::NeedsPool
+    };
+    for (index, kind) in kinds.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO research_jobs(id,project,kind,status,report_path,harness,created_ms,updated_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
+            params![
+                job_id(project, *kind),
+                project.as_str(),
+                kind.name(),
+                status.stored(),
+                kind.report_path(),
+                harnesses[index % harnesses.len()],
+                now
+            ],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
+
+const JOB_COLUMNS: &str = "id,project,kind,status,report_path,harness,attempts,created_ms,updated_ms,started_ms,finished_ms,failure";
+
+fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<[Option<String>; 6]> {
+    Ok([
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ])
+}
+
+fn load_jobs(
+    tx: &Transaction<'_>,
+    filter: &str,
+    value: &str,
+) -> Result<Vec<ResearchJob>, EngineError> {
+    let mut statement = tx
+        .prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM research_jobs WHERE {filter}=?1 ORDER BY created_ms, id LIMIT 65"
+        ))
+        .map_err(error)?;
+    let rows = statement
+        .query_map([value], |row| {
+            Ok((
+                job_row(row)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })
+        .map_err(error)?;
+    let mut jobs = Vec::new();
+    for row in rows {
+        let (text, attempts, created_ms, updated_ms, started_ms, finished_ms, failure_code) =
+            row.map_err(error)?;
+        let [id, project, kind, status, report_path, harness] =
+            text.map(|value| value.ok_or_else(|| failure("research_job_corrupt")));
+        let kind = ResearchKind::parse(&kind?).ok_or_else(|| failure("research_job_corrupt"))?;
+        let status = ResearchStatus::parse(&status?)?;
+        jobs.push(ResearchJob {
+            id: id?,
+            project_id: ProjectId::new(project?).map_err(|e| failure(&e.0))?,
+            kind,
+            kind_label: kind.label().into(),
+            status,
+            status_label: status.label().into(),
+            report_path: report_path?,
+            harness: harness?,
+            attempts: u32::try_from(attempts).map_err(error)?,
+            created_ms,
+            updated_ms,
+            started_ms,
+            finished_ms,
+            failure: failure_code,
+        });
+    }
+    if jobs.len() > 64 {
+        return Err(failure("research_job_capacity"));
+    }
+    Ok(jobs)
+}
+
+fn effective(status: ResearchStatus, has_pool: bool) -> ResearchStatus {
+    match status {
+        ResearchStatus::Queued | ResearchStatus::NeedsPool if has_pool => ResearchStatus::Queued,
+        ResearchStatus::Queued | ResearchStatus::NeedsPool => ResearchStatus::NeedsPool,
+        other => other,
+    }
+}
+
+/// Lists a project's research jobs with the current pool assignment applied.
+/// Takes a read transaction, the configuration and the project.
+/// Returns at most 64 jobs in creation order with plain labels.
+pub fn list_jobs(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+) -> Result<Vec<ResearchJob>, EngineError> {
+    let has_pool = project_has_pool(config, project);
+    let mut jobs = load_jobs(tx, "project", project.as_str())?;
+    for job in &mut jobs {
+        job.status = effective(job.status, has_pool);
+        job.status_label = job.status.label().into();
+        assert_eq!(&job.project_id, project);
+    }
+    Ok(jobs)
+}
+
+fn sync_pool_status(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    now: i64,
+) -> Result<(), EngineError> {
+    let projects: Vec<String> = {
+        let mut statement = tx
+            .prepare("SELECT DISTINCT project FROM research_jobs WHERE status IN ('queued','needs_pool') LIMIT 4096")
+            .map_err(error)?;
+        let rows = statement.query_map([], |row| row.get(0)).map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)?
+    };
+    for project in projects {
+        let id = ProjectId::new(project.clone()).map_err(|e| failure(&e.0))?;
+        let status = effective(ResearchStatus::Queued, project_has_pool(config, &id));
+        tx.execute(
+            "UPDATE research_jobs SET status=?1, updated_ms=?2
+            WHERE project=?3 AND status IN ('queued','needs_pool') AND status<>?1",
+            params![status.stored(), now, project],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
+
+/// Atomically claims the oldest queued research job for one runner.
+/// Takes a connection, the configuration, a claimer identity and the time.
+/// Returns the claimed job marked Running, or none when nothing is claimable.
+pub fn claim_research_job(
+    connection: &mut Connection,
+    config: &EffectiveConfig,
+    claimer: &str,
+    now: i64,
+) -> Result<Option<ResearchJob>, EngineError> {
+    crate::protocol::RequestId::new(claimer).map_err(|_| failure("research_claimer_invalid"))?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    sync_pool_status(&tx, config, now)?;
+    let id: Option<String> = tx
+        .query_row(
+            "SELECT id FROM research_jobs WHERE status='queued' ORDER BY created_ms, id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(id) = id else {
+        tx.commit().map_err(error)?;
+        return Ok(None);
+    };
+    let changed = tx
+        .execute(
+            "UPDATE research_jobs SET status='running', claimed_by=?2, attempts=attempts+1,
+            started_ms=?3, updated_ms=?3, finished_ms=NULL, failure=NULL
+            WHERE id=?1 AND status='queued'",
+            params![id, claimer, now],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
+    let job = load_jobs(&tx, "id", &id)?
+        .pop()
+        .ok_or_else(|| failure("research_job_corrupt"))?;
+    tx.commit().map_err(error)?;
+    assert_eq!(job.status, ResearchStatus::Running);
+    Ok(Some(job))
+}
+
+/// Finishes a running job that the same claimer holds.
+/// Takes a connection, the job, the claimer, an optional failure code and the time.
+/// Returns `research_job_not_claimed` unless the job is running under that claimer.
+pub fn finish_research_job(
+    connection: &mut Connection,
+    id: &str,
+    claimer: &str,
+    failure_code: Option<&str>,
+    now: i64,
+) -> Result<(), EngineError> {
+    if failure_code.is_some_and(|code| crate::protocol::RequestId::new(code).is_err()) {
+        return Err(failure("research_failure_invalid"));
+    }
+    let status = if failure_code.is_some() {
+        ResearchStatus::Failed
+    } else {
+        ResearchStatus::Done
+    };
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let changed = tx
+        .execute(
+            "UPDATE research_jobs SET status=?1, failure=?2, finished_ms=?3, updated_ms=?3
+            WHERE id=?4 AND status='running' AND claimed_by=?5",
+            params![status.stored(), failure_code, now, id, claimer],
+        )
+        .map_err(error)?;
+    if changed != 1 {
+        return Err(failure("research_job_not_claimed"));
+    }
+    tx.commit().map_err(error)
+}
+
+/// Selects the whole report or one markdown section by its heading text.
+/// Takes the report text and an optional heading.
+/// Returns the trimmed text through the next heading of the same or higher level.
+pub fn section(report: &str, heading: Option<&str>) -> Option<String> {
+    let Some(heading) = heading else {
+        return Some(report.trim().to_owned());
+    };
+    let level = |line: &str| {
+        let hashes = line.bytes().take_while(|b| *b == b'#').count();
+        (hashes > 0 && line[hashes..].starts_with(' ')).then_some(hashes)
+    };
+    let lines: Vec<&str> = report.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| level(line).is_some_and(|n| line[n..].trim() == heading.trim()))?;
+    let depth = level(lines[start])?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| level(line).is_some_and(|n| n <= depth))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    Some(lines[start..end].join("\n").trim().to_owned())
+}
+
+fn projects_root(database: &Path) -> Result<PathBuf, EngineError> {
+    let runtime = std::fs::canonicalize(
+        database
+            .parent()
+            .ok_or_else(|| failure("runtime_parent_missing"))?,
+    )
+    .map_err(error)?;
+    let root = runtime.join(PROJECTS_DIRECTORY);
+    match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(error(e)),
+    }
+    if !std::fs::symlink_metadata(&root).map_err(error)?.is_dir() {
+        return Err(failure("projects_root_not_a_directory"));
+    }
+    Ok(root)
+}
+
+fn brief(name: &str, setup: &ProjectSetup, documents: &[StoredDocument]) -> String {
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            "- None\n".to_owned()
+        } else {
+            items.iter().map(|item| format!("- {item}\n")).collect()
+        }
+    };
+    format!(
+        "# {name}\n\n## About\n\n{}\n\n## Tech stack\n\n{}\n## Target platforms\n\n{}\n## Research\n\n{}\n## Documents\n\n{}",
+        if setup.about.trim().is_empty() {
+            "Not described yet."
+        } else {
+            setup.about.trim()
+        },
+        list(
+            setup
+                .tech_stack
+                .iter()
+                .map(|t| t.trim().to_owned())
+                .collect()
+        ),
+        list(
+            setup
+                .platforms
+                .iter()
+                .map(|p| p.label().to_owned())
+                .collect()
+        ),
+        list(
+            setup
+                .research
+                .iter()
+                .map(|r| format!("{} -> {}", r.label(), r.report_path()))
+                .collect()
+        ),
+        list(
+            documents
+                .iter()
+                .map(|d| format!("{CONTEXT_DIRECTORY}/documents/{}", d.name))
+                .collect()
+        ),
+    )
+}
+
+fn stage(staging: &Path, name: &str, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, Outcome> {
+    let builder = || {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    let unwritable = || Outcome::Rejected {
+        code: "project_folder_unwritable".into(),
+    };
+    builder().create(staging).map_err(|_| unwritable())?;
+    for directory in [
+        "context",
+        "context/documents",
+        "context/research",
+        "worktrees",
+    ] {
+        builder()
+            .create(staging.join(directory))
+            .map_err(|_| unwritable())?;
+    }
+    let documents = copy_documents(
+        &setup.documents,
+        &staging.join("context/documents"),
+        PROJECT_DOCUMENT_BYTES_MAX,
+    )
+    .map_err(|code| Outcome::Rejected { code: code.into() })?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(staging.join("context/brief.md"))
+        .map_err(|_| unwritable())?;
+    file.write_all(brief(name, setup, &documents).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| unwritable())?;
+    Ok(documents)
+}
+
+/// Executes a host-only project setup action inside the owner transaction.
+/// Takes the transaction, configuration, database path, action and revision.
+/// Returns Applied, or a plain rejection before any durable row is written.
+pub(crate) fn execute(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    database: &Path,
+    action: &SetupAction,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    action.validate()?;
+    match action {
+        SetupAction::Create {
+            project_id,
+            spec,
+            setup,
+        } => create(tx, config, database, project_id, spec, setup),
+        SetupAction::SaveToMemory {
+            project_id,
+            research,
+            section: heading,
+        } => {
+            let Some(stored) = load_setup(tx, project_id)? else {
+                return Ok(rejected("project_setup_missing"));
+            };
+            let report = match read_beneath(
+                Path::new(&stored.folder),
+                &research.report_path(),
+                0,
+                REPORT_BYTES_MAX,
+            ) {
+                Ok((bytes, _)) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => return Ok(rejected("research_report_missing")),
+            };
+            let Some(text) = section(&report, heading.as_deref()) else {
+                return Ok(rejected("research_section_missing"));
+            };
+            crate::memory::propose_research(
+                tx,
+                config,
+                project_id,
+                research.name(),
+                &text,
+                revision,
+            )
+        }
+    }
+}
+
+fn rejected(code: &str) -> Outcome {
+    Outcome::Rejected { code: code.into() }
+}
+
+fn create(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    database: &Path,
+    project_id: &ProjectId,
+    spec: &ProjectSpec,
+    setup: &ProjectSetup,
+) -> Result<Outcome, EngineError> {
+    if setup
+        .pool
+        .as_ref()
+        .is_some_and(|pool| !pool_exists(config, pool))
+    {
+        return Ok(rejected("pool_missing"));
+    }
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if exists {
+        return Ok(rejected("project_exists"));
+    }
+    let team = setup
+        .team
+        .clone()
+        .unwrap_or_else(|| default_team(config, setup.pool.as_ref(), &setup.research));
+    team.validate()?;
+    let root = projects_root(database)?;
+    let folder = root.join(project_id.as_str());
+    if std::fs::symlink_metadata(&folder).is_ok() {
+        return Ok(rejected("project_folder_exists"));
+    }
+    let staging = root.join(format!(".staging-{}", project_id.as_str()));
+    if std::fs::symlink_metadata(&staging).is_ok() {
+        std::fs::remove_dir_all(&staging).map_err(error)?;
+    }
+    let documents = match stage(&staging, &spec.name, setup) {
+        Ok(documents) => documents,
+        Err(outcome) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Ok(outcome);
+        }
+    };
+    let result = record(
+        tx, config, project_id, spec, setup, team, documents, &folder,
+    )
+    .and_then(|outcome| {
+        if outcome == Outcome::Applied {
+            std::fs::rename(&staging, &folder).map_err(error)?;
+        }
+        Ok(outcome)
+    });
+    if !matches!(result, Ok(Outcome::Applied)) {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+    spec: &ProjectSpec,
+    setup: &ProjectSetup,
+    team: TeamPlan,
+    documents: Vec<StoredDocument>,
+    folder: &Path,
+) -> Result<Outcome, EngineError> {
+    let outcome = crate::storage::create_project(tx, project_id, spec)?;
+    if outcome != Outcome::Applied {
+        return Ok(outcome);
+    }
+    let now = now_ms();
+    let stored = StoredSetup {
+        project_id: project_id.clone(),
+        name: spec.name.clone(),
+        about: setup.about.clone(),
+        tech_stack: setup
+            .tech_stack
+            .iter()
+            .map(|t| t.trim().to_owned())
+            .collect(),
+        platforms: setup.platforms.clone(),
+        research: setup.research.clone(),
+        pool: setup.pool.clone(),
+        team,
+        documents,
+        folder: folder
+            .to_str()
+            .ok_or_else(|| failure("project_folder_unwritable"))?
+            .to_owned(),
+        created_ms: now,
+    };
+    tx.execute(
+        "INSERT INTO project_setups VALUES (?1,?2)",
+        params![
+            project_id.as_str(),
+            serde_json::to_string(&stored).map_err(error)?
+        ],
+    )
+    .map_err(error)?;
+    insert_jobs(
+        tx,
+        project_id,
+        &setup.research,
+        &stored.team,
+        project_has_pool(config, project_id),
+        now,
+    )?;
+    assert!(!tx.is_autocommit());
+    Ok(Outcome::Applied)
+}
+
+/// Loads the stored setup of one project.
+/// Takes a transaction and the project.
+/// Returns the setup, or none for a project created without one.
+pub fn load_setup(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Option<StoredSetup>, EngineError> {
+    let body: Option<String> = tx
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    body.map(|body| {
+        let stored: StoredSetup = serde_json::from_str(&body).map_err(error)?;
+        assert_eq!(&stored.project_id, project);
+        Ok(stored)
+    })
+    .transpose()
+}
+
+fn context_kind(path: &str) -> Option<ContextKind> {
+    let rest = path.strip_prefix("context/")?;
+    if rest == "brief.md" {
+        return Some(ContextKind::Brief);
+    }
+    let (directory, name) = rest.split_once('/')?;
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains('/')
+        || name.len() > DOCUMENT_NAME_BYTES_MAX
+        || name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    match directory {
+        "documents" => Some(ContextKind::Document),
+        "research" => Some(ContextKind::Research),
+        _ => None,
+    }
+}
+
+fn open_directory(
+    parent: &rustix::fd::OwnedFd,
+    name: &str,
+) -> rustix::io::Result<rustix::fd::OwnedFd> {
+    rustix::fs::openat(
+        parent,
+        name,
+        open_flags() | OFlags::DIRECTORY,
+        Mode::empty(),
+    )
+}
+
+fn read_beneath(
+    folder: &Path,
+    relative: &str,
+    offset: u64,
+    limit: u64,
+) -> Result<(Vec<u8>, u64), &'static str> {
+    context_kind(relative).ok_or("context_path_invalid")?;
+    let missing = |_| "context_item_missing";
+    let mut fd = rustix::fs::open(folder, open_flags() | OFlags::DIRECTORY, Mode::empty())
+        .map_err(missing)?;
+    let parts: Vec<&str> = relative.split('/').collect();
+    for directory in &parts[..parts.len() - 1] {
+        fd = open_directory(&fd, directory).map_err(missing)?;
+    }
+    let file = rustix::fs::openat(&fd, parts[parts.len() - 1], open_flags(), Mode::empty())
+        .map_err(missing)?;
+    let (mut file, bytes) = regular(file, "context_item_missing")?;
+    if offset > bytes {
+        return Err("context_offset_invalid");
+    }
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))
+        .map_err(|_| "context_item_unreadable")?;
+    let mut buffer = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut buffer)
+        .map_err(|_| "context_item_unreadable")?;
+    assert!(buffer.len() as u64 <= limit);
+    Ok((buffer, bytes))
+}
+
+/// Lists the brief, documents and research reports in a project folder.
+/// Takes the stored setup.
+/// Returns at most 64 regular-file items; links and special files are skipped.
+pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError> {
+    let folder = Path::new(&stored.folder);
+    let mut items = Vec::new();
+    let mut push = |path: String, kind: ContextKind| -> Result<(), EngineError> {
+        if items.len() >= CONTEXT_ITEMS_MAX {
+            return Ok(());
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(folder.join(&path))
+            && metadata.is_file()
+        {
+            items.push(ContextItem {
+                path,
+                kind,
+                bytes: metadata.len(),
+            });
+        }
+        Ok(())
+    };
+    push(format!("{CONTEXT_DIRECTORY}/brief.md"), ContextKind::Brief)?;
+    for (directory, kind) in [
+        ("documents", ContextKind::Document),
+        ("research", ContextKind::Research),
+    ] {
+        let path = folder.join(CONTEXT_DIRECTORY).join(directory);
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&path)
+            .map_err(error)?
+            .take(CONTEXT_ITEMS_MAX * 4)
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let relative = format!("{CONTEXT_DIRECTORY}/{directory}/{name}");
+            if context_kind(&relative) == Some(kind) {
+                push(relative, kind)?;
+            }
+        }
+    }
+    assert!(items.len() <= CONTEXT_ITEMS_MAX);
+    Ok(ProjectContext {
+        project_id: stored.project_id.clone(),
+        folder: stored.folder.clone(),
+        items,
+    })
+}
+
+/// Reads one bounded chunk of a context item without following links.
+/// Takes the stored setup, the relative item path and a byte offset.
+/// Returns text for markdown, text and csv files; other kinds return only their size.
+pub fn read_context(
+    stored: &StoredSetup,
+    path: &str,
+    offset: u64,
+) -> Result<ContextChunk, EngineError> {
+    let textual = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ["md", "txt", "csv"].contains(&e.to_ascii_lowercase().as_str()));
+    let limit = if textual {
+        CONTEXT_CHUNK_BYTES as u64
+    } else {
+        0
+    };
+    let (mut bytes, size) =
+        read_beneath(Path::new(&stored.folder), path, offset, limit).map_err(failure)?;
+    if !textual {
+        return Ok(ContextChunk {
+            path: path.into(),
+            bytes: size,
+            offset,
+            text: None,
+            next_offset: None,
+        });
+    }
+    let complete = offset + bytes.len() as u64 >= size;
+    if !complete {
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => bytes.len(),
+        };
+        bytes.truncate(valid.max(1));
+    }
+    let consumed = bytes.len() as u64;
+    let chunk = ContextChunk {
+        path: path.into(),
+        bytes: size,
+        offset,
+        text: Some(String::from_utf8_lossy(&bytes).into_owned()),
+        next_offset: (offset + consumed < size).then_some(offset + consumed),
+    };
+    assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
+    Ok(chunk)
+}
+
+#[cfg(test)]
+mod engine_tests;
+#[cfg(test)]
+mod tests;

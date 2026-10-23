@@ -171,6 +171,10 @@ pub enum Command {
     Assets {
         action: crate::assets::AssetAction,
     },
+    #[serde(skip_deserializing)]
+    ProjectSetup {
+        action: crate::project_setup::SetupAction,
+    },
     ProposePlan {
         plan: crate::coordination::WorkPlan,
     },
