@@ -1,8 +1,7 @@
 use super::*;
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
-    CodexAuthObservation, Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact,
-    encode_fact,
+    Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
 };
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyObservation, NativeAuthCustodyRetirement,
@@ -379,7 +378,6 @@ fn commit_native_auth_custody(
 pub(crate) enum NativeAuthHostUpdate {
     CustodyUncertain,
     Unavailable,
-    Codex(CodexAuthObservation),
 }
 
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
@@ -764,7 +762,6 @@ fn apply_update(
     update: NativeAuthHostUpdate,
 ) -> Result<(), EngineError> {
     match update {
-        NativeAuthHostUpdate::Codex(observation) => observation.apply(fact)?,
         NativeAuthHostUpdate::CustodyUncertain => {
             fact.phase = NativeAuthPhase::Uncertain;
             fact.code = Some("native_auth_recovery_required".into());

@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) enum MasterRuntimeCommand {
+    #[cfg(test)]
     RegisterRcliProfile {
         host: HostStamp,
         project_id: ProjectId,
@@ -100,12 +101,14 @@ pub(crate) struct PreparedMasterTurn {
 }
 
 pub(crate) enum MasterRuntimeResult {
+    #[cfg(test)]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
     Profile(Box<NativeProfileUse>),
 }
 
+#[cfg(test)]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct MasterStopBinding {
     db_instance: String,
@@ -116,6 +119,7 @@ pub(crate) struct MasterStopBinding {
     provenance: OwnerProvenance,
 }
 
+#[cfg(test)]
 impl MasterStopBinding {
     pub(crate) fn from_fresh_submit(
         host: &HostStamp,
@@ -824,6 +828,7 @@ fn load_runtime_turn(
     Ok((session, turn))
 }
 
+#[cfg(test)]
 pub(super) fn settle_stopped_commit(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2186,19 +2191,33 @@ fn adopt_account_profile(
     Ok(())
 }
 
+#[cfg(test)]
+struct RcliRegistration<'a> {
+    host: &'a HostStamp,
+    project_id: &'a ProjectId,
+    session_id: &'a SessionId,
+    configured_home: &'a Path,
+}
+
+#[cfg(test)]
 fn register_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
     custody: &mut Result<NativeProfileCustody, EngineError>,
-    host: &HostStamp,
-    project_id: &ProjectId,
-    session_id: &SessionId,
-    configured_home: &Path,
+    registration: RcliRegistration<'_>,
 ) -> Result<MasterRuntimeResult, EngineError> {
+    let host = registration.host;
     let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
     let tx = db.transaction().map_err(error)?;
-    let original = registration_session(&tx, config, Some(sources), host, project_id, session_id)?;
+    let original = registration_session(
+        &tx,
+        config,
+        Some(sources),
+        host,
+        registration.project_id,
+        registration.session_id,
+    )?;
     let connection = configured_connection(config, &original)?.clone();
     let revision = Cursor::new(owner_revision(&tx)?);
     tx.commit().map_err(error)?;
@@ -2208,7 +2227,7 @@ fn register_rcli_profile(
         host,
         &original,
         connection,
-        configured_home,
+        registration.configured_home,
         revision,
     )?;
     let tx = db.transaction().map_err(error)?;
@@ -2523,6 +2542,7 @@ pub(super) fn runtime(
     path: &Path,
     command: MasterRuntimeCommand,
 ) -> Result<MasterRuntimeResult, EngineError> {
+    #[cfg(test)]
     if let MasterRuntimeCommand::RegisterRcliProfile {
         host,
         project_id,
@@ -2530,16 +2550,13 @@ pub(super) fn runtime(
         configured_home,
     } = command
     {
-        return register_rcli_profile(
-            db,
-            config,
-            sources,
-            custody,
-            &host,
-            &project_id,
-            &session_id,
-            &configured_home,
-        );
+        let registration = RcliRegistration {
+            host: &host,
+            project_id: &project_id,
+            session_id: &session_id,
+            configured_home: &configured_home,
+        };
+        return register_rcli_profile(db, config, sources, custody, registration);
     }
     if let MasterRuntimeCommand::Prepare {
         host,
@@ -2555,6 +2572,7 @@ pub(super) fn runtime(
     provision_bootstrap(db, config, sources, custody, path, &command)?;
     let tx = db.transaction().map_err(error)?;
     let (host, project_id, session_id, turn_id) = match &command {
+        #[cfg(test)]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
         MasterRuntimeCommand::Route {
             host,
@@ -2591,6 +2609,7 @@ pub(super) fn runtime(
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     match command {
+        #[cfg(test)]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
         MasterRuntimeCommand::Route { ref host, .. } => {
             if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {

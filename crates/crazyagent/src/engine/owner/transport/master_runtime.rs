@@ -295,7 +295,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::ConfiguredProfile(_) => {
+            MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
+            #[cfg(test)]
+            MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));
             }
         };

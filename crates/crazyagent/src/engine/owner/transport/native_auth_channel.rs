@@ -639,6 +639,7 @@ impl OwnerRuntimeHandle {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_native_auth_custody(
         &self,
         work: NativeAuthWork,
