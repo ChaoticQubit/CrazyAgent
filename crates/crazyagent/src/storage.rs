@@ -645,6 +645,7 @@ fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineErr
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
+    crate::project_setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
@@ -1047,6 +1048,9 @@ fn execute(
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
+        Command::ProjectSetup { action } => {
+            crate::project_setup::execute(tx, config, path, action, revision)
+        }
         Command::Snapshot => {
             let mut outcome = snapshot(tx)?;
             if let Outcome::Snapshot { tasks, .. } = &mut outcome {
@@ -1112,7 +1116,7 @@ fn execute(
     }
 }
 
-fn create_project(
+pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
@@ -1887,6 +1891,39 @@ fn owner_read(
         OwnerRead::CurrentBrief { project_id } => {
             crate::conversation::current_brief(&tx, project_id)?
         }
+        OwnerRead::ProjectCatalog { pool, research } => OwnerData::ProjectCatalog {
+            catalog: Box::new(
+                crate::project_setup::catalog(
+                    config,
+                    pool.as_ref(),
+                    research,
+                    &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                )
+                .map_err(error)?,
+            ),
+        },
+        OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {
+            project_id: project_id.clone(),
+            setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
+        },
+        OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
+            project_id: project_id.clone(),
+            jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
+        },
+        OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
+            context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
+        },
+        OwnerRead::ProjectContextItem {
+            project_id,
+            path,
+            offset,
+        } => OwnerData::ProjectContextItem {
+            chunk: crate::project_setup::read_context(
+                &stored_setup(&tx, project_id)?,
+                path,
+                *offset,
+            )?,
+        },
         OwnerRead::Page {
             view,
             cursor,
@@ -1919,6 +1956,14 @@ fn owner_read(
         return Err(error("owner_response_bounds"));
     }
     Ok(reply)
+}
+
+fn stored_setup(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<crate::project_setup::StoredSetup, EngineError> {
+    crate::project_setup::load_setup(tx, project_id)?
+        .ok_or_else(|| error("project_setup_missing"))
 }
 
 fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {

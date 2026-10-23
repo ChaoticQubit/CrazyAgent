@@ -191,6 +191,9 @@ fn event_loop(
             } else if let Some(job) = app.take_creation_job() {
                 connection.creation(job).map_err(TuiError)?;
                 dirty = true;
+            } else if let Some(query) = app.take_setup_query() {
+                connection.project_setup(query).map_err(TuiError)?;
+                dirty = true;
             } else if let Some(job) = app.model_access_request().map_err(TuiError)? {
                 connection.model_access(job).map_err(TuiError)?;
                 dirty = true;
