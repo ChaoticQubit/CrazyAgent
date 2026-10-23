@@ -227,3 +227,64 @@ impl Ctx {
         self.width >= 100
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::glyphs::UNICODE;
+
+    fn ctx() -> Ctx {
+        Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new())
+    }
+
+    #[test]
+    fn queued_reads_are_not_repeated_and_reconnect_jumps_the_queue() {
+        let mut ctx = ctx();
+        ctx.request(Request::Projects);
+        ctx.request(Request::Pools);
+        ctx.request(Request::Projects);
+        ctx.request(Request::Reconnect);
+        assert_eq!(ctx.queued(), 2);
+        assert_eq!(ctx.store.projects, Load::Loading);
+        assert!(ctx.take_reconnect());
+        assert!(!ctx.take_reconnect(), "one ask, one reconnect");
+        assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+        ctx.request(Request::Projects);
+        assert_eq!(ctx.queued(), 2, "a sent read may be asked for again");
+    }
+
+    #[test]
+    fn a_refresh_keeps_shown_data_instead_of_a_spinner() {
+        let mut ctx = ctx();
+        ctx.store.pools = Load::Ready(Vec::new());
+        ctx.request(Request::Pools);
+        assert_eq!(ctx.store.pools, Load::Ready(Vec::new()));
+        ctx.request(Request::Profile);
+        assert_eq!(ctx.store.profile, Load::Loading);
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_says_so() {
+        let mut ctx = ctx();
+        for _ in 0..QUEUE_MAX {
+            ctx.request(Request::EditPool {
+                change: crate::tui::seam::PoolChange::Remove {
+                    id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                },
+            });
+        }
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        ctx.request(Request::Pools);
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        assert_eq!(ctx.message().unwrap().lead, "Too many requests are waiting.");
+        assert_eq!(ctx.store.pools, Load::Idle, "a refused read leaves the data alone");
+    }
+
+    #[test]
+    fn generations_are_nonzero_and_increase() {
+        let mut ctx = ctx();
+        let first = ctx.next_generation();
+        assert!(first > 0);
+        assert!(ctx.next_generation() > first);
+    }
+}
