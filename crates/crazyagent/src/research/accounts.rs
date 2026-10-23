@@ -23,7 +23,7 @@ pub enum AccountPick {
     NoUsableAccount,
     Account {
         connection: CredentialRef,
-        account: ResearchAccount,
+        account: Box<ResearchAccount>,
     },
 }
 
