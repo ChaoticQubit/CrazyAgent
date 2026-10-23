@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  New project  /  Review
+────────────────────────────────────────────────────────────────────────────────
+  ✓ About   ✓ Stack   ✓ Documents   ✓ Work   ✓ Pool   ✓ Team   Review
+───────────────────────────────────────────────────────────────━━━━━━───────────
+  Review
+  Tidepool
+  A live dashboard for marine researchers to watch sensor buoys and get alerts
+  when readings look wrong.
+
+  Project folder  Made by CrazyAgent  new
+  Stack           None picked
+  Platforms       None picked
+  Documents       None
+  Work to start   Market, Competitor, Front-end design
+  Pool            Main
+  Team            Codex leads. Codex x3. Tools on.
+
+  Research starts right away. You can close CrazyAgent and agents keep
+  working.
+
+  [ Back ]   [> Create project ]
+
+
+ Enter Create project  Shift-Tab Back  Shift-←→ Steps                    ? Help

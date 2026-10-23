@@ -7,6 +7,10 @@ pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
 
 #[cfg(test)]
+mod new_project_frames;
+#[cfg(test)]
 mod new_project_tests;
+#[cfg(test)]
+mod project_frames;
 #[cfg(test)]
 mod project_tests;

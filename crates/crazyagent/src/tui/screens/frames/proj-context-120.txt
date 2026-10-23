@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Context
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+───────────────────────────────────────────━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Context                                                                                 ~/projects/fieldnotes-mobile
+
+  Files                                │ research/market_research.md                                   Market research
+                                       │
+    brief.md                           │ Market research: Fieldnotes Mobile
+    research/                          │
+  >   market_research.md               │ Ecologists keep field notes on paper or in general note apps that lose data
+                                       │ without signal. Most want one offline notebook that syncs later.
+  Agents write results here            │
+  as Markdown files.                   │ Who pays
+                                       │ - University ecology labs, mostly grant funded
+                                       │ - Park and reserve services
+                                       │ - Environmental consultancies
+                                       │
+                                       │ Sources
+                                       │ 1. National Park Service data  https://www.nps.gov
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter Open   o Open in editor   d Delete   m Save to memory   Shift-←→ Tabs   Esc Home                          ? Help

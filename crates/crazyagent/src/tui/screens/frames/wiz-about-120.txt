@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  New project  /  About
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New project             │ About
+                          │ Tell agents what you are building.
+  > About                 │
+    Stack and platforms   │ Name
+    Documents             │ [ Tidepool                                                             ]
+    Work to start         │ What is it about?
+    Pool                  │ [ A live dashboard for marine researchers to watch sensor buoys and    ]
+    Team                  │ [ get alerts when readings look wrong.█                                ]
+    Review                │
+                          │ Project folder
+  Esc keeps this draft    │ (*) Create a new folder     Made when you create the project
+  and goes home.          │ ( ) Use an existing folder  Not ready yet
+                          │ Agents can change files only inside this folder.
+                          │
+                          │ [ Back ]   [ Continue ]
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+
+ Tab Next field   Ctrl-J New line   Shift-Tab Previous   Shift-←→ Steps   Esc Leave, keep draft                  ? Help

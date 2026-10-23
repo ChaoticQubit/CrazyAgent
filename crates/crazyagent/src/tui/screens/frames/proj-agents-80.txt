@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Agents
+────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+────────────────────────────────━━━━━━━━────────────────────────────────────────
+  Agents  3 waiting
+    Agent                    Harness        Status
+  > ◔ Market research        Codex          ! Needs a pool
+    ◬ Design research        Codex          ! Needs a pool
+    ▭ Front-end design       Codex          ! Needs a pool
+
+  Market research                                                 Queued hh:mm
+  Report        research/market_research.md
+  Tools         On, inside the project folder
+
+
+
+
+
+
+
+
+
+
+ ↑↓ Move  Enter Open report  Shift-←→ Tabs  Esc Home                     ? Help

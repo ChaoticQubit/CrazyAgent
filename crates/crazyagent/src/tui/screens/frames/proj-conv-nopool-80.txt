@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Conversation
+────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+───────────────━━━━━━━━━━━━━━───────────────────────────────────────────────────
+  Master  Codex                                                 ! Needs a pool
+
+  This project has no pool, so the master cannot start.
+  Press s to open project settings and pick one.
+
+
+
+
+
+
+
+
+
+
+
+
+  ────────────────────────────────────────────────────────────────────────────
+  > Pick a pool first
+
+ s Project settings  Shift-←→ Tabs  Esc Home                             ? Help
