@@ -375,7 +375,6 @@ pub fn radio(on: bool, label: &str) -> String {
 
 /// One checkbox, `[x] Label` or `[ ] Label`.
 /// Inputs: whether checked and the label. Output: the text.
-#[cfg_attr(not(test), expect(dead_code, reason = "pool editor rows"))]
 pub fn checkbox(on: bool, label: &str) -> String {
     format!("{} {label}", if on { "[x]" } else { "[ ]" })
 }

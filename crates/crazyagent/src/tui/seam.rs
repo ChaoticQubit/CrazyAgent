@@ -1,10 +1,39 @@
 use super::client::{ConversationJob, CreationJob, OwnerEvent, SetupQuery};
 use super::master_session;
-use crate::config::ModelAccessEdit;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, ResearchJob, ResearchStatus, StoredSetup};
-use crate::protocol::{Command, Cursor, ProjectId, StoredProject};
+use crate::protocol::{Command, CredentialRef, Cursor, ProjectId, StoredProject};
+
+/// A pool change asked for in Settings, Pools. The engine side builds the
+/// exact pool record, keeping an existing pool's projects and roles.
+/// Input: built by the pool list and editor. Output: one model access edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PoolChange {
+    Create {
+        name: String,
+        members: Vec<CredentialRef>,
+    },
+    Update {
+        id: CredentialRef,
+        name: String,
+        members: Vec<CredentialRef>,
+    },
+    Remove {
+        id: CredentialRef,
+    },
+}
+
+/// One account as lists show it: never a secret, only plain labels.
+/// Input: built from the engine's account list. Output: list and pool editor
+/// rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountRow {
+    pub id: CredentialRef,
+    pub name: String,
+    pub provider: String,
+    pub status: String,
+}
 
 /// One engine request a screen asks the shell to send.
 /// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
@@ -15,7 +44,7 @@ pub enum Request {
     SaveProfile { profile: OwnerProfile },
     Pools,
     Projects,
-    EditPool { edit: ModelAccessEdit },
+    EditPool { change: PoolChange },
     Setup(SetupQuery),
     Creation(Box<CreationJob>),
     Conversation(Box<ConversationJob>),
@@ -55,7 +84,7 @@ pub(in crate::tui) enum ShellRequest {
     Pools,
     Projects,
     EditPool {
-        edit: ModelAccessEdit,
+        change: PoolChange,
         generation: u64,
     },
 }

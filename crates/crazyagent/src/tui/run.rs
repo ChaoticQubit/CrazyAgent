@@ -216,8 +216,8 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         }),
         Request::Pools => connection.shell(ShellRequest::Pools),
         Request::Projects => connection.shell(ShellRequest::Projects),
-        Request::EditPool { edit } => connection.shell(ShellRequest::EditPool {
-            edit,
+        Request::EditPool { change } => connection.shell(ShellRequest::EditPool {
+            change,
             generation: shell.ctx.next_generation(),
         }),
         Request::Setup(query) => connection.project_setup(query),

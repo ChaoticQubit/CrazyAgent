@@ -1,9 +1,10 @@
 use super::*;
-use crate::config::ModelAccessEdit;
+use crate::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crate::engine::EngineError;
-use crate::engine::owner::ModelAccessCollection;
+use crate::engine::owner::{ModelAccessCollection, ModelAccessRecord};
+use crate::protocol::CredentialRef;
 use crate::protocol::{Outcome, StoredProject};
-use crate::tui::seam::{ProjectCard, ShellEvent, ShellRequest};
+use crate::tui::seam::{PoolChange, ProjectCard, ShellEvent, ShellRequest};
 
 const PROJECTS_MAX: usize = 200;
 
@@ -60,15 +61,15 @@ impl NativeOwner {
                 Err(error) => Err(error),
             }),
             ShellRequest::Projects => ShellEvent::Projects(self.project_cards(lost).await),
-            ShellRequest::EditPool { edit, generation } => {
-                ShellEvent::PoolEdited(self.edit_pool(edit, generation, lost).await)
+            ShellRequest::EditPool { change, generation } => {
+                ShellEvent::PoolEdited(self.edit_pool(change, generation, lost).await)
             }
         }
     }
 
     async fn edit_pool(
         &mut self,
-        edit: ModelAccessEdit,
+        change: PoolChange,
         generation: u64,
         lost: &mut bool,
     ) -> Result<(), String> {
@@ -76,6 +77,39 @@ impl NativeOwner {
         if controller.pending().is_some() {
             return Err("controller_pending_intent".into());
         }
+        let edit = match change {
+            PoolChange::Create { name, members } => ModelAccessEdit::CreatePool {
+                pool: AccountPool {
+                    id: new_pool_id(&name)?,
+                    name: Some(name),
+                    members,
+                    projects: Vec::new(),
+                    roles: Vec::new(),
+                    fallback_allowed: false,
+                    provider_quota_policy: ProviderQuotaPolicy::default(),
+                },
+            },
+            PoolChange::Update { id, name, members } => {
+                let record = controller
+                    .read(OwnerRead::ModelAccessRecord {
+                        collection: ModelAccessCollection::Pools,
+                        id,
+                    })
+                    .await
+                    .map_err(|error| transport(&error, lost))?;
+                let OwnerData::ModelAccessRecord {
+                    record: ModelAccessRecord::Pool { mut pool },
+                    ..
+                } = record.data
+                else {
+                    return Err("pool_not_found".into());
+                };
+                pool.name = Some(name);
+                pool.members = members;
+                ModelAccessEdit::ReplacePool { pool }
+            }
+            PoolChange::Remove { id } => ModelAccessEdit::RemovePool { id },
+        };
         let fresh = controller
             .read(OwnerRead::ModelAccessPage {
                 collection: ModelAccessCollection::Pools,
@@ -174,6 +208,19 @@ impl NativeOwner {
         assert!(cards.len() <= PROJECTS_MAX);
         Ok(cards)
     }
+}
+
+/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
+/// Input: the pool name. Output: the id, or the plain problem code.
+fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
+    let stem: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .flat_map(|character| character.to_lowercase())
+        .collect();
+    let nonce = crate::engine::owner::random_id().map_err(|error| bounded_problem(&error.0))?;
+    CredentialRef::new(format!("pool-{stem}-{nonce}")).map_err(|error| bounded_problem(&error.to_string()))
 }
 
 fn transport(error: &EngineError, lost: &mut bool) -> String {

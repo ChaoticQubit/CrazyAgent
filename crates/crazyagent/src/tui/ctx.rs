@@ -1,6 +1,6 @@
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{ProjectCard, Request};
+use super::seam::{AccountRow, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
@@ -50,7 +50,7 @@ pub struct Store {
     pub profile: Load<Option<OwnerProfile>>,
     pub projects: Load<Vec<ProjectCard>>,
     pub pools: Load<Vec<PoolSummary>>,
-    pub accounts: Load<usize>,
+    pub accounts: Load<Vec<AccountRow>>,
     pub harnesses: Load<usize>,
     pub memory: Load<usize>,
     pub projects_seen: Option<String>,

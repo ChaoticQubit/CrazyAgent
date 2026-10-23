@@ -1,21 +1,18 @@
 use super::{draw_page, step};
-use crate::config::{ModelAccessEdit, plain_problem};
+use crate::config::{POOL_MEMBERS_MAX, plain_problem};
 use crate::pools::{MemberStatus, PoolSummary};
 use crate::protocol::CredentialRef;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{cells, join, list_row, restyle, row, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-
-/// Most accounts one pool may hold.
-pub const POOL_MEMBERS_MAX: usize = 15;
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
@@ -63,7 +60,7 @@ impl Pools {
                 self.confirm = None;
                 self.deleting = true;
                 ctx.request(Request::EditPool {
-                    edit: ModelAccessEdit::RemovePool { id },
+                    change: PoolChange::Remove { id },
                 });
             }
             Key::Enter => self.confirm = None,
@@ -171,8 +168,10 @@ impl Screen for Pools {
                 self.ask_delete(ctx);
                 Flow::Handled
             }
-            Key::Enter if count == 0 => Flow::Open(Place::NewPool),
-            Key::Enter => Flow::Open(Place::NewPool),
+            Key::Enter => match ctx.store.pools.ready().and_then(|pools| pools.get(self.selected)) {
+                Some(pool) => Flow::Open(Place::EditPool(pool.id.clone())),
+                None => Flow::Open(Place::NewPool),
+            },
             Key::Char('r') if matches!(ctx.store.pools, Load::Failed(_)) => {
                 ctx.request(Request::Pools);
                 Flow::Handled
@@ -411,7 +410,7 @@ mod tests {
         screen.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                edit: ModelAccessEdit::RemovePool { id },
+                change: PoolChange::Remove { id },
             }) => assert_eq!(id.as_str(), "pool-spare"),
             other => panic!("unexpected request {other:?}"),
         }

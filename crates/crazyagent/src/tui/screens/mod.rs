@@ -9,7 +9,7 @@ use super::ctx::Ctx;
 use super::frame::{Hint, Modal};
 use super::keys::Key;
 use super::seam::Arrival;
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -109,6 +109,7 @@ pub enum Place {
     Settings(SettingsSection),
     AddAccount,
     NewPool,
+    EditPool(CredentialRef),
     NewProject,
     Project {
         id: ProjectId,
@@ -144,6 +145,27 @@ impl std::fmt::Debug for Flow {
 /// engine arrivals to it, and keeps a stack of screens.
 /// Input: keys after the global keys, arrivals from the engine. Output: body
 /// drawing, header crumbs and status, help-line hints, an optional modal.
+///
+/// The rebuilt shell runs with `CRAZYAGENT_TUI=v1`; the design is
+/// `docs/design/tui/DESIGN.md` and `tui/frames/` holds its text renders.
+///
+/// Adding a screen:
+/// 1. Implement this trait. Add a `Place` when Go to or another screen opens
+///    it, and build it in `open`.
+/// 2. Move with `Flow`: `Open(place)` pushes, `Replace(screen)` swaps the top,
+///    `Back` pops. An `Esc` returned as `Ignored` goes back.
+/// 3. Ask for engine data with `ctx.request(Request::..)` in `shown`. Shared
+///    data lands in `ctx.store`; every open screen sees each `Arrival`.
+/// 4. Add key tests next to the screen and a render test against a design
+///    frame in `render_tests.rs`.
+///
+/// Shared parts: colors only from `theme`, symbols only from `glyphs`;
+/// `widgets::TextField` (plain, multiline, secret with wipe and
+/// `take_secret`), `buttons`, `radio`, `checkbox`, `menu_item`;
+/// `frame::Modal`, `frame::tab_strip`, `settings::draw_page`;
+/// `text::list_row`, `text::cells`, `text::with_bar` and `text::thumb` for
+/// long lists. A status is a glyph and a word. Never show invented data:
+/// missing engine support shows "Not ready yet".
 pub trait Screen {
     /// Breadcrumbs after "CrazyAgent", such as ["Settings", "Accounts"].
     fn crumbs(&self) -> Vec<String>;
@@ -215,7 +237,8 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Welcome => Box::new(welcome::Welcome::new(ctx)),
         Place::Settings(section) => settings::open(*section, ctx),
         Place::AddAccount => settings::open_add_account(ctx),
-        Place::NewPool => settings::open_new_pool(ctx),
+        Place::NewPool => Box::new(settings::pool_editor::PoolEditor::new(None, ctx)),
+        Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(stub::NotReady::new_project()),
         Place::Project { id, name, tab } => {
             Box::new(stub::NotReady::project(id.clone(), name.clone(), *tab))

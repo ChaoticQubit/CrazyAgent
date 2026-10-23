@@ -228,7 +228,6 @@ pub fn list_row(
 /// Appends a scrollbar column to list lines.
 /// Inputs: lines, total width including the bar, the first thumb row and the
 /// thumb size. Output: lines with `█` for the thumb and `│` for the track.
-#[cfg_attr(not(test), expect(dead_code, reason = "scroll bar of the Accounts list and pool editor"))]
 pub fn with_bar(
     lines: Vec<Line<'static>>,
     limit: usize,
@@ -257,7 +256,6 @@ pub fn with_bar(
 /// Thumb position and size for a list window.
 /// Inputs: visible rows, first visible row and total rows. Output: thumb top
 /// and size in rows, at least one row.
-#[cfg_attr(not(test), expect(dead_code, reason = "scroll bar of the Accounts list and pool editor"))]
 pub fn thumb(visible: usize, offset: usize, total: usize) -> (usize, usize) {
     if total == 0 || visible == 0 {
         return (0, visible);
