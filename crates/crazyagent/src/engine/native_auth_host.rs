@@ -147,7 +147,11 @@ impl RegisteredNativeAuthHost {
 
     pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
         self.verified_path()?;
-        Ok(self.digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        Ok(self
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
     }
 }
 
@@ -172,11 +176,13 @@ fn custodian_command(
         .current_dir(runtime_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        })
+        .stderr(
+            if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            },
+        )
         .process_group(0);
     Ok(command)
 }
@@ -187,14 +193,26 @@ pub(in crate::engine) async fn dispatch(
 ) -> Result<(), EngineError> {
     let executable = host.registered_executable()?;
     let harness = work.fact().binding.connection.harness.as_str();
-    let codex = if harness == "codex" { host.registered_codex_executable()? } else { None };
-    let claude = if harness == "claude" { host.registered_claude_executable()? } else { None };
+    let codex = if harness == "codex" {
+        host.registered_codex_executable()?
+    } else {
+        None
+    };
+    let claude = if harness == "claude" {
+        host.registered_claude_executable()?
+    } else {
+        None
+    };
     let runtime_dir = host.owner_runtime_dir()?;
     let launch = host.prepare_native_auth_custody(work).await?;
-    let mut command = custodian_command(executable.verified_path()?, &runtime_dir, codex.as_deref())?;
+    let mut command =
+        custodian_command(executable.verified_path()?, &runtime_dir, codex.as_deref())?;
     if let Some(claude) = claude.as_ref() {
-        command.arg("--claude-executable").arg(claude.verified_path()?)
-            .arg("--claude-sha256").arg(claude.verified_sha256()?);
+        command
+            .arg("--claude-executable")
+            .arg(claude.verified_path()?)
+            .arg("--claude-sha256")
+            .arg(claude.verified_sha256()?);
     }
     let mut child = command.spawn().map_err(io_error)?;
     let Some(input) = child.stdin.take() else {

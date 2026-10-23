@@ -141,10 +141,11 @@ impl DispatchFixture {
         )
         .await
         .unwrap();
-        let owner = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
-            .await
-            .unwrap()
-            .0;
+        let owner =
+            OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+                .await
+                .unwrap()
+                .0;
         Self {
             backend,
             root,
@@ -312,7 +313,9 @@ impl DispatchFixture {
         .unwrap();
         let count = |table: &str| {
             database
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
                 .unwrap()
         };
         (count("master_turns"), count("model_gateway_attempts"))
@@ -329,10 +332,14 @@ impl DispatchFixture {
         )
         .await
         .unwrap();
-        self.owner = OwnerClient::discover(self.root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
-            .await
-            .unwrap()
-            .0;
+        self.owner = OwnerClient::discover(
+            self.root.path(),
+            OwnerClientKind::Tui,
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .0;
     }
 
     async fn finish(mut self) {
@@ -345,10 +352,18 @@ async fn master_dispatch_open_and_unrelated_commit_launch_no_turn() {
     let fixture = DispatchFixture::start().await;
     let mut dispatcher = MasterDispatch::new();
     let (create, created) = fixture.create().await;
-    assert!(!dispatcher.committed(fixture.runtime(), &create, &created).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &create, &created)
+            .unwrap()
+    );
     let (open, opened, session) = fixture.open().await;
     assert!(session.current_turn.is_none());
-    assert!(!dispatcher.committed(fixture.runtime(), &open, &opened).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &open, &opened)
+            .unwrap()
+    );
     dispatcher.shutdown().await.unwrap();
     assert_eq!(fixture.counts(), (0, 0));
     fixture.finish().await;
@@ -363,7 +378,11 @@ async fn master_dispatch_fresh_submit_invokes_real_driver_and_preserves_unknown_
     operation(&submitted);
     assert_eq!(fixture.turn(&session).await.phase, MasterTurnPhase::Queued);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     let turn = fixture.await_blocked(&session).await;
     assert_eq!(turn.id, submit.request_id);
     assert_eq!(turn.session_id, session.session_id);
@@ -384,13 +403,29 @@ async fn master_dispatch_duplicate_and_actual_replay_never_invoke_a_second_drive
     let (submit, submitted) = fixture.submit(&session, "dispatch-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
-    assert!(!dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     fixture.await_blocked(&session).await;
     let replay = fixture.commit(&submit).await;
     assert!(operation(&replay).historical_replay);
-    assert!(!dispatcher.committed(fixture.runtime(), &submit, &replay).unwrap());
-    assert!(!dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &submit, &replay)
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     dispatcher.shutdown().await.unwrap();
     assert_eq!(fixture.counts(), (1, 0));
     fixture.finish().await;
@@ -409,7 +444,11 @@ async fn master_dispatch_actual_rejected_submit_and_read_launch_no_driver() {
     };
     assert!(matches!(operation.result, OwnerResult::Rejected { .. }));
     let mut dispatcher = MasterDispatch::new();
-    assert!(!dispatcher.committed(fixture.runtime(), &busy, &rejected).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &busy, &rejected)
+            .unwrap()
+    );
     let read = request(
         "dispatch-capabilities",
         0,
@@ -419,7 +458,11 @@ async fn master_dispatch_actual_rejected_submit_and_read_launch_no_driver() {
     );
     let read_reply = fixture.owner.request(read.clone()).await.unwrap();
     assert!(matches!(read_reply.response, OwnerResponse::Read { .. }));
-    assert!(!dispatcher.committed(fixture.runtime(), &read, &read_reply).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &read, &read_reply)
+            .unwrap()
+    );
     dispatcher.shutdown().await.unwrap();
     assert_eq!(fixture.turn(&session).await.phase, MasterTurnPhase::Queued);
     assert_eq!(fixture.counts(), (1, 0));
@@ -434,9 +477,17 @@ async fn master_dispatch_rejects_a_real_reply_from_another_operation() {
     let (submit, submitted) = fixture.submit(&session, "dispatch-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &opened).is_err());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &opened)
+            .is_err()
+    );
     assert_eq!(fixture.turn(&session).await.phase, MasterTurnPhase::Queued);
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     fixture.await_blocked(&session).await;
     dispatcher.shutdown().await.unwrap();
     assert_eq!(fixture.counts(), (1, 0));
@@ -452,7 +503,11 @@ async fn master_dispatch_rejects_an_actual_committed_reply_from_a_foreign_owner_
     let (submit, submitted) = foreign.submit(&session, "dispatch-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).is_err());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .is_err()
+    );
     dispatcher.shutdown().await.unwrap();
     assert_eq!(fixture.counts(), (0, 0));
     assert_eq!(foreign.turn(&session).await.phase, MasterTurnPhase::Queued);
@@ -480,8 +535,16 @@ async fn master_dispatch_actual_cancel_before_driver_start_remains_cancelled() {
         .await;
     operation(&cancelled);
     let mut dispatcher = MasterDispatch::new();
-    assert!(!dispatcher.committed(fixture.runtime(), &cancel, &cancelled).unwrap());
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        !dispatcher
+            .committed(fixture.runtime(), &cancel, &cancelled)
+            .unwrap()
+    );
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     dispatcher.shutdown().await.unwrap();
     let turn = fixture.turn(&session).await;
     assert_eq!(turn.phase, MasterTurnPhase::Cancelled);
@@ -503,7 +566,11 @@ async fn master_dispatch_shutdown_joins_a_blocked_driver_and_reports_cleanup_unc
     let engine = Arc::downgrade(&runtime.engine);
     let barrier = runtime.engine.owner_egress.write().await;
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     let result = tokio::time::timeout(Duration::from_secs(5), dispatcher.shutdown())
         .await
         .expect("retained driver shutdown exceeded the test bound");
@@ -526,7 +593,11 @@ async fn master_dispatch_shutdown_prevents_a_later_committed_turn_launch() {
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
     dispatcher.shutdown().await.unwrap();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).is_err());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .is_err()
+    );
     assert_eq!(fixture.turn(&session).await.phase, MasterTurnPhase::Queued);
     assert_eq!(fixture.counts(), (1, 0));
     fixture.finish().await;
@@ -543,7 +614,11 @@ async fn master_dispatch_drop_aborts_owned_pending_work_instead_of_detaching_it(
     let engine = Arc::downgrade(&runtime.engine);
     let barrier = runtime.engine.owner_egress.write().await;
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     tokio::time::sleep(Duration::from_millis(20)).await;
     drop(dispatcher);
     drop(barrier);
@@ -562,10 +637,17 @@ async fn master_dispatch_blocks_a_codex_turn_without_a_current_sign_in() {
     let (submit, submitted) = fixture.submit(&session, "unsigned-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     let turn = fixture.await_blocked(&session).await;
     assert_eq!(turn.id, submit.request_id);
-    assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ReadinessUnknown));
+    assert_eq!(
+        turn.reason,
+        Some(crate::master_session::MasterReason::ReadinessUnknown)
+    );
     assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
@@ -579,10 +661,17 @@ async fn master_dispatch_blocks_a_claude_turn_without_a_current_sign_in() {
     let (submit, submitted) = fixture.submit(&session, "unsigned-claude-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     let turn = fixture.await_blocked(&session).await;
     assert_eq!(turn.id, submit.request_id);
-    assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ReadinessUnknown));
+    assert_eq!(
+        turn.reason,
+        Some(crate::master_session::MasterReason::ReadinessUnknown)
+    );
     assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
@@ -597,10 +686,17 @@ async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_resta
     let (submit, submitted) = fixture.submit(&session, "after-restart").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
-    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    assert!(
+        dispatcher
+            .committed(fixture.runtime(), &submit, &submitted)
+            .unwrap()
+    );
     let turn = fixture.await_blocked(&session).await;
     assert_eq!(turn.id, submit.request_id);
-    assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ConnectionChanged));
+    assert_eq!(
+        turn.reason,
+        Some(crate::master_session::MasterReason::ConnectionChanged)
+    );
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
 }

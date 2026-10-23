@@ -142,10 +142,13 @@ impl RcliMasterLaunch {
             &self.binding.connection,
             Some(&self.profile_config_sha256),
         )?;
-        if matches!(self.binding.connection.auth, ModelAuthentication::ApiKey { .. }) {
+        if matches!(
+            self.binding.connection.auth,
+            ModelAuthentication::ApiKey { .. }
+        ) {
             let path = self.home_dir.join(".backboard/keys.json");
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|_| error("rcli_master_profile_mismatch"))?;
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| error("rcli_master_profile_mismatch"))?;
             validate_file(&path, &metadata, false)
                 .map_err(|_| error("rcli_master_profile_mismatch"))?;
         }
@@ -210,8 +213,8 @@ fn checked_profile_config(
     {
         return Err(error(code));
     }
-    let profile: ProfileConfig = serde_json::from_slice(&bytes)
-        .map_err(|_| error("rcli_master_profile_mismatch"))?;
+    let profile: ProfileConfig =
+        serde_json::from_slice(&bytes).map_err(|_| error("rcli_master_profile_mismatch"))?;
     let selection = configured_sdk_connection(connection)?;
     validate_selection(&profile, &selection)?;
     assert!(bytes.len() as u64 <= CONFIG_BYTES_MAX);
@@ -238,7 +241,9 @@ fn canonical_path(path: &Path) -> Result<(), ProtocolError> {
     if !path.is_absolute()
         || path.parent().is_none()
         || path.as_os_str().len() > 4096
-        || path.components().any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+        || path
+            .components()
+            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
         || fs::canonicalize(path).map_err(|_| error("rcli_master_paths_rejected"))? != path
     {
         return Err(error("rcli_master_paths_rejected"));
@@ -250,7 +255,11 @@ fn canonical_path(path: &Path) -> Result<(), ProtocolError> {
 
 fn validate_file(path: &Path, metadata: &Metadata, executable: bool) -> Result<(), ProtocolError> {
     canonical_path(path)?;
-    let maximum = if executable { ARTIFACT_BYTES_MAX } else { CONFIG_BYTES_MAX };
+    let maximum = if executable {
+        ARTIFACT_BYTES_MAX
+    } else {
+        CONFIG_BYTES_MAX
+    };
     let forbidden = if executable { 0o022 } else { 0o077 };
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
@@ -268,14 +277,28 @@ fn validate_file(path: &Path, metadata: &Metadata, executable: bool) -> Result<(
 
 fn stamp(metadata: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
     (
-        metadata.dev(), metadata.ino(), metadata.len(), metadata.mode(),
-        metadata.mtime(), metadata.mtime_nsec(), metadata.ctime(), metadata.ctime_nsec(),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mode(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
     )
 }
 
 fn pinned_file(path: &Path, expected: &str, executable: bool) -> Result<File, ProtocolError> {
-    let code = if executable { "rcli_master_artifact_changed" } else { "rcli_master_profile_changed" };
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+    let code = if executable {
+        "rcli_master_artifact_changed"
+    } else {
+        "rcli_master_profile_changed"
+    };
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         return Err(error(code));
     }
     let (file, digest) = checked_file(path, executable)?;
@@ -286,7 +309,11 @@ fn pinned_file(path: &Path, expected: &str, executable: bool) -> Result<File, Pr
 }
 
 fn checked_file(path: &Path, executable: bool) -> Result<(File, String), ProtocolError> {
-    let code = if executable { "rcli_master_artifact_changed" } else { "rcli_master_profile_changed" };
+    let code = if executable {
+        "rcli_master_artifact_changed"
+    } else {
+        "rcli_master_profile_changed"
+    };
     let metadata = fs::symlink_metadata(path).map_err(|_| error(code))?;
     validate_file(path, &metadata, executable).map_err(|_| error(code))?;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
@@ -296,9 +323,13 @@ fn checked_file(path: &Path, executable: bool) -> Result<(File, String), Protoco
     let mut total = 0_u64;
     loop {
         let count = file.read(&mut buffer).map_err(|_| error(code))?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         total += count as u64;
-        if total > metadata.len() { return Err(error(code)); }
+        if total > metadata.len() {
+            return Err(error(code));
+        }
         digest.update(&buffer[..count]);
     }
     let digest = format!("{:x}", digest.finalize());
@@ -317,7 +348,10 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn validate_selection(profile: &ProfileConfig, connection: &ModelConnection) -> Result<(), ProtocolError> {
+fn validate_selection(
+    profile: &ProfileConfig,
+    connection: &ModelConnection,
+) -> Result<(), ProtocolError> {
     let code = "rcli_master_profile_mismatch";
     if connection.harness.as_str() != "rcli"
         || profile.model.provider != connection.provider.as_str()
@@ -330,17 +364,34 @@ fn validate_selection(profile: &ProfileConfig, connection: &ModelConnection) -> 
         return Err(error(code));
     }
     let provider = &profile.providers[0];
-    let ModelEndpoint::Http { url } = &connection.endpoint else { return Err(error(code)); };
+    let ModelEndpoint::Http { url } = &connection.endpoint else {
+        return Err(error(code));
+    };
     validate_endpoint(url)?;
     if provider.id != profile.model.provider
         || provider.id.len() > 64
-        || !provider.id.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        || !provider.id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte))
-        || ["openai", "anthropic", "google", "openrouter", "gemini", "google-gemini"].contains(&provider.id.as_str())
+        || !provider
+            .id
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !provider.id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        || [
+            "openai",
+            "anthropic",
+            "google",
+            "openrouter",
+            "gemini",
+            "google-gemini",
+        ]
+        .contains(&provider.id.as_str())
         || provider.name.trim().is_empty()
         || provider.enabled == Some(false)
         || provider.protocol != connection.protocol.as_str()
-        || !["openai-chat", "openai-responses", "anthropic-messages"].contains(&provider.protocol.as_str())
+        || !["openai-chat", "openai-responses", "anthropic-messages"]
+            .contains(&provider.protocol.as_str())
         || provider.base_url.trim_end_matches('/') != url.trim_end_matches('/')
         || provider.headers.as_ref().is_some_and(nonempty)
         || provider.extra_args.as_ref().is_some_and(nonempty)
@@ -349,13 +400,25 @@ fn validate_selection(profile: &ProfileConfig, connection: &ModelConnection) -> 
     {
         return Err(error(code));
     }
-    let auth = provider.auth.as_ref().map(|auth| auth.kind.as_str()).unwrap_or("apiKey");
-    if !matches!((&connection.auth, auth), (ModelAuthentication::None {}, "none") | (ModelAuthentication::ApiKey { .. }, "apiKey")) {
+    let auth = provider
+        .auth
+        .as_ref()
+        .map(|auth| auth.kind.as_str())
+        .unwrap_or("apiKey");
+    if !matches!(
+        (&connection.auth, auth),
+        (ModelAuthentication::None {}, "none") | (ModelAuthentication::ApiKey { .. }, "apiKey")
+    ) {
         return Err(error(code));
     }
     if let Some(models) = &provider.models {
-        let selected: Vec<_> = models.iter().filter(|model| model.id == connection.model.id).collect();
-        if models.len() > 128 || selected.len() != 1 || selected[0].enabled == Some(false)
+        let selected: Vec<_> = models
+            .iter()
+            .filter(|model| model.id == connection.model.id)
+            .collect();
+        if models.len() > 128
+            || selected.len() != 1
+            || selected[0].enabled == Some(false)
             || selected[0].extra_args.as_ref().is_some_and(nonempty)
         {
             return Err(error(code));

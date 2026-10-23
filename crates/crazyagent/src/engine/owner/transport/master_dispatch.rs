@@ -92,7 +92,12 @@ impl MasterDispatch {
         let turn = request.request_id.clone();
         let task = executor.spawn(async move {
             let result = drive_until_settled(
-                || async { runtime.drive_master_turn(&project, &session, &turn).await.map(|_| ()) },
+                || async {
+                    runtime
+                        .drive_master_turn(&project, &session, &turn)
+                        .await
+                        .map(|_| ())
+                },
                 DRIVE_PAUSE,
             )
             .await;
@@ -119,7 +124,9 @@ impl MasterDispatch {
 
     pub(super) async fn shutdown(&mut self) -> Result<(), EngineError> {
         self.assert_consistent();
-        let deadline = *self.closing.get_or_insert_with(|| Instant::now() + SHUTDOWN_GRACE);
+        let deadline = *self
+            .closing
+            .get_or_insert_with(|| Instant::now() + SHUTDOWN_GRACE);
         for index in 0..self.entries.len() {
             let Some(task) = self.entries[index].task.as_mut() else {
                 continue;
@@ -244,7 +251,10 @@ fn validate_commit(
     {
         return Err(failure("master_dispatch_binding_mismatch"));
     }
-    let slots = authority.slots.lock().map_err(|_| failure("master_dispatch_owner_unavailable"))?;
+    let slots = authority
+        .slots
+        .lock()
+        .map_err(|_| failure("master_dispatch_owner_unavailable"))?;
     let admitted = slots.iter().any(|slot| {
         let admission = &slot.registration.admission;
         slot.registration.active
@@ -268,13 +278,17 @@ mod tests {
     #[tokio::test]
     async fn unknown_outcome_drives_the_same_turn_again_until_it_settles() {
         let calls = AtomicU32::new(0);
-        let result = drive_until_settled(|| async {
-            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
-                Err(failure("owner_outcome_unknown_reconcile_same_identity"))
-            } else {
-                Ok(())
-            }
-        }, Duration::from_millis(1)).await;
+        let result = drive_until_settled(
+            || async {
+                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(failure("owner_outcome_unknown_reconcile_same_identity"))
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
         assert_eq!(result, Ok(()));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
@@ -282,18 +296,29 @@ mod tests {
     #[tokio::test]
     async fn other_failures_and_exhausted_retries_are_returned() {
         let calls = AtomicU32::new(0);
-        let result = drive_until_settled(|| async {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Err::<(), _>(failure("master_repository_missing"))
-        }, Duration::from_millis(1)).await;
+        let result = drive_until_settled(
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(failure("master_repository_missing"))
+            },
+            Duration::from_millis(1),
+        )
+        .await;
         assert_eq!(result, Err(failure("master_repository_missing")));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let calls = AtomicU32::new(0);
-        let result = drive_until_settled(|| async {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Err::<(), _>(failure("owner_outcome_unknown_reconcile_same_identity"))
-        }, Duration::from_millis(1)).await;
-        assert_eq!(result, Err(failure("owner_outcome_unknown_reconcile_same_identity")));
+        let result = drive_until_settled(
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(failure("owner_outcome_unknown_reconcile_same_identity"))
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(failure("owner_outcome_unknown_reconcile_same_identity"))
+        );
         assert_eq!(calls.load(Ordering::SeqCst), DRIVE_ATTEMPTS);
     }
 }

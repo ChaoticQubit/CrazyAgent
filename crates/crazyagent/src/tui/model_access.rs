@@ -730,7 +730,11 @@ impl State {
     pub fn apply(&mut self, event: Event) -> Result<(), String> {
         match event {
             Event::ClaudeCode(event) => self.native_auth.apply_code(*event)?,
-            Event::AccountProfile { submission, result, retained } => {
+            Event::AccountProfile {
+                submission,
+                result,
+                retained,
+            } => {
                 self.apply_profile(submission, result, retained)?;
             }
             Event::AccountProfileCapabilities { submission, result } => {
@@ -1004,9 +1008,7 @@ impl State {
         if matches!(&self.record, Some(ModelAccessRecord::Connection { connection })
             if rcli_home_supported(connection))
         {
-            return vec![
-                "k Private profile setup | h Advanced SDK home selection".into(),
-            ];
+            return vec!["k Private profile setup | h Advanced SDK home selection".into()];
         }
         Vec::new()
     }

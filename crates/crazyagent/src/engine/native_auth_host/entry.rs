@@ -80,7 +80,13 @@ pub(in crate::engine) async fn run_with_codex(
     executable: &Path,
     expected_sha256: &str,
 ) -> Result<NativeAuthFact, EngineError> {
-    run_inner(runtime_dir, input, Some((executable, expected_sha256)), None).await
+    run_inner(
+        runtime_dir,
+        input,
+        Some((executable, expected_sha256)),
+        None,
+    )
+    .await
 }
 
 pub(in crate::engine) async fn run_with_claude(
@@ -89,7 +95,13 @@ pub(in crate::engine) async fn run_with_claude(
     executable: &Path,
     expected_sha256: &str,
 ) -> Result<NativeAuthFact, EngineError> {
-    run_inner(runtime_dir, input, None, Some((executable, expected_sha256))).await
+    run_inner(
+        runtime_dir,
+        input,
+        None,
+        Some((executable, expected_sha256)),
+    )
+    .await
 }
 
 async fn run_inner(

@@ -192,11 +192,16 @@ fn prepare_command(
     }
     let args: Vec<_> = command.get_args().collect();
     if !args.windows(2).any(|pair| {
-        pair[0] == OsStr::new("-c")
-            && pair[1] == OsStr::new("cli_auth_credentials_store=\"file\"")
-    }) || args.iter().filter(|arg| {
-        arg.to_str().is_some_and(|value| value.contains("cli_auth_credentials_store"))
-    }).count() != 1 {
+        pair[0] == OsStr::new("-c") && pair[1] == OsStr::new("cli_auth_credentials_store=\"file\"")
+    }) || args
+        .iter()
+        .filter(|arg| {
+            arg.to_str()
+                .is_some_and(|value| value.contains("cli_auth_credentials_store"))
+        })
+        .count()
+        != 1
+    {
         return Err(EngineError("codex_host_file_auth_required".into()));
     }
     let home = profile.profile_path()?;

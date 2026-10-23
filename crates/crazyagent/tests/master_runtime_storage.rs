@@ -112,10 +112,11 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let owner = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
-            .await
-            .unwrap()
-            .0;
+        let owner =
+            OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+                .await
+                .unwrap()
+                .0;
         assert!(root.path().join("engine.db").is_file());
         assert!(service.owner_runtime().is_some());
         Self {
@@ -269,7 +270,9 @@ fn probe_phase(
             assert_eq!(stored, phase);
             Ok(())
         }
-        Err(error) => Err(format!("actual SQLite rejected master phase {phase}: {error}")),
+        Err(error) => Err(format!(
+            "actual SQLite rejected master phase {phase}: {error}"
+        )),
     };
     tx.rollback().unwrap();
     assert!(db.is_autocommit());
