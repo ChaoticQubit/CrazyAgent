@@ -124,7 +124,12 @@ pub fn pad(line: Line<'static>, limit: usize, glyphs: &Glyphs) -> Line<'static> 
 /// Builds one row with text on the left and text aligned to the right edge.
 /// Inputs: total width, left line and right line. Output: a line of exactly
 /// that width; the left side is cut first when both do not fit.
-pub fn row(limit: usize, left: Line<'static>, right: Line<'static>, glyphs: &Glyphs) -> Line<'static> {
+pub fn row(
+    limit: usize,
+    left: Line<'static>,
+    right: Line<'static>,
+    glyphs: &Glyphs,
+) -> Line<'static> {
     let right_width = right.width();
     let left = if left.width() + right_width > limit {
         pad(left, limit.saturating_sub(right_width + 1), glyphs)
@@ -141,7 +146,12 @@ pub fn row(limit: usize, left: Line<'static>, right: Line<'static>, glyphs: &Gly
 /// Lays out table cells at fixed widths with a gap between them.
 /// Inputs: column widths, one line per column and the gap. Output: one line;
 /// each cell is padded or cut to its width.
-pub fn cells(widths: &[usize], values: Vec<Line<'static>>, gap: usize, glyphs: &Glyphs) -> Line<'static> {
+pub fn cells(
+    widths: &[usize],
+    values: Vec<Line<'static>>,
+    gap: usize,
+    glyphs: &Glyphs,
+) -> Line<'static> {
     assert_eq!(widths.len(), values.len());
     let mut spans = Vec::new();
     let count = widths.len();
@@ -273,7 +283,10 @@ pub fn thumb(visible: usize, offset: usize, total: usize) -> (usize, usize) {
 /// Input: the line. Output: its characters without styles.
 #[cfg(test)]
 pub fn plain(line: &Line<'_>) -> String {
-    line.spans.iter().map(|span| span.content.as_ref()).collect()
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 #[cfg(test)]
@@ -303,14 +316,26 @@ mod tests {
     fn rows_pad_cut_and_align() {
         let line = row(20, Line::raw("Accounts"), Line::raw("240"), &UNICODE);
         assert_eq!(plain(&line), "Accounts         240");
-        let long = row(10, Line::raw("Claude Pro - personal"), Line::raw("1"), &UNICODE);
+        let long = row(
+            10,
+            Line::raw("Claude Pro - personal"),
+            Line::raw("1"),
+            &UNICODE,
+        );
         assert_eq!(plain(&long), "Claude … 1");
         assert_eq!(long.width(), 10);
         assert_eq!(cut("Fieldnotes Mobile", 14, "…"), "Fieldnotes Mo…");
         assert_eq!(cut("Fieldnotes Mobile", 14, "."), "Fieldnotes Mo.");
         assert_eq!(cut("short", 14, "…"), "short");
-        let cut_line = pad(Line::raw("Buoy firmware sends readings every 90 s in CBOR."), 44, &UNICODE);
-        assert_eq!(plain(&cut_line), "Buoy firmware sends readings every 90 s in …");
+        let cut_line = pad(
+            Line::raw("Buoy firmware sends readings every 90 s in CBOR."),
+            44,
+            &UNICODE,
+        );
+        assert_eq!(
+            plain(&cut_line),
+            "Buoy firmware sends readings every 90 s in …"
+        );
     }
 
     #[test]
@@ -318,20 +343,46 @@ mod tests {
         let theme = Theme::new(Depth::NoColor, Colors::Dark, Appearance::Dark);
         let focused = list_row(Line::raw("Main"), 10, true, true, &theme, &ASCII);
         assert_eq!(plain(&focused), "> Main    ");
-        assert!(focused.spans.iter().all(|span| span.style == theme.selection));
+        assert!(
+            focused
+                .spans
+                .iter()
+                .all(|span| span.style == theme.selection)
+        );
         let remembered = list_row(Line::raw("Main"), 10, true, false, &theme, &ASCII);
         assert_eq!(plain(&remembered), "  Main    ");
-        assert!(remembered.spans.iter().all(|span| span.style == theme.selection_dim));
-        assert_eq!(plain(&list_row(Line::raw("Main"), 10, false, true, &theme, &ASCII)), "  Main    ");
+        assert!(
+            remembered
+                .spans
+                .iter()
+                .all(|span| span.style == theme.selection_dim)
+        );
+        assert_eq!(
+            plain(&list_row(
+                Line::raw("Main"),
+                10,
+                false,
+                true,
+                &theme,
+                &ASCII
+            )),
+            "  Main    "
+        );
     }
 
     #[test]
     fn status_words_carry_their_glyph() {
         let theme = Theme::new(Depth::Ansi16, Colors::Dark, Appearance::Dark);
         assert_eq!(plain(&status("Signed in", &theme, &UNICODE)), "✓ Signed in");
-        assert_eq!(plain(&status("Can't reach this URL", &theme, &ASCII)), "x Can't reach this URL");
+        assert_eq!(
+            plain(&status("Can't reach this URL", &theme, &ASCII)),
+            "x Can't reach this URL"
+        );
         assert_eq!(plain(&status("Idle", &theme, &UNICODE)), "Idle");
-        assert_eq!(status("Not signed in", &theme, &UNICODE).spans[0].style, theme.warning);
+        assert_eq!(
+            status("Not signed in", &theme, &UNICODE).spans[0].style,
+            theme.warning
+        );
     }
 
     #[test]
@@ -350,7 +401,10 @@ mod tests {
         let barred = with_bar(lines.clone(), 8, 1, 2, &theme, &UNICODE);
         let text: Vec<String> = barred.iter().map(plain).collect();
         assert_eq!(text, ["one    │", "two    █", "three  █", "four   │"]);
-        let ascii: Vec<String> = with_bar(lines, 8, 0, 1, &theme, &ASCII).iter().map(plain).collect();
+        let ascii: Vec<String> = with_bar(lines, 8, 0, 1, &theme, &ASCII)
+            .iter()
+            .map(plain)
+            .collect();
         assert_eq!(ascii, ["one    #", "two    |", "three  |", "four   |"]);
     }
 }

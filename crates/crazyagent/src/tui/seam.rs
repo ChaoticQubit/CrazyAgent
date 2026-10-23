@@ -38,7 +38,10 @@ pub struct AccountRow {
 /// One engine request a screen asks the shell to send.
 /// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
 /// time on the owner connection; the reply comes back as an `Arrival`.
-#[expect(dead_code, reason = "project setup, creation and conversation requests are built by the project screens")]
+#[expect(
+    dead_code,
+    reason = "project setup, creation and conversation requests are built by the project screens"
+)]
 pub enum Request {
     Profile,
     SaveProfile { profile: OwnerProfile },
@@ -102,7 +105,10 @@ pub(in crate::tui) enum ShellEvent {
 
 /// Something that arrived from the engine, broadcast to every open screen.
 /// Input: an engine reply. Output: screens react; the shell updates `Store`.
-#[expect(dead_code, reason = "owner and wire replies are read by the project screens")]
+#[expect(
+    dead_code,
+    reason = "owner and wire replies are read by the project screens"
+)]
 pub enum Arrival {
     Connected,
     Disconnected(String),
@@ -194,17 +200,21 @@ impl ProjectCard {
         jobs: &[ResearchJob],
         pools: &[PoolSummary],
     ) -> Self {
-        let pool = setup.and_then(|setup| setup.pool.as_ref()).map(|reference| {
-            pools
-                .iter()
-                .find(|pool| &pool.id == reference)
-                .map_or_else(|| "A removed pool".to_owned(), |pool| pool.name.clone())
-        });
+        let pool = setup
+            .and_then(|setup| setup.pool.as_ref())
+            .map(|reference| {
+                pools
+                    .iter()
+                    .find(|pool| &pool.id == reference)
+                    .map_or_else(|| "A removed pool".to_owned(), |pool| pool.name.clone())
+            });
         Self {
             id: project.project_id.clone(),
             name: project.spec.name.clone(),
             about: setup.map(|setup| setup.about.clone()).unwrap_or_default(),
-            platforms: setup.map(|setup| setup.platforms.clone()).unwrap_or_default(),
+            platforms: setup
+                .map(|setup| setup.platforms.clone())
+                .unwrap_or_default(),
             pool,
             research: ResearchCounts::of(jobs),
             created_ms: setup.map(|setup| setup.created_ms),

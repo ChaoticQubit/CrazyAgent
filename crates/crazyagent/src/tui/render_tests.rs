@@ -78,7 +78,11 @@ fn fixture(name: &str, swaps: &[(&str, &str)]) -> Vec<String> {
                 let from_width = super::text::width(from);
                 let to_width = super::text::width(to);
                 if row.contains(from) && to_width <= from_width {
-                    row = row.replacen(from, &format!("{to}{}", " ".repeat(from_width - to_width)), 1);
+                    row = row.replacen(
+                        from,
+                        &format!("{to}{}", " ".repeat(from_width - to_width)),
+                        1,
+                    );
                 }
             }
             row
@@ -125,7 +129,11 @@ fn check_modal(name: &str, actual: &[String], title: &str) {
         .unwrap();
     let mut wrong = Vec::new();
     for row in (top..=bottom).chain([expected.len() - 1]) {
-        let (from, to) = if row == expected.len() - 1 { (0, expected[row].chars().count()) } else { (left, right) };
+        let (from, to) = if row == expected.len() - 1 {
+            (0, expected[row].chars().count())
+        } else {
+            (left, right)
+        };
         let want = chars(&expected[row], from, to);
         let got = chars(&actual[row], from, to);
         if want != got {
@@ -165,12 +173,27 @@ fn pool(name: &str, ready: usize, waiting: usize, projects: usize) -> PoolSummar
 }
 
 fn pools() -> Vec<PoolSummary> {
-    vec![pool("Main", 6, 1, 2), pool("Research", 3, 1, 0), pool("Local only", 1, 1, 0)]
+    vec![
+        pool("Main", 6, 1, 2),
+        pool("Research", 3, 1, 0),
+        pool("Local only", 1, 1, 0),
+    ]
 }
 
-fn card(name: &str, about: &str, platforms: &[Platform], pool: Option<&str>, research: ResearchCounts, age_ms: i64) -> ProjectCard {
+fn card(
+    name: &str,
+    about: &str,
+    platforms: &[Platform],
+    pool: Option<&str>,
+    research: ResearchCounts,
+    age_ms: i64,
+) -> ProjectCard {
     ProjectCard {
-        id: ProjectId::new(format!("project-{}", name.split(' ').next().unwrap().to_lowercase())).unwrap(),
+        id: ProjectId::new(format!(
+            "project-{}",
+            name.split(' ').next().unwrap().to_lowercase()
+        ))
+        .unwrap(),
         name: name.into(),
         about: about.into(),
         platforms: platforms.to_vec(),
@@ -187,7 +210,11 @@ fn projects() -> Vec<ProjectCard> {
             "Live dashboard for marine sensor buoys.",
             &[Platform::Website],
             Some("Main"),
-            ResearchCounts { done: 2, running: 2, ..Default::default() },
+            ResearchCounts {
+                done: 2,
+                running: 2,
+                ..Default::default()
+            },
             4 * 60_000 + 5_000,
         ),
         card(
@@ -195,7 +222,10 @@ fn projects() -> Vec<ProjectCard> {
             "Invoicing for small design studios.",
             &[Platform::Website, Platform::DesktopApp],
             Some("Main"),
-            ResearchCounts { done: 3, ..Default::default() },
+            ResearchCounts {
+                done: 3,
+                ..Default::default()
+            },
             DAY_MS,
         ),
         card(
@@ -203,7 +233,10 @@ fn projects() -> Vec<ProjectCard> {
             "Offline field notes for ecologists.",
             &[Platform::MobileApp],
             None,
-            ResearchCounts { needs_pool: 1, ..Default::default() },
+            ResearchCounts {
+                needs_pool: 1,
+                ..Default::default()
+            },
             4 * DAY_MS,
         ),
     ]
@@ -213,8 +246,11 @@ fn profile() -> OwnerProfile {
     OwnerProfile {
         name: "Mira Okafor".into(),
         role: "Founder and full-stack developer".into(),
-        bio: "Building tools for marine researchers. Ten years of TypeScript, learning Rust.".into(),
-        preferred_stack: ["TypeScript", "React", "Rust", "Postgres"].map(Into::into).to_vec(),
+        bio: "Building tools for marine researchers. Ten years of TypeScript, learning Rust."
+            .into(),
+        preferred_stack: ["TypeScript", "React", "Rust", "Postgres"]
+            .map(Into::into)
+            .to_vec(),
         working_style: WorkingStyle {
             detail: AnswerDetail::Terse,
             initiative: Initiative::AskFirst,
@@ -231,12 +267,19 @@ const BIO_80: [(&str, &str); 2] = [
 ];
 
 fn old_date() -> String {
-    clock::ago(clock::now_ms() - 4 * DAY_MS, clock::now_ms(), clock::local_offset())
+    clock::ago(
+        clock::now_ms() - 4 * DAY_MS,
+        clock::now_ms(),
+        clock::local_offset(),
+    )
 }
 
 fn project_swaps(old: &str) -> Vec<(&'static str, String)> {
     vec![
-        ("Research: 2 done, 1 running", "Research: 2 done, 2 running".into()),
+        (
+            "Research: 2 done, 1 running",
+            "Research: 2 done, 2 running".into(),
+        ),
         ("Updated 4 min ago", "Created 4 min ago".into()),
         ("Updated yesterday", "Created yesterday".into()),
         ("Updated Oct 19", format!("Created {old}")),
@@ -244,7 +287,10 @@ fn project_swaps(old: &str) -> Vec<(&'static str, String)> {
 }
 
 fn swapped<'a>(swaps: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
-    swaps.iter().map(|(from, to)| (*from, to.as_str())).collect()
+    swaps
+        .iter()
+        .map(|(from, to)| (*from, to.as_str()))
+        .collect()
 }
 
 fn shell_at(ctx: Ctx, place: Place) -> Shell {
@@ -257,9 +303,17 @@ fn shell_at(ctx: Ctx, place: Place) -> Shell {
 fn startup_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = Shell::new(ctx(width, height));
-        check(&format!("startup-connecting-{width}"), &render(&mut shell, width, height), &[]);
+        check(
+            &format!("startup-connecting-{width}"),
+            &render(&mut shell, width, height),
+            &[],
+        );
         shell.ctx.link = Link::Down("engine_unavailable".into());
-        check(&format!("startup-down-{width}"), &render(&mut shell, width, height), &[]);
+        check(
+            &format!("startup-down-{width}"),
+            &render(&mut shell, width, height),
+            &[],
+        );
     }
     let mut shell = Shell::new(ctx(50, 12));
     check("too-small", &render(&mut shell, 50, 12), &[]);
@@ -270,7 +324,11 @@ fn welcome_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = shell_at(ready(width, height), Place::Welcome);
         keys(&mut shell, "Mira Ok");
-        check(&format!("welcome-{width}"), &render(&mut shell, width, height), &[]);
+        check(
+            &format!("welcome-{width}"),
+            &render(&mut shell, width, height),
+            &[],
+        );
     }
     let mut shell = shell_at(ready(80, 24), Place::Welcome);
     for _ in 0..6 {
@@ -284,7 +342,10 @@ fn welcome_frames_match_the_design() {
         shell.key(Key::Tab);
         keys(shell, "Founder and full-stack developer");
         shell.key(Key::Tab);
-        keys(shell, "Building tools for marine researchers. Ten years of TypeScript, learning Rust.");
+        keys(
+            shell,
+            "Building tools for marine researchers. Ten years of TypeScript, learning Rust.",
+        );
         shell.key(Key::Tab);
         keys(shell, "TypeScript, React, Rust, Postgres");
         for _ in 0..3 {
@@ -329,7 +390,11 @@ fn home_frames_match_the_design() {
         ctx.store.pools = Load::Ready(pools());
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
-        check(&format!("home-projects-{width}"), &render(&mut shell, width, height), &swapped(&swaps));
+        check(
+            &format!("home-projects-{width}"),
+            &render(&mut shell, width, height),
+            &swapped(&swaps),
+        );
     }
 
     let mut shell = shell_at(ready(80, 24), Place::Home);
@@ -340,8 +405,14 @@ fn home_frames_match_the_design() {
     ctx.store.pools = Load::Ready(pools());
     ctx.store.projects_seen = Some("10:42".into());
     let mut shell = shell_at(ctx, Place::Home);
-    shell.arrive(super::seam::Arrival::Disconnected("trusted_connection_lost".into()));
-    check("home-disconnected-80", &render(&mut shell, 80, 24), &swapped(&swaps));
+    shell.arrive(super::seam::Arrival::Disconnected(
+        "trusted_connection_lost".into(),
+    ));
+    check(
+        "home-disconnected-80",
+        &render(&mut shell, 80, 24),
+        &swapped(&swaps),
+    );
 
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(Vec::new());
@@ -356,12 +427,19 @@ const UNCOUNTED: [(&str, &str); 2] = [
         "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
         "@ Accounts   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   ⁂ Memory   ◉ Profile",
     ),
-    ("───────────────────━━━━━━━━━", "───────────────━━━━━━━━━────"),
+    (
+        "───────────────────━━━━━━━━━",
+        "───────────────━━━━━━━━━────",
+    ),
 ];
 
 #[test]
 fn settings_frames_match_the_design() {
-    let reach = [UNCOUNTED[0], UNCOUNTED[1], ("1 can't be reached", "1 not signed in")];
+    let reach = [
+        UNCOUNTED[0],
+        UNCOUNTED[1],
+        ("1 can't be reached", "1 not signed in"),
+    ];
     for (width, height) in [(120, 36), (80, 24)] {
         let mut ctx = ready(width, height);
         ctx.store.pools = Load::Ready(pools());
@@ -369,7 +447,11 @@ fn settings_frames_match_the_design() {
         projects[2].pool = None;
         ctx.store.projects = Load::Ready(projects);
         let mut shell = shell_at(ctx, Place::Settings(SettingsSection::Pools));
-        check(&format!("pools-{width}"), &render(&mut shell, width, height), &reach);
+        check(
+            &format!("pools-{width}"),
+            &render(&mut shell, width, height),
+            &reach,
+        );
     }
     let mut ctx = ready(80, 24);
     ctx.store.pools = Load::Ready(Vec::new());
@@ -387,8 +469,17 @@ fn settings_frames_match_the_design() {
         let mut shell = shell_at(ctx, Place::Settings(SettingsSection::Profile));
         let from = format!("{}{}", "─".repeat(89), "━".repeat(9));
         let to = format!("{}{}{}", "─".repeat(75), "━".repeat(9), "─".repeat(14));
-        let swaps = [UNCOUNTED[0], (from.as_str(), to.as_str()), BIO_80[0], BIO_80[1]];
-        check(&format!("profile-{width}"), &render(&mut shell, width, height), &swaps);
+        let swaps = [
+            UNCOUNTED[0],
+            (from.as_str(), to.as_str()),
+            BIO_80[0],
+            BIO_80[1],
+        ];
+        check(
+            &format!("profile-{width}"),
+            &render(&mut shell, width, height),
+            &swaps,
+        );
     }
 }
 
@@ -424,11 +515,19 @@ fn overlay_frames_match_the_design() {
         ctx.store.pools = Load::Ready(pools());
         let mut shell = shell_at(ctx, Place::Home);
         shell.key(Key::Char('?'));
-        check_modal(&format!("help-{width}"), &render(&mut shell, width, height), "Keys");
+        check_modal(
+            &format!("help-{width}"),
+            &render(&mut shell, width, height),
+            "Keys",
+        );
         shell.key(Key::Esc);
         shell.key(Key::Ctrl('k'));
         keys(&mut shell, "tide");
-        check_modal(&format!("goto-{width}"), &render(&mut shell, width, height), "Go to");
+        check_modal(
+            &format!("goto-{width}"),
+            &render(&mut shell, width, height),
+            "Go to",
+        );
         shell.key(Key::Down);
         shell.key(Key::Down);
         shell.key(Key::Enter);
@@ -444,10 +543,15 @@ fn overlay_frames_match_the_design() {
     }
 
     let mut ctx = ready(80, 24);
-    ctx.store.projects = Load::Ready(projects().into_iter().map(|mut card| {
-        card.research.running = if card.name == "Tidepool" { 3 } else { 0 };
-        card
-    }).collect());
+    ctx.store.projects = Load::Ready(
+        projects()
+            .into_iter()
+            .map(|mut card| {
+                card.research.running = if card.name == "Tidepool" { 3 } else { 0 };
+                card
+            })
+            .collect(),
+    );
     let mut shell = Shell::with(ctx, Box::new(Draft));
     shell.key(Key::Ctrl('q'));
     assert!(!shell.quitting());
@@ -505,7 +609,13 @@ fn same_bar(rows: &[String], column: usize) -> Vec<String> {
         .map(|row| {
             row.chars()
                 .enumerate()
-                .map(|(index, character)| if index == column && character == '█' { '│' } else { character })
+                .map(|(index, character)| {
+                    if index == column && character == '█' {
+                        '│'
+                    } else {
+                        character
+                    }
+                })
                 .collect()
         })
         .collect()
@@ -552,7 +662,11 @@ fn pool_editor_frames_match_the_design() {
         shell.key(Key::Home);
         shell.key(Key::Down);
         shell.key(Key::Down);
-        check_without_thumb(&format!("pool-editor-{width}"), &render(&mut shell, width, height), width);
+        check_without_thumb(
+            &format!("pool-editor-{width}"),
+            &render(&mut shell, width, height),
+            width,
+        );
     }
 
     let mut ctx = ready(80, 24);

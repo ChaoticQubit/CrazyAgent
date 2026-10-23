@@ -1,7 +1,8 @@
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint, too_small,
+    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint,
+    too_small,
 };
 use super::keys::{Global, Key, global};
 use super::screens::startup::Startup;
@@ -44,7 +45,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
                 } else {
                     format!("{} / {}", card.name, tab.label())
                 },
-                kind: if tab == ProjectTab::Overview { "Project" } else { "Project tab" },
+                kind: if tab == ProjectTab::Overview {
+                    "Project"
+                } else {
+                    "Project tab"
+                },
                 place: Place::Project {
                     id: card.id.clone(),
                     name: card.name.clone(),
@@ -186,7 +191,10 @@ impl Shell {
     }
 
     fn top(&self) -> &dyn Screen {
-        self.stack.last().expect("the stack is never empty").as_ref()
+        self.stack
+            .last()
+            .expect("the stack is never empty")
+            .as_ref()
     }
 
     /// Records a new window size.
@@ -213,11 +221,9 @@ impl Shell {
     }
 
     fn running(&self) -> usize {
-        self.ctx
-            .store
-            .projects
-            .ready()
-            .map_or(0, |cards| cards.iter().map(|card| card.research.running).sum())
+        self.ctx.store.projects.ready().map_or(0, |cards| {
+            cards.iter().map(|card| card.research.running).sum()
+        })
     }
 
     fn draft(&self) -> bool {
@@ -277,7 +283,8 @@ impl Shell {
     }
 
     fn home(&mut self) {
-        let root_is_home = self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
+        let root_is_home =
+            self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
         if root_is_home {
             self.stack.truncate(1);
             self.refresh();
@@ -399,12 +406,17 @@ impl Shell {
         match &arrival {
             Arrival::Connected => {
                 if self.ctx.link == Link::Reconnecting {
-                    self.ctx.say(Message::success("Connected to the engine again.", ""));
+                    self.ctx
+                        .say(Message::success("Connected to the engine again.", ""));
                 }
                 self.ctx.link = Link::Ready;
             }
             Arrival::Disconnected(problem) => {
-                let started = self.stack.first().and_then(|screen| screen.place()).is_some();
+                let started = self
+                    .stack
+                    .first()
+                    .and_then(|screen| screen.place())
+                    .is_some();
                 if started {
                     self.ctx.link = Link::Reconnecting;
                     self.ctx.say(Message::error(
@@ -640,7 +652,10 @@ impl Shell {
         draw_lines(
             frame.buffer_mut(),
             rule,
-            &[Line::from(Span::styled(glyphs.hline.repeat(width), theme.muted))],
+            &[Line::from(Span::styled(
+                glyphs.hline.repeat(width),
+                theme.muted,
+            ))],
         );
         let ctx = &self.ctx;
         let cursor = self
@@ -656,7 +671,11 @@ impl Shell {
             .overlay_hints()
             .or_else(|| screen_modal.as_ref().map(|(_, hints)| hints.clone()))
             .unwrap_or_else(|| self.top().hints(&self.ctx));
-        draw_lines(frame.buffer_mut(), help, &[help_line(width, &hints, &theme, glyphs)]);
+        draw_lines(
+            frame.buffer_mut(),
+            help,
+            &[help_line(width, &hints, &theme, glyphs)],
+        );
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None
         } else {
@@ -667,7 +686,8 @@ impl Shell {
         }
         match &self.overlay {
             Some(Overlay::Help) => {
-                self.help_modal().draw(frame.buffer_mut(), area, &theme, glyphs);
+                self.help_modal()
+                    .draw(frame.buffer_mut(), area, &theme, glyphs);
             }
             Some(Overlay::GoTo(go)) => {
                 let (modal, at) = self.go_to_modal(go);
@@ -675,7 +695,8 @@ impl Shell {
                 cursor = Some(Position::new(inner.x + at.x, inner.y + at.y));
             }
             Some(Overlay::Quit(ask)) => {
-                self.quit_modal(ask).draw(frame.buffer_mut(), area, &theme, glyphs);
+                self.quit_modal(ask)
+                    .draw(frame.buffer_mut(), area, &theme, glyphs);
             }
             None => {}
         }
@@ -698,7 +719,13 @@ mod tests {
     use crate::tui::theme::{Appearance, Colors, Depth};
 
     fn ctx() -> Ctx {
-        let mut ctx = Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new());
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
         ctx.link = Link::Ready;
         ctx
     }
@@ -745,7 +772,10 @@ mod tests {
     fn go_to_lists_projects_tabs_settings_and_actions_and_opens_over_home() {
         let mut ctx = ctx();
         ctx.store.projects = Load::Ready(vec![card("Tidepool", 0)]);
-        let labels: Vec<String> = targets(&ctx).into_iter().map(|target| target.label).collect();
+        let labels: Vec<String> = targets(&ctx)
+            .into_iter()
+            .map(|target| target.label)
+            .collect();
         assert_eq!(labels[0], "Tidepool");
         assert!(labels.contains(&"Tidepool / Agents".to_owned()));
         assert!(labels.contains(&"Settings / Plugins and skills".to_owned()));
@@ -768,19 +798,28 @@ mod tests {
     fn go_to_and_help_stay_closed_where_they_do_not_apply() {
         let mut shell = Shell::new(ctx());
         shell.key(Key::Ctrl('k'));
-        assert!(shell.overlay.is_none(), "no Go to before the owner is set up");
+        assert!(
+            shell.overlay.is_none(),
+            "no Go to before the owner is set up"
+        );
 
         let mut shell = at(Place::Welcome, ctx());
         shell.key(Key::Ctrl('k'));
         assert!(shell.overlay.is_none(), "no Go to on the first-run page");
         shell.key(Key::Char('?'));
-        assert!(shell.overlay.is_none(), "? types into the focused name field");
+        assert!(
+            shell.overlay.is_none(),
+            "? types into the focused name field"
+        );
 
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('?'));
         assert!(matches!(shell.overlay, Some(Overlay::Help)));
         shell.key(Key::Char('x'));
-        assert!(matches!(shell.overlay, Some(Overlay::Help)), "other keys keep it open");
+        assert!(
+            matches!(shell.overlay, Some(Overlay::Help)),
+            "other keys keep it open"
+        );
         shell.key(Key::Esc);
         assert!(shell.overlay.is_none());
     }
@@ -790,7 +829,10 @@ mod tests {
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('s'));
         assert_eq!(shell.depth(), 2);
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Accounts)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Accounts))
+        );
         shell.key(Key::Esc);
         assert_eq!(shell.place(), Some(Place::Home));
         shell.key(Key::Esc);
@@ -803,9 +845,15 @@ mod tests {
         let mut shell = at(Place::Home, ctx());
         shell.key(Key::Char('s'));
         shell.key(Key::ShiftLeft);
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Profile)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Profile))
+        );
         shell.key(Key::Char(']'));
-        assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Accounts)));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Accounts))
+        );
         shell.key(Key::ShiftRight);
         assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Pools)));
         assert_eq!(shell.depth(), 2, "sections replace each other");
@@ -826,7 +874,10 @@ mod tests {
             _ => panic!("quit asks first"),
         }
         shell.key(Key::Enter);
-        assert!(!shell.quitting() && shell.overlay.is_none(), "Enter on Stay stays");
+        assert!(
+            !shell.quitting() && shell.overlay.is_none(),
+            "Enter on Stay stays"
+        );
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Esc);
         assert!(!shell.quitting() && shell.overlay.is_none());
@@ -849,10 +900,16 @@ mod tests {
         drain(&mut shell);
         shell.arrive(Arrival::Disconnected("trusted_connection_lost".into()));
         assert_eq!(shell.ctx.link, Link::Reconnecting);
-        assert_eq!(shell.ctx.message().unwrap().lead, "Lost the connection to the engine.");
+        assert_eq!(
+            shell.ctx.message().unwrap().lead,
+            "Lost the connection to the engine."
+        );
         shell.arrive(Arrival::Connected);
         assert_eq!(shell.ctx.link, Link::Ready);
-        assert_eq!(shell.ctx.message().unwrap().lead, "Connected to the engine again.");
+        assert_eq!(
+            shell.ctx.message().unwrap().lead,
+            "Connected to the engine again."
+        );
         let requests = drain(&mut shell);
         assert!(requests.contains(&"Projects".to_owned()), "{requests:?}");
         assert!(requests.contains(&"Pools".to_owned()), "{requests:?}");

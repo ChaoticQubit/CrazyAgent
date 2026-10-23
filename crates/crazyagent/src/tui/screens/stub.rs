@@ -58,7 +58,11 @@ impl Screen for NotReady {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        let mut hints = vec![hint("Esc", "Back"), hint("Ctrl-K", "Go to"), hint("Ctrl-Q", "Quit")];
+        let mut hints = vec![
+            hint("Esc", "Back"),
+            hint("Ctrl-K", "Go to"),
+            hint("Ctrl-Q", "Quit"),
+        ];
         if matches!(self.place, Place::Project { .. }) {
             hints.insert(1, sections_hint(ctx.glyphs));
             hints[1].label = "Tabs".into();
@@ -79,7 +83,11 @@ impl Screen for NotReady {
             .position(|each| each == tab)
             .expect("every tab is listed");
         let count = ProjectTab::ALL.len();
-        let next = ProjectTab::ALL[if forward { (index + 1) % count } else { (index + count - 1) % count }];
+        let next = ProjectTab::ALL[if forward {
+            (index + 1) % count
+        } else {
+            (index + count - 1) % count
+        }];
         Flow::Replace(Box::new(Self::project(id.clone(), name.clone(), next)))
     }
 
@@ -98,7 +106,13 @@ impl Screen for NotReady {
                 .iter()
                 .position(|each| each == tab)
                 .expect("every tab is listed");
-            lines.extend(tab_strip(area.width as usize, &tabs, active, &ctx.theme, ctx.glyphs));
+            lines.extend(tab_strip(
+                area.width as usize,
+                &tabs,
+                active,
+                &ctx.theme,
+                ctx.glyphs,
+            ));
         }
         lines.extend(indent(
             vec![

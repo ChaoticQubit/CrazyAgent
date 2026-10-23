@@ -32,7 +32,11 @@ impl Startup {
 /// Inputs: the path and the home folder. Output: the display path.
 pub fn tilde(path: &str, home: Option<&str>) -> String {
     match home {
-        Some(home) if !home.is_empty() && path.starts_with(home) && path[home.len()..].starts_with('/') => {
+        Some(home)
+            if !home.is_empty()
+                && path.starts_with(home)
+                && path[home.len()..].starts_with('/') =>
+        {
             format!("~{}", &path[home.len()..])
         }
         _ => path.to_owned(),
@@ -70,7 +74,10 @@ fn copy(text: &str) -> Result<(), String> {
         .write_all(text.as_bytes())
         .map_err(|error| error.to_string())?;
     let status = child.wait().map_err(|error| error.to_string())?;
-    status.success().then_some(()).ok_or_else(|| "clipboard_failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "clipboard_failed".into())
 }
 
 impl Screen for Startup {
@@ -190,7 +197,10 @@ mod tests {
             tilde("/Users/mira/.crazyagent/engine.sock", Some("/Users/mira")),
             "~/.crazyagent/engine.sock"
         );
-        assert_eq!(tilde("/Users/miranda/e.sock", Some("/Users/mira")), "/Users/miranda/e.sock");
+        assert_eq!(
+            tilde("/Users/miranda/e.sock", Some("/Users/mira")),
+            "/Users/miranda/e.sock"
+        );
         assert_eq!(tilde("/tmp/e.sock", None), "/tmp/e.sock");
     }
 }

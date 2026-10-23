@@ -220,7 +220,8 @@ fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
         .flat_map(|character| character.to_lowercase())
         .collect();
     let nonce = crate::engine::owner::random_id().map_err(|error| bounded_problem(&error.0))?;
-    CredentialRef::new(format!("pool-{stem}-{nonce}")).map_err(|error| bounded_problem(&error.to_string()))
+    CredentialRef::new(format!("pool-{stem}-{nonce}"))
+        .map_err(|error| bounded_problem(&error.to_string()))
 }
 
 fn transport(error: &EngineError, lost: &mut bool) -> String {

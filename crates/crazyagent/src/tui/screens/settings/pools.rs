@@ -70,7 +70,12 @@ impl Pools {
     }
 
     fn ask_delete(&mut self, ctx: &mut Ctx) {
-        let Some(pool) = ctx.store.pools.ready().and_then(|pools| pools.get(self.selected)) else {
+        let Some(pool) = ctx
+            .store
+            .pools
+            .ready()
+            .and_then(|pools| pools.get(self.selected))
+        else {
             return;
         };
         if used_by(pool, false, ctx) != "Not used" {
@@ -88,7 +93,11 @@ impl Pools {
     }
 
     fn widths(wide: bool) -> [usize; 4] {
-        if wide { [18, 10, 32, 40] } else { [13, 9, 30, 14] }
+        if wide {
+            [18, 10, 32, 40]
+        } else {
+            [13, 9, 30, 14]
+        }
     }
 }
 
@@ -107,7 +116,10 @@ pub fn readiness(pool: &PoolSummary, ctx: &Ctx) -> Line<'static> {
     let mut spans = vec![Span::styled(format!("{ready} ready"), ctx.theme.success)];
     if waiting > 0 {
         spans.push(Span::raw(", "));
-        spans.push(Span::styled(format!("{waiting} not signed in"), ctx.theme.warning));
+        spans.push(Span::styled(
+            format!("{waiting} not signed in"),
+            ctx.theme.warning,
+        ));
     }
     Line::from(spans)
 }
@@ -145,7 +157,11 @@ impl Screen for Pools {
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match ctx.store.pools.ready() {
             Some(pools) if pools.is_empty() => {
-                vec![hint("Enter", "New pool"), sections_hint(ctx.glyphs), hint("Esc", "Home")]
+                vec![
+                    hint("Enter", "New pool"),
+                    sections_hint(ctx.glyphs),
+                    hint("Esc", "Home"),
+                ]
             }
             _ => vec![
                 hint("a", "New pool"),
@@ -168,7 +184,12 @@ impl Screen for Pools {
                 self.ask_delete(ctx);
                 Flow::Handled
             }
-            Key::Enter => match ctx.store.pools.ready().and_then(|pools| pools.get(self.selected)) {
+            Key::Enter => match ctx
+                .store
+                .pools
+                .ready()
+                .and_then(|pools| pools.get(self.selected))
+            {
                 Some(pool) => Flow::Open(Place::EditPool(pool.id.clone())),
                 None => Flow::Open(Place::NewPool),
             },
@@ -241,7 +262,11 @@ impl Screen for Pools {
                 ],
                 top: None,
             },
-            vec![hint(&arrows, "Choose"), hint("Enter", "Confirm"), hint("Esc", "Cancel")],
+            vec![
+                hint(&arrows, "Choose"),
+                hint("Enter", "Confirm"),
+                hint("Esc", "Cancel"),
+            ],
         ))
     }
 
@@ -280,7 +305,11 @@ impl Screen for Pools {
                         limit,
                         styled("Pools", Role::Accent, theme),
                         styled(
-                            format!("{} pool{}", pools.len(), if pools.len() == 1 { "" } else { "s" }),
+                            format!(
+                                "{} pool{}",
+                                pools.len(),
+                                if pools.len() == 1 { "" } else { "s" }
+                            ),
                             Role::Muted,
                             theme,
                         ),
@@ -293,7 +322,9 @@ impl Screen for Pools {
                         restyle(
                             cells(
                                 &widths,
-                                ["Name", "Accounts", "Ready", "Used by"].map(Line::raw).to_vec(),
+                                ["Name", "Accounts", "Ready", "Used by"]
+                                    .map(Line::raw)
+                                    .to_vec(),
                                 2,
                                 ctx.glyphs,
                             ),
@@ -374,7 +405,13 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        let mut ctx = Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new());
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
         ctx.store.pools = Load::Ready(vec![pool("main", 2), pool("spare", 0)]);
         ctx.store.projects = Load::Ready(Vec::new());
         ctx
@@ -384,7 +421,10 @@ mod tests {
     fn a_used_pool_cannot_be_deleted_and_says_why() {
         let mut ctx = ctx();
         let mut screen = Pools::new();
-        assert!(matches!(screen.key(&Key::Char('d'), &mut ctx), Flow::Handled));
+        assert!(matches!(
+            screen.key(&Key::Char('d'), &mut ctx),
+            Flow::Handled
+        ));
         assert!(screen.modal(&ctx).is_none());
         assert_eq!(
             ctx.message().unwrap().lead,
@@ -416,7 +456,10 @@ mod tests {
         }
         assert!(screen.busy(&ctx));
         screen.key(&Key::Char('d'), &mut ctx);
-        assert!(screen.modal(&ctx).is_none(), "no second delete while one runs");
+        assert!(
+            screen.modal(&ctx).is_none(),
+            "no second delete while one runs"
+        );
 
         screen.arrive(&Arrival::PoolEdited(Err("pool_in_use".into())), &mut ctx);
         assert_eq!(

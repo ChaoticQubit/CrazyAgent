@@ -162,7 +162,9 @@ impl Ctx {
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
-            Request::Pools if self.store.pools.ready().is_none() => self.store.pools = Load::Loading,
+            Request::Pools if self.store.pools.ready().is_none() => {
+                self.store.pools = Load::Loading
+            }
             Request::Projects if self.store.projects.ready().is_none() => {
                 self.store.projects = Load::Loading
             }
@@ -234,7 +236,13 @@ mod tests {
     use crate::tui::glyphs::UNICODE;
 
     fn ctx() -> Ctx {
-        Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new())
+        Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        )
     }
 
     #[test]
@@ -276,8 +284,15 @@ mod tests {
         assert_eq!(ctx.queued(), QUEUE_MAX);
         ctx.request(Request::Pools);
         assert_eq!(ctx.queued(), QUEUE_MAX);
-        assert_eq!(ctx.message().unwrap().lead, "Too many requests are waiting.");
-        assert_eq!(ctx.store.pools, Load::Idle, "a refused read leaves the data alone");
+        assert_eq!(
+            ctx.message().unwrap().lead,
+            "Too many requests are waiting."
+        );
+        assert_eq!(
+            ctx.store.pools,
+            Load::Idle,
+            "a refused read leaves the data alone"
+        );
     }
 
     #[test]

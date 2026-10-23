@@ -60,7 +60,11 @@ impl PoolEditor {
                 .and_then(|pools| pools.iter().find(|pool| &pool.id == id))
         }) {
             name.set(&pool.name);
-            members = pool.members.iter().map(|member| member.id.clone()).collect();
+            members = pool
+                .members
+                .iter()
+                .map(|member| member.id.clone())
+                .collect();
         }
         Self {
             id: id.cloned(),
@@ -77,7 +81,11 @@ impl PoolEditor {
     }
 
     fn title(&self) -> &'static str {
-        if self.id.is_some() { "Edit pool" } else { "New pool" }
+        if self.id.is_some() {
+            "Edit pool"
+        } else {
+            "New pool"
+        }
     }
 
     /// The accounts shown: sorted by name, then narrowed by the filter words
@@ -119,7 +127,9 @@ impl PoolEditor {
             self.offset = self.cursor + 1 - self.rows;
         }
         self.offset = self.offset.min(count.saturating_sub(self.rows));
-        assert!(count == 0 || (self.offset <= self.cursor && self.cursor < self.offset + self.rows));
+        assert!(
+            count == 0 || (self.offset <= self.cursor && self.cursor < self.offset + self.rows)
+        );
     }
 
     fn toggle(&mut self, ctx: &mut Ctx) {
@@ -142,17 +152,25 @@ impl PoolEditor {
 
     fn submit(&mut self, ctx: &mut Ctx) {
         let name = self.name.value().trim().to_owned();
-        if name.is_empty() || name.chars().count() > NAME_CHARS_MAX || name.chars().any(char::is_control) {
+        if name.is_empty()
+            || name.chars().count() > NAME_CHARS_MAX
+            || name.chars().any(char::is_control)
+        {
             self.name.error = Some(if name.is_empty() {
                 "Enter a pool name.".into()
             } else {
-                plain_problem("pool_name_bounds").expect("pool_name_bounds has a sentence").into()
+                plain_problem("pool_name_bounds")
+                    .expect("pool_name_bounds has a sentence")
+                    .into()
             });
             self.focus = Focus::Name;
             return;
         }
         if self.members.is_empty() {
-            ctx.say(Message::error("Choose at least one account.", "Space selects one."));
+            ctx.say(Message::error(
+                "Choose at least one account.",
+                "Space selects one.",
+            ));
             self.focus = Focus::Table;
             return;
         }
@@ -171,7 +189,11 @@ impl PoolEditor {
 
     fn step_focus(&mut self, forward: bool) {
         let order = [Focus::Name, Focus::Table, Focus::Save, Focus::Cancel];
-        let current = if self.focus == Focus::Filter { Focus::Table } else { self.focus };
+        let current = if self.focus == Focus::Filter {
+            Focus::Table
+        } else {
+            self.focus
+        };
         let index = order
             .iter()
             .position(|focus| *focus == current)
@@ -289,7 +311,11 @@ impl PoolEditor {
                         &WIDTHS,
                         vec![
                             Line::raw(checkbox(self.members.contains(&account.id), &account.name)),
-                            Line::raw(format!("{} {}", glyphs.provider(&account.provider), account.provider)),
+                            Line::raw(format!(
+                                "{} {}",
+                                glyphs.provider(&account.provider),
+                                account.provider
+                            )),
                             status(&account.status, theme, glyphs),
                         ],
                         2,
@@ -437,14 +463,23 @@ impl Screen for PoolEditor {
         let mut content = vec![row(
             limit,
             styled(self.title(), Role::Accent, theme),
-            styled(counter, if full { Role::Warning } else { Role::Heading }, theme),
+            styled(
+                counter,
+                if full { Role::Warning } else { Role::Heading },
+                theme,
+            ),
             ctx.glyphs,
         )];
         if wide {
             content.push(Line::default());
         }
         let mut cursor = None;
-        let (field, at) = self.name.lines(limit.min(FIELD_WIDTH_MAX), self.focus == Focus::Name, theme, ctx.glyphs);
+        let (field, at) = self.name.lines(
+            limit.min(FIELD_WIDTH_MAX),
+            self.focus == Focus::Name,
+            theme,
+            ctx.glyphs,
+        );
         if let Some(at) = at {
             cursor = Some(Position::new(at.x, at.y + content.len() as u16));
         }
@@ -458,15 +493,30 @@ impl Screen for PoolEditor {
                     content.len() as u16,
                 ));
             }
-            Span::styled(typed, if self.focus == Focus::Filter { theme.accent } else { theme.muted })
+            Span::styled(
+                typed,
+                if self.focus == Focus::Filter {
+                    theme.accent
+                } else {
+                    theme.muted
+                },
+            )
         } else {
             Span::styled("/ Filter", theme.muted)
         };
         content.push(row(
             limit,
-            Line::from(vec![Span::styled("Accounts", theme.accent), Span::raw("  "), filter]),
+            Line::from(vec![
+                Span::styled("Accounts", theme.accent),
+                Span::raw("  "),
+                filter,
+            ]),
             styled(
-                if self.selected_only { "v  Show all accounts" } else { "v  Show selected only" },
+                if self.selected_only {
+                    "v  Show all accounts"
+                } else {
+                    "v  Show selected only"
+                },
                 Role::Muted,
                 theme,
             ),
@@ -477,7 +527,9 @@ impl Screen for PoolEditor {
             restyle(
                 cells(
                     &WIDTHS,
-                    ["    Account", "Provider", "Status"].map(Line::raw).to_vec(),
+                    ["    Account", "Provider", "Status"]
+                        .map(Line::raw)
+                        .to_vec(),
                     2,
                     ctx.glyphs,
                 ),
@@ -536,7 +588,13 @@ mod tests {
     }
 
     fn ctx(count: usize) -> Ctx {
-        let mut ctx = Ctx::new(Depth::NoColor, Colors::Dark, Appearance::Dark, &UNICODE, String::new());
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
         ctx.store.accounts = Load::Ready((0..count).map(account).collect());
         ctx
     }
@@ -559,7 +617,10 @@ mod tests {
         }
         assert_eq!(editor.members.len(), 15);
         assert!(!editor.members.contains(&account(15).id));
-        assert_eq!(ctx.message().unwrap().lead, "A pool holds at most 15 accounts.");
+        assert_eq!(
+            ctx.message().unwrap().lead,
+            "A pool holds at most 15 accounts."
+        );
         editor.key(&Key::Up, &mut ctx);
         editor.key(&Key::Char(' '), &mut ctx);
         assert_eq!(editor.members.len(), 15, "the refused row stays unselected");
@@ -577,7 +638,11 @@ mod tests {
         editor.key(&Key::Char('/'), &mut ctx);
         assert!(editor.typing());
         typed(&mut editor, "SEAT 02", &mut ctx);
-        let names: Vec<String> = editor.view(&ctx).iter().map(|row| row.name.clone()).collect();
+        let names: Vec<String> = editor
+            .view(&ctx)
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
         assert_eq!(names.len(), 11);
         assert_eq!(names[0], "Seat 002");
         assert!(names.iter().all(|name| name.contains("02")));
@@ -624,11 +689,17 @@ mod tests {
             other => panic!("unexpected request {other:?}"),
         }
         assert!(editor.saving);
-        assert!(matches!(editor.key(&Key::Esc, &mut ctx), Flow::Handled), "keys wait while saving");
+        assert!(
+            matches!(editor.key(&Key::Esc, &mut ctx), Flow::Handled),
+            "keys wait while saving"
+        );
 
         let flow = editor.arrive(&Arrival::PoolEdited(Err("pool_exists".into())), &mut ctx);
         assert!(matches!(flow, Flow::Handled));
-        assert_eq!(ctx.message().unwrap().lead, "A pool with this id already exists.");
+        assert_eq!(
+            ctx.message().unwrap().lead,
+            "A pool with this id already exists."
+        );
         editor.key(&Key::Enter, &mut ctx);
         assert!(matches!(ctx.next_request(), Some(Request::EditPool { .. })));
         let flow = editor.arrive(&Arrival::PoolEdited(Ok(())), &mut ctx);
@@ -664,7 +735,12 @@ mod tests {
         editor.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                change: PoolChange::Update { id: sent, name, members },
+                change:
+                    PoolChange::Update {
+                        id: sent,
+                        name,
+                        members,
+                    },
             }) => {
                 assert_eq!(sent, id);
                 assert_eq!(name, "Main 2");
