@@ -561,6 +561,39 @@ fn leaving_the_wizard_keeps_the_draft_for_next_time() {
     assert_eq!(kept_draft().as_deref(), Some("Fieldnotes"));
 }
 
+#[test]
+fn an_unsent_message_counts_as_a_draft_that_quit_warns_about() {
+    let mut ctx = ctx(80, 24);
+    let mut screen = open(
+        &Place::Project {
+            id: ProjectId::new("notes-cli").unwrap(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    assert!(!screen.draft());
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.typing());
+    for character in "   ".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    assert!(!screen.draft());
+    for character in "Plan it".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    assert!(screen.draft());
+    assert_eq!(screen.loss(), "Your unsent message will be lost.");
+    assert!(matches!(screen.key(&Key::Enter, &mut ctx), Flow::Handled));
+    assert!(screen.draft());
+    while let Some(request) = ctx.next_request() {
+        assert!(
+            !matches!(request, Request::Master(_)),
+            "nothing is sent without a pool"
+        );
+    }
+}
+
 fn framed(shell: &mut Shell, width: u16, height: u16) -> String {
     let away = Position::new(u16::MAX, u16::MAX);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

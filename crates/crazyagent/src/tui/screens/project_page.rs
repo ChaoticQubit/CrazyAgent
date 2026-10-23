@@ -662,6 +662,18 @@ impl Screen for ProjectPage {
         self.screen.counts().0 > 0 || self.master.has_pending() || self.waiting.is_some()
     }
 
+    fn draft(&self) -> bool {
+        self.screen.edit.is_some() || !self.screen.input.value().trim().is_empty()
+    }
+
+    fn loss(&self) -> &'static str {
+        if self.screen.edit.is_some() {
+            "Your memory edit will be lost."
+        } else {
+            "Your unsent message will be lost."
+        }
+    }
+
     fn place(&self) -> Option<Place> {
         Some(Place::Project {
             id: self.screen.project.clone(),
