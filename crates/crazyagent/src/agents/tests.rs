@@ -406,3 +406,141 @@ fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_clo
     until("the restarted reply", || replied(&agents, killed, "killed"));
     agents.stop(killed).unwrap();
 }
+
+fn serve(
+    hosted: Hosted,
+    request: LaunchRequest,
+    prompts: Receiver<String>,
+) -> Option<HostedRequest> {
+    let mut session = Session::start(request).unwrap();
+    hosted.started(session.process_group());
+    let interrupt = hosted.interrupt_flag();
+    let mut text = String::new();
+    loop {
+        if let Some(asked) = hosted.requested() {
+            let _ = session.stop();
+            hosted.finish(AgentState::Stopped, None);
+            return Some(asked);
+        }
+        if let Ok(prompt) = prompts.try_recv() {
+            interrupt.store(false, Ordering::Release);
+            session.send(&prompt).unwrap();
+            text.clear();
+            hosted.set_busy(true);
+        }
+        if interrupt.swap(false, Ordering::AcqRel) {
+            let _ = session.interrupt();
+        }
+        match session.next_event(POLL) {
+            Ok(Some(LaunchEvent::Text { text: part })) => text.push_str(&part),
+            Ok(Some(LaunchEvent::TurnFinished { .. })) => {
+                hosted.text(&text);
+                hosted.set_busy(false);
+            }
+            Ok(Some(LaunchEvent::Exited { .. })) | Err(_) => {
+                hosted.finish(AgentState::Exited, None);
+                return None;
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+#[test]
+fn a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_restart() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = Arc::new(case.agents());
+    let base = spec(&root, "hosted", None);
+    let agent = HostedAgent {
+        project: base.project.clone(),
+        role: AgentRole::SubAgent,
+        label: "Team sub-agent 7".into(),
+        harness: "claude-code".into(),
+        host: "team",
+        reference: "7".into(),
+    };
+    let start = |hosted: Hosted| {
+        let request = base.request(None).unwrap();
+        let (prompts, inbox) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || serve(hosted, request, inbox));
+        (prompts, thread)
+    };
+
+    let hosted = agents.host(agent.clone(), None).unwrap();
+    let id = hosted.id().to_owned();
+    let (prompts, thread) = start(hosted);
+    let (pid, grandchild) = pids(&root, "hosted");
+    let listed = agents.list(Some(&base.project), 0, LIST_MAX).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
+    assert_eq!(listed[0].label, "Team sub-agent 7");
+    assert_eq!(listed[0].state, AgentState::Running);
+    assert!(listed[0].can_stop && listed[0].can_restart && !listed[0].can_interrupt);
+    assert_eq!(agents.interrupt(&id).unwrap_err().0, "agent_not_busy");
+    assert_eq!(agents.send(&id, "echo no").unwrap_err().0, "agent_hosted");
+
+    prompts.send("wait".into()).unwrap();
+    until("the hosted turn to start", || {
+        agents.view(&id).unwrap().busy
+    });
+    assert!(agents.view(&id).unwrap().can_interrupt);
+    agents.interrupt(&id).unwrap();
+    until("the interrupted turn to end", || {
+        !agents.view(&id).unwrap().busy
+    });
+    prompts.send("echo after".into()).unwrap();
+    until("the next reply", || replied(&agents, &id, "after"));
+    assert!(alive(pid));
+
+    let stopped = agents.stop(&id).unwrap();
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert!(!stopped.can_stop);
+    assert_eq!(thread.join().unwrap(), Some(HostedRequest::Stop));
+    until("the hosted group to be gone", || {
+        !alive(pid) && !alive(grandchild)
+    });
+
+    assert_eq!(
+        agents.restart(&id).unwrap_err().0,
+        "agent_restart_unavailable"
+    );
+    assert!(agents.take_restarts("team").is_empty());
+    assert!(agents.view(&id).unwrap().can_restart);
+    assert_eq!(agents.restart(&id).unwrap().state, AgentState::Stopped);
+    assert!(agents.take_restarts("research").is_empty());
+    assert_eq!(
+        agents.take_restarts("team"),
+        vec![HostedRestart {
+            id: id.clone(),
+            host: "team".into(),
+            reference: "7".into(),
+        }]
+    );
+
+    std::fs::remove_file(root.join("work").join("hosted").join("pids.json")).unwrap();
+    let again = agents.host(agent.clone(), Some(&id)).unwrap();
+    assert_eq!(again.id(), id);
+    let (_prompts, thread) = start(again);
+    let (second, _) = pids(&root, "hosted");
+    assert_ne!(second, pid);
+    let view = agents.view(&id).unwrap();
+    assert_eq!((view.state, view.attempt), (AgentState::Running, 2));
+    assert_eq!(
+        agents.restart(&id).unwrap().state,
+        AgentState::Stopped,
+        "a live hosted agent stops first"
+    );
+    assert_eq!(thread.join().unwrap(), Some(HostedRequest::Restart));
+    assert_eq!(agents.take_restarts("team").len(), 1);
+    until("the second process to be gone", || !alive(second));
+
+    let third = agents.host(agent, Some(&id)).unwrap();
+    assert_eq!(agents.view(&id).unwrap().attempt, 3);
+    drop(third);
+    let closed = agents.view(&id).unwrap();
+    assert_eq!(closed.state, AgentState::Closed);
+    assert_eq!(closed.status, "Stopped when CrazyAgent closed");
+    assert!(closed.can_restart);
+    drop(prompts);
+}
