@@ -3,7 +3,7 @@ mod research_support;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
-use research_support::codex;
+use research_support::{claude, codex};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
@@ -61,6 +61,8 @@ impl Engine {
             .arg("--writable-settings")
             .arg("--codex-executable")
             .arg(codex())
+            .arg("--claude-executable")
+            .arg(claude())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -208,11 +210,7 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     let codex = jobs.get(codex_job).unwrap().unwrap();
     assert_eq!(codex.status, ResearchStatus::Done, "{:?}", codex.error);
     let claude = jobs.get(claude_job).unwrap().unwrap();
-    assert_eq!(claude.status, ResearchStatus::Failed);
-    assert_eq!(
-        claude.error.as_deref(),
-        Some("This harness is not installed on this computer")
-    );
+    assert_eq!(claude.status, ResearchStatus::Done, "{:?}", claude.error);
     let rcli = jobs.get(rcli_job).unwrap().unwrap();
     assert_eq!(rcli.status, ResearchStatus::Failed);
     assert_eq!(
@@ -237,12 +235,18 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     let front_end = report("front_end_design");
     assert!(front_end.starts_with("# Front-end design\n"), "{front_end}");
     assert!(front_end.contains("Researched by Codex"), "{front_end}");
+    let competitors = report("competitor_research");
     assert!(
-        !project
-            .join("context")
-            .join("research")
-            .join("competitor_research.md")
-            .exists()
+        competitors.starts_with("# Competitor research\n"),
+        "{competitors}"
+    );
+    assert!(
+        competitors.contains("Researched by Claude Code"),
+        "{competitors}"
+    );
+    assert!(
+        competitors.contains("## Links and references"),
+        "{competitors}"
     );
     assert_eq!(
         jobs.get(codex_job).unwrap().unwrap().report_path.as_deref(),
