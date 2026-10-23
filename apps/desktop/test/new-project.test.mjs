@@ -196,13 +196,9 @@ test("a pool shows its name from the engine and falls back to its id", () => {
   assert.equal(wizard.poolName(pool({})), "pool-0a1b2c");
 });
 
-test("pool readiness uses the design's words and the most ready pool is preselected", () => {
+test("ready accounts are counted and the most ready pool is preselected", () => {
   const member = (id, status) => ({ id, kind: "chatgpt", provider: "openai", status, status_label: "" });
   const summary = (id, statuses) => ({ id, name: id, summary: "", members: statuses.map((status, index) => member(`${id}-${index}`, status)), project_count: 0 });
-  assert.equal(wizard.poolReadiness(summary("p", ["signed_in", "set_up", "signed_in", "not_signed_in"])), "3 ready, 1 not signed in");
-  assert.equal(wizard.poolReadiness(summary("p", ["signed_in"])), "1 ready");
-  assert.equal(wizard.poolReadiness(summary("p", ["not_signed_in", "not_signed_in"])), "None ready, 2 not signed in");
-  assert.equal(wizard.poolReadiness(summary("p", [])), "No accounts");
   assert.equal(wizard.readyCount(summary("p", ["signed_in", "not_signed_in", "set_up"])), 2);
   const pools = [{ pool: { id: "big", members: ["a", "b", "c"] }, members: [] }, { pool: { id: "ready", members: ["d", "e"] }, members: [] }];
   const summaries = [summary("big", ["not_signed_in", "not_signed_in", "signed_in"]), summary("ready", ["signed_in", "set_up"])];

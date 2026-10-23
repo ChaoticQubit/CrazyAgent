@@ -1,7 +1,8 @@
 import type { PoolSummary } from "../../api";
 import type { PoolChoice } from "../../api-projects";
 import { displayText } from "../conversation";
-import { poolName, poolReadiness, poolSummary, readyCount } from "./wizard";
+import { poolReadiness } from "../settings/pools";
+import { poolName, poolSummary, readyCount } from "./wizard";
 
 /** Radio cards for choosing a project's pool, with readiness and an optional "Choose later".
  * Inputs: the pools, their summaries when known, the chosen id (null for later), whether later
@@ -20,7 +21,7 @@ export function PoolPicker({ pools, summaries = [], value, later, onChange, name
       <span className="pj-radio-body">
         <strong>{displayText(poolName(choice.pool))}</strong>
         <span className="pj-secondary">{poolSummary(choice.members)}</span>
-        {summary && <span className="pj-small pj-muted">{poolReadiness(summary)}</span>}
+        {summary && <span className="pj-small pj-muted">{poolReadiness(summary.members)}</span>}
         {(choice.pool.members.length === 0 || (summary && readyCount(summary) === 0)) && <span className="pj-note warn">No accounts in this pool are ready. Research waits until one signs in.</span>}
       </span>
     </label>)}

@@ -80,13 +80,14 @@ test("relative time reads like the design", () => {
   assert.equal(research.ago(now - 4 * 86_400_000, now), "4 days ago");
 });
 
-test("home folder paths are shown with a tilde", () => {
-  assert.equal(research.tildePath("/Users/mira/CrazyAgent/projects/x", "/Users/mira"), "~/CrazyAgent/projects/x");
-  assert.equal(research.tildePath("/opt/x", "/Users/mira"), "/opt/x");
-  assert.equal(research.tildePath("/Users/mirage/x", "/Users/mira"), "/Users/mirage/x");
-  assert.equal(research.homePath("/Users/mira/Docs/field-interviews.md"), "~/Docs/field-interviews.md");
-  assert.equal(research.homePath("/Users/mira"), "~");
-  assert.equal(research.homePath("/Volumes/Work/notes.md"), "/Volumes/Work/notes.md");
+test("project folders and attached documents are shown under the home folder with a tilde", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const { homePath } = await import("../src/screens/settings/harnesses.tsx");
+  assert.equal(overview.folderLabel("/Users/mira/CrazyAgent/projects/harbor-notes"), "~/CrazyAgent/projects/harbor-notes");
+  assert.equal(overview.folderLabel("/opt/x"), "/opt/x");
+  assert.equal(homePath("/Users/mira/Docs/field-interviews.md"), "~/Docs/field-interviews.md");
+  assert.equal(homePath("/Users/mira"), "~");
+  assert.equal(homePath("/Volumes/Work/notes.md"), "/Volumes/Work/notes.md");
 });
 
 test("master status words follow the design's fixed set", () => {

@@ -369,16 +369,6 @@ export function readyCount(pool: PoolSummary): number {
   return pool.members.filter((member) => member.status !== "not_signed_in").length;
 }
 
-/** A pool's readiness in the design's words, such as "3 ready, 1 not signed in".
- * Input: the pool's summary. Output: the line. */
-export function poolReadiness(pool: PoolSummary): string {
-  if (pool.members.length === 0) return "No accounts";
-  const ready = readyCount(pool);
-  const waiting = pool.members.length - ready;
-  const first = ready === 0 ? "None ready" : `${ready} ready`;
-  return waiting === 0 ? first : `${first}, ${waiting} not signed in`;
-}
-
 /** Picks the pool to preselect: the one with the most ready accounts when the summaries are
  * known, else the one with the most accounts; the first wins a tie.
  * Inputs: the pools and their summaries, if known. Output: its id, or null when there are none. */

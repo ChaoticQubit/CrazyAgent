@@ -7,7 +7,7 @@ import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
-import { homePath } from "../project/research";
+import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
 import { RESEARCH_ICONS, RESEARCH_LABELS, TeamEditor } from "./team-editor";

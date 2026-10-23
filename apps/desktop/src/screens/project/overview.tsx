@@ -5,11 +5,13 @@ import { failureCopy, loadProjectMemories, receiptState, retryResearch } from ".
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { poolName, poolReadiness, poolSummary } from "../new-project/wizard";
+import { poolName, poolSummary } from "../new-project/wizard";
+import { poolReadiness } from "../settings/pools";
 import { useLoad } from "../../state";
+import { homePath } from "../settings/harnesses";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, homePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -96,7 +98,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {setup && <div><dt>Tech stack</dt><dd className="pj-chips">{setup.tech_stack.length ? setup.tech_stack.map((item) => <span className="pj-chip" key={item}>{displayText(item)}</span>) : <span className="pj-muted">None</span>}</dd></div>}
         {setup && <div><dt>Platforms</dt><dd>{setup.platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform).join(", ") || "None"}</dd></div>}
         <div><dt>Pool</dt><dd>{data.assigned
-          ? <><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=pool`)}>{displayText(assignedSummary?.name ?? poolName(data.assigned.pool))}</button> <span className="pj-small pj-muted">{assignedSummary ? `${poolSummary(data.assigned.members)}, ${poolReadiness(assignedSummary)}` : poolSummary(data.assigned.members)}</span></>
+          ? <><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=pool`)}>{displayText(assignedSummary?.name ?? poolName(data.assigned.pool))}</button> <span className="pj-small pj-muted">{assignedSummary ? `${poolSummary(data.assigned.members)}, ${poolReadiness(assignedSummary.members)}` : poolSummary(data.assigned.members)}</span></>
           : data.pools?.kind === "ok" ? <Badge word="Needs a pool" tone="warn" /> : <span className="pj-muted">{data.pools === undefined ? "Loading..." : "Unknown"}</span>}</dd></div>
         {setup && <div><dt>Team</dt><dd>Master: {harnessName(harnesses, setup.team.master)}</dd>
           <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : "No agents beside the master"}</dd></div>}

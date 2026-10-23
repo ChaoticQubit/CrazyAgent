@@ -30,18 +30,6 @@ export function ago(at: number, now: number): string {
   return days === 1 ? "Yesterday" : `${days} days ago`;
 }
 
-/** Shows a path under the home folder with "~".
- * Inputs: the absolute path and the home folder. Output: the shortened path. */
-export function tildePath(path: string, home: string): string {
-  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
-}
-
-/** Shows a path under the macOS user folder it starts with as "~", so the owner sees
- * where a file is without their account name. Input: an absolute path. Output: the shortened path. */
-export function homePath(path: string): string {
-  return tildePath(path, /^\/Users\/[^/]+/u.exec(path)?.[0] ?? "");
-}
-
 /** The Overview fact for skills or MCP servers: how many are on in this project. An item is on
  * when it is on where it was added and this project has not switched it off.
  * Inputs: the engine list and the singular and plural words. Output: the line, or null until it loads. */
