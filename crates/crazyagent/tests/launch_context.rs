@@ -509,7 +509,16 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     let prompt =
         PathBuf::from(argument_after(&claude_command, "--append-system-prompt-file").unwrap());
     assert_eq!(mode(&prompt), 0o600);
-    assert_eq!(fs::read_to_string(&prompt).unwrap(), instructions);
+    let prompt_text = fs::read_to_string(&prompt).unwrap();
+    assert!(prompt_text.starts_with(&instructions));
+    assert!(
+        prompt_text.contains(&format!(
+            "- meal-tips: Teaches meal-tips. ({})",
+            plugin.join("skills/meal-tips/SKILL.md").display()
+        )),
+        "Claude in bare mode has no Skill tool, so the skills are listed in its instructions"
+    );
+    assert!(!prompt_text.contains("switched-off"));
 
     assert_eq!(
         command_with_context(&request(&case, "codex", &codex_home, true), &context)
@@ -560,7 +569,14 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     .unwrap();
     assert_eq!(off_mcp, serde_json::json!({"mcpServers": {}}));
     assert!(argument_after(&claude_off_command, "--plugin-dir").is_none());
-    assert!(argument_after(&claude_off_command, "--append-system-prompt-file").is_some());
+    assert_eq!(
+        fs::read_to_string(
+            argument_after(&claude_off_command, "--append-system-prompt-file").unwrap()
+        )
+        .unwrap(),
+        instructions,
+        "tools off lists no skills"
+    );
     drop(claude_off_files);
 
     let bare = command(&request(&case, "codex", &off_home, true)).unwrap();

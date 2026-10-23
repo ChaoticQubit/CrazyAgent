@@ -1,5 +1,5 @@
 use crate::harnesses::launch::LaunchError;
-use crate::plugins::{LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec};
+use crate::plugins::{EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec};
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
@@ -17,6 +17,7 @@ pub const INDEX_BYTES_MAX: usize = 7 * 1024;
 pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 32 * 1024;
+pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
@@ -163,8 +164,6 @@ impl AgentContext {
         };
         remove(&state);
         directory(&state, true)?;
-        let instructions = state.join("instructions.md");
-        write_private(&instructions, self.instructions.as_bytes())?;
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
         if id == "codex" {
@@ -184,6 +183,7 @@ impl AgentContext {
             installed
                 .arguments
                 .extend([OsString::from("--mcp-config"), mcp.into_os_string()]);
+            let mut text = self.instructions.clone();
             if skills {
                 let plugin = state.join("plugin");
                 directory(&plugin, true)?;
@@ -193,10 +193,14 @@ impl AgentContext {
                     PLUGIN_MANIFEST.as_bytes(),
                 )?;
                 self.copy_skills(&plugin.join("skills"))?;
+                text.push_str(&skills_index(&plugin.join("skills"), &self.plugins.skills));
                 installed
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
             }
+            assert!(text.len() <= INSTRUCTIONS_BYTES_MAX + SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+            let instructions = state.join("instructions.md");
+            write_private(&instructions, text.as_bytes())?;
             installed.arguments.extend([
                 OsString::from("--append-system-prompt-file"),
                 instructions.into_os_string(),
@@ -324,6 +328,34 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     }
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
     text
+}
+
+fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
+    let mut index = String::from(
+        "\n## Skills\n\nThe owner approved these skills for this project. Read a skill's SKILL.md before you use it.\n\n",
+    );
+    let mut left = 0;
+    for skill in skills {
+        let path = folder.join(&skill.name).join("SKILL.md");
+        let mut text = String::new();
+        let description = File::open(&path)
+            .and_then(|file| file.take(64 * 1024).read_to_string(&mut text))
+            .ok()
+            .and_then(|_| crate::plugins::skill_folder::frontmatter(&text).ok())
+            .map(|(_, description)| description)
+            .unwrap_or_default();
+        let line = format!("- {}: {} ({})\n", skill.name, description, path.display());
+        if left > 0 || index.len() + line.len() > SKILLS_INDEX_BYTES_MAX {
+            left += 1;
+            continue;
+        }
+        index.push_str(&line);
+    }
+    if left > 0 {
+        index.push_str(&format!("- and {left} more skills in the same folder\n"));
+    }
+    assert!(index.len() <= SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+    index
 }
 
 fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
