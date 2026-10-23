@@ -1235,12 +1235,14 @@ fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
             look.muted,
         ),
     ];
-    let help = vec![
-        ("Enter", "Change pool"),
-        ("o", "Open folder"),
-        TABS,
-        ("Esc", "Home"),
-    ];
+    let pool_key = match &screen.pool {
+        _ if !screen.pool_ready => None,
+        Some(pool) if pool.assigned => Some("Change pool"),
+        Some(_) => Some("Assign pool"),
+        None => Some("Pick a pool"),
+    };
+    let mut help: Help = pool_key.map(|label| ("Enter", label)).into_iter().collect();
+    help.extend([("o", "Open folder"), TABS, ("Esc", "Home")]);
     let _ = cells;
     (lines, None, help)
 }

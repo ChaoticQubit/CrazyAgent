@@ -269,12 +269,20 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         ProjectReply::Assign(picked.clone())
     );
     screen.open(Tab::Settings);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Assign(picked)
     );
     screen.pool.as_mut().unwrap().assigned = true;
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.help.first(), Some(&("Enter", "Change pool")));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::PickPool);
+    let assigned = screen.pool.take();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.help.first(), Some(&("Enter", "Pick a pool")));
+    screen.pool = assigned;
     screen.open(Tab::Overview);
     screen.setup.as_mut().unwrap().pool = None;
     screen.pool = None;
