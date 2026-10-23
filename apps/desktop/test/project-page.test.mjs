@@ -410,3 +410,13 @@ test("the Agents tab labels research and asks the engine for the live team", asy
   assert.match(markup, /<h3>Research<\/h3><ul class="pj-rows" aria-label="Research agents">/);
   assert.match(markup, /Loading the team\.\.\./);
 });
+
+test("team tasks waiting for a pool ask the owner for one, with the engine's reason", () => {
+  assert.equal(research.teamWaitingLine([teamTask(1, "running"), teamTask(2, "done")]), null);
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool", { problem: "No account in this project's pool can run codex" })]),
+    "A team task waits: No account in this project's pool can run codex.");
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool"), teamTask(2, "needs_pool", { problem: "No account in this project's pool can run codex." })]),
+    "2 team tasks wait: No account in this project's pool can run codex.");
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
+  assert.equal(research.teamWaitingLine([]), null);
+});

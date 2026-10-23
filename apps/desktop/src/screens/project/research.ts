@@ -139,6 +139,16 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
   return { agents, tasks };
 }
 
+/** The Needs you line for team tasks that wait for a pool account, with the engine's first
+ * reason when it gave one. Input: the team tasks. Output: the line, or null when none wait. */
+export function teamWaitingLine(tasks: Pick<TeamStatus["tasks"][number], "status" | "problem">[]): string | null {
+  const waiting = tasks.filter((task) => task.status === "needs_pool");
+  if (waiting.length === 0) return null;
+  const reason = waiting.find((task) => task.problem)?.problem?.trim().replace(/\.$/u, "");
+  const lead = waiting.length === 1 ? "A team task waits" : `${waiting.length} team tasks wait`;
+  return reason ? `${lead}: ${reason}.` : `${lead} for an account in this project's pool.`;
+}
+
 /** The Overview fact for skills or MCP servers: how many are on in this project. An item is on
  * when it is on where it was added and this project has not switched it off.
  * Inputs: the engine list and the singular and plural words. Output: the line, or null until it loads. */

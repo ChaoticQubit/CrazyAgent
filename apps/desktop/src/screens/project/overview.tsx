@@ -11,7 +11,8 @@ import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { useTeam } from "./team";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -48,6 +49,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [summaries] = useLoad(poolSummaries, [data.id]);
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
+  const [team] = useTeam(data.id);
+  const teamWaiting = team.result?.kind === "ok" ? teamWaitingLine(team.result.value.tasks) : null;
   async function retry(job: ResearchJob) {
     setRetrying(job.id);
     const result = await retryResearch(data.id, job.id, nextGeneration());
@@ -60,9 +63,11 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }
   return <div className="pj-overview">
     <div className="pj-stack">
-      {(waiting || suggested > 0 || signIn) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
+      {(waiting || suggested > 0 || signIn || teamWaiting) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
         {waiting && <div className="pj-need"><span>{displayText(waitingLine(jobs))}</span>
           <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>}
+        {teamWaiting && <div className="pj-need"><span>{displayText(teamWaiting)}</span>
+          <button type="button" className="btn" onClick={() => data.navigate(`${base}/settings?section=pool`)}>{data.assigned ? "Change pool" : "Choose pool"}</button></div>}
         {signIn && <div className="pj-need"><span>{displayText(signIn)}</span>
           <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Sign in again</button></div>}
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
