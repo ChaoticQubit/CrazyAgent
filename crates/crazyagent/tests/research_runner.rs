@@ -27,7 +27,7 @@ fn local_model() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct Case {
-    runtime: EngineRuntime,
+    _runtime: EngineRuntime,
     project: PathBuf,
     state: PathBuf,
     database: PathBuf,
@@ -41,7 +41,7 @@ fn case(about: &str) -> Case {
         project,
         state: runtime.state.clone(),
         database: runtime.database.clone(),
-        runtime,
+        _runtime: runtime,
     }
 }
 
