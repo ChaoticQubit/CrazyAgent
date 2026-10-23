@@ -1,4 +1,4 @@
- CrazyAgent  /  Home  /  New project  /  Team
+ [◆▪◆▪] CrazyAgent  /  Home  /  New project  /  Team
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   New project             │ Team
                           │ Choose which harness leads and which ones do the work. Defaults come from pool Main.
