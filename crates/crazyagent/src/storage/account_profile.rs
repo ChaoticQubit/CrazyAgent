@@ -204,14 +204,7 @@ fn reply(admission: &Admission, request: &AccountProfileRequest, outcome: Accoun
 /// Input: the configured connection. Output: its API-key credential reference, or a stable
 /// digest-derived reference for an unauthenticated local endpoint; other auth is rejected.
 pub(super) fn configured_profile_ref(connection: &ModelConnection) -> Result<CredentialRef, EngineError> {
-    match &connection.auth {
-        ModelAuthentication::ApiKey { credential_ref } => Ok(credential_ref.clone()),
-        ModelAuthentication::None {} => {
-            let bytes = serde_json::to_vec(connection).map_err(error)?;
-            CredentialRef::new(format!("configured-{:x}", Sha256::digest(bytes))).map_err(error)
-        }
-        _ => Err(error("account_profile_auth_unsupported")),
-    }
+    crate::config::configured_profile_ref(connection).ok_or_else(|| error("account_profile_auth_unsupported"))
 }
 
 fn prepare(

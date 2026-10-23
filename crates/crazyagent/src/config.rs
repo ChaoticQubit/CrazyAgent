@@ -626,11 +626,26 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 
 const LOCAL_DESTINATION: &str = "local";
 
+/// Returns the profile reference that harness setup generates for an RCLI HTTP connection,
+/// which is also its own master target. Input: the connection. Output: its API-key
+/// credential reference, a digest-derived reference for a keyless endpoint, or none otherwise.
+pub fn configured_profile_ref(connection: &ModelConnection) -> Option<CredentialRef> {
+    match &connection.auth {
+        ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+        ModelAuthentication::None {} => {
+            let bytes = serde_json::to_vec(connection).ok()?;
+            CredentialRef::new(format!("configured-{:x}", Sha256::digest(bytes))).ok()
+        }
+        _ => None,
+    }
+}
+
 /// Treats an explicit pool-to-project assignment as owner approval of the pool's accounts.
 /// Input: the edited global document and the validated catalog it now holds.
 /// Output: `routing.approved_accounts` gains every account of an assigned pool, an empty
 /// `allowed_destinations` gains the local execution target and every signed-in connection
-/// of an assigned pool becomes an allowed master target; nothing is ever removed.
+/// or RCLI HTTP connection of an assigned pool gets its own allowed master target; nothing
+/// is ever removed.
 fn approve_assigned_accounts(
     document: &mut toml_edit::DocumentMut,
     catalog: &ModelAccess,
@@ -650,7 +665,7 @@ fn approve_assigned_accounts(
     if assigned.is_empty() {
         return Ok(());
     }
-    let signed_in: Vec<&CredentialRef> = catalog
+    let signed_in: Vec<CredentialRef> = catalog
         .pools
         .iter()
         .filter(|pool| !pool.projects.is_empty())
@@ -660,7 +675,21 @@ fn approve_assigned_accounts(
                     && matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
             })
         })
-        .map(|connection| &connection.id)
+        .map(|connection| connection.id.clone())
+        .chain(
+            catalog
+                .pools
+                .iter()
+                .filter(|pool| !pool.projects.is_empty())
+                .flat_map(|pool| {
+                    catalog.connections.iter().filter(|connection| {
+                        pool.members.contains(&connection.id)
+                            && connection.harness.as_str() == "rcli"
+                            && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+                    })
+                })
+                .filter_map(configured_profile_ref),
+        )
         .collect();
     let shape = || ConfigError("routing_approval_shape".into());
     let routing = document
@@ -880,18 +909,67 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     }
 
     #[test]
+    fn assigning_pools_approves_each_rcli_account_its_own_profile_destination() {
+        let global = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["key-account", "local-account"]
+connections = [
+  { id = "key-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "key-account", endpoint = { kind = "http", url = "http://127.0.0.1:9/v1" }, model = { id = "m", author = "openai-compatible" }, auth = { method = "api_key", credential_ref = "key-ref" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [{ id = "pool", members = ["key-connection", "local-connection"], projects = [], roles = [], fallback_allowed = false }]
+"#;
+        let edit = ModelAccessEdit::ReplacePool {
+            pool: AccountPool {
+                id: CredentialRef::new("pool").unwrap(),
+                members: vec![
+                    CredentialRef::new("key-connection").unwrap(),
+                    CredentialRef::new("local-connection").unwrap(),
+                ],
+                projects: vec![CredentialRef::new("demo").unwrap()],
+                roles: vec![CredentialRef::new("project_leader").unwrap()],
+                fallback_allowed: false,
+                provider_quota_policy: ProviderQuotaPolicy::default(),
+            },
+        };
+        let (_, config) = edit_model_access(global, "", &edit, &[]).unwrap();
+        let access = config.settings.model_access.as_ref().unwrap();
+        let destinations = &config.settings.allowed_destinations;
+        assert!(destinations.contains(&CredentialRef::new("local").unwrap()));
+        for connection in &access.connections {
+            let profile = configured_profile_ref(connection).unwrap();
+            assert!(destinations.contains(&profile), "{profile:?}");
+        }
+        assert_eq!(
+            configured_profile_ref(&access.connections[0]),
+            Some(CredentialRef::new("key-ref").unwrap())
+        );
+        assert_ne!(
+            configured_profile_ref(&access.connections[0]),
+            configured_profile_ref(&access.connections[1])
+        );
+    }
+
+    #[test]
     fn assigning_a_pool_to_a_project_approves_its_accounts_and_a_local_destination() {
         let (bytes, config) =
             edit_model_access(ASSIGNMENT_GLOBAL, "", &assigned_pool(&["demo"]), &[]).unwrap();
         let account = CredentialRef::new("local-account").unwrap();
         assert_eq!(config.settings.routing.approved_accounts, vec![account]);
+        let connection = &config.settings.model_access.as_ref().unwrap().connections[0];
         assert_eq!(
             config.settings.allowed_destinations,
-            vec![CredentialRef::new("local").unwrap()]
+            vec![
+                CredentialRef::new("local").unwrap(),
+                configured_profile_ref(connection).unwrap()
+            ]
         );
         let (_, again) = edit_model_access(&bytes, "", &assigned_pool(&["demo", "other"]), &[]).unwrap();
         assert_eq!(again.settings.routing.approved_accounts.len(), 1);
-        assert_eq!(again.settings.allowed_destinations.len(), 1);
+        assert_eq!(again.settings.allowed_destinations, config.settings.allowed_destinations);
     }
 
     #[test]

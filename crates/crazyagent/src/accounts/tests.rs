@@ -123,7 +123,7 @@ fn api_key_drafts_use_presets_and_require_a_key_and_model() {
         (
             Provider::Openrouter,
             "https://openrouter.ai/api/v1",
-            "openai-compatible",
+            "openai-chat",
         ),
     ] {
         let mut value = draft(provider, SignInMethod::ApiKey);

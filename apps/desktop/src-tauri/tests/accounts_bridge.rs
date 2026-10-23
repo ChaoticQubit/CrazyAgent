@@ -1,6 +1,9 @@
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
+use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent_desktop::bridge::NativeBridge;
+use crazyagent::engine::owner::ModelAccessCollection;
+use crazyagent::protocol::CredentialRef;
+use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -158,6 +161,76 @@ async fn desktop_accounts_commands_reach_the_real_engine() -> TestResult<()> {
     );
     let checked = bridge.check_account(claude.id.as_str()).await.unwrap();
     assert_eq!(checked.account.status_label, "Not signed in");
+
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_configures_a_pooled_key_account_from_the_saved_key() -> TestResult<()> {
+    let root = tempfile::Builder::new()
+        .prefix("ca-dkey-")
+        .tempdir_in("/private/tmp")?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await?;
+    let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+    bridge.connect().await?;
+    let secret = format!("sk-dkey-{}", std::process::id());
+    let added = bridge
+        .add_account(
+            AccountDraft {
+                provider: Provider::Openrouter,
+                method: SignInMethod::ApiKey,
+                name: "Saved router".into(),
+                url: None,
+                model: Some("openai/gpt-4o".into()),
+            },
+            Some(secret.clone()),
+        )
+        .await
+        .unwrap();
+    let page = bridge
+        .model_access_page(ModelAccessCollection::Pools, false)
+        .await
+        .unwrap();
+    assert!(page.fresh && page.writable);
+    let pool = AccountPool {
+        id: CredentialRef::new("saved-router-pool").unwrap(),
+        members: vec![added.id.clone()],
+        projects: Vec::new(),
+        roles: Vec::new(),
+        fallback_allowed: false,
+        provider_quota_policy: ProviderQuotaPolicy::BoundedAttempt,
+    };
+    let receipt = bridge
+        .edit_model_access(&page.ticket, ModelAccessEdit::CreatePool { pool }, 1)
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::Applied);
+    let inspected = bridge
+        .inspect_model_access(ModelAccessCollection::Connections, added.id.as_str())
+        .await
+        .unwrap();
+    assert!(inspected.fresh && inspected.writable);
+    let configured = bridge
+        .configure_account_profile(&inspected.ticket, None, 2)
+        .await
+        .unwrap_err();
+    assert_eq!(configured.code, "rcli_private_key_writer_unavailable");
+    let settings = std::fs::read_to_string(&global)?;
+    assert!(settings.contains(added.id.as_str()) && !settings.contains(&secret));
 
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
