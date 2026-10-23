@@ -56,6 +56,7 @@ pub(crate) enum MasterRuntimeObservation {
 
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
+    pub(crate) instructions: String,
     pub(crate) session: MasterSessionView,
     pub(crate) attempt: Attempt,
     pub(crate) profile: PreparedNativeProfile,
@@ -1230,8 +1231,16 @@ fn bundle(
 ) -> Result<MasterRuntimeResult, EngineError> {
     let record = preparation(tx, &session, turn)?;
     let attempt = turn.attempt.clone().ok_or_else(|| error("master_attempt_missing"))?;
+    let instructions = match session.selection.backend {
+        MasterBackend::Rcli => String::new(),
+        MasterBackend::Codex | MasterBackend::Claude => {
+            crate::launch_context::for_master(tx, &session.project_id)
+                .map_err(|problem| EngineError(problem.0))?
+        }
+    };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
+        instructions,
         session,
         attempt,
         profile: PreparedNativeProfile::from_binding(record.auth.binding()),

@@ -1,4 +1,6 @@
-use crazyagent::adapters::codex::{AuthAccount, AuthControl, FRAME_BYTES_MAX, State};
+use crazyagent::adapters::codex::{
+    AuthAccount, AuthControl, DEVELOPER_INSTRUCTIONS_BYTES_MAX, FRAME_BYTES_MAX, State,
+};
 use crazyagent::adapters::events::{EventKind, TokenUsage, TurnOutcome};
 use crazyagent::adapters::{NativeAction, NativeHarness};
 use crazyagent::engine::codex_host::{CodexHostBatch, CodexHostProtocol};
@@ -140,6 +142,39 @@ fn codex_host_thread_start_preserves_read_only_sandbox_and_exact_project_cwd() {
     assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
     assert_eq!(outgoing["params"]["sandbox"], "read-only");
     assert_eq!(host.state(), State::ThreadStarting);
+}
+
+#[test]
+fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_only_policy() {
+    let project = Path::new("/unit/declared-project");
+    let instructions = "# Project context from CrazyAgent\n\nThe codename is \"BLUE-HERON-77\".\n";
+    let mut host = initialized();
+    let outgoing = message(&host.start_instructed_thread(project, instructions).unwrap());
+    assert_eq!(outgoing["method"], "thread/start");
+    assert_eq!(outgoing["params"]["developerInstructions"], instructions);
+    assert_eq!(outgoing["params"]["cwd"], "/unit/declared-project");
+    assert_eq!(outgoing["params"]["approvalPolicy"], "on-request");
+    assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
+    assert_eq!(outgoing["params"]["sandbox"], "read-only");
+    assert_eq!(host.state(), State::ThreadStarting);
+
+    let mut plain = initialized();
+    let outgoing = message(&plain.start_thread(project).unwrap());
+    assert!(outgoing["params"].get("developerInstructions").is_none());
+
+    let oversized = "x".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX + 1);
+    for refused in ["", "  \n", "before\0after", oversized.as_str()] {
+        let mut host = initialized();
+        assert!(host.start_instructed_thread(project, refused).is_err());
+        assert_eq!(host.state(), State::Ready);
+    }
+    let largest = "x".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+    let mut host = initialized();
+    let outgoing = message(&host.start_instructed_thread(project, &largest).unwrap());
+    assert_eq!(
+        outgoing["params"]["developerInstructions"],
+        largest.as_str()
+    );
 }
 
 #[test]

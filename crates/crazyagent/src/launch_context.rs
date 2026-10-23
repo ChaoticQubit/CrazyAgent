@@ -1,8 +1,10 @@
 use crate::harnesses::launch::LaunchError;
-use crate::plugins::{EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec};
+use crate::plugins::{
+    EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec,
+};
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -18,11 +20,15 @@ pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 32 * 1024;
 pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
+pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
+pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
+    INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK;
 pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
 const NAME_BYTES_MAX: usize = 256;
+const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
 const STATE: &str = "crazyagent";
 const LOCK: &str = "crazyagent.lock";
@@ -35,6 +41,9 @@ const _: () = assert!(
         + MEMORY_SECTION_BYTES_MAX
         + 3 * SECTION_SLACK
         <= INSTRUCTIONS_BYTES_MAX
+);
+const _: () = assert!(
+    MASTER_INSTRUCTIONS_BYTES_MAX <= crate::adapters::codex::DEVELOPER_INSTRUCTIONS_BYTES_MAX
 );
 
 fn failure(code: &str) -> LaunchError {
@@ -79,28 +88,53 @@ pub fn for_project(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<AgentContext, LaunchError> {
-    let root = connection
+    let root = engine_root(connection)?;
+    let tx = connection.unchecked_transaction().map_err(unavailable)?;
+    let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
+        .map_err(|problem| LaunchError(problem.0))?;
+    let instructions = project_instructions(&tx, project)?;
+    drop(tx);
+    Ok(AgentContext {
+        plugins,
+        instructions,
+    })
+}
+
+/// Builds the startup instruction for the engine's own project master conversation, which
+/// runs with its tools off: the same project context and approved memories every agent
+/// gets, then the names of the approved skills and MCP servers that team agents with tools
+/// on receive. No secret value, command, URL or file of a server is read or given.
+/// Input: a transaction the caller holds on `engine.db` and the project. Output: at most
+/// `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown, or a plain code.
+pub fn for_master(tx: &Transaction<'_>, project: &ProjectId) -> Result<String, LaunchError> {
+    let root = engine_root(tx)?;
+    let plugins = crate::storage::plugins::effective(tx, &root, project)
+        .map_err(|problem| LaunchError(problem.0))?;
+    let mut text = project_instructions(tx, project)?;
+    text.push_str(&team_index(&plugins));
+    assert!(text.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+    Ok(text)
+}
+
+fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
+    Ok(connection
         .path()
         .filter(|path| !path.is_empty())
         .map(Path::new)
         .and_then(Path::parent)
         .filter(|root| root.is_absolute())
         .ok_or_else(|| failure("launch_context_database_unknown"))?
-        .to_path_buf();
-    let tx = connection.unchecked_transaction().map_err(unavailable)?;
-    let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
-        .map_err(|problem| LaunchError(problem.0))?;
-    let setup = crate::project_setup::load_setup(&tx, project).map_err(unavailable)?;
-    let memories = crate::memory::library::approved_for_project(&tx, project)
+        .to_path_buf())
+}
+
+fn project_instructions(tx: &Transaction<'_>, project: &ProjectId) -> Result<String, LaunchError> {
+    let setup = crate::project_setup::load_setup(tx, project).map_err(unavailable)?;
+    let memories = crate::memory::library::approved_for_project(tx, project)
         .map_err(unavailable)?
         .render();
-    drop(tx);
     let instructions = render(project, setup.as_ref(), &memories);
     assert!(instructions.len() <= INSTRUCTIONS_BYTES_MAX);
-    Ok(AgentContext {
-        plugins,
-        instructions,
-    })
+    Ok(instructions)
 }
 
 impl AgentContext {
@@ -330,6 +364,16 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     text
 }
 
+fn skill_description(path: &Path) -> String {
+    let mut text = String::new();
+    File::open(path)
+        .and_then(|file| file.take(64 * 1024).read_to_string(&mut text))
+        .ok()
+        .and_then(|_| crate::plugins::skill_folder::frontmatter(&text).ok())
+        .map(|(_, description)| description)
+        .unwrap_or_default()
+}
+
 fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
     let mut index = String::from(
         "\n## Skills\n\nThe owner approved these skills for this project. Read a skill's SKILL.md before you use it.\n\n",
@@ -337,13 +381,7 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
     let mut left = 0;
     for skill in skills {
         let path = folder.join(&skill.name).join("SKILL.md");
-        let mut text = String::new();
-        let description = File::open(&path)
-            .and_then(|file| file.take(64 * 1024).read_to_string(&mut text))
-            .ok()
-            .and_then(|_| crate::plugins::skill_folder::frontmatter(&text).ok())
-            .map(|(_, description)| description)
-            .unwrap_or_default();
+        let description = skill_description(&path);
         let line = format!("- {}: {} ({})\n", skill.name, description, path.display());
         if left > 0 || index.len() + line.len() > SKILLS_INDEX_BYTES_MAX {
             left += 1;
@@ -355,6 +393,40 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
         index.push_str(&format!("- and {left} more skills in the same folder\n"));
     }
     assert!(index.len() <= SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+    index
+}
+
+fn team_index(plugins: &EffectivePlugins) -> String {
+    if plugins.skills.is_empty() && plugins.servers.is_empty() {
+        return String::new();
+    }
+    let mut index = String::from(
+        "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n",
+    );
+    let skills = plugins.skills.iter().map(|skill| {
+        let description = skill_description(&skill.folder.join("SKILL.md"));
+        format!(
+            "- Skill {}: {}\n",
+            clip(&skill.name, NAME_BYTES_MAX),
+            clip(description.trim(), DESCRIPTION_BYTES_MAX)
+        )
+    });
+    let servers = plugins
+        .servers
+        .iter()
+        .map(|server| format!("- MCP server {}\n", clip(&server.name, NAME_BYTES_MAX)));
+    let mut left = 0;
+    for line in skills.chain(servers) {
+        if left > 0 || index.len() + line.len() > TEAM_INDEX_BYTES_MAX {
+            left += 1;
+            continue;
+        }
+        index.push_str(&line);
+    }
+    if left > 0 {
+        index.push_str(&format!("- and {left} more\n"));
+    }
+    assert!(index.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     index
 }
 
