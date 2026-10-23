@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const { App, AppView } = await import("../src/app.tsx");
-const { HomeView, setupSteps, needsYou } = await import("../src/screens/dashboard/index.tsx");
+const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
 const profile = { name: "Mira Okafor", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } };
 
@@ -134,4 +134,38 @@ test("every app surface draws the Ember 4 brand mark, never the text-only placeh
   const welcome = render({ profile: { kind: "ok", value: null } });
   assert.match(welcome, large);
   assert.doesNotMatch(welcome, placeholder);
+});
+
+test("a project card sums up live agents and research from the team and research reads", () => {
+  const team = (agents, tasks = []) => ({ kind: "ok", value: { agents: agents.map((status, index) => ({ id: index, role: index ? "sub" : "master", status })), tasks: tasks.map((status, id) => ({ id, status })) } });
+  const research = (statuses) => ({ kind: "ok", value: { jobs: statuses.map((status, id) => ({ id, status })) } });
+  assert.deepEqual(cardActivity(undefined, undefined), { research: null, agents: null, waiting: false, live: false });
+  assert.deepEqual(cardActivity(team(["idle", "working", "stopped"]), research(["done", "running", "queued"])),
+    { research: "Research 1 of 3 done", agents: "2 agents working", waiting: false, live: true });
+  assert.deepEqual(cardActivity(team(["idle"]), research(["needs_pool", "needs_pool"])),
+    { research: "Research waits for a pool", agents: "No agents working", waiting: true, live: true });
+  assert.deepEqual(cardActivity(team(["idle"]), research(["done", "failed", "cancelled"])),
+    { research: "Research 1 of 3 done, 1 failed, 1 stopped", agents: "No agents working", waiting: false, live: false });
+  assert.deepEqual(cardActivity(team(["working"]), research([])), { research: null, agents: "1 agent working", waiting: false, live: true });
+  assert.equal(cardActivity(team(["starting"]), research([])).live, true);
+  assert.equal(cardActivity(team(["idle"], ["queued"]), research(["done"])).live, true);
+  assert.equal(cardActivity(team(["idle"], ["done", "cancelled"]), research(["done"])).live, false);
+  assert.deepEqual(cardActivity({ kind: "not_ready" }, research(["running"])), { research: "Research 0 of 1 done", agents: "1 agent working", waiting: false, live: true });
+  assert.deepEqual(cardActivity({ kind: "error", code: "x", message: "y" }, { kind: "not_ready" }), { research: null, agents: null, waiting: false, live: false });
+
+  const rows = [{ id: "p1", name: "Harbor Notes", repository_count: 0 }, { id: "p2", name: "Quayside", repository_count: 0 }];
+  const view = (activity) => renderToStaticMarkup(createElement(HomeView, {
+    projects: ok(rows), accounts: ok([account({})]), pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
+    harnesses: ok([]), onRetryProjects: () => {}, activity,
+  }));
+  const cards = view(new Map([["p1", cardActivity(team(["idle", "working"]), research(["done", "running"]))],
+    ["p2", cardActivity(team(["idle"]), research(["needs_pool"]))]]));
+  const first = cards.slice(cards.indexOf('aria-label="Harbor Notes"'), cards.indexOf('aria-label="Quayside"'));
+  const second = cards.slice(cards.indexOf('aria-label="Quayside"'));
+  assert.match(first, /<span class="activity">.*Research 1 of 2 done<\/span>/);
+  assert.match(first, /<span class="activity">.*2 agents working<\/span>/);
+  assert.match(second, /<span class="activity warn">.*Research waits for a pool<\/span>/);
+  assert.match(second, /No agents working/);
+  assert.doesNotMatch(view(undefined), /class="activity/);
+  assert.doesNotMatch(view(new Map()), /class="activity/);
 });
