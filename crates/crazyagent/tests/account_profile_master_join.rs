@@ -42,6 +42,7 @@ fn connection() -> ModelConnection {
 fn pool() -> AccountPool {
     AccountPool {
         id: reference("local-pool"),
+        name: None,
         members: vec![connection().id],
         projects: vec![],
         roles: vec![],

@@ -280,6 +280,7 @@ export interface ModelConnection {
 
 export interface AccountPool {
   id: string;
+  name?: string;
   members: string[];
   projects: string[];
   roles: string[];

@@ -1273,6 +1273,7 @@ impl Form {
                 ("Role IDs", &[], 16384),
                 ("Fallback allowed", &["false", "true"], 256),
                 ("Provider quota policy", &["bounded_attempt", "strict"], 256),
+                ("Pool name (optional)", &[], 256),
             ],
         };
         Self {
@@ -1343,6 +1344,7 @@ impl Form {
                     refs(&pool.roles),
                     pool.fallback_allowed.to_string(),
                     provider_quota_policy_name(pool.provider_quota_policy).into(),
+                    pool.name.unwrap_or_default(),
                 ],
             ),
         };
@@ -1460,6 +1462,7 @@ impl Form {
             ModelAccessCollection::Pools => {
                 let pool = AccountPool {
                     id: reference(0)?,
+                    name: Some(value(6)).filter(|name| !name.is_empty()),
                     members: references(1)?,
                     projects: references(2)?,
                     roles: references(3)?,

@@ -40,6 +40,7 @@ impl Intent {
         let connection = input.connection(&nonce)?;
         let pool = AccountPool {
             id: inputs::generated_reference(input.provider, &input.label, &nonce, "pool")?,
+            name: None,
             members: vec![connection.id.clone()],
             projects: Vec::new(),
             roles: Vec::new(),

@@ -183,6 +183,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
         }
         let pool = AccountPool {
             id: reference("pool"),
+            name: None,
             members: vec![reference("connection")],
             projects: vec![reference("project")],
             roles: vec![reference("builder")],

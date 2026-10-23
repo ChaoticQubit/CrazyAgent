@@ -289,6 +289,7 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
     );
     let pool = crazyagent::config::AccountPool {
         id: reference("pool"),
+        name: None,
         members: vec![reference("connection")],
         projects: vec![reference("project")],
         roles: vec![reference("implementer")],
@@ -1025,6 +1026,7 @@ fn wire_rejects_secret_fields_client_paths_and_oversized_metadata() {
     let edit = crazyagent::config::ModelAccessEdit::CreatePool {
         pool: crazyagent::config::AccountPool {
             id: reference("pool"),
+            name: None,
             members: vec![reference("member"); 10000],
             projects: vec![reference("project")],
             roles: vec![reference("role")],
@@ -1474,6 +1476,7 @@ async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
     }
     let pool = AccountPool {
         id: reference("unassigned-pool"),
+        name: None,
         members: vec![reference("connection")],
         projects: vec![],
         roles: vec![],
