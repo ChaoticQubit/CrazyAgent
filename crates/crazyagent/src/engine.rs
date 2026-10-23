@@ -398,6 +398,7 @@ pub struct Engine {
     timeout: Duration,
     owner_egress: tokio::sync::RwLock<()>,
     dispatch_drive: tokio::sync::Mutex<()>,
+    agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
 }
 
 impl Engine {
@@ -438,6 +439,7 @@ impl Engine {
                 timeout,
                 owner_egress: tokio::sync::RwLock::new(()),
                 dispatch_drive: tokio::sync::Mutex::new(()),
+                agents: Mutex::default(),
             },
             config,
         ))
@@ -452,6 +454,7 @@ impl Engine {
             timeout,
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
+            agents: Mutex::default(),
         })
     }
 
@@ -464,6 +467,7 @@ impl Engine {
             timeout,
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
+            agents: Mutex::default(),
         })
     }
 
