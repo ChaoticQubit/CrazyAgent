@@ -6,12 +6,23 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::plugins::ServerSpec;
 use crate::project_setup::{Platform, ProjectSetup};
 use crate::protocol::ProjectSpec;
+use crate::tui::client::Connection;
+use crate::tui::ctx::{Ctx, Link};
+use crate::tui::glyphs::UNICODE;
+use crate::tui::keys::Key;
+use crate::tui::run::owner_arrival;
 use crate::tui::screens::new_project_frames::compose;
 use crate::tui::screens::new_project_view::{Screen, tab_strip};
 use crate::tui::screens::project::Tab;
+use crate::tui::screens::{Place, ProjectTab, open};
+use crate::tui::seam::{Request, ShellRequest};
+use crate::tui::shell::Shell;
+use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::KeyModifiers;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const LONG_RUNS: &str = "/opt/homebrew/bin/uvx mcp-server-postgres --connection postgresql://localhost:5432/tidepool --read-only";
 
@@ -561,17 +572,23 @@ fn exact_lines_keep_every_character() {
     );
 }
 
-#[tokio::test]
-async fn a_real_engine_project_switches_an_every_project_skill_off() {
+struct Engine {
+    root: tempfile::TempDir,
+    _service: EngineService,
+    _stop: tokio::sync::watch::Sender<bool>,
+    controller: OwnerController,
+}
+
+async fn engine() -> Engine {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-plug-")
         .tempdir_in("/private/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
     let config =
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+    let service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
     let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
@@ -613,6 +630,18 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
         .add_skill(Scope::Global, folder.display().to_string())
         .await
         .unwrap();
+    Engine {
+        root,
+        _service: service,
+        _stop: stop,
+        controller,
+    }
+}
+
+#[tokio::test]
+async fn a_real_engine_project_switches_an_every_project_skill_off() {
+    let engine = engine().await;
+    let controller = &engine.controller;
     controller
         .add_mcp_server(
             here(),
@@ -671,4 +700,137 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
     ));
     assert_eq!(view.skills[0].on_here, Some(false));
     assert!(find(&frame(&view, 80, 24), "release-notes").contains("Off here"));
+}
+
+async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut quiet = 0;
+    loop {
+        let mut moved = false;
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+            moved = true;
+        }
+        if !connection.busy()
+            && shell.ctx.link == Link::Ready
+            && let Some(request) = shell.ctx.next_request()
+        {
+            moved = true;
+            match request {
+                Request::Pools => connection.shell(ShellRequest::Pools).unwrap(),
+                Request::PoolProjects => connection.shell(ShellRequest::PoolProjects).unwrap(),
+                Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
+                Request::Setup(query) => connection.project_setup(query).unwrap(),
+                Request::Master(job) => connection.master(*job).unwrap(),
+                Request::Settings(job) => {
+                    sent.push(match job.as_ref() {
+                        SettingsJob::ProjectPlugins { .. } => "project plugins",
+                        SettingsJob::Plugin(_) => "plugin change",
+                        _ => "settings",
+                    });
+                    connection.settings(*job).unwrap();
+                }
+                other => panic!("the project page never sends {other:?}"),
+            }
+        }
+        quiet = if moved || connection.busy() {
+            0
+        } else {
+            quiet + 1
+        };
+        if quiet > 20 {
+            return sent;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "engine reads never settled: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn render(shell: &mut Shell, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| shell.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
+    let engine = engine().await;
+    let mut connection = Connection::connect_paired(
+        Client::new(engine.root.path().join("e.sock"), Duration::from_secs(2)).unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    let screen = open(
+        &Place::Project {
+            id: project(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = drive(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"project plugins"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Project settings"), "{shown}");
+    let release = shown
+        .lines()
+        .find(|line| line.contains("> release-notes"))
+        .unwrap_or_else(|| panic!("no skill row:\n{shown}"));
+    assert!(release.contains("Every project"), "{shown}");
+    assert!(
+        shown.contains("No MCP servers yet. Press m to add one for this project."),
+        "{shown}"
+    );
+
+    shell.key(Key::Char(' '));
+    let sent = drive(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["plugin change", "project plugins"]);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Off here"), "{shown}");
+    assert!(
+        shown.contains("release-notes is off for this project."),
+        "{shown}"
+    );
+    let skills = engine
+        .controller
+        .plugin_skills(Some(project()))
+        .await
+        .unwrap();
+    assert_eq!(skills[0].on_here, Some(false));
+
+    shell.key(Key::Char('a'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Only this project can use it."), "{shown}");
+    assert!(
+        shown.contains("Tidepool  /  Settings  /  Add skill"),
+        "{shown}"
+    );
+    shell.key(Key::Esc);
+    drive(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Project settings"), "{shown}");
+    assert!(shown.contains("Off here"), "{shown}");
 }

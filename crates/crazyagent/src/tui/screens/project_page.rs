@@ -6,8 +6,11 @@ use super::project::{
     project_pool,
 };
 use super::project_master::{MasterRead, transcript_from};
+use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
+use super::settings_accounts::send as send_settings;
+use super::settings_plugins::{AddPlugin, EditServer};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
@@ -477,6 +480,11 @@ impl ProjectPage {
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
+        if self.screen.tab == Tab::Settings
+            && let Some(job) = self.screen.plugins.next_job()
+        {
+            send_settings(ctx, job);
+        }
         if self.sent.len() >= SENT_MAX {
             return;
         }
@@ -568,6 +576,40 @@ impl ProjectPage {
         self.redraw(ctx);
         flow
     }
+
+    fn plugins_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Settings
+            && self.screen.pool_picker.is_none()
+            && self.screen.edit.is_none()
+            && self.screen.confirm_delete.is_none()
+    }
+
+    fn plugins_reply(&mut self, reply: PluginsReply, ctx: &mut Ctx) -> Flow {
+        let project = self.screen.project.clone();
+        let name = self.screen.name.clone();
+        let flow = match reply {
+            PluginsReply::Ignored => Flow::Ignored,
+            PluginsReply::Handled => Flow::Handled,
+            PluginsReply::Send(job) => {
+                send_settings(ctx, job);
+                Flow::Handled
+            }
+            PluginsReply::AddSkill => {
+                return Flow::Replace(Box::new(AddPlugin::skill().for_project(project, name)));
+            }
+            PluginsReply::AddServer => {
+                return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
+            }
+            PluginsReply::Edit(server) => {
+                return Flow::Replace(Box::new(
+                    EditServer::new(*server).for_project(project, name),
+                ));
+            }
+        };
+        self.pump(ctx);
+        self.redraw(ctx);
+        flow
+    }
 }
 
 impl Screen for ProjectPage {
@@ -589,6 +631,14 @@ impl Screen for ProjectPage {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         self.screen.width = ctx.width;
+        if self.plugins_have_keys()
+            && let Some(event) = key_event(key)
+        {
+            match self.screen.plugins.key(event) {
+                PluginsReply::Ignored => {}
+                reply => return self.plugins_reply(reply, ctx),
+            }
+        }
         let reply = match key {
             Key::Paste(text) => self.screen.paste(text),
             other => match key_event(other) {
@@ -614,6 +664,7 @@ impl Screen for ProjectPage {
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Setup(event) => self.setup_arrived(event),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
+                OwnerEvent::Settings(event) => self.screen.plugins.apply(event),
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -625,6 +676,7 @@ impl Screen for ProjectPage {
             Arrival::Disconnected(_) => {
                 self.sent.clear();
                 self.screen.forget_reads();
+                self.screen.plugins.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
@@ -659,7 +711,10 @@ impl Screen for ProjectPage {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.screen.counts().0 > 0 || self.master.has_pending() || self.waiting.is_some()
+        self.screen.counts().0 > 0
+            || self.master.has_pending()
+            || self.waiting.is_some()
+            || self.screen.plugins.busy()
     }
 
     fn draft(&self) -> bool {

@@ -62,7 +62,7 @@ pub(in crate::tui) fn project_screen(
             }
             context(screen, width, content, room, look)
         }
-        Tab::Settings => settings(screen, content, look),
+        Tab::Settings => settings(screen, content, room, look),
     };
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
@@ -1255,7 +1255,7 @@ fn context(
     (lines, None, help)
 }
 
-fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
+fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     let entry = |label: &str, value: Row| Row::of(label, look.muted).pad(10).cat(value);
     let pool = match &screen.pool {
         _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
@@ -1268,7 +1268,7 @@ fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
             .push("   Enter Assign", look.muted),
         None => Row::of("No pool yet", look.warning).push("   Enter Pick a pool", look.muted),
     };
-    let lines = vec![
+    let mut lines = vec![
         Row::of("Project settings", look.accent),
         Row::default(),
         entry("Name", Row::of(screen.name.clone(), look.fg)),
@@ -1276,30 +1276,25 @@ fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
         Row::default(),
-        spread(
-            content,
-            Row::of("Skills", look.heading),
-            Row::of("From Settings, plus this project", look.muted),
-        ),
-        Row::of(
-            "  Not ready yet. Project skills come with the plugins and skills update.",
-            look.muted,
-        ),
-        Row::default(),
-        Row::of("MCP servers", look.heading),
-        Row::of(
-            "  Not ready yet. Project MCP servers come with the same update.",
-            look.muted,
-        ),
     ];
+    let (plugins, mut help) = screen
+        .plugins
+        .rows(content, room.saturating_sub(lines.len()), look);
+    lines.extend(plugins);
     let pool_key = match &screen.pool {
         _ if !screen.pool_ready => None,
         Some(pool) if pool.assigned => Some("Change pool"),
         Some(_) => Some("Assign pool"),
         None => Some("Pick a pool"),
     };
-    let mut help: Help = pool_key.map(|label| ("Enter", label)).into_iter().collect();
-    help.extend([("o", "Open folder"), TABS, ("Esc", "Home")]);
+    if let Some(at) = help.iter().position(|item| *item == TABS) {
+        help.insert(at, ("o", "Open folder"));
+        if let Some(label) = pool_key
+            && help.iter().all(|(key, _)| *key != "Enter")
+        {
+            help.insert(0, ("Enter", label));
+        }
+    }
     let _ = cells;
     (lines, None, help)
 }

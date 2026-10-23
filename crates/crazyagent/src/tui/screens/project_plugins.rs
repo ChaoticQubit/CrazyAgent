@@ -5,7 +5,7 @@ use super::settings_plugins::{plugin_plain, short_runs};
 use crate::plugins::{Scope, ServerStatus, ServerView, SkillView};
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
 const WIDE: usize = 96;
@@ -223,6 +223,12 @@ impl ProjectPlugins {
     /// Takes the key event. Returns what the host should do next; Enter on an
     /// item that needs no approval is left to the host.
     pub fn key(&mut self, key: KeyEvent) -> PluginsReply {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+        {
+            return PluginsReply::Ignored;
+        }
         if let Some(id) = self.removing.clone() {
             return match key.code {
                 KeyCode::Char('y') => {

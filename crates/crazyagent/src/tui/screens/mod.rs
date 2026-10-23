@@ -8,13 +8,6 @@ pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "v1-tui-projects plugs the project plugins view into the project Settings tab"
-    )
-)]
 pub(in crate::tui) mod project_plugins;
 #[cfg_attr(
     not(test),
