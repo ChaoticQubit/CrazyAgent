@@ -264,6 +264,23 @@ export function saveResearchToMemory(id: string, research: ResearchKind, section
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
+export const RESEARCH_LOG_LINES_MAX = 200;
+
+/** Reads the latest plain lines of one research agent's log.
+ * Inputs: the project id and the job id. Output: at most RESEARCH_LOG_LINES_MAX lines, oldest first. */
+export async function loadResearchLog(id: string, job: number): Promise<Result<string[]>> {
+  const result = await call<{ lines: string[] }>("desktop_research_log", { id, job });
+  if (result.kind !== "ok") return result;
+  if (!Array.isArray(result.value?.lines) || !result.value.lines.every((line) => typeof line === "string")) return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+  return { kind: "ok", value: result.value.lines.slice(-RESEARCH_LOG_LINES_MAX) };
+}
+
+/** Asks the engine to run one failed research job again.
+ * Inputs: the project id, the job id and a draft generation. Output: the engine receipt. */
+export function retryResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_retry_research", { id, job, generation });
+}
+
 export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
 
 export interface MemoryItem {

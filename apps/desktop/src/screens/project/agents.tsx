@@ -1,6 +1,7 @@
 import { call, nextGeneration } from "../../api";
-import { useState } from "react";
-import { failureCopy } from "../../api-projects";
+import type { Result } from "../../api";
+import { useEffect, useState } from "react";
+import { failureCopy, loadResearchLog } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -20,12 +21,31 @@ export function agentStatus(row: ResearchRow): { word: string; tone: Tone } {
   }
 }
 
+function AgentLog({ data, job }: { data: ProjectData; job: ResearchJob }) {
+  const [log, setLog] = useState<Result<string[]>>();
+  const live = job.status === "running";
+  useEffect(() => {
+    let current = true;
+    void loadResearchLog(data.id, job.id).then((result) => { if (current) setLog(result); });
+    return () => { current = false; };
+  }, [data.id, job.id, live ? data.now : 0]);
+  return <div className="pj-log" id={`pj-log-${job.id}`}>
+    {log === undefined && <p className="pj-muted pj-small" role="status">Loading log...</p>}
+    {log?.kind === "not_ready" && <NotReady what="the agent log isn't in this build." />}
+    {log?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the log. {failureCopy(log.code)}</p>}
+    {log?.kind === "ok" && (log.value.length
+      ? <ol className="pj-log-lines" aria-label={`${displayText(job.kind_label)} log`}>{log.value.map((line, index) => <li key={index}>{displayText(line)}</li>)}</ol>
+      : <p className="pj-muted pj-small">No log lines yet.</p>)}
+  </div>;
+}
+
 /** Agents tab: every agent the project has started, with live progress from the engine.
  * Input: the project data. Output: the list; rows refresh while research polls. */
 export function AgentsTab({ data }: { data: ProjectData }) {
   const [filter, setFilter] = useState<"running" | "all">("running");
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
   const [note, setNote] = useState("");
+  const [logOpen, setLogOpen] = useState<number | null>(null);
   const jobs = valueOf(data.research)?.jobs ?? [];
   const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
@@ -61,8 +81,11 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         <span className="pj-secondary pj-small">{harnessName(harnesses, job.harness)}</span>
         <span><Badge word={status.word} tone={status.tone} /> <span className="pj-small pj-secondary">{displayText(row.progress)}</span></span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
-        <span>{job.status === "running" && !job.cancel_requested && <button type="button" className="btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
+        <span className="pj-row">{job.started_ms !== null && <button type="button" className="btn" aria-expanded={logOpen === job.id} aria-controls={`pj-log-${job.id}`}
+          onClick={() => setLogOpen(logOpen === job.id ? null : job.id)}>View log</button>}
+          {job.status === "running" && !job.cancel_requested && <button type="button" className="btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
+        {logOpen === job.id && <AgentLog data={data} job={job} />}
       </li>;
     })}</ul> : data.research?.kind === "ok" && <div className="pj-empty">
       <h3>{filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}</h3>

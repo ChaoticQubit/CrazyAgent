@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { failureCopy, loadProjectMemories } from "../../api-projects";
+import { nextGeneration } from "../../api";
+import { failureCopy, loadProjectMemories, receiptState, retryResearch } from "../../api-projects";
+import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { poolSummary } from "../new-project/wizard";
@@ -36,6 +38,17 @@ export function OverviewTab({ data }: { data: ProjectData }) {
     void loadProjectMemories(data.id, null).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value).suggested.length : 0); });
     return () => { live = false; };
   }, [data.id, data.now]);
+  const [retrying, setRetrying] = useState<number | null>(null);
+  async function retry(job: ResearchJob) {
+    setRetrying(job.id);
+    const result = await retryResearch(data.id, job.id, nextGeneration());
+    setRetrying(null);
+    if (result.kind === "not_ready") return data.notify("Not ready yet: trying research again isn't in this build.");
+    if (result.kind === "error") return data.notify(failureCopy(result.code));
+    const state = receiptState(result.value);
+    if (state.kind === "rejected") return data.notify(failureCopy(state.code));
+    data.reload();
+  }
   return <div className="pj-overview">
     <div className="pj-stack">
       {(waiting || suggested > 0) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
@@ -54,7 +67,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
           <Badge word={row.status} tone={row.tone} />
           <span className="pj-secondary">{displayText(row.progress)}</span>
           <span className="pj-small pj-muted">{row.elapsed}</span>
-          <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}</span>
+          <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}
+            {job.status === "failed" && <button type="button" className="btn" disabled={retrying === job.id} onClick={() => void retry(job)}>Try again</button>}</span>
         </li>)}</ul>}
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>

@@ -193,3 +193,25 @@ test("the Needs you line for waiting research uses the engine's reason when it g
     "Research is waiting: No account in this project's pool can run this research.");
   assert.equal(research.waitingLine([job("needs_pool", { error: "Needs a pool." })]), "Research is waiting: Needs a pool.");
 });
+
+const tabData = (jobs) => ({
+  id: "p-1", name: "Harbor Notes", setup: undefined, research: { kind: "ok", value: { project_id: "p-1", jobs } }, context: undefined,
+  pools: undefined, harnesses: undefined, assigned: null, now: 1_000 + 60_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+});
+
+test("an agent that started offers View log, only a running one offers Stop", async () => {
+  const agents = await import("../src/screens/project/agents.tsx");
+  const running = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));
+  assert.match(running, /<button type="button" class="btn" aria-expanded="false" aria-controls="pj-log-1">View log<\/button>/);
+  assert.match(running, />Stop</);
+  assert.doesNotMatch(running, /id="pj-log-1"/);
+  const queued = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("queued")]) }));
+  assert.doesNotMatch(queued, />View log<|>Stop</);
+});
+
+test("a failed research row shows its plain reason and Try again", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData([job("failed", { error: "This harness cannot run research yet", started_ms: 1_000, finished_ms: 2_000 }), job("done")]) }));
+  assert.match(markup, /This harness cannot run research yet/);
+  assert.equal(markup.match(/>Try again</g)?.length, 1);
+});
