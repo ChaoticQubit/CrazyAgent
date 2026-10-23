@@ -29,6 +29,7 @@ fn main() {
         "desktop_promote_memory",
         "desktop_delete_memory",
         "desktop_forget_memory",
+        "desktop_remember_research",
         "desktop_open_project",
         "desktop_history",
         "desktop_send_message",

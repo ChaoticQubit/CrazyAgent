@@ -52,6 +52,7 @@ pub struct MemoryList {
 fn code(code: &str, fallback: &'static str) -> BridgeError {
     failure(known_code(code).unwrap_or(match code {
         "project_missing" => "project_missing",
+        "research_section_invalid" => "research_section_invalid",
         _ => fallback,
     }))
 }
@@ -181,6 +182,24 @@ impl NativeBridge {
         let action = LibraryAction::Forget {
             project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
             entry_id: memory_id(memory)?,
+        };
+        self.change_memory(action, generation).await
+    }
+
+    /// Keeps a research report, or one of its sections, as an approved project memory
+    /// with one owner click. Takes the project id, research kind, optional heading and
+    /// a fresh draft generation. Returns the intent receipt.
+    pub async fn remember_research(
+        &mut self,
+        project: &str,
+        research: crazyagent::project_setup::ResearchKind,
+        section: Option<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let action = LibraryAction::Remember {
+            project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
+            research,
+            section,
         };
         self.change_memory(action, generation).await
     }
