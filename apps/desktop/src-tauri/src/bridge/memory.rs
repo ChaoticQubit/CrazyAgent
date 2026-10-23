@@ -15,6 +15,7 @@ pub struct MemoryNote {
     pub project_id: Option<String>,
     pub origin: &'static str,
     pub from_project_id: Option<String>,
+    pub source_path: Option<String>,
 }
 
 impl From<SavedMemory> for MemoryNote {
@@ -25,11 +26,12 @@ impl From<SavedMemory> for MemoryNote {
                 ("project", Some(project_id.as_str().to_owned()))
             }
         };
-        let (origin, from_project_id) = match memory.origin {
-            MemoryOrigin::Written => ("written", None),
+        let (origin, from_project_id, source_path) = match memory.origin {
+            MemoryOrigin::Written => ("written", None, None),
             MemoryOrigin::Promoted { project_id, .. } => {
-                ("promoted", Some(project_id.as_str().to_owned()))
+                ("promoted", Some(project_id.as_str().to_owned()), None)
             }
+            MemoryOrigin::Selected { path } => ("selected", None, Some(path)),
         };
         Self {
             id: memory.id.as_str().to_owned(),
@@ -38,6 +40,7 @@ impl From<SavedMemory> for MemoryNote {
             project_id,
             origin,
             from_project_id,
+            source_path,
         }
     }
 }
@@ -53,6 +56,7 @@ fn code(code: &str, fallback: &'static str) -> BridgeError {
     failure(known_code(code).unwrap_or(match code {
         "project_missing" => "project_missing",
         "research_section_invalid" => "research_section_invalid",
+        "context_path_invalid" => "context_path_invalid",
         _ => fallback,
     }))
 }
@@ -112,7 +116,10 @@ impl NativeBridge {
 
     /// Reads the approved memories every agent in a project starts with.
     /// Takes the project id. Returns the bounded set agents receive.
-    pub async fn approved_memories(&mut self, project: &str) -> Result<ApprovedMemories, BridgeError> {
+    pub async fn approved_memories(
+        &mut self,
+        project: &str,
+    ) -> Result<ApprovedMemories, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
@@ -200,6 +207,25 @@ impl NativeBridge {
             project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
             research,
             section,
+        };
+        self.change_memory(action, generation).await
+    }
+
+    /// Saves text the owner selected in a context file as an approved project memory,
+    /// keeping the file path as its source. Takes the project id, the file path, the
+    /// selected text and a fresh draft generation. Returns the intent receipt; a file
+    /// that no longer holds the text is a plain rejection.
+    pub async fn save_selection_to_memory(
+        &mut self,
+        id: &str,
+        path: String,
+        text: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let action = LibraryAction::SaveSelection {
+            project_id: ProjectId::new(id).map_err(|_| failure("invalid_project"))?,
+            path,
+            text,
         };
         self.change_memory(action, generation).await
     }

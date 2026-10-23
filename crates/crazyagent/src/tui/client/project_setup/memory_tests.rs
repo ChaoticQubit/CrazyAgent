@@ -54,6 +54,16 @@ async fn tui_adds_lists_and_deletes_global_memory_through_the_real_engine() {
         .unwrap_err(),
         "Keep the memory under 2000 characters."
     );
+    assert_eq!(
+        app.request_library_change(LibraryAction::SaveSelection {
+            project_id: crate::protocol::ProjectId::new("tui-mem").unwrap(),
+            path: "context/brief.md\n".into(),
+            text: "Selected words".into(),
+        })
+        .unwrap_err(),
+        "context_path_invalid"
+    );
+    assert!(app.take_setup_query().is_none());
     assert!(
         app.request_library(LibraryQuery::Change {
             action: LibraryAction::Delete {

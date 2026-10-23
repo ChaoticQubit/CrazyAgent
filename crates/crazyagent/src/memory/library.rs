@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const NOTE_BYTES_MAX: usize = 2000;
+pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
 pub const SEARCH_BYTES_MAX: usize = 100;
 pub const PAGE_ITEMS_MAX: u8 = 20;
 pub const SCOPE_ITEMS_MAX: usize = 200;
@@ -57,6 +58,9 @@ pub enum MemoryOrigin {
         entry_id: RequestId,
         version: u64,
     },
+    Selected {
+        path: String,
+    },
 }
 
 /// One memory the owner saved by hand or promoted to global memory.
@@ -104,6 +108,11 @@ pub enum LibraryAction {
         research: crate::project_setup::ResearchKind,
         section: Option<String>,
     },
+    SaveSelection {
+        project_id: ProjectId,
+        path: String,
+        text: String,
+    },
 }
 
 impl LibraryAction {
@@ -112,6 +121,15 @@ impl LibraryAction {
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::Add { text, .. } => validate_note(text),
+            Self::SaveSelection { path, text, .. } => {
+                if path.is_empty()
+                    || path.len() > CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
+                    return Err(error("context_path_invalid"));
+                }
+                validate_note(text)
+            }
             Self::Promote { version: 0, .. } => Err(error("memory_changed")),
             Self::Remember {
                 project_id,
@@ -141,6 +159,7 @@ pub enum ApprovedKind {
     Note,
     Promoted,
     Research,
+    Selection,
 }
 
 /// One owner-approved memory an agent in the project may read.
@@ -177,7 +196,11 @@ impl ApprovedMemories {
             (ApprovedScope::Project, "\n### This project\n\n"),
             (ApprovedScope::Global, "\n### All projects\n\n"),
         ] {
-            let mut items = self.items.iter().filter(|item| item.scope == scope).peekable();
+            let mut items = self
+                .items
+                .iter()
+                .filter(|item| item.scope == scope)
+                .peekable();
             if items.peek().is_some() {
                 text.push_str(heading);
             }
@@ -233,7 +256,10 @@ pub fn validate_note(text: &str) -> Result<(), EngineError> {
     if text.len() > NOTE_BYTES_MAX {
         return Err(error("memory_note_too_long"));
     }
-    if text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
         return Err(error("memory_note_invalid"));
     }
     Ok(())
@@ -256,7 +282,8 @@ pub fn validate_page(search: Option<&str>, limit: u8) -> Result<(), EngineError>
     Ok(())
 }
 
-const CODES: [&str; 13] = [
+const CODES: [&str; 14] = [
+    "memory_selection_stale",
     "memory_source_removed",
     "memory_note_blank",
     "memory_note_too_long",
@@ -298,9 +325,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "memory_project_missing" => Some("That project no longer exists."),
         "memory_search_invalid" => Some("Keep the search on one line, up to 100 characters."),
         "memory_page_invalid" => Some("Show between 1 and 20 memories at a time."),
-        "memory_source_removed" => {
-            Some("This memory's source was removed. Delete the memory, then save the research again.")
+        "memory_selection_stale" => {
+            Some("This text is no longer in that file. Open the file again and select it again.")
         }
+        "memory_source_removed" => Some(
+            "This memory's source was removed. Delete the memory, then save the research again.",
+        ),
         _ => None,
     }
 }
@@ -341,8 +371,120 @@ pub(crate) fn execute(
             project_id,
             research,
             section,
-        } => remember(tx, config, project_id, *research, section.as_deref(), revision),
+        } => remember(
+            tx,
+            config,
+            project_id,
+            *research,
+            section.as_deref(),
+            revision,
+        ),
+        LibraryAction::SaveSelection {
+            project_id,
+            path,
+            text,
+        } => save_selection(tx, project_id, path, text.trim(), revision),
     }
+}
+
+fn save_selection(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    path: &str,
+    text: &str,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let source = match crate::project_setup::context_text(tx, project, path)? {
+        Ok(source) => source,
+        Err(code) => return rejected(code),
+    };
+    if !selected_from(&source, text) {
+        return rejected("memory_selection_stale");
+    }
+    let scope = MemoryScope::Project {
+        project_id: project.clone(),
+    };
+    let digest = hash(format!("{revision}\n{}\n{path}\n{text}", project.as_str()).as_bytes());
+    let id = RequestId::new(format!("selection-{}", &digest[..32])).map_err(error)?;
+    if let Some(code) = blocked(tx, &id, &scope, text, "memory_duplicate")? {
+        return rejected(code);
+    }
+    let origin = MemoryOrigin::Selected { path: path.into() };
+    insert(tx, &id, &scope, &origin, text)
+}
+
+/// Removes markdown link targets so file text reads as the owner saw it rendered.
+/// Input: the raw file text. Output: the text with every `](target)` reduced to `]`.
+fn readable(source: &str) -> String {
+    let mut text = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(start) = rest.find("](") {
+        text.push_str(&rest[..=start]);
+        let target = &rest[start + 2..];
+        match target.find(')') {
+            Some(end) if !target[..end].contains('\n') => rest = &target[end + 1..],
+            _ => {
+                text.push('(');
+                rest = target;
+            }
+        }
+    }
+    text.push_str(rest);
+    assert!(text.len() <= source.len());
+    text
+}
+
+/// Splits text into lowercase words, ignoring punctuation, markup and spacing.
+/// Input: any text. Output: the words in order.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Finds a run of words inside a longer run in linear time.
+/// Input: the file words and the nonempty selected words. Output: whether they appear
+/// together, in order, with nothing between them.
+fn contains_words(haystack: &[String], needle: &[String]) -> bool {
+    assert!(!needle.is_empty());
+    let mut fallback = vec![0usize; needle.len()];
+    let mut length = 0;
+    for index in 1..needle.len() {
+        while length > 0 && needle[index] != needle[length] {
+            length = fallback[length - 1];
+        }
+        if needle[index] == needle[length] {
+            length += 1;
+        }
+        fallback[index] = length;
+    }
+    let mut matched = 0;
+    for word in haystack {
+        while matched > 0 && word != &needle[matched] {
+            matched = fallback[matched - 1];
+        }
+        if word == &needle[matched] {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            return true;
+        }
+    }
+    assert!(matched < needle.len());
+    false
+}
+
+/// Checks that a selection the owner made in the reader still comes from the file.
+/// Input: the current file text and the trimmed selection. Output: true when the
+/// selection's words appear together in the file as rendered, or, for a selection
+/// without words, when the file holds it exactly.
+fn selected_from(source: &str, selection: &str) -> bool {
+    let needle = words(selection);
+    if needle.is_empty() {
+        return source.contains(selection);
+    }
+    contains_words(&words(&readable(source)), &needle)
 }
 
 fn remember(
@@ -359,7 +501,8 @@ fn remember(
     };
     let id = super::research_entry_id(project, research.name(), &text)?;
     if load_entry(tx, &id)?.is_none() {
-        let outcome = super::propose_research(tx, config, project, research.name(), &text, revision)?;
+        let outcome =
+            super::propose_research(tx, config, project, research.name(), &text, revision)?;
         if outcome != Outcome::Applied {
             return Ok(outcome);
         }
@@ -588,12 +731,21 @@ fn forget(
         return rejected("memory_missing");
     }
     let versions = tx
-        .execute("DELETE FROM knowledge_entries WHERE id=?1", [entry_id.as_str()])
+        .execute(
+            "DELETE FROM knowledge_entries WHERE id=?1",
+            [entry_id.as_str()],
+        )
         .map_err(error)?;
-    tx.execute("DELETE FROM knowledge_heads WHERE id=?1", [entry_id.as_str()])
-        .map_err(error)?;
-    tx.execute("DELETE FROM knowledge_globals WHERE entry=?1", [entry_id.as_str()])
-        .map_err(error)?;
+    tx.execute(
+        "DELETE FROM knowledge_heads WHERE id=?1",
+        [entry_id.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "DELETE FROM knowledge_globals WHERE entry=?1",
+        [entry_id.as_str()],
+    )
+    .map_err(error)?;
     let remaining: Vec<KnowledgeEntry> = bodies(
         tx,
         "SELECT body FROM knowledge_entries WHERE project=?1 LIMIT ?2",
@@ -649,7 +801,11 @@ fn forget(
                 |r| r.get(0),
             )
             .map_err(error)?;
-        if !captured && !remaining.iter().any(|other| other.source_ids.contains(source)) {
+        if !captured
+            && !remaining
+                .iter()
+                .any(|other| other.source_ids.contains(source))
+        {
             tx.execute(
                 "DELETE FROM knowledge_sources WHERE project=?1 AND id=?2 AND revoked=0",
                 params![project.as_str(), source.as_str()],
@@ -690,7 +846,10 @@ fn row(
 
 /// Reads one saved memory by id for the owner's detail view.
 /// Input: the transaction and memory id. Output: the memory, or None once deleted.
-pub(crate) fn get(tx: &Transaction<'_>, id: &RequestId) -> Result<Option<SavedMemory>, EngineError> {
+pub(crate) fn get(
+    tx: &Transaction<'_>,
+    id: &RequestId,
+) -> Result<Option<SavedMemory>, EngineError> {
     tx.query_row(
         "SELECT ordinal,id,project,origin,text FROM memory_library WHERE id=?1",
         [id.as_str()],
@@ -730,7 +889,11 @@ fn scoped(
         items.push(row(ordinal, id, project, origin, text)?);
     }
     assert!(items.len() <= limit);
-    assert!(items.windows(2).all(|pair| pair[0].ordinal > pair[1].ordinal));
+    assert!(
+        items
+            .windows(2)
+            .all(|pair| pair[0].ordinal > pair[1].ordinal)
+    );
     Ok(items)
 }
 
@@ -834,6 +997,14 @@ fn kept_research(
     Ok(entries)
 }
 
+fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
+    match origin {
+        MemoryOrigin::Written => ApprovedKind::Note,
+        MemoryOrigin::Promoted { .. } => ApprovedKind::Promoted,
+        MemoryOrigin::Selected { .. } => ApprovedKind::Selection,
+    }
+}
+
 /// Returns the bounded owner-approved memories an agent in this project may read.
 /// Input: the engine transaction and project id. Output: project notes and kept
 /// project research first, then global memory, newest first, within the launch bounds.
@@ -851,17 +1022,17 @@ pub(crate) fn approved_for_project(
         project_id: project.clone(),
     };
     for memory in scoped(tx, &local, None, None, SCOPE_ITEMS_MAX)? {
-        collector.push(ApprovedScope::Project, ApprovedKind::Note, &memory.text);
+        collector.push(
+            ApprovedScope::Project,
+            kind_of(&memory.origin),
+            &memory.text,
+        );
     }
     for entry in kept_research(tx, project)? {
         collector.push(ApprovedScope::Project, ApprovedKind::Research, &entry.text);
     }
     for memory in scoped(tx, &MemoryScope::Global, None, None, SCOPE_ITEMS_MAX)? {
-        let kind = match memory.origin {
-            MemoryOrigin::Written => ApprovedKind::Note,
-            MemoryOrigin::Promoted { .. } => ApprovedKind::Promoted,
-        };
-        collector.push(ApprovedScope::Global, kind, &memory.text);
+        collector.push(ApprovedScope::Global, kind_of(&memory.origin), &memory.text);
     }
     let memories = ApprovedMemories {
         items: collector.items,

@@ -1364,6 +1364,23 @@ pub(crate) fn execute(
     }
 }
 
+/// Reads a whole context file as text, up to the report bound, without following links.
+/// Takes the project and the file path relative to its folder. Returns the text, or a
+/// plain rejection code when the setup or file is missing or the path is not a context path.
+pub(crate) fn context_text(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    path: &str,
+) -> Result<Result<String, &'static str>, EngineError> {
+    let Some(stored) = load_setup(tx, project_id)? else {
+        return Ok(Err("project_setup_missing"));
+    };
+    Ok(
+        read_beneath(Path::new(&stored.folder), path, 0, REPORT_BYTES_MAX)
+            .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned()),
+    )
+}
+
 /// Reads one research report, or one of its sections, from the project folder.
 /// Takes the project, research kind and optional heading. Returns the text, or a
 /// plain rejection code when the setup, report or section is missing.

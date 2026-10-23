@@ -365,6 +365,21 @@ async fn desktop_forget_memory(
 }
 
 #[tauri::command]
+async fn desktop_save_selection_to_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .save_selection_to_memory(&id, path, text, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_remember_research(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -468,6 +483,21 @@ async fn desktop_close_master(
     main_window(&window)?;
     lock(&state)?
         .close_master(&ticket, &session_id, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_cancel_master_turn(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session: String,
+    turn: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .cancel_master_turn(&ticket, &session, &turn, generation)
         .await
 }
 
@@ -1046,6 +1076,7 @@ pub fn run() {
             desktop_delete_memory,
             desktop_forget_memory,
             desktop_remember_research,
+            desktop_save_selection_to_memory,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
@@ -1055,6 +1086,7 @@ pub fn run() {
             desktop_open_master,
             desktop_submit_master,
             desktop_close_master,
+            desktop_cancel_master_turn,
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,

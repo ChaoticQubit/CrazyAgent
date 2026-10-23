@@ -32,7 +32,10 @@ impl OwnerController {
 
     /// Reads one saved memory for its detail view.
     /// Takes the memory id. Returns the memory, or None once it was deleted.
-    pub async fn memory(&mut self, memory_id: RequestId) -> Result<Option<SavedMemory>, EngineError> {
+    pub async fn memory(
+        &mut self,
+        memory_id: RequestId,
+    ) -> Result<Option<SavedMemory>, EngineError> {
         match self.read(OwnerRead::Memory { memory_id }).await?.data {
             OwnerData::Memory { memory } => Ok(memory),
             _ => Err(EngineError("controller_read_response".into())),
@@ -45,7 +48,11 @@ impl OwnerController {
         &mut self,
         project_id: ProjectId,
     ) -> Result<ApprovedMemories, EngineError> {
-        match self.read(OwnerRead::ApprovedMemories { project_id }).await?.data {
+        match self
+            .read(OwnerRead::ApprovedMemories { project_id })
+            .await?
+            .data
+        {
             OwnerData::ApprovedMemories { memories } => Ok(memories),
             _ => Err(EngineError("controller_read_response".into())),
         }
@@ -125,6 +132,25 @@ impl OwnerController {
             project_id,
             research,
             section,
+        };
+        self.change_memory(action, generation).await
+    }
+
+    /// Saves text the owner selected in a context file as an approved project memory
+    /// with the file path as its source. Takes the project, the path relative to the
+    /// project folder, the selected text and the client generation. The engine refuses
+    /// the text when the file no longer holds it.
+    pub async fn save_selection_to_memory(
+        &mut self,
+        project_id: ProjectId,
+        path: String,
+        text: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        let action = LibraryAction::SaveSelection {
+            project_id,
+            path,
+            text,
         };
         self.change_memory(action, generation).await
     }

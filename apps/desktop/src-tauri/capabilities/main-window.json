@@ -35,6 +35,8 @@
     "allow-desktop-delete-memory",
     "allow-desktop-forget-memory",
     "allow-desktop-remember-research",
+    "allow-desktop-save-selection-to-memory",
+    "allow-desktop-cancel-master-turn",
     "allow-desktop-open-project",
     "allow-desktop-history",
     "allow-desktop-send-message",

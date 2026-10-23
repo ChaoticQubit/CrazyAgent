@@ -63,9 +63,13 @@ impl Engine {
     }
 
     async fn owner(&self) -> OwnerController {
-        OwnerController::attach(self.root.path(), OwnerClientKind::Tui, Duration::from_secs(2))
-            .await
-            .unwrap()
+        OwnerController::attach(
+            self.root.path(),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
     }
 
     fn database(&self) -> rusqlite::Connection {
@@ -187,7 +191,11 @@ fn notes_and_searches_are_bounded_with_plain_problems() {
         (None, 0, "memory_page_invalid"),
         (None, PAGE_ITEMS_MAX + 1, "memory_page_invalid"),
         (Some(" ".to_owned()), 5, "memory_search_invalid"),
-        (Some("s".repeat(SEARCH_BYTES_MAX + 1)), 5, "memory_search_invalid"),
+        (
+            Some("s".repeat(SEARCH_BYTES_MAX + 1)),
+            5,
+            "memory_search_invalid",
+        ),
         (Some("two\nlines".to_owned()), 5, "memory_search_invalid"),
     ] {
         assert_eq!(validate_page(search.as_deref(), limit).unwrap_err().0, code);
@@ -253,7 +261,10 @@ fn the_launch_section_is_plain_and_never_exceeds_its_bound() {
     let project = text.find("### This project").unwrap();
     let global = text.find("### All projects").unwrap();
     assert!(project < global, "{text}");
-    assert!(text.contains("- Two competitors.\n  Both are paid.\n"), "{text}");
+    assert!(
+        text.contains("- Two competitors.\n  Both are paid.\n"),
+        "{text}"
+    );
     assert!(text.contains("- Prefer Rust.\n"), "{text}");
     assert!(text.contains("left out"), "{text}");
     let mut collector = Collector {
@@ -324,7 +335,10 @@ fn storage_refuses_bad_notes_and_full_scopes_without_writing() {
             scope: project_scope(&alpha),
             text: format!("note {index}"),
         };
-        assert_eq!(execute(&tx, &config, &action, index + 1).unwrap(), Outcome::Applied);
+        assert_eq!(
+            execute(&tx, &config, &action, index + 1).unwrap(),
+            Outcome::Applied
+        );
     }
     let full = LibraryAction::Add {
         scope: project_scope(&alpha),
@@ -349,8 +363,16 @@ fn storage_refuses_bad_notes_and_full_scopes_without_writing() {
     let approved = approved_for_project(&tx, &alpha).unwrap();
     assert_eq!(approved.items.len(), LAUNCH_ITEMS_MAX);
     assert!(!approved.complete);
-    assert_eq!(approved.items[0].text, format!("note {}", SCOPE_ITEMS_MAX - 1));
-    assert!(approved.items.iter().all(|item| item.scope == ApprovedScope::Project));
+    assert_eq!(
+        approved.items[0].text,
+        format!("note {}", SCOPE_ITEMS_MAX - 1)
+    );
+    assert!(
+        approved
+            .items
+            .iter()
+            .all(|item| item.scope == ApprovedScope::Project)
+    );
     assert!(approved.render().len() <= LAUNCH_BYTES_MAX + RENDER_HEADER_BYTES_MAX);
 }
 
@@ -412,17 +434,36 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         "memory_note_too_long"
     );
 
-    let globals = owner.memories(MemoryScope::Global, None, None).await.unwrap();
+    let globals = owner
+        .memories(MemoryScope::Global, None, None)
+        .await
+        .unwrap();
     assert_eq!(
-        globals.items.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        globals
+            .items
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
         [secret_note, global_note],
         "global memory lists newest first, trimmed"
     );
-    assert!(globals.items.iter().all(|m| m.origin == MemoryOrigin::Written));
+    assert!(
+        globals
+            .items
+            .iter()
+            .all(|m| m.origin == MemoryOrigin::Written)
+    );
     assert_eq!(globals.next, None);
-    let local = owner.memories(project_scope(&meals), None, None).await.unwrap();
+    let local = owner
+        .memories(project_scope(&meals), None, None)
+        .await
+        .unwrap();
     assert_eq!(
-        local.items.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        local
+            .items
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
         [project_note]
     );
     let found = owner
@@ -430,7 +471,11 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         .await
         .unwrap();
     assert_eq!(
-        found.items.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        found
+            .items
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
         [global_note],
         "search ignores case and surrounding spaces"
     );
@@ -444,7 +489,11 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     );
     assert_eq!(
         owner
-            .memories(project_scope(&ProjectId::new("mem-absent").unwrap()), None, None)
+            .memories(
+                project_scope(&ProjectId::new("mem-absent").unwrap()),
+                None,
+                None
+            )
             .await
             .unwrap_err()
             .0,
@@ -453,12 +502,19 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
 
     for index in 0..25 {
         let response = owner
-            .add_memory(MemoryScope::Global, format!("Paged fact {index:02}"), next())
+            .add_memory(
+                MemoryScope::Global,
+                format!("Paged fact {index:02}"),
+                next(),
+            )
             .await
             .unwrap();
         assert_eq!(result(response), OwnerResult::Applied);
     }
-    let first = owner.memories(MemoryScope::Global, None, None).await.unwrap();
+    let first = owner
+        .memories(MemoryScope::Global, None, None)
+        .await
+        .unwrap();
     assert_eq!(first.items.len(), usize::from(PAGE_ITEMS_MAX));
     assert_eq!(first.items[0].text, "Paged fact 24");
     let second = owner
@@ -490,17 +546,29 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(rest.next, None);
     for memory in paged.items.iter().chain(&rest.items) {
         assert_eq!(
-            result(owner.delete_memory(memory.id.clone(), next()).await.unwrap()),
+            result(
+                owner
+                    .delete_memory(memory.id.clone(), next())
+                    .await
+                    .unwrap()
+            ),
             OwnerResult::Applied
         );
     }
     assert_eq!(
-        owner.memories(MemoryScope::Global, None, None).await.unwrap().items.len(),
+        owner
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .unwrap()
+            .items
+            .len(),
         2
     );
 
     std::fs::write(
-        engine.folder("mem-meals").join("context/research/market_research.md"),
+        engine
+            .folder("mem-meals")
+            .join("context/research/market_research.md"),
         "# Market\n\nAbout 2 million households plan meals weekly.\n",
     )
     .unwrap();
@@ -592,19 +660,31 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         .iter()
         .map(|item| (item.scope, item.kind, item.text.as_str()))
         .collect();
-    assert_eq!(texts[0], (ApprovedScope::Project, ApprovedKind::Note, project_note));
     assert_eq!(
-        texts[1],
-        (ApprovedScope::Project, ApprovedKind::Research, entry.text.as_str())
+        texts[0],
+        (ApprovedScope::Project, ApprovedKind::Note, project_note)
     );
     assert_eq!(
-        texts.iter().filter(|(_, _, text)| *text == entry.text).count(),
+        texts[1],
+        (
+            ApprovedScope::Project,
+            ApprovedKind::Research,
+            entry.text.as_str()
+        )
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|(_, _, text)| *text == entry.text)
+            .count(),
         1,
         "a promoted memory is given once"
     );
     assert!(texts.contains(&(ApprovedScope::Global, ApprovedKind::Note, global_note)));
     assert!(
-        !texts.iter().any(|(_, _, text)| text.contains("other project")),
+        !texts
+            .iter()
+            .any(|(_, _, text)| text.contains("other project")),
         "another project's notes stay there"
     );
     let rendered = approved.render();
@@ -629,7 +709,13 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         ),
         OwnerResult::Applied
     );
-    assert!(owner.project_memories(meals.clone(), None).await.unwrap().is_empty());
+    assert!(
+        owner
+            .project_memories(meals.clone(), None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         tables_holding(&engine.database(), "households plan meals"),
         ["memory_library"],
@@ -710,8 +796,12 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
         rejected("memory_duplicate")
     );
     let approved = owner.approved_memories(meals.clone()).await.unwrap();
-    assert!(approved.items.iter().any(|item| item.kind == ApprovedKind::Research
-        && item.text == entry.text));
+    assert!(
+        approved
+            .items
+            .iter()
+            .any(|item| item.kind == ApprovedKind::Research && item.text == entry.text)
+    );
     assert_eq!(
         approved
             .items
@@ -768,8 +858,238 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
             .is_empty()
     );
     let after = owner.approved_memories(meals.clone()).await.unwrap();
-    assert!(after.items.iter().all(|item| item.text != project_note && item.text != secret_note));
+    assert!(
+        after
+            .items
+            .iter()
+            .all(|item| item.text != project_note && item.text != secret_note)
+    );
     assert!(after.items.iter().any(|item| item.text == entry.text));
+    drop(owner);
+    engine.stop().await;
+}
+
+#[test]
+fn a_selection_matches_the_file_as_rendered_and_nothing_else() {
+    let source = "# Market\n\nAbout **2 million** households. [Source](https://example.org/a) Growing fast.\n\n| Plan | Price |\n|---|---|\n| Free | 0 |\n";
+    assert_eq!(readable("[a](b) and [c](d\ne)"), "[a] and [c](d\ne)");
+    assert_eq!(
+        words("About **2 million**, Ünïcode!"),
+        ["about", "2", "million", "ünïcode"]
+    );
+    for selection in [
+        "About 2 million households. Source Growing fast.",
+        "MARKET",
+        "Free 0",
+        "households.\n  Source",
+        "|---|",
+    ] {
+        assert!(selected_from(source, selection), "{selection}");
+    }
+    for selection in [
+        "About 3 million",
+        "Source https example",
+        "fast. Plan Free",
+        "million About",
+        "~~~",
+    ] {
+        assert!(!selected_from(source, selection), "{selection}");
+    }
+    let list = |text: &str| -> Vec<String> { text.split(' ').map(str::to_owned).collect() };
+    assert!(contains_words(&list("a a a b"), &list("a a b")));
+    assert!(contains_words(&list("a b a b a c"), &list("a b a c")));
+    assert!(!contains_words(&list("a b a b a b"), &list("a b a c")));
+    assert!(!contains_words(&[], &list("a")));
+}
+
+#[tokio::test]
+async fn a_selection_from_a_context_file_becomes_an_approved_project_memory() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "mem-select", 1).await;
+    let path = "context/research/market_research.md";
+    let file = engine.folder("mem-select").join(path);
+    std::fs::write(
+        &file,
+        "# Market\n\nAbout **2 million** households. [Source](https://example.org/a) Growing fast.\n",
+    )
+    .unwrap();
+    let selection = "About 2 million households. Source Growing fast.";
+    assert_eq!(
+        result(
+            owner
+                .save_selection_to_memory(
+                    project.clone(),
+                    path.into(),
+                    format!("  {selection}\n"),
+                    2
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        result(
+            owner
+                .save_selection_to_memory(
+                    project.clone(),
+                    "context/brief.md".into(),
+                    "Plans weekly meals".into(),
+                    3
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "any text file in the project context can be the source"
+    );
+    let page = owner
+        .memories(project_scope(&project), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|m| (m.text.as_str(), &m.origin))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "Plans weekly meals",
+                &MemoryOrigin::Selected {
+                    path: "context/brief.md".into()
+                }
+            ),
+            (selection, &MemoryOrigin::Selected { path: path.into() }),
+        ]
+    );
+    let approved = owner.approved_memories(project.clone()).await.unwrap();
+    assert_eq!(
+        approved
+            .items
+            .iter()
+            .map(|i| (i.scope, i.kind, i.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                ApprovedScope::Project,
+                ApprovedKind::Selection,
+                "Plans weekly meals"
+            ),
+            (ApprovedScope::Project, ApprovedKind::Selection, selection),
+        ],
+        "a saved selection is an owner action, so agents get it at once"
+    );
+    assert_eq!(
+        result(
+            owner
+                .save_selection_to_memory(project.clone(), path.into(), selection.into(), 4)
+                .await
+                .unwrap()
+        ),
+        rejected("memory_duplicate")
+    );
+
+    std::fs::write(&file, "# Market\n\nThe numbers were revised.\n").unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_selection_to_memory(
+                    project.clone(),
+                    path.into(),
+                    "About 2 million households.".into(),
+                    5
+                )
+                .await
+                .unwrap()
+        ),
+        rejected("memory_selection_stale"),
+        "a file that changed since the owner read it is refused"
+    );
+    std::os::unix::fs::symlink(
+        engine.root.path().join("global.toml"),
+        engine
+            .folder("mem-select")
+            .join("context/documents/linked.md"),
+    )
+    .unwrap();
+    for (bad, code) in [
+        ("context/documents/absent.md", "context_item_missing"),
+        ("context/documents/linked.md", "context_item_missing"),
+        ("context/../global.toml", "context_path_invalid"),
+    ] {
+        assert_eq!(
+            result(
+                owner
+                    .save_selection_to_memory(project.clone(), bad.into(), "timeout".into(), 6)
+                    .await
+                    .unwrap()
+            ),
+            rejected(code),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        result(
+            owner
+                .save_selection_to_memory(
+                    ProjectId::new("mem-absent").unwrap(),
+                    path.into(),
+                    "numbers".into(),
+                    7
+                )
+                .await
+                .unwrap()
+        ),
+        rejected("project_setup_missing")
+    );
+    for (bad_path, text, code) in [
+        (
+            "context/brief.md\n",
+            "Plans".to_owned(),
+            "context_path_invalid",
+        ),
+        ("", "Plans".to_owned(), "context_path_invalid"),
+        (
+            "context/brief.md",
+            "n".repeat(NOTE_BYTES_MAX + 1),
+            "memory_note_too_long",
+        ),
+        ("context/brief.md", "  ".to_owned(), "memory_note_blank"),
+    ] {
+        assert_eq!(
+            owner
+                .save_selection_to_memory(project.clone(), bad_path.into(), text, 8)
+                .await
+                .unwrap_err()
+                .0,
+            code
+        );
+    }
+    assert_eq!(
+        owner
+            .save_selection_to_memory(
+                project.clone(),
+                "c".repeat(CONTEXT_PATH_BYTES_MAX + 1),
+                "Plans".into(),
+                8
+            )
+            .await
+            .unwrap_err()
+            .0,
+        "context_path_invalid"
+    );
+
+    let saved = page.items[1].id.clone();
+    assert_eq!(
+        result(owner.delete_memory(saved.clone(), 9).await.unwrap()),
+        OwnerResult::Applied
+    );
+    assert_eq!(owner.memory(saved).await.unwrap(), None);
+    assert!(
+        tables_holding(&engine.database(), selection).is_empty(),
+        "a deleted selection leaves no copy in any engine table"
+    );
     drop(owner);
     engine.stop().await;
 }
