@@ -876,7 +876,9 @@ fn apply(
 ) -> Result<WireReply, EngineError> {
     if matches!(
         request.command,
-        Command::OwnerConversation { .. } | Command::OwnerModelAccess { .. }
+        Command::OwnerConversation { .. }
+            | Command::OwnerModelAccess { .. }
+            | Command::OwnerProfile { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1041,6 +1043,7 @@ fn execute(
         Command::OwnerConversation { mutation } => {
             crate::conversation::apply(tx, mutation, revision)
         }
+        Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
             crate::verification::execute(tx, config, command)
         }
@@ -1445,6 +1448,7 @@ fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
         }
     }
     crate::conversation::initialize(&tx)?;
+    crate::owner_profile::initialize(&tx)?;
     let count: i64 = tx
         .query_row("SELECT COUNT(*) FROM owner_meta", [], |r| r.get(0))
         .map_err(error)?;
@@ -1887,6 +1891,8 @@ fn owner_read(
         OwnerRead::CurrentBrief { project_id } => {
             crate::conversation::current_brief(&tx, project_id)?
         }
+        OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
         OwnerRead::Page {
             view,
             cursor,
@@ -1919,6 +1925,62 @@ fn owner_read(
         return Err(error("owner_response_bounds"));
     }
     Ok(reply)
+}
+
+/// Reads one page of the plain pool list with each member's sign-in status.
+/// Input: the read transaction, current config and the index of the first pool.
+/// Output: pools from that index while the reply stays within 30000 bytes, and
+/// the index of the next unread pool when any remain.
+fn pool_summaries(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    offset: u8,
+) -> Result<OwnerData, EngineError> {
+    let catalog = config.settings.model_access.clone().unwrap_or_default();
+    let mut signed_in = std::collections::BTreeSet::new();
+    for connection in &catalog.connections {
+        let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
+        else {
+            continue;
+        };
+        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+        let fact: Option<Option<Vec<u8>>> = tx
+            .query_row(
+                "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(bytes) = fact {
+            let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
+            let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+            if fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
+                && matches!(fact.action, crate::engine::owner::NativeAuthAction::SignIn { .. })
+            {
+                signed_in.insert(connection.id.clone());
+            }
+        }
+    }
+    let all = crate::pools::summarize(&catalog, |connection| signed_in.contains(&connection.id));
+    let start = usize::from(offset).min(all.len());
+    let mut pools = Vec::new();
+    for summary in &all[start..] {
+        pools.push(summary.clone());
+        if serde_json::to_vec(&pools).map_err(error)?.len() > 30000 {
+            pools.pop();
+            break;
+        }
+    }
+    if pools.is_empty() && start < all.len() {
+        return Err(error("pool_summary_bounds"));
+    }
+    let end = start + pools.len();
+    let next_offset = (end < all.len())
+        .then(|| u8::try_from(end).map_err(error))
+        .transpose()?;
+    assert!(end <= all.len());
+    Ok(OwnerData::PoolSummaries { pools, next_offset })
 }
 
 fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {

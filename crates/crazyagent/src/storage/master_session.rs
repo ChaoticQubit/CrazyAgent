@@ -1185,7 +1185,12 @@ fn current_prompt(
         "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND kind='brief' ORDER BY brief_version DESC LIMIT 1",
         [session.project_id.as_str()], |row| row.get(0),
     ).optional().map_err(error)?;
-    checked_prompt(&session.session_id, turn_id, message, brief.as_deref())
+    let context = match (crate::owner_profile::load(tx)?, brief) {
+        (Some(profile), Some(brief)) => Some(format!("{}\n\n{brief}", profile.preface())),
+        (Some(profile), None) => Some(profile.preface()),
+        (None, brief) => brief,
+    };
+    checked_prompt(&session.session_id, turn_id, message, context.as_deref())
 }
 
 fn prompt(

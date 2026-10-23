@@ -128,6 +128,9 @@ pub enum OwnerMutation {
     Conversation {
         mutation: crate::conversation::ConversationMutation,
     },
+    SaveOwnerProfile {
+        profile: crate::owner_profile::OwnerProfile,
+    },
     ProposeBaseline {
         draft: BaselineDraft,
     },
@@ -200,6 +203,12 @@ impl OwnerMutation {
                 mutation.validate()?;
                 Command::OwnerConversation {
                     mutation: mutation.clone(),
+                }
+            }
+            Self::SaveOwnerProfile { profile } => {
+                profile.validate()?;
+                Command::OwnerProfile {
+                    profile: profile.clone(),
                 }
             }
             Self::ProposeBaseline { draft } => Command::ProposeBaseline {
@@ -317,6 +326,10 @@ pub enum OwnerRead {
     CurrentBrief {
         project_id: ProjectId,
     },
+    OwnerProfile,
+    PoolSummaries {
+        offset: u8,
+    },
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -370,7 +383,9 @@ impl OwnerRead {
             | Self::Baseline { .. }
             | Self::Capabilities
             | Self::ConversationHistory { .. }
-            | Self::CurrentBrief { .. } => return Ok(None),
+            | Self::CurrentBrief { .. }
+            | Self::OwnerProfile
+            | Self::PoolSummaries { .. } => return Ok(None),
             Self::Setting { name } => {
                 if name.is_empty() || name.len() > 96 {
                     return Err(failure("owner_setting_name_bounds"));
@@ -657,6 +672,13 @@ pub enum OwnerData {
     CurrentBrief {
         project_id: ProjectId,
         brief: Option<crate::conversation::ConversationEntry>,
+    },
+    OwnerProfile {
+        profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    PoolSummaries {
+        pools: Vec<crate::pools::PoolSummary>,
+        next_offset: Option<u8>,
     },
     Page {
         items: Vec<OwnerSummary>,

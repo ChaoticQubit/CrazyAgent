@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 mod account_profile;
+mod owner_setup;
 pub use account_profile::PendingAccountProfile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -176,6 +176,36 @@ async fn no_brief_preserves_exact_message_bytes() {
 }
 
 #[tokio::test]
+async fn a_saved_owner_profile_prefaces_every_master_prompt() {
+    let mut case = Fixture::new(false).await;
+    let message = "What next?";
+    queue(&mut case, message).await;
+    let before = assembled(&case);
+    let profile = crate::owner_profile::OwnerProfile {
+        name: "Ada".into(),
+        role: "Founder".into(),
+        bio: String::new(),
+        preferred_stack: vec!["Rust".into()],
+        working_style: crate::owner_profile::WorkingStyle {
+            detail: crate::owner_profile::AnswerDetail::Terse,
+            initiative: crate::owner_profile::Initiative::ActFirst,
+        },
+    };
+    owner_apply(&case.storage, &case.started, "save-owner-profile",
+        OwnerMutation::SaveOwnerProfile { profile: profile.clone() }).await;
+    let profiled = assembled(&case);
+    let project = case.session.project_id.clone();
+    brief(&case, &project, 0, "Build a CLI.").await;
+    let briefed = assembled(&case);
+    case.close().await;
+    assert_eq!(before.unwrap(), message);
+    let preface = "About the owner: Ada, Founder.\nPreferred stack: Rust.\nKeep answers short. Act first, then report.";
+    assert_eq!(profile.preface(), preface);
+    assert_eq!(profiled.unwrap(), format!("{preface}\n\n{message}"));
+    assert_eq!(briefed.unwrap(), format!("{preface}\n\nBuild a CLI.\n\n{message}"));
+}
+
+#[tokio::test]
 async fn latest_project_brief_uses_exact_two_lf() {
     let mut case = Fixture::new(false).await;
     let message = " \tmessage\r\n";
