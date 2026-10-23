@@ -400,3 +400,36 @@ fn process_group_alive(group: u32) -> bool {
     let pid = rustix::process::Pid::from_raw(group as i32).unwrap();
     rustix::process::test_kill_process_group(pid).is_ok()
 }
+
+#[test]
+fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
+    let case = case("# Recipe box\n\nA mobile app that stores family recipes.\n");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "design_research", "codex", false)
+        .unwrap();
+    let run = runner(&case, limits(Duration::from_secs(600)))
+        .run_once(&project(
+            &case,
+            Some(ResearchAccount::Endpoint {
+                base_url: OLLAMA.into(),
+                model: OLLAMA_MODEL.into(),
+            }),
+        ))
+        .unwrap()
+        .unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(run.status, ResearchStatus::Done, "{:?}", job.error);
+    let profile =
+        fs::read_to_string(case.state.join("profiles").join(format!("job-{id}-1.sb"))).unwrap();
+    assert!(!profile.contains("(allow network*)"));
+    assert!(profile.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
+    let report = fs::read_to_string(
+        case.project
+            .join("context")
+            .join("research")
+            .join("design_research.md"),
+    )
+    .unwrap();
+    assert!(report.starts_with("# Design research\n"), "{report}");
+}

@@ -326,6 +326,34 @@ impl ProjectSandbox {
         assert_eq!(command.get_program(), SANDBOX_EXEC);
         command
     }
+
+    /// Rebuilds a harness launch command (absolute program, arguments,
+    /// explicitly set environment, working directory inside the project) so it
+    /// runs under the installed profile. HOME and TMPDIR always point at the
+    /// agent's own dirs, whatever the harness set.
+    pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
+        let program = Path::new(harness.get_program());
+        if !clean_absolute(program) {
+            return Err(invalid("harness program must be an absolute plain path"));
+        }
+        let cwd = harness.get_current_dir().unwrap_or(&self.project_root);
+        if !clean_absolute(cwd) || !cwd.starts_with(&self.project_root) {
+            return Err(invalid("harness must start inside the project folder"));
+        }
+        let mut command = self.command(profile, program);
+        command.args(harness.get_args()).current_dir(cwd);
+        for (key, value) in harness.get_envs() {
+            if key == "HOME" || key == "TMPDIR" {
+                continue;
+            }
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
 }
 
 fn invalid(reason: &str) -> SandboxError {

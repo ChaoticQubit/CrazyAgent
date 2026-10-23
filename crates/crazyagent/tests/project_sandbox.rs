@@ -305,3 +305,48 @@ fn sandbox_refuses_unsafe_roots_and_profile_locations() {
         0o600
     );
 }
+
+#[test]
+fn wrap_puts_an_existing_harness_command_under_the_sandbox_and_keeps_only_safe_env() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("wrap.sb");
+    sandbox.install(&profile).unwrap();
+    let escape = case.outside.join("wrapped-escape.txt");
+    let inside = case.project.join("worktrees").join("wrapped.txt");
+    let mut harness = std::process::Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg(format!(
+            "echo \"$HARNESS_MODE\" > {} && echo \"$HOME\" >> {} && (echo x > {} || true)",
+            quoted(&inside),
+            quoted(&inside),
+            quoted(&escape)
+        ))
+        .env("HARNESS_MODE", "headless")
+        .env("HOME", owner_home())
+        .current_dir(case.project.join("worktrees"));
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    let output = wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&inside).unwrap(),
+        format!("headless\n{}\n", case.home.display())
+    );
+    assert!(!escape.exists());
+    let mut outside = std::process::Command::new("/bin/sh");
+    outside.current_dir(&case.outside);
+    assert!(sandbox.wrap(&profile, &outside).is_err());
+    let mut relative = std::process::Command::new("sh");
+    relative.current_dir(&case.project);
+    assert!(sandbox.wrap(&profile, &relative).is_err());
+}
