@@ -22,8 +22,6 @@ mod native_profiles;
 #[cfg(test)]
 pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
-#[cfg(test)]
-pub(crate) use native_profiles::MAX_PROFILES;
 
 const LOCATOR: &str = "owner-current";
 const LOCATOR_MAX: usize = 2048;
