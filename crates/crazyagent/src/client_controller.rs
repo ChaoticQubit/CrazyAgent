@@ -13,6 +13,7 @@ mod account_profile;
 mod project_setup;
 mod owner_setup;
 mod accounts;
+mod memory;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {

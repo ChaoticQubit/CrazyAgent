@@ -240,7 +240,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "master" | "owner_profile";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "master" | "owner_profile";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -426,6 +426,79 @@ export function reviewMemory(
   generation: number,
 ): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_review_memory", { id, memory, version, decision, generation });
+}
+
+export type SavedMemory = {
+  id: string;
+  text: string;
+  scope: "global" | "project";
+  project_id: string | null;
+  origin: "written" | "promoted";
+  from_project_id: string | null;
+};
+
+export type SavedMemoryPage = {
+  items: SavedMemory[];
+  next: number | null;
+};
+
+export type ApprovedMemory = {
+  scope: "global" | "project";
+  kind: "note" | "promoted" | "research";
+  text: string;
+};
+
+export type ApprovedMemories = {
+  items: ApprovedMemory[];
+  complete: boolean;
+};
+
+export const MEMORY_NOTE_MAX = 2000;
+
+export function memories(
+  project: string | null = null,
+  search: string | null = null,
+  before: number | null = null,
+): Promise<SavedMemoryPage> {
+  return invoke<SavedMemoryPage>("desktop_memories", { project, search, before });
+}
+
+export function memory(id: string): Promise<SavedMemory | null> {
+  return invoke<SavedMemory | null>("desktop_memory", { id });
+}
+
+export function approvedMemories(project: string): Promise<ApprovedMemories> {
+  return invoke<ApprovedMemories>("desktop_approved_memories", { project });
+}
+
+export function addMemory(project: string | null, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_memory", { project, text, generation });
+}
+
+export function promoteMemory(
+  project: string,
+  memory: string,
+  version: number,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_promote_memory", { project, memory, version, generation });
+}
+
+export function deleteMemory(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_delete_memory", { id, generation });
+}
+
+export function rememberResearch(
+  project: string,
+  research: ResearchKind,
+  section: string | null,
+  generation: number,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_remember_research", { project, research, section, generation });
+}
+
+export function forgetMemory(project: string, memory: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_forget_memory", { project, memory, generation });
 }
 
 export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {

@@ -10,6 +10,7 @@ use bridge::{
     ProjectPage,
 };
 use bridge::project_setup::MemoryItem;
+use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::harnesses::HarnessEntry;
@@ -18,6 +19,7 @@ use crazyagent::engine::owner::{
     NativeAuthMethod,
 };
 use crazyagent::memory::ReviewDecision;
+use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
@@ -269,6 +271,109 @@ async fn desktop_review_memory(
     main_window(&window)?;
     lock(&state)?
         .review_memory(&id, &memory, version, decision, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: Option<String>,
+    search: Option<String>,
+    before: Option<u64>,
+) -> Result<MemoryList, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .memories(project.as_deref(), search.as_deref(), before)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Option<MemoryNote>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.memory(&id).await
+}
+
+#[tauri::command]
+async fn desktop_approved_memories(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<ApprovedMemories, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.approved_memories(&project).await
+}
+
+#[tauri::command]
+async fn desktop_add_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: Option<String>,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_memory(project.as_deref(), text, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_promote_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    memory: String,
+    version: u64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .promote_memory(&project, &memory, version, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_delete_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.delete_memory(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_forget_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    memory: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .forget_memory(&project, &memory, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_remember_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    research: ResearchKind,
+    section: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .remember_research(&project, research, section, generation)
         .await
 }
 
@@ -720,6 +825,14 @@ pub fn run() {
             desktop_delete_project_context,
             desktop_project_memories,
             desktop_review_memory,
+            desktop_memories,
+            desktop_memory,
+            desktop_approved_memories,
+            desktop_add_memory,
+            desktop_promote_memory,
+            desktop_delete_memory,
+            desktop_forget_memory,
+            desktop_remember_research,
             desktop_open_project,
             desktop_history,
             desktop_send_message,
