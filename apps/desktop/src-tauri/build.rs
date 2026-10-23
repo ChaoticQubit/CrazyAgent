@@ -65,6 +65,21 @@ fn main() {
         "desktop_remove_account",
         "desktop_check_account",
         "desktop_local_models",
+        "desktop_plugin_skills",
+        "desktop_plugin_servers",
+        "desktop_add_skill",
+        "desktop_set_skill_enabled",
+        "desktop_remove_skill",
+        "desktop_add_mcp_server",
+        "desktop_update_mcp_server",
+        "desktop_approve_mcp_server",
+        "desktop_set_mcp_server_enabled",
+        "desktop_remove_mcp_server",
+        "desktop_switch_plugin",
+        "desktop_set_mcp_secret",
+        "desktop_remove_mcp_secret",
+        "desktop_check_mcp_server",
+        "desktop_project_plugins",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

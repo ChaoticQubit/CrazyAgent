@@ -158,6 +158,51 @@ export function errorMessage(error: unknown): string {
     pool_in_use: "This pool is used by a project. Remove it from the project first.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
     owner_profile_name: "Enter your name, up to 100 characters.",
+    skill_folder_not_found: "That folder was not found.",
+    skill_not_a_folder: "Pick a folder, not a file.",
+    skill_missing_skill_md: "This folder has no SKILL.md file.",
+    skill_frontmatter_missing: "SKILL.md needs a name and description at the top.",
+    skill_name_invalid: "The skill name in SKILL.md must be 1 to 64 lowercase letters, digits or hyphens.",
+    skill_description_invalid: "The description in SKILL.md must be 1 to 1024 characters.",
+    skill_too_many_files: "A skill folder can hold up to 200 files.",
+    skill_too_large: "A skill folder can be up to 8 MB.",
+    skill_too_deep: "A skill folder can be up to 8 folders deep.",
+    skill_link_outside: "This folder links to files outside it.",
+    skill_file_unsupported: "This folder holds something that is not a file or folder.",
+    skill_unreadable: "Some files in this folder can't be read.",
+    skill_name_taken: "A skill with this name already exists here.",
+    skill_limit: "You can add up to 100 skills here.",
+    skill_not_found: "This skill was removed.",
+    server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
+    server_name_taken: "An MCP server with this name already exists here.",
+    server_limit: "You can add up to 50 MCP servers here.",
+    server_not_found: "This MCP server was removed.",
+    server_command_invalid: "Enter the full path to the command, starting with /.",
+    server_args_invalid: "Use up to 32 arguments, each on one line.",
+    server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+    server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
+    server_secret_limit: "A server can have up to 16 secrets.",
+    server_secret_duplicate: "Each secret needs its own name.",
+    server_secret_not_found: "This secret was removed.",
+    server_secret_invalid: "Enter the secret on one line, up to 8192 characters.",
+    server_changed: "This server changed. Review it again before approving.",
+    server_check_command_only: "Only command servers can be checked from here.",
+    server_check_busy: "Other checks are running. Try again in a moment.",
+    server_command_not_found: "Can't start: command not found.",
+    server_command_not_runnable: "Can't start: this file can't be run.",
+    server_cant_start: "The server can't start.",
+    server_exited: "The server stopped before answering.",
+    server_check_timeout: "The server did not answer within 10 seconds.",
+    server_output_too_large: "The server sent too much output.",
+    server_refused: "The server refused the request.",
+    server_reply_invalid: "The server's answer was not valid MCP.",
+    plugin_project_unknown: "This project was not found.",
+    plugin_not_found: "This item was removed.",
+    plugin_switch_global_only: "Only items from global settings can be switched here.",
+    plugin_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
+    plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    plugins_failed: "The plugins request failed. Refresh before continuing.",
     owner_profile_role: "Keep the role on one line, up to 100 characters.",
     owner_profile_bio: "Keep the bio under 1000 characters.",
     owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
@@ -696,6 +741,121 @@ export function saveOwnerProfile(profile: OwnerProfile, generation: number): Pro
 /** Reads every pool with plain counts such as "2 ChatGPT, 1 Claude" and member status words. */
 export function poolSummaries(): Promise<PoolSummary[]> {
   return invoke<PoolSummary[]>("desktop_pool_summaries");
+}
+
+export type PluginScope = { kind: "global" } | { kind: "project"; project_id: string };
+
+export type McpServerSpec = { kind: "stdio"; command: string; args: string[] } | { kind: "http"; url: string };
+
+export type McpServerStatus = "waiting_for_approval" | "approved" | "off" | "cant_start";
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string;
+  scope: PluginScope;
+  scope_label: string;
+  enabled: boolean;
+  on_here: boolean | null;
+  source: string;
+  folder: string;
+}
+
+export interface McpServerView {
+  id: string;
+  name: string;
+  scope: PluginScope;
+  scope_label: string;
+  spec: McpServerSpec;
+  runs: string;
+  enabled: boolean;
+  status: McpServerStatus;
+  status_label: string;
+  problem: string | null;
+  tools: string[];
+  checks: number;
+  secrets: { name: string; saved: boolean }[];
+  on_here: boolean | null;
+}
+
+export interface EffectivePlugins {
+  skills: { name: string; folder: string }[];
+  servers: { name: string; spec: McpServerSpec; secrets: { name: string; reference: string }[] }[];
+}
+
+/** Lists skills for global settings (no project) or for one project's settings. */
+export function pluginSkills(projectId?: string): Promise<SkillView[]> {
+  return invoke<SkillView[]>("desktop_plugin_skills", { projectId: projectId ?? null });
+}
+
+/** Lists MCP servers with plain status words for global settings or one project. */
+export function pluginServers(projectId?: string): Promise<McpServerView[]> {
+  return invoke<McpServerView[]>("desktop_plugin_servers", { projectId: projectId ?? null });
+}
+
+/** Adds a skill from a picked folder that holds SKILL.md; the engine keeps its own copy. */
+export function addSkill(scope: PluginScope, folder: string): Promise<SkillView> {
+  return invoke<SkillView>("desktop_add_skill", { scope, folder });
+}
+
+/** Turns a skill on or off where it was added. */
+export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView> {
+  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled });
+}
+
+/** Removes a skill and the engine's copy of its folder. */
+export function removeSkill(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_skill", { id });
+}
+
+/** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */
+export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSpec, secrets: [string, string][]): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_add_mcp_server", { scope, name, spec, secrets });
+}
+
+/** Changes how an MCP server runs; it then waits for approval again. */
+export function updateMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec });
+}
+
+/** Approves an MCP server exactly as shown; a server that changed since is refused. */
+export function approveMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_approve_mcp_server", { id, spec });
+}
+
+/** Turns an MCP server on or off where it was added. */
+export function setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+}
+
+/** Removes an MCP server and its saved secrets. */
+export function removeMcpServer(id: string): Promise<void> {
+  return invoke<void>("desktop_remove_mcp_server", { id });
+}
+
+/** Switches a global skill or MCP server on or off for one project. */
+export function switchPlugin(projectId: string, id: string, on: boolean): Promise<void> {
+  return invoke<void>("desktop_switch_plugin", { projectId, id, on });
+}
+
+/** Saves or replaces one MCP server secret. */
+export function setMcpSecret(id: string, name: string, value: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_secret", { id, name, value });
+}
+
+/** Deletes one MCP server secret. */
+export function removeMcpSecret(id: string, name: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_remove_mcp_secret", { id, name });
+}
+
+/** Starts a command MCP server, lists its tools and stops it. */
+export function checkMcpServer(id: string): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_check_mcp_server", { id });
+}
+
+/** Reads what agents launched for a project receive: skill folders and approved MCP servers. */
+export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
+  return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
 }
 
 export interface MasterTurn {

@@ -14,6 +14,7 @@ mod project_setup;
 mod owner_setup;
 mod accounts;
 mod memory;
+mod plugins;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
