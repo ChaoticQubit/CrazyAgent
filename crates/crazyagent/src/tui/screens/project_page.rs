@@ -1,16 +1,28 @@
+use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
 use super::new_project_view::{Row, Screen as View};
-use super::project::{ProjectReply, ProjectScreen, Tab, plain_problem, project_pool};
+use super::project::{
+    MasterStatus, ProjectReply, ProjectScreen, Speaker, Tab, Transcript, plain_problem,
+    project_pool,
+};
+use super::project_master::{MasterRead, transcript_from};
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
+use crate::engine::owner::{OwnerResponse, OwnerResult};
+use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::SetupQuery;
 use crate::protocol::{CredentialRef, ProjectId};
-use crate::tui::client::OwnerEvent;
+use crate::tui::app::UiEvent;
+use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
-use crate::tui::ctx::Ctx;
+use crate::tui::ctx::{Ctx, Link};
 use crate::tui::frame::{Hint, Message};
 use crate::tui::keys::Key;
+use crate::tui::master_session::{
+    Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
+    Submission as MasterSubmission,
+};
 use crate::tui::seam::{Arrival, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -19,6 +31,87 @@ use ratatui::text::Line;
 use std::path::{Path, PathBuf};
 
 const SENT_MAX: usize = 8;
+const MASTER_SENT_MAX: usize = 4;
+
+#[derive(PartialEq)]
+enum MasterSent {
+    Catalog(MasterContext),
+    Read(MasterContext),
+    Mutation(MasterSubmission),
+}
+
+impl MasterSent {
+    fn of_job(job: &MasterJob) -> Self {
+        match job {
+            MasterJob::Catalog { context } => Self::Catalog(context.clone()),
+            MasterJob::Read { context, .. } => Self::Read(context.clone()),
+            MasterJob::Mutation { submission, .. } => Self::Mutation(submission.clone()),
+        }
+    }
+
+    fn of_event(event: &MasterEvent) -> Self {
+        match event {
+            MasterEvent::Catalog { context, .. } => Self::Catalog(context.clone()),
+            MasterEvent::Read { context, .. } => Self::Read(context.clone()),
+            MasterEvent::Mutation { submission, .. } => Self::Mutation(submission.clone()),
+        }
+    }
+}
+
+struct Waiting {
+    text: String,
+    opening: bool,
+}
+
+fn rejection(event: &MasterEvent) -> Option<String> {
+    let MasterEvent::Mutation {
+        result: Ok(response),
+        ..
+    } = event
+    else {
+        return None;
+    };
+    match response.as_ref() {
+        OwnerResponse::Rejected { code } => Some(code.clone()),
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            match &operation.result {
+                OwnerResult::Rejected { code } => Some(code.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn not_recorded(event: &MasterEvent) -> bool {
+    matches!(
+        event,
+        MasterEvent::Mutation { result: Ok(response), .. }
+            if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. })
+    )
+}
+
+fn submitted_text(event: &MasterEvent) -> Option<&str> {
+    match event {
+        MasterEvent::Mutation {
+            submission:
+                MasterSubmission {
+                    action: MasterOwnerAction::Submit { text, .. },
+                    ..
+                },
+            ..
+        } => Some(text),
+        _ => None,
+    }
+}
+
+fn backend_name(backend: MasterBackend) -> String {
+    match backend {
+        MasterBackend::Rcli => "RCLI".to_owned(),
+        MasterBackend::Codex => harness_name("codex", None),
+        MasterBackend::Claude => harness_name("claude", None),
+    }
+}
 
 fn tab_of(tab: ProjectTab) -> Tab {
     Tab::ALL[ProjectTab::ALL
@@ -62,13 +155,17 @@ pub(in crate::tui) fn open_path(path: &str) -> Result<(), String> {
 }
 
 /// One project as a shell screen.
-/// Holds the project state, its last drawn view and the engine reads it sent.
+/// Holds the project state, its last drawn view, the engine reads it sent and its master conversation.
 /// Reads go one at a time through the shell queue; only replies to its own reads are applied.
 pub(in crate::tui) struct ProjectPage {
     screen: ProjectScreen,
     view: View,
     sent: Vec<SetupQuery>,
     assigning: Option<String>,
+    master: MasterState,
+    master_sent: Vec<MasterSent>,
+    waiting: Option<Waiting>,
+    retried: bool,
 }
 
 impl ProjectPage {
@@ -86,10 +183,234 @@ impl ProjectPage {
             view: View::default(),
             sent: Vec::new(),
             assigning: None,
+            master: MasterState::default(),
+            master_sent: Vec::new(),
+            waiting: None,
+            retried: false,
         };
         page.refresh_pool(ctx);
+        page.select_master(ctx);
+        page.screen.transcript = page.transcript();
         page.redraw(ctx);
         page
+    }
+
+    fn select_master(&mut self, ctx: &Ctx) {
+        let ready = ctx.link == Link::Ready && ctx.identity.is_some();
+        self.master
+            .select(
+                ctx.identity.clone(),
+                Some(self.screen.project.clone()),
+                ready,
+            )
+            .expect("the master view generation never runs out");
+    }
+
+    fn sync_master(&mut self, ctx: &mut Ctx) {
+        self.select_master(ctx);
+        if self.master_sent.len() < MASTER_SENT_MAX
+            && let Some(job) = self.master.request(self.screen.tab == Tab::Conversation)
+        {
+            self.master_sent.push(MasterSent::of_job(&job));
+            ctx.request(Request::Master(Box::new(job)));
+        }
+        self.screen.transcript = self.transcript();
+    }
+
+    fn transcript(&self) -> Option<Transcript> {
+        let (session, turns, input) = self.master.transcript()?;
+        let read = MasterRead {
+            session: session.map(|session| session.phase),
+            turns,
+            inputs: input.map_or(&[][..], std::slice::from_ref),
+        };
+        let harness = match session {
+            Some(session) => backend_name(session.selection.backend),
+            None => self.screen.setup.as_ref().map_or_else(
+                || "Master".to_owned(),
+                |setup| harness_name(&setup.team.master, None),
+            ),
+        };
+        let tools = self
+            .screen
+            .setup
+            .as_ref()
+            .is_some_and(|setup| setup.team.master_tools);
+        let mut transcript = transcript_from(&read, &harness, None, tools, self.screen.offset);
+        if session.is_none() {
+            transcript.status = MasterStatus::Ready;
+        }
+        if let Some(waiting) = &self.waiting {
+            transcript.messages.push(super::project::Message {
+                speaker: Speaker::You,
+                time: None,
+                text: waiting.text.clone(),
+                error: false,
+            });
+            transcript.status = MasterStatus::Thinking { since_ms: None };
+        }
+        Some(transcript)
+    }
+
+    fn drop_waiting(&mut self, ctx: &mut Ctx, problem: &str) {
+        let Some(waiting) = self.waiting.take() else {
+            return;
+        };
+        if self.screen.input.value().is_empty() {
+            self.screen.input.set(&waiting.text);
+        }
+        ctx.say(Message::error(
+            problem,
+            "What you typed is back in the box.",
+        ));
+    }
+
+    fn send_master(&mut self, text: String, ctx: &mut Ctx) {
+        if self.waiting.is_some() || self.master.has_pending() {
+            self.screen.input.set(&text);
+            ctx.say(Message::warning(
+                "The master is still taking your last message.",
+                "Wait a moment, then send again.",
+            ));
+            return;
+        }
+        let session = self
+            .master
+            .transcript()
+            .and_then(|(session, _, _)| session)
+            .map(|session| (session.phase, session.current_turn.is_some()));
+        match session {
+            Some((crate::master_session::MasterSessionPhase::Configured, true)) => {
+                self.screen.input.set(&text);
+                ctx.say(Message::warning(
+                    "The master is still working.",
+                    "Press Ctrl-X to stop it, or wait for its reply.",
+                ));
+            }
+            Some((crate::master_session::MasterSessionPhase::Configured, false)) => {
+                self.retried = false;
+                if self.master.submit(&text, ctx.next_generation()) != Ok(true) {
+                    self.screen.input.set(&text);
+                    ctx.say(Message::warning(
+                        "The master is not ready for a message yet.",
+                        "Wait a moment, then send again.",
+                    ));
+                }
+            }
+            _ => self.open_master(text, ctx),
+        }
+    }
+
+    fn open_master(&mut self, text: String, ctx: &mut Ctx) {
+        self.waiting = Some(Waiting {
+            text,
+            opening: false,
+        });
+        self.retried = false;
+        if self.master.open().is_err() {
+            self.drop_waiting(ctx, "The master could not start.");
+        }
+    }
+
+    fn master_arrived(&mut self, event: &MasterEvent, ctx: &mut Ctx) {
+        let sent = MasterSent::of_event(event);
+        let Some(index) = self.master_sent.iter().position(|each| *each == sent) else {
+            return;
+        };
+        self.master_sent.remove(index);
+        let rejected = rejection(event);
+        let barrier = not_recorded(event);
+        let failed = matches!(event, MasterEvent::Mutation { result: Err(_), .. });
+        let applied = self.master.apply(event.clone());
+        if let (Some(code), Some(text)) = (&rejected, submitted_text(event)) {
+            if self.screen.input.value().is_empty() {
+                self.screen.input.set(text);
+            }
+            ctx.say(Message::error(
+                "The master did not take that message.",
+                &plain_problem(code),
+            ));
+        }
+        if (barrier || failed) && !self.retried {
+            self.retried = true;
+            if barrier {
+                self.master.retry();
+            } else {
+                self.master.access();
+            }
+        } else if failed {
+            ctx.say(Message::warning(
+                "The engine did not confirm the master's last step.",
+                "It is checked again when the connection is back.",
+            ));
+        }
+        match applied {
+            Err(_) => self.drop_waiting(ctx, "The master conversation stopped updating."),
+            Ok(Some(confirmed)) => {
+                if matches!(confirmed.action, MasterOwnerAction::Open { .. })
+                    && let Some(waiting) = self.waiting.take()
+                {
+                    self.retried = false;
+                    if self.master.submit(&waiting.text, ctx.next_generation()) != Ok(true) {
+                        self.waiting = Some(waiting);
+                        self.drop_waiting(ctx, "The master started but did not take the message.");
+                    }
+                }
+            }
+            Ok(None) => self.advance_open(event, rejected.is_some() || failed, ctx),
+        }
+    }
+
+    fn advance_open(&mut self, event: &MasterEvent, stopped: bool, ctx: &mut Ctx) {
+        let Some(waiting) = self.waiting.as_mut() else {
+            return;
+        };
+        if stopped {
+            self.drop_waiting(ctx, "The master could not start.");
+            return;
+        }
+        if waiting.opening || !matches!(event, MasterEvent::Catalog { .. }) {
+            return;
+        }
+        waiting.opening = true;
+        if self.master.reduce(&UiEvent::Submit) != Ok(true) || !self.master.has_pending() {
+            let _ = self.master.reduce(&UiEvent::Cancel);
+            self.drop_waiting(
+                ctx,
+                "The master could not start. Check that the pool has a signed-in account.",
+            );
+        }
+    }
+
+    fn setup_arrived(&mut self, event: &SetupEvent) {
+        let Some(index) = self.sent.iter().position(|query| query == &event.query) else {
+            return;
+        };
+        let query = self.sent.remove(index);
+        self.screen.now_ms = now_ms();
+        self.screen.apply(&query, event.result.clone());
+    }
+
+    fn stop_master(&mut self, ctx: &mut Ctx) {
+        match self.master.control(false) {
+            Ok(()) => ctx.say(Message::success("Stopping the master's turn.", "")),
+            Err(_) => ctx.say(Message::warning(
+                "The master is not working on anything.",
+                "",
+            )),
+        }
+    }
+
+    fn retry_master(&mut self, ctx: &mut Ctx) {
+        let last = self
+            .master
+            .transcript()
+            .and_then(|(_, _, input)| input)
+            .map(|entry| entry.text.clone());
+        match last {
+            Some(text) => self.send_master(text, ctx),
+            None => ctx.say(Message::warning("There is no message to send again.", "")),
+        }
     }
 
     fn refresh_pool(&mut self, ctx: &Ctx) {
@@ -229,14 +550,20 @@ impl ProjectPage {
                 ));
                 Flow::Open(Place::Settings(SettingsSection::Pools))
             }
-            ProjectReply::Send(_) | ProjectReply::StopTurn | ProjectReply::Retry => {
-                ctx.say(Message::warning(
-                    "Not ready yet.",
-                    "This part of the project screen is still being connected.",
-                ));
+            ProjectReply::Send(text) => {
+                self.send_master(text, ctx);
+                Flow::Handled
+            }
+            ProjectReply::StopTurn => {
+                self.stop_master(ctx);
+                Flow::Handled
+            }
+            ProjectReply::Retry => {
+                self.retry_master(ctx);
                 Flow::Handled
             }
         };
+        self.sync_master(ctx);
         self.pump(ctx);
         self.redraw(ctx);
         flow
@@ -283,30 +610,28 @@ impl Screen for ProjectPage {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
-        let event = match arrival {
-            Arrival::Owner(event) => event,
-            Arrival::PoolEdited(result) => {
-                self.assigned(result, ctx);
-                self.redraw(ctx);
-                return Flow::Handled;
+        match arrival {
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Setup(event) => self.setup_arrived(event),
+                OwnerEvent::Master(event) => self.master_arrived(event, ctx),
+                _ => return Flow::Handled,
+            },
+            Arrival::PoolEdited(result) => self.assigned(result, ctx),
+            Arrival::Pools(_) | Arrival::PoolProjects(_) => {}
+            Arrival::Connected(_) => {
+                self.select_master(ctx);
+                self.master.access();
             }
-            Arrival::Pools(_) | Arrival::PoolProjects(_) => {
-                self.refresh_pool(ctx);
-                self.redraw(ctx);
-                return Flow::Handled;
+            Arrival::Disconnected(_) => {
+                self.sent.clear();
+                self.screen.forget_reads();
+                self.master_sent
+                    .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
             _ => return Flow::Handled,
-        };
-        let OwnerEvent::Setup(event) = event.as_ref() else {
-            return Flow::Handled;
-        };
-        let Some(index) = self.sent.iter().position(|query| query == &event.query) else {
-            return Flow::Handled;
-        };
-        let query = self.sent.remove(index);
-        self.screen.now_ms = now_ms();
-        self.screen.apply(&query, event.result.clone());
+        }
         self.refresh_pool(ctx);
+        self.sync_master(ctx);
         self.pump(ctx);
         self.redraw(ctx);
         Flow::Handled
@@ -316,6 +641,7 @@ impl Screen for ProjectPage {
         ctx.request(Request::Pools);
         ctx.request(Request::PoolProjects);
         self.refresh_pool(ctx);
+        self.sync_master(ctx);
         self.pump(ctx);
         self.redraw(ctx);
     }
@@ -333,7 +659,7 @@ impl Screen for ProjectPage {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.screen.counts().0 > 0
+        self.screen.counts().0 > 0 || self.master.has_pending() || self.waiting.is_some()
     }
 
     fn place(&self) -> Option<Place> {

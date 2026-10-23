@@ -365,6 +365,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                 request,
                 Request::Pools
                     | Request::PoolProjects
+                    | Request::Master(_)
                     | Request::Setup(
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
@@ -418,6 +419,58 @@ async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
     assert!(shown.contains("Main   Enter Change"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_message_opens_the_master_and_reaches_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"master"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Home  /  Notes CLI  /  Conversation"),
+        "{shown}"
+    );
+    assert!(shown.contains("No messages yet."), "{shown}");
+
+    shell.key(Key::Enter);
+    for character in "Plan the first slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        sent.iter().filter(|each| **each == "master").count() >= 5,
+        "{sent:?}"
+    );
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Plan the first slice"), "{shown}");
+    assert!(shown.contains("RCLI"), "{shown}");
+    assert!(!shown.contains("could not start"), "{shown}");
+    assert!(!shown.contains("did not take"), "{shown}");
+    assert!(!shown.contains("No messages yet."), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

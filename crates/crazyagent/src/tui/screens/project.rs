@@ -378,6 +378,13 @@ impl ProjectScreen {
         Some(query)
     }
 
+    /// Forgets the read in flight after the engine connection dropped, so the next read is sent again.
+    /// Takes the screen; loaded data stays on screen.
+    /// Returns nothing.
+    pub fn forget_reads(&mut self) {
+        self.waiting = None;
+    }
+
     fn jobs_live(&self) -> bool {
         self.jobs.as_ref().is_none_or(|jobs| {
             jobs.iter().any(|job| {
