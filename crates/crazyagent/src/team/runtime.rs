@@ -28,6 +28,9 @@ const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 const SESSION_EVENTS_MAX: usize = 200_000;
+const HISTORY_MESSAGES_MAX: i64 = 12;
+const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
+const HISTORY_BYTES_MAX: usize = 6000;
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
 /// Bounds every team agent obeys.
@@ -505,6 +508,13 @@ impl TeamRuntime {
         let mut prompt = String::new();
         if fresh {
             prompt.push_str(&self.framing(stored));
+            let history =
+                conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
+            if !history.is_empty() {
+                prompt.push_str("Conversation so far:\n");
+                prompt.push_str(&history);
+                prompt.push('\n');
+            }
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
         let worker = self.workers.get_mut(&id).expect("master worker exists");
@@ -1482,6 +1492,54 @@ pub fn start_for_engine(
     )
     .map_err(|e| e.0)?;
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
+}
+
+/// Gives a fresh master the recent team conversation before one message.
+/// Takes a connection, the project, the id of the message being sent and a byte bound.
+/// Returns owner and master lines plus engine messages other than notes, oldest first,
+/// keeping the newest lines that fit within the bound.
+pub fn conversation_before(
+    connection: &Connection,
+    project: &ProjectId,
+    before: i64,
+    max: usize,
+) -> Result<String, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT author,text FROM team_messages WHERE project=?1 AND id<?2 AND state<>'note'
+             ORDER BY id DESC LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows: Vec<(String, String)> = statement
+        .query_map(
+            params![project.as_str(), before, HISTORY_MESSAGES_MAX],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for (author, text) in rows {
+        let speaker = match author.as_str() {
+            "owner" => "Owner",
+            "master" => "Master",
+            _ => "Engine",
+        };
+        let line = format!(
+            "{speaker}: {}\n",
+            bound_text(text.trim(), HISTORY_MESSAGE_BYTES_MAX)
+        );
+        if used + line.len() > max {
+            break;
+        }
+        used += line.len();
+        lines.push(line);
+    }
+    lines.reverse();
+    let history = lines.concat();
+    assert!(history.len() <= max);
+    Ok(history)
 }
 
 /// Reads the team agents of a project directly from the engine database.

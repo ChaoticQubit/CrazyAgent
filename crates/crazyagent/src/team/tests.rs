@@ -657,3 +657,62 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
     assert!(!team.has_live_agents());
     team.shutdown().unwrap();
 }
+
+#[test]
+fn a_fresh_master_reads_the_recent_conversation_within_bounds() {
+    let (_directory, mut connection) = database();
+    let project = ProjectId::new("team-history").unwrap();
+    let tx = connection.transaction().unwrap();
+    for (author, state, text) in [
+        (
+            MessageAuthor::Owner,
+            MessageState::Answered,
+            "Build the menu page",
+        ),
+        (
+            MessageAuthor::Master,
+            MessageState::Reply,
+            "DELEGATE: Write menu.html",
+        ),
+        (
+            MessageAuthor::Engine,
+            MessageState::Note,
+            "These tasks were not handed off",
+        ),
+        (
+            MessageAuthor::Engine,
+            MessageState::Pending,
+            "Results from your sub-agents",
+        ),
+    ] {
+        append_message(&tx, &project, author, text, state, 1)
+            .unwrap()
+            .unwrap();
+    }
+    let other = ProjectId::new("team-other").unwrap();
+    append_message(
+        &tx,
+        &other,
+        MessageAuthor::Owner,
+        "secret plan",
+        MessageState::Answered,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let history = runtime::conversation_before(&connection, &project, 4, 4000).unwrap();
+    assert_eq!(
+        history,
+        "Owner: Build the menu page\nMaster: DELEGATE: Write menu.html\n"
+    );
+    assert_eq!(
+        runtime::conversation_before(&connection, &project, 1, 4000).unwrap(),
+        ""
+    );
+    assert_eq!(
+        runtime::conversation_before(&connection, &project, 4, 40).unwrap(),
+        "Master: DELEGATE: Write menu.html\n",
+        "the newest messages are kept when the bound is tight"
+    );
+}
