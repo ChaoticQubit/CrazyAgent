@@ -1,5 +1,6 @@
 use super::master_runtime::MasterHostLaunch;
 use super::{EngineError, Identity, OwnerRuntimeHandle, Root, failure};
+use crate::config::ModelEndpoint;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::io_error;
 use crate::engine::owner::{is_hex_id, random_id};
@@ -103,6 +104,7 @@ impl OwnerRuntimeHandle {
             &prepared.cwd,
             &home,
             executable.verified_path()?,
+            &prepared.attempt.connection.endpoint,
         )?;
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
@@ -225,17 +227,22 @@ fn master_command(
 /// Builds and installs the Seatbelt boundary for one master turn. The master writes only
 /// in the project repository, its leased worktree, the account's managed home and the
 /// turn's own temp folder; it reads the harness install folder and the turn directory,
-/// and reaches only HTTPS model endpoints because its tools are off. Output: the
-/// installed sandbox, or `master_sandbox_unavailable` when any part is refused.
-fn master_sandbox(
+/// and reaches only its model endpoint (HTTPS for a native account) because its tools
+/// are off. Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+pub(super) fn master_sandbox(
     root: &Root,
     runtime_ref: &RequestId,
     repository: &Path,
     worktree: &Path,
     home: &Path,
     executable: &Path,
+    endpoint: &ModelEndpoint,
 ) -> Result<InstalledSandbox, EngineError> {
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
+    let remote = match endpoint {
+        ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
+        ModelEndpoint::Http { url } => SandboxRemote::for_endpoint(url).map_err(refused)?,
+    };
     let name = format!("master-runtime-{}", runtime_ref.as_str());
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
@@ -250,16 +257,11 @@ fn master_sandbox(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
-    let sandbox = ProjectSandbox::new(
-        repository,
-        &home,
-        &tmp,
-        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(HTTPS_PORT)]),
-    )
-    .and_then(|sandbox| sandbox.allow_worktree(worktree))
-    .and_then(|sandbox| sandbox.allow_read(&install))
-    .and_then(|sandbox| sandbox.allow_read(&runtime.path))
-    .map_err(refused)?;
+    let sandbox = ProjectSandbox::new(repository, &home, &tmp, SandboxNetwork::Only(vec![remote]))
+        .and_then(|sandbox| sandbox.allow_worktree(worktree))
+        .and_then(|sandbox| sandbox.allow_read(&install))
+        .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+        .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
     verify_master_runtime(root, &runtime, &name)?;
@@ -570,6 +572,7 @@ mod tests {
         std::fs::write(&executable, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (runtime_ref, capture_ref, capture) = allocate_master_capture(&root).unwrap();
+        let native = ModelEndpoint::Native {};
         let sandbox = master_sandbox(
             &root,
             &runtime_ref,
@@ -577,6 +580,7 @@ mod tests {
             &worktree,
             &home,
             &executable,
+            &native,
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -694,20 +698,37 @@ mod tests {
                 &repository,
                 &worktree,
                 &home,
-                &executable
+                &executable,
+                &native
             )
             .is_err()
         );
-        for (repository, worktree) in [
-            (base.join("missing"), worktree.clone()),
-            (repository.clone(), base.join("missing")),
-            (repository.clone(), base.join("..").join("worktrees")),
+        let ftp = ModelEndpoint::Http {
+            url: "ftp://127.0.0.1/v1".into(),
+        };
+        for (repository, worktree, endpoint) in [
+            (base.join("missing"), worktree.clone(), &native),
+            (repository.clone(), base.join("missing"), &native),
+            (
+                repository.clone(),
+                base.join("..").join("worktrees"),
+                &native,
+            ),
+            (repository.clone(), worktree.clone(), &ftp),
         ] {
             let (fresh, _, _) = allocate_master_capture(&root).unwrap();
             assert_eq!(
-                master_sandbox(&root, &fresh, &repository, &worktree, &home, &executable)
-                    .unwrap_err()
-                    .0,
+                master_sandbox(
+                    &root,
+                    &fresh,
+                    &repository,
+                    &worktree,
+                    &home,
+                    &executable,
+                    endpoint
+                )
+                .unwrap_err()
+                .0,
                 "master_sandbox_unavailable"
             );
             assert!(
@@ -717,6 +738,25 @@ mod tests {
                     .exists()
             );
         }
+        let (local, _, _) = allocate_master_capture(&root).unwrap();
+        let endpoint = ModelEndpoint::Http {
+            url: "http://127.0.0.1:11434/v1".into(),
+        };
+        let text = master_sandbox(
+            &root,
+            &local,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &endpoint,
+        )
+        .unwrap()
+        .sandbox()
+        .profile();
+        assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
+        assert!(!text.contains("*:443"));
+        assert!(!text.contains("(allow network*)"));
     }
 
     #[test]

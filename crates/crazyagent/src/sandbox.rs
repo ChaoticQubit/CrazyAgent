@@ -94,6 +94,34 @@ pub enum SandboxRemote {
     AnyHost(u16),
 }
 
+impl SandboxRemote {
+    /// The destination a tools-off agent needs for one model endpoint: the URL's port on
+    /// loopback for a local server, otherwise that port on any host. Input: an http or
+    /// https URL. Output: the remote, or a refusal for another scheme, host or port.
+    pub fn for_endpoint(url: &str) -> Result<Self, SandboxError> {
+        let parsed = url::Url::parse(url).map_err(|_| invalid("endpoint URL is invalid"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(invalid("endpoint URL must be http or https"));
+        }
+        let port = parsed
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| invalid("endpoint port is missing"))?;
+        let loopback = match parsed.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => return Err(invalid("endpoint host is missing")),
+        };
+        assert_ne!(port, 0);
+        Ok(if loopback {
+            Self::Loopback(port)
+        } else {
+            Self::AnyHost(port)
+        })
+    }
+}
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {

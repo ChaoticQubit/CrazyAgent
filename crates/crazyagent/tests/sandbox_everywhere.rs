@@ -1,4 +1,4 @@
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -197,4 +197,27 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
     let mut relative = Command::new("sh");
     relative.current_dir(&case.worktree);
     assert!(installed.wrap(&relative).is_err());
+}
+
+#[test]
+fn a_model_endpoint_becomes_one_loopback_or_remote_port() {
+    for (url, remote) in [
+        ("http://127.0.0.1:11434/v1", SandboxRemote::Loopback(11434)),
+        ("http://localhost:8080", SandboxRemote::Loopback(8080)),
+        ("http://LOCALHOST", SandboxRemote::Loopback(80)),
+        ("http://[::1]:9000/v1", SandboxRemote::Loopback(9000)),
+        ("https://api.openai.com/v1", SandboxRemote::AnyHost(443)),
+        ("http://10.0.0.5:8000", SandboxRemote::AnyHost(8000)),
+    ] {
+        assert_eq!(SandboxRemote::for_endpoint(url).unwrap(), remote, "{url}");
+    }
+    for url in [
+        "ftp://127.0.0.1/v1",
+        "file:///tmp/model",
+        "not a url",
+        "http://127.0.0.1:0/v1",
+        "",
+    ] {
+        assert!(SandboxRemote::for_endpoint(url).is_err(), "{url}");
+    }
 }
