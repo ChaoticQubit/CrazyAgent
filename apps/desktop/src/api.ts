@@ -1,6 +1,8 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
-import { retryBusy } from "./engine-client";
-import type { AccountPool, IntentReceipt, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, ProjectPage } from "./engine-client";
+import { errorMessage, retryBusy } from "./engine-client";
+import type { AccountPool, IntentReceipt, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SkillView } from "./engine-client";
+
+export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -61,6 +63,7 @@ const COPY: Record<string, string> = {
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
+  picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -68,7 +71,8 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
 /** Turns an engine error code into one plain sentence for the owner.
  * Input: an error code. Output: the copy for it, or the generic fallback. */
 export function plainError(code: string): string {
-  return COPY[code] ?? FALLBACK;
+  if (COPY[code]) return COPY[code];
+  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : FALLBACK;
 }
 
 /** Sorts a failed bridge call into "not ready yet" (the command is not in this build) or a
@@ -351,26 +355,6 @@ export function harnessCatalog(): Promise<Result<HarnessEntry[]>> {
   return call<HarnessEntry[]>("desktop_harness_catalog");
 }
 
-export interface Skill {
-  id: string;
-  name: string;
-  description: string;
-  path: string;
-  default_on: boolean;
-}
-
-export interface McpServer {
-  id: string;
-  name: string;
-  runs: string;
-  status: "approved" | "needs_approval" | "turned_off" | "cant_start";
-  status_label: string;
-  reason: string | null;
-  network: boolean;
-  secrets: string[];
-  default_on: boolean;
-}
-
 export interface Memory {
   id: string;
   text: string;
@@ -380,29 +364,83 @@ export interface Memory {
   saved_at: string | null;
 }
 
-/** Reads the app-wide skills. Output: skills with their folder and default switch. */
-export function listSkills(): Promise<Result<Skill[]>> {
-  return call<Skill[]>("desktop_skills");
+/** Reads skills for global settings (no project) or one project's settings, where global
+ * items carry the project's own switch. Output: skills in engine order. */
+export function listSkills(projectId?: string): Promise<Result<SkillView[]>> {
+  return call<SkillView[]>("desktop_plugin_skills", { projectId: projectId ?? null });
 }
 
-/** Turns a global skill on or off for new projects. Inputs: skill id and the switch. */
-export function setSkillDefault(id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_set_skill_default", { id, on });
+/** Adds a skill from a folder that holds SKILL.md; the engine keeps its own copy.
+ * Inputs: where it applies and the folder's full path. Output: the new skill. */
+export function addSkill(scope: PluginScope, folder: string): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-/** Reads the app-wide MCP servers with their approval status. Output: the servers. */
-export function listMcpServers(): Promise<Result<McpServer[]>> {
-  return call<McpServer[]>("desktop_mcp_servers");
+/** Turns a skill on or off where it was added. Inputs: skill id and the switch. */
+export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
 }
 
-/** Approves one MCP server after the owner reviewed what it runs. Input: server id. */
-export function approveMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_approve_mcp_server", { id });
+/** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
+export function removeSkill(id: string): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id });
 }
 
-/** Turns a global MCP server on or off for new projects. Inputs: server id and the switch. */
-export function setMcpDefault(id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_set_mcp_default", { id, on });
+/** Reads MCP servers for global settings (no project) or one project's settings.
+ * Output: servers with how they run, status, saved secret names and tools. */
+export function listMcpServers(projectId?: string): Promise<Result<McpServerView[]>> {
+  return call<McpServerView[]>("desktop_plugin_servers", { projectId: projectId ?? null });
+}
+
+/** Adds an MCP server that waits for approval. Secret values go to the engine once, in its
+ * own private frame, and never come back. Inputs: scope, name, spec, secrets by name. */
+export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSpec, secrets: [string, string][]): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_add_mcp_server", { scope, name, spec, secrets });
+}
+
+/** Approves an MCP server exactly as the owner saw it; the engine refuses one that changed.
+ * Inputs: server id and the shown spec. Output: the approved server. */
+export function approveMcpServer(id: string, spec: McpServerSpec): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_approve_mcp_server", { id, spec });
+}
+
+/** Turns an MCP server on or off where it was added. Inputs: server id and the switch. */
+export function setMcpServerEnabled(id: string, enabled: boolean): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+}
+
+/** Removes an MCP server and its saved secrets. Input: server id. */
+export function removeMcpServer(id: string): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id });
+}
+
+/** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.
+ * Inputs: server id, secret name and value. Output: the server with its secret names. */
+export function setMcpSecret(id: string, name: string, value: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_secret", { id, name, value });
+}
+
+/** Deletes one saved MCP server secret. Inputs: server id and secret name. */
+export function removeMcpSecret(id: string, name: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_remove_mcp_secret", { id, name });
+}
+
+/** Starts a command MCP server, lists its tools and stops it. Input: server id.
+ * Output: the server with its tools or the plain reason it can't start. */
+export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_check_mcp_server", { id });
+}
+
+/** Switches a global skill or MCP server on or off for one project.
+ * Inputs: project id, item id and the switch. */
+export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId, id, on });
+}
+
+/** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
+ * owner closed the chooser. */
+export function pickFolder(): Promise<Result<string | null>> {
+  return call<string | null>("desktop_pick_folder");
 }
 
 /** Reads saved and suggested memories across projects. Output: the memories. */
