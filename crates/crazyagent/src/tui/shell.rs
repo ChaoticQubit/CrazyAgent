@@ -966,6 +966,27 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_read_failure_says_so_and_r_reads_it_again() {
+        let mut shell = Shell::new(ctx());
+        shell.arrive(Arrival::Connected(None));
+        assert!(drain(&mut shell).contains(&"Profile".to_owned()));
+        shell.arrive(Arrival::Profile(Err("owner_profile_read".into())));
+        assert_eq!(
+            shell.ctx.link,
+            Link::Ready,
+            "the engine answered, so it is not down"
+        );
+        assert!(matches!(shell.ctx.store.profile, Load::Failed(_)));
+        assert!(!shell.busy(), "no spinner while waiting for the owner");
+        assert_eq!(shell.place(), None);
+        shell.key(Key::Char('r'));
+        assert_eq!(drain(&mut shell), vec!["Profile".to_owned()]);
+        assert!(shell.busy());
+        shell.arrive(Arrival::Profile(Ok(None)));
+        assert_eq!(shell.place(), Some(Place::Welcome));
+    }
+
+    #[test]
     fn quit_on_welcome_asks_once_something_is_typed() {
         let mut shell = at(Place::Welcome, ctx());
         shell.key(Key::Ctrl('q'));

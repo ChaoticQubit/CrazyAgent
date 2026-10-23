@@ -946,3 +946,18 @@ fn a_long_pool_list_scrolls_with_the_selection_and_shows_a_bar() {
     let rows = render(&mut shell, 80, 24);
     assert!(pool_rows(&rows)[0].contains("> Pool 00"));
 }
+
+#[test]
+fn a_profile_read_failure_is_not_shown_as_a_stopped_engine() {
+    let mut shell = Shell::new(ready(80, 24));
+    shell.arrive(super::seam::Arrival::Connected(None));
+    shell.arrive(super::seam::Arrival::Profile(Err(
+        "owner_profile_read".into()
+    )));
+    let text = render(&mut shell, 80, 24).join("\n");
+    assert!(text.contains("Could not read your profile"));
+    assert!(text.contains("Press r to try again."));
+    assert!(text.contains("r Try again"));
+    assert!(!text.contains("engine isn't running"));
+    assert!(!text.contains("Engine not running"));
+}
