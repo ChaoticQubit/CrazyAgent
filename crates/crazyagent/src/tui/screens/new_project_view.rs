@@ -471,7 +471,10 @@ impl Draw<'_> {
     }
 
     fn muted(&mut self, text: &str) {
-        let style = self.look.muted;
+        self.note(text, self.look.muted);
+    }
+
+    fn note(&mut self, text: &str, style: Style) {
         for line in wrap_words(text, self.content) {
             self.add(Row::of(line, style));
         }
@@ -513,8 +516,8 @@ impl Draw<'_> {
             );
         }
         match (self.note_for(control), hint) {
-            (Some((text, true)), _) => self.add(Row::of(text, look.error)),
-            (Some((text, false)), _) => self.add(Row::of(text, look.success)),
+            (Some((text, true)), _) => self.note(&text, look.error),
+            (Some((text, false)), _) => self.note(&text, look.success),
             (None, Some(hint)) => self.add(Row::of(hint, look.muted)),
             (None, None) => {}
         }
@@ -772,7 +775,7 @@ fn stack(draw: &mut Draw) {
     }
     draw.add(custom);
     if let Some((text, _)) = draw.note_for(Control::Grid) {
-        draw.add(Row::of(text, look.error));
+        draw.note(&text, look.error);
     }
     draw.add(Row::default());
     draw.add(Row::of("Platforms", look.heading));
@@ -1104,7 +1107,7 @@ fn team(draw: &mut Draw) {
         &look,
     ));
     if let Some((text, _)) = draw.note_for(Control::Team) {
-        draw.add(Row::of(text, look.error));
+        draw.note(&text, look.error);
     }
     draw.add(Row::default());
     let mut size = Row::of("Team size", look.heading).pad(12);
@@ -1137,7 +1140,7 @@ fn team(draw: &mut Draw) {
         .note_for(Control::Min)
         .or_else(|| draw.note_for(Control::Max))
     {
-        Some((text, _)) => draw.add(Row::of(text, look.error)),
+        Some((text, _)) => draw.note(&text, look.error),
         None => draw.add(Row::of(
             format!(
                 "At most {} agents run at once. Extra work waits until one finishes.",
@@ -1340,7 +1343,7 @@ fn review(draw: &mut Draw) {
                 "Research starts right away. You can close CrazyAgent and agents keep working.",
             );
             if let Some((text, _)) = draw.note_for(Control::Continue) {
-                draw.add(Row::of(text, look.error));
+                draw.note(&text, look.error);
             }
             draw.add(Row::default());
             draw.buttons("Create project");

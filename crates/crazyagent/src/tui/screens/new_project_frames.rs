@@ -237,3 +237,117 @@ fn static_text_wraps_at_spaces_up_to_the_full_width() {
     let long = "word ".repeat(300);
     assert!(wrap_words(&long, 7).iter().all(|line| cells(line) <= 7));
 }
+
+fn documents_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let research = home.path().join("Research");
+    std::fs::create_dir(&research).unwrap();
+    for (name, bytes) in [
+        ("buoy-spec-v3.pdf", 2_516_582),
+        ("interviews-2026-09.md", 38_912),
+        ("competitor-notes.txt", 6_144),
+        ("buoy-video.pdf", 51 * 1024 * 1024),
+    ] {
+        std::fs::File::create(research.join(name))
+            .unwrap()
+            .set_len(bytes)
+            .unwrap();
+    }
+    home
+}
+
+fn state_frames(home: &std::path::Path) -> Vec<(String, String)> {
+    let look = Look::plain();
+    let mut drawn = Vec::new();
+    let mut draw = |id: &str, wizard: &Wizard| {
+        let screen = wizard_screen(wizard, 80, 24, &look);
+        drawn.push((id.to_owned(), compose(&screen, 80, 24, "", &look)));
+    };
+    let mut wizard = Wizard::new(
+        pool_choices(&super::new_project_tests::config()),
+        Some(home.to_path_buf()),
+    );
+    type_text(&mut wizard, "Tidepool");
+    wizard.key(key(KeyCode::Tab));
+    type_text(
+        &mut wizard,
+        "A live dashboard for marine researchers to watch sensor buoys and get alerts when readings look wrong.",
+    );
+    wizard.tech = ["TypeScript", "React", "Next.js", "Postgres", "TimescaleDB"]
+        .map(String::from)
+        .to_vec();
+    wizard.platforms = vec![crate::project_setup::Platform::Website];
+    wizard.research = vec![
+        ResearchKind::MarketResearch,
+        ResearchKind::CompetitorResearch,
+        ResearchKind::FrontEndDesign,
+    ];
+    wizard.done[Step::About.index()] = true;
+    wizard.done[Step::Stack.index()] = true;
+    wizard.go(Step::Documents);
+    type_text(&mut wizard, "~/Research/");
+    draw("wiz-docs-empty-80", &wizard);
+    wizard.key(super::new_project_tests::control('u'));
+    for name in [
+        "buoy-spec-v3.pdf",
+        "interviews-2026-09.md",
+        "competitor-notes.txt",
+    ] {
+        type_text(&mut wizard, &format!("~/Research/{name}"));
+        wizard.key(key(KeyCode::Enter));
+        assert_eq!(
+            wizard.note.as_ref().filter(|note| note.error),
+            None,
+            "{name}"
+        );
+    }
+    type_text(&mut wizard, "~/Research/buoy-video.pdf");
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.note.as_ref().is_some_and(|note| note.error));
+    draw("wiz-docs-error-80", &wizard);
+    wizard.key(super::new_project_tests::control('u'));
+    wizard.note = None;
+    wizard.done[Step::Documents.index()] = true;
+    wizard.done[Step::Work.index()] = true;
+    let mut empty = Wizard::new(Vec::new(), None);
+    for step in [Step::About, Step::Stack, Step::Documents, Step::Work] {
+        empty.done[step.index()] = true;
+    }
+    empty.go(Step::Pool);
+    draw("wiz-pool-none-80", &empty);
+    wizard.done[Step::Pool.index()] = true;
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.picker.is_some());
+    draw("wiz-team-picker-80", &wizard);
+    wizard.key(key(KeyCode::Esc));
+    assert!(wizard.picker.is_none());
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Right));
+    assert!(wizard.note.as_ref().is_some_and(|note| note.error));
+    draw("wiz-team-error-80", &wizard);
+    wizard.key(key(KeyCode::Left));
+    assert_eq!(wizard.check_team(), Ok(()));
+    wizard.done[Step::Team.index()] = true;
+    wizard.go(Step::Review);
+    assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
+    draw("wiz-creating-80", &wizard);
+    wizard.failed("project_folder_exists");
+    draw("wiz-create-error-80", &wizard);
+    drawn
+}
+
+#[test]
+fn wizard_empty_error_and_loading_states_match_the_design() {
+    let home = documents_home();
+    let drawn = state_frames(home.path());
+    for (id, text) in &drawn {
+        assert_eq!(text.lines().count(), 24, "{id}");
+        assert!(
+            !text.contains(home.path().to_str().unwrap()),
+            "{id} shows the home path"
+        );
+    }
+    check_frames(&drawn);
+}
