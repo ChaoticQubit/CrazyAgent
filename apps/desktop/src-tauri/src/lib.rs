@@ -9,6 +9,7 @@ use bridge::{
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
 };
+use bridge::picker::Pick;
 use bridge::project_setup::MemoryItem;
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::config::ModelAccessEdit;
@@ -762,6 +763,27 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
+        Pick::Canceled => None,
+        Pick::Paths(mut paths) => {
+            assert!(!paths.is_empty());
+            Some(paths.swap_remove(0))
+        }
+    })
+}
+
+#[tauri::command]
+async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(match bridge::picker::choose(bridge::picker::DOCUMENTS_SCRIPT).await? {
+        Pick::Canceled => Vec::new(),
+        Pick::Paths(paths) => paths,
+    })
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -934,6 +956,8 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_pick_folder,
+            desktop_pick_documents,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

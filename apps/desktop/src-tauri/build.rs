@@ -72,6 +72,8 @@ fn main() {
         "desktop_remove_mcp_secret",
         "desktop_check_mcp_server",
         "desktop_project_plugins",
+        "desktop_pick_folder",
+        "desktop_pick_documents",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

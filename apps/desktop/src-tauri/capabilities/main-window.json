@@ -76,6 +76,8 @@
     "allow-desktop-set-mcp-secret",
     "allow-desktop-remove-mcp-secret",
     "allow-desktop-check-mcp-server",
-    "allow-desktop-project-plugins"
+    "allow-desktop-project-plugins",
+    "allow-desktop-pick-folder",
+    "allow-desktop-pick-documents"
   ]
 }

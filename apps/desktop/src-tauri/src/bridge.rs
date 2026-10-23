@@ -25,6 +25,7 @@ mod native_auth;
 pub mod project_setup;
 mod owner_setup;
 mod plugins;
+pub mod picker;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
