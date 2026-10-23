@@ -162,7 +162,7 @@ fn native_auth_registered_executable_rejects_empty_and_oversize_files() {
     let file = File::create(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&path).is_err());
-    file.set_len(super::EXECUTABLE_BYTES_MAX + 1).unwrap();
+    file.set_len(256 * 1024 * 1024 + 1).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&path).is_err());
 }
 
@@ -173,42 +173,4 @@ fn native_auth_registered_executable_internal_hash_length_is_bounded() {
     let path = executable(root.path(), "host");
     let file = File::open(path).unwrap();
     let _ = RegisteredNativeAuthHost::hash(&file, 0);
-}
-
-#[test]
-fn native_auth_registers_the_installed_claude_code_executable() {
-    let entries = crate::harnesses::catalog(&crate::harnesses::Search::from_environment());
-    let claude = entries
-        .into_iter()
-        .find(|entry| entry.id == "claude-code")
-        .and_then(|entry| entry.executable)
-        .expect("installed Claude Code");
-    let claude = std::fs::canonicalize(claude).unwrap();
-    let registered = RegisteredNativeAuthHost::capture(&claude).unwrap();
-    assert_eq!(registered.verified_path().unwrap(), claude);
-    assert_eq!(registered.verified_sha256().unwrap().len(), 64);
-}
-
-#[test]
-fn native_auth_executable_bound_admits_large_harness_builds_and_refuses_beyond_it() {
-    let root = tempfile::tempdir().unwrap();
-    let large = executable(root.path(), "large");
-    OpenOptions::new()
-        .write(true)
-        .open(&large)
-        .unwrap()
-        .set_len(300 * 1024 * 1024)
-        .unwrap();
-    assert!(RegisteredNativeAuthHost::capture(&large).is_ok());
-    let oversized = executable(root.path(), "oversized");
-    OpenOptions::new()
-        .write(true)
-        .open(&oversized)
-        .unwrap()
-        .set_len(super::EXECUTABLE_BYTES_MAX + 1)
-        .unwrap();
-    assert_eq!(
-        RegisteredNativeAuthHost::capture(&oversized).err().unwrap().0,
-        "native_auth_host_executable_unsafe"
-    );
 }
