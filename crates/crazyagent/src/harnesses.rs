@@ -1,3 +1,4 @@
+pub mod launch;
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;

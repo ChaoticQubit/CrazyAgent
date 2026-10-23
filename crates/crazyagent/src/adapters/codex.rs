@@ -388,6 +388,22 @@ impl CodexProtocol {
     }
 
     pub fn start_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "on-request", "read-only")
+    }
+
+    /// Starts a thread whose tools run without approval prompts and without Codex's
+    /// own sandbox, for a process the caller already confines in an OS sandbox.
+    /// Input: absolute working directory. Output: the encoded `thread/start` request.
+    pub fn start_tool_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "never", "danger-full-access")
+    }
+
+    fn start_thread_with(
+        &mut self,
+        cwd: &Path,
+        approval: &'static str,
+        sandbox: &'static str,
+    ) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Ready)?;
         if self.has_pending_login() {
             return Err(ProtocolError::InvalidState);
@@ -396,8 +412,8 @@ impl CodexProtocol {
         let bytes = self.request(
             Operation::ThreadStart { cwd: cwd.into() },
             json!({
-                "cwd":cwd,"approvalPolicy":"on-request",
-                "approvalsReviewer":"user","sandbox":"read-only"
+                "cwd":cwd,"approvalPolicy":approval,
+                "approvalsReviewer":"user","sandbox":sandbox
             }),
         )?;
         self.phase = State::ThreadStarting;
