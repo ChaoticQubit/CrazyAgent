@@ -74,14 +74,16 @@ fn catalog(backend: MasterBackend) -> String {
             .replace("claude-code", "codex")
             .replace("anthropic", "openai")
             .replace("claude-", "codex-"),
-        _ => CATALOG.into(),
+        MasterBackend::Claude => CATALOG.replace("sandbox-profile", "claude-connection"),
+        MasterBackend::Rcli => CATALOG.into(),
     }
 }
 
 fn selection(backend: MasterBackend) -> MasterSelection {
     let (target, account) = match backend {
         MasterBackend::Codex => ("codex-connection", "codex-account"),
-        _ => ("sandbox-profile", "claude-account"),
+        MasterBackend::Claude => ("claude-connection", "claude-account"),
+        MasterBackend::Rcli => ("sandbox-profile", "claude-account"),
     };
     let target = CredentialRef::new(target).unwrap();
     MasterSelection {
@@ -558,6 +560,23 @@ async fn master_dispatch_blocks_a_codex_turn_without_a_current_sign_in() {
     fixture.create().await;
     let (_, _, session) = fixture.open().await;
     let (submit, submitted) = fixture.submit(&session, "unsigned-turn").await;
+    operation(&submitted);
+    let mut dispatcher = MasterDispatch::new();
+    assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());
+    let turn = fixture.await_blocked(&session).await;
+    assert_eq!(turn.id, submit.request_id);
+    assert_eq!(turn.reason, Some(crate::master_session::MasterReason::ReadinessUnknown));
+    assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+    dispatcher.shutdown().await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn master_dispatch_blocks_a_claude_turn_without_a_current_sign_in() {
+    let fixture = DispatchFixture::start_with(MasterBackend::Claude).await;
+    fixture.create().await;
+    let (_, _, session) = fixture.open().await;
+    let (submit, submitted) = fixture.submit(&session, "unsigned-claude-turn").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
     assert!(dispatcher.committed(fixture.runtime(), &submit, &submitted).unwrap());

@@ -91,6 +91,31 @@ export function status(): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("desktop_status");
 }
 
+export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+
+export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
+
+export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
+
+export interface HarnessEntry {
+  id: string;
+  name: string;
+  status: HarnessStatus;
+  status_label: string;
+  executable: string | null;
+  headless: string;
+  tools: ToolControl;
+  model_selection: boolean;
+  account_kinds: AccountKind[];
+}
+
+/** Lists every harness the engine knows, in owner order, with its status on this machine.
+ * Input: none. Output: entries whose status_label reads "Ready", "Not installed" or
+ * "Limited control: <reason>". */
+export function harnessCatalog(): Promise<HarnessEntry[]> {
+  return invoke<HarnessEntry[]>("desktop_harness_catalog");
+}
+
 export function baselines(next = false): Promise<BaselinePage> {
   return invoke<BaselinePage>("desktop_baselines", { next });
 }

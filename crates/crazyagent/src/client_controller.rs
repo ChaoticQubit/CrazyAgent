@@ -15,6 +15,19 @@ mod owner_setup;
 mod accounts;
 pub use account_profile::PendingAccountProfile;
 
+impl OwnerController {
+    /// Lists the engine's harness catalog for the master, sub-agent and research pickers.
+    /// Input: none; uses the attached owner connection. Output: entries in owner
+    /// priority order, or `controller_disconnected` without a connection.
+    pub async fn harness_catalog(&self) -> Result<Vec<crate::harnesses::HarnessEntry>, EngineError> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?;
+        client.harness_catalog().await
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerView {
     pub state: OwnerReadReply,

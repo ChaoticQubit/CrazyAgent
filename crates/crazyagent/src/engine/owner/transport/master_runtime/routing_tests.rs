@@ -576,7 +576,7 @@ fn unallocated(turn: &MasterTurnView, phase: MasterTurnPhase, reason: Option<Mas
 }
 
 #[tokio::test]
-async fn claude_drive_persists_unsupported_without_preparation_attempt_or_runtime() {
+async fn claude_drive_runs_the_native_readiness_checks_without_preparation_attempt_or_runtime() {
     let case = Fixture::new(MasterBackend::Claude, false).await;
     let before = case.snapshot();
     assert!(!case.repository.exists());
@@ -585,7 +585,7 @@ async fn claude_drive_persists_unsupported_without_preparation_attempt_or_runtim
     unallocated(
         &returned,
         MasterTurnPhase::Blocked,
-        Some(MasterReason::UnsupportedCapability),
+        Some(MasterReason::ConnectionChanged),
     );
     assert_eq!(returned.id, case.turn.id);
     assert_eq!(returned.session_id, case.turn.session_id);
@@ -630,13 +630,13 @@ async fn codex_subscription_master_is_not_blocked_as_an_unsupported_backend() {
 }
 
 #[tokio::test]
-async fn unsupported_drive_replay_returns_the_same_persisted_view_without_new_work() {
+async fn blocked_drive_replay_returns_the_same_persisted_view_without_new_work() {
     let case = Fixture::new(MasterBackend::Claude, false).await;
     let blocked = case.drive().await.unwrap();
     unallocated(
         &blocked,
         MasterTurnPhase::Blocked,
-        Some(MasterReason::UnsupportedCapability),
+        Some(MasterReason::ConnectionChanged),
     );
     let before = case.snapshot();
     assert_eq!(case.drive().await.unwrap(), blocked);
