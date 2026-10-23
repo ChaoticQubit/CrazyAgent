@@ -177,7 +177,26 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
+}
+
+/// Tells whether a provider error message says the account hit a rate or usage limit.
+/// Takes the provider's error text, which is never stored or shown.
+/// Returns true for rate limit, usage limit, quota and HTTP 429 wording.
+pub fn rate_limited(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "usage_limit",
+        "quota",
+        "429",
+        "too many requests",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// A plain failure code from a launch adapter. It never carries secrets or raw output.
@@ -639,6 +658,11 @@ impl Driver {
                                     .map_err(|_| failure("launch_protocol_failed"))?,
                             );
                             events.push(LaunchEvent::ApprovalDenied);
+                        }
+                        CodexEvent::TurnError { message, .. } => {
+                            events.push(LaunchEvent::TurnError {
+                                rate_limited: rate_limited(&message),
+                            });
                         }
                         CodexEvent::RequestFailed {
                             method: "turn/interrupt",
