@@ -41,7 +41,9 @@ pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
         (MemoryOrigin::Promoted { project_id, .. }, _)
         | (_, MemoryScope::Project { project_id }) => project_name(project_id, ctx),
-        (MemoryOrigin::Written, MemoryScope::Global) => "You".into(),
+        (MemoryOrigin::Written | MemoryOrigin::Selected { .. }, MemoryScope::Global) => {
+            "You".into()
+        }
     }
 }
 
@@ -58,7 +60,9 @@ pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
                 project_name(project_id, ctx)
             )
         }
-        (MemoryOrigin::Written, MemoryScope::Global) => "Saved by you for every project.".into(),
+        (MemoryOrigin::Written | MemoryOrigin::Selected { .. }, MemoryScope::Global) => {
+            "Saved by you for every project.".into()
+        }
     }
 }
 
