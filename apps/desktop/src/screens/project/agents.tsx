@@ -96,7 +96,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         <span><Badge word={status.word} tone={status.tone} /> <span className="pj-small pj-secondary">{displayText(row.progress)}</span></span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
         <span className="pj-row">{job.started_ms !== null && <button type="button" className="btn" aria-expanded={logOpen === job.id} aria-controls={`pj-log-${job.id}`}
-          onClick={() => setLogOpen(logOpen === job.id ? null : job.id)}>View log</button>}
+          onClick={() => setLogOpen(logOpen === job.id ? null : job.id)}>{logOpen === job.id ? "Hide log" : "View log"}</button>}
           {job.status === "running" && !job.cancel_requested && <button type="button" className="btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
         {logOpen === job.id && <AgentLog data={data} job={job} />}
