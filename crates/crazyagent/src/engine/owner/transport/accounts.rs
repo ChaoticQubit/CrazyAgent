@@ -531,6 +531,21 @@ fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, 
     Ok(Some(bytes))
 }
 
+/// Reads the key saved for one account so the engine can hand it to a harness writer over
+/// a pipe. Input: owner root and the account's credential reference. Output: the key, or
+/// none when the account has no saved key.
+pub(super) fn saved_key(
+    root: &Root,
+    credential: &CredentialRef,
+) -> Result<Option<AccountSecret>, EngineError> {
+    let Some(bytes) = read_key(root, credential)? else {
+        return Ok(None);
+    };
+    AccountSecret::new(bytes)
+        .map(Some)
+        .map_err(|_| failure("account_key_store_unsafe"))
+}
+
 fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError> {
     let Some(directory) = keys_directory(root, false)? else {
         return Ok(());
