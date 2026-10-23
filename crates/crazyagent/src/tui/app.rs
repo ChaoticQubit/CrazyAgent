@@ -864,7 +864,7 @@ impl App {
             }
             OwnerEvent::Accounts(event) => self.accounts = Some(*event),
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
-            OwnerEvent::Shell(_) => {}
+            OwnerEvent::Shell(_) | OwnerEvent::Settings(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
                     self.setup_view = Some((event.query, view));
@@ -1711,6 +1711,21 @@ impl App {
             entry_id,
             version,
             decision,
+            generation: self.declaration.generation,
+        })
+    }
+
+    /// Queues one team action: a message to the master, a task handed to a sub-agent,
+    /// a cancel or the keep-warm switch. Team status reads use SetupQuery::Team.
+    /// Takes the team action.
+    /// Returns an error in limited mode, for an invalid action or while another setup request waits.
+    pub fn request_team_change(&mut self, action: crate::team::TeamAction) -> Result<(), String> {
+        if !self.owner_ready {
+            return Err("Team changes are disabled in limited mode".into());
+        }
+        action.validate().map_err(|e| e.0)?;
+        self.request_project_setup(SetupQuery::TeamChange {
+            action,
             generation: self.declaration.generation,
         })
     }

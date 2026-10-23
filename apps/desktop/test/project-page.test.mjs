@@ -350,34 +350,52 @@ test("team agents and tasks use the design's status words", () => {
   assert.deepEqual(["queued", "needs_pool", "running", "done", "failed", "cancelled"].map(research.teamTaskWord), ["Queued", "Needs a pool", "Running", "Done", "Failed", "Stopped"]);
 });
 
-test("team rows show live agents with their task, then tasks no agent holds", () => {
+test("the Team panel names each agent, its account and current task, and lists tasks from master to sub-agent", () => {
   const status = {
     agents: [
-      teamAgent(1, "working", { role: "master", harness: "claude" }),
-      teamAgent(2, "working", { task: 10, turns: 3 }),
-      teamAgent(3, "stopped"),
+      teamAgent(1, "working", { role: "master", harness: "claude", account: "acct-a" }),
+      teamAgent(2, "working", { task: 10, turns: 3, account: "acct-b" }),
+      teamAgent(3, "idle", { account: "acct-gone" }),
       teamAgent(4, "failed", { problem: "Codex stopped answering." }),
     ],
     tasks: [
-      teamTask(10, "running", { agent: 2, prompt: "Build the login screen\nwith tests" }),
-      teamTask(11, "queued", { prompt: "Write the README" }),
-      teamTask(12, "needs_pool"),
-      teamTask(13, "done", { agent: 3 }),
+      teamTask(10, "running", { agent: 2, prompt: "Build the login screen\nwith tests", started_ms: 1_000 }),
+      teamTask(11, "queued", { source: "owner", prompt: "Write the README" }),
+      teamTask(12, "done", { agent: 3, result: "## Summary\n\nLogin screen built, 4 tests pass.", started_ms: 0, finished_ms: 120_000 }),
+      teamTask(13, "failed", { problem: "No account in this project's pool can run codex" }),
     ],
   };
-  const running = research.teamRows(status, "running");
-  assert.deepEqual(running.map((row) => [row.key, row.title, row.word, row.detail, row.stop]), [
-    ["agent-1", "Master", "Running", "", null],
-    ["agent-2", "Agent", "Running", "Build the login screen", { task: 10, label: "Stop" }],
-    ["task-11", "Task", "Queued", "Write the README", { task: 11, label: "Cancel" }],
-    ["task-12", "Task", "Needs a pool", "Task 12", { task: 12, label: "Cancel" }],
+  const accounts = [{ id: "acct-a", name: "Work Claude" }, { id: "acct-b", name: "Codex main" }];
+  const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
+  const running = research.teamPanel(status, accounts, label, "running", 61_000);
+  assert.deepEqual(running.agents, [
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "" },
+    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen" },
+    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work" },
   ]);
-  assert.equal(running[1].turns, 3);
-  const all = research.teamRows(status, "all");
-  assert.deepEqual(all.map((row) => row.key), ["agent-1", "agent-2", "agent-3", "agent-4", "task-11", "task-12", "task-13"]);
-  assert.equal(all.find((row) => row.key === "agent-4").detail, "Codex stopped answering.");
-  assert.equal(all.find((row) => row.key === "task-13").stop, null);
-  assert.deepEqual(research.teamRows({ agents: [], tasks: [] }, "all"), []);
+  assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
+    ["task-10", "From the master", "Codex 1", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
+    ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
+  ]);
+  const all = research.teamPanel(status, accounts, label, "all", 61_000);
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering." });
+  assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
+    ["task-10", "Codex 1", "Running", "", "1 min", { task: 10, label: "Stop" }],
+    ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
+    ["task-12", "Codex 2", "Done", "Login screen built, 4 tests pass.", "2 min", null],
+    ["task-13", "Codex", "Failed", "No account in this project's pool can run codex", "", null],
+  ]);
+  assert.equal(all.tasks[2].result, "## Summary\n\nLogin screen built, 4 tests pass.");
+  assert.deepEqual(research.teamPanel({ agents: [], tasks: [] }, [], label, "all", 0), { agents: [], tasks: [] });
+});
+
+test("a task result summary is its first plain line", () => {
+  assert.equal(research.resultSummary("## Summary\n\nLogin built."), "Login built.");
+  assert.equal(research.resultSummary("- first point\n- second"), "first point");
+  assert.equal(research.resultSummary("> quoted answer"), "quoted answer");
+  assert.equal(research.resultSummary("# Only a heading"), "Only a heading");
+  assert.equal(research.resultSummary(""), "");
+  assert.equal(research.resultSummary("x".repeat(300)), `${"x".repeat(199)}...`);
 });
 
 test("a long task prompt shows its first line, cut to fit a row", () => {
@@ -391,4 +409,14 @@ test("the Agents tab labels research and asks the engine for the live team", asy
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));
   assert.match(markup, /<h3>Research<\/h3><ul class="pj-rows" aria-label="Research agents">/);
   assert.match(markup, /Loading the team\.\.\./);
+});
+
+test("team tasks waiting for a pool ask the owner for one, with the engine's reason", () => {
+  assert.equal(research.teamWaitingLine([teamTask(1, "running"), teamTask(2, "done")]), null);
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool", { problem: "No account in this project's pool can run codex" })]),
+    "A team task waits: No account in this project's pool can run codex.");
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool"), teamTask(2, "needs_pool", { problem: "No account in this project's pool can run codex." })]),
+    "2 team tasks wait: No account in this project's pool can run codex.");
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
+  assert.equal(research.teamWaitingLine([]), null);
 });

@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  New project  /  Pool
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  New project             │ Pool
+                          │ Agents in this project use accounts from one pool.
+  ✓ About                 │
+  ✓ Stack and platforms   │ > (*) Main          3 accounts    rcli, Claude Code, Codex
+  ✓ Documents             │   ( ) Unnamed pool  1 account     rcli
+  ✓ Work to start         │   ( ) No pool yet                 Work waits and shows "Needs a pool"
+  > Pool                  │
+    Team                  │ a  Create a pool
+    Review                │
+                          │ [ Back ]   [ Continue ]
+  Esc keeps this draft    │
+  and goes home.          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+
+ ↑↓ Choose   a Create a pool   Tab Buttons   Shift-←→ Steps   Esc Leave, keep draft                              ? Help

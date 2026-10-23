@@ -54,7 +54,7 @@ pub struct Store {
     pub pools: Load<Vec<PoolSummary>>,
     pub pool_projects: Load<Vec<PoolScope>>,
     pub accounts: Load<Vec<AccountRow>>,
-    pub harnesses: Load<usize>,
+    pub harnesses: Load<(usize, usize)>,
     pub memory: Load<usize>,
     pub projects_seen: Option<String>,
 }

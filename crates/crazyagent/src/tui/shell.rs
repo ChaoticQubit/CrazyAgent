@@ -485,6 +485,7 @@ impl Shell {
                 }
                 Err(_) => {}
             },
+            Arrival::Owner(_) => super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx),
             _ => {}
         }
         let count = self.stack.len();

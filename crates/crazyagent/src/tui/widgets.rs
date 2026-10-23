@@ -73,7 +73,6 @@ impl TextField {
     /// A masked field for an API key, code or other secret.
     /// Inputs: label and maximum characters. Output: an empty masked field with
     /// room reserved so typing never leaves copies in freed memory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Add account fields"))]
     pub fn secret(label: &str, max_chars: usize) -> Self {
         let mut field = Self::new(label, max_chars);
         field.masked = true;
@@ -90,7 +89,6 @@ impl TextField {
 
     /// Sets the note line under the field.
     /// Input: the text. Output: the field.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Add account fields"))]
     pub fn note(mut self, text: &str) -> Self {
         self.note = text.to_owned();
         self
@@ -112,7 +110,6 @@ impl TextField {
 
     /// Shows "51 characters" at the right of the label while text is present.
     /// Input: none. Output: the field.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Add account fields"))]
     pub fn counted(mut self) -> Self {
         self.counter = true;
         self
@@ -159,7 +156,6 @@ impl TextField {
 
     /// Hands the typed secret over and empties the field.
     /// Input: none. Output: the bytes, for the engine call only.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Add account fields"))]
     pub fn take_secret(&mut self) -> Vec<u8> {
         assert!(self.masked);
         let bytes = self.value.as_bytes().to_vec();
@@ -385,7 +381,6 @@ pub fn checkbox(on: bool, label: &str) -> String {
 /// One menu item: a `▌` bar and accent title when focused, a muted description.
 /// Inputs: title, description, width, focus, theme and glyphs. Output: the
 /// title line, wrapped description lines and a blank line.
-#[cfg_attr(not(test), expect(dead_code, reason = "Add account sign-in methods"))]
 pub fn menu_item(
     title: &str,
     description: &str,

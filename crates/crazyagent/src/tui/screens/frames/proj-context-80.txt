@@ -1,0 +1,24 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Context
+────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+───────────────────────────────────────────━━━━━━━━━────────────────────────────
+  Context                                         ~/projects/fieldnotes-mobile
+
+    brief.md                              Project brief
+    research/
+  >   market_research.md                  Market research
+
+  Agents write results here as Markdown. o opens a file in your editor.
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter Open  o Open in editor  d Delete  m Save to memory                ? Help

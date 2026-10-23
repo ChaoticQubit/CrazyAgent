@@ -1,0 +1,36 @@
+ CrazyAgent  /  Home  /  Fieldnotes Mobile
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Fieldnotes Mobile                                                                       ~/projects/fieldnotes-mobile
+  Offline field notes for ecologists.
+
+  This project has no pool, so no agent can start.
+  Pick a pool in Settings. Work starts as soon as you do.
+
+  [> Pick a pool ]
+
+  Work
+    Market research         ! Needs a pool
+    Design research         ! Needs a pool
+    Front-end design        ! Needs a pool
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter Pick a pool   Shift-←→ Tabs   Esc Home                                                                    ? Help

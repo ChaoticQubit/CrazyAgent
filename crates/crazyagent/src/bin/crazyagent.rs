@@ -14,7 +14,6 @@ const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
-crazyagent research STATE_DIR PROJECT_ID PROJECT_DIR --codex-executable ABS_PATH --endpoint URL --model MODEL [--tools on|off] [--minutes N] KIND [KIND...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -76,15 +75,6 @@ fn main() -> ExitCode {
             }
         };
     }
-    if args.first().is_some_and(|arg| arg == "research") {
-        return match crazyagent::research::cli::run(&args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::FAILURE
-            }
-        };
-    }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
             Ok(()) => ExitCode::SUCCESS,
@@ -108,7 +98,8 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
     let codex = match args.len() {
         2 => None,
         6 if (args[2] == "--codex-executable" && args[4] == "--codex-sha256")
-            || (args[2] == "--claude-executable" && args[4] == "--claude-sha256") => {
+            || (args[2] == "--claude-executable" && args[4] == "--claude-sha256") =>
+        {
             let executable = Path::new(&args[3]);
             if !executable.is_absolute() {
                 return Err("native_auth_host_executable_unsafe".into());
@@ -117,9 +108,9 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
                 .to_str()
                 .filter(|value| {
                     value.len() == 64
-                        && value.bytes().all(|byte| {
-                            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                        })
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 })
                 .ok_or("native_auth_host_executable_digest_invalid")?;
             Some((executable, digest))
@@ -145,7 +136,13 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
         .block_on(async {
             if let Some((executable, digest)) = codex {
                 if args[2] == "--claude-executable" {
-                    return crazyagent::engine::run_native_auth_custodian_with_claude(Path::new(&args[1]), input.into(), executable, digest).await;
+                    return crazyagent::engine::run_native_auth_custodian_with_claude(
+                        Path::new(&args[1]),
+                        input.into(),
+                        executable,
+                        digest,
+                    )
+                    .await;
                 }
                 crazyagent::engine::run_native_auth_custodian_with_codex(
                     Path::new(&args[1]),
@@ -192,20 +189,37 @@ fn engine_options(args: &[OsString]) -> Result<(bool, Option<&Path>), String> {
     Ok((writable, codex))
 }
 
-type EngineOptions = (bool, Option<std::path::PathBuf>, Option<std::path::PathBuf>, Option<std::path::PathBuf>);
+type EngineOptions = (
+    bool,
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+);
 
 fn engine_options_with_claude(args: &[OsString]) -> Result<EngineOptions, String> {
-    if !(5..=12).contains(&args.len()) { return Err(USAGE.into()); }
+    if !(5..=12).contains(&args.len()) {
+        return Err(USAGE.into());
+    }
     let mut filtered = Vec::with_capacity(args.len());
     let mut claude = None;
     let mut rcli = None;
     let mut index = 0;
     while index < args.len() {
-        if index >= 5 && (args[index] == "--claude-executable" || args[index] == "--rcli-executable") {
-            let slot = if args[index] == "--claude-executable" { &mut claude } else { &mut rcli };
-            if slot.is_some() { return Err(USAGE.into()); }
+        if index >= 5
+            && (args[index] == "--claude-executable" || args[index] == "--rcli-executable")
+        {
+            let slot = if args[index] == "--claude-executable" {
+                &mut claude
+            } else {
+                &mut rcli
+            };
+            if slot.is_some() {
+                return Err(USAGE.into());
+            }
             let path = Path::new(args.get(index + 1).ok_or(USAGE)?);
-            if !path.is_absolute() { return Err("native_auth_host_executable_unsafe".into()); }
+            if !path.is_absolute() {
+                return Err("native_auth_host_executable_unsafe".into());
+            }
             *slot = Some(path.to_path_buf());
             index += 2;
         } else {
@@ -288,10 +302,14 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                             .map_err(|e| e.to_string())?;
                     }
                     if let Some(executable) = claude.as_deref() {
-                        service.register_claude_executable(executable).map_err(|e| e.to_string())?;
+                        service
+                            .register_claude_executable(executable)
+                            .map_err(|e| e.to_string())?;
                     }
                     if let Some(executable) = rcli.as_deref() {
-                        service.register_rcli_executable(executable).map_err(|e| e.to_string())?;
+                        service
+                            .register_rcli_executable(executable)
+                            .map_err(|e| e.to_string())?;
                     }
                     Ok(())
                 })
@@ -308,9 +326,35 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     .map(Some),
                 })
                 .and_then(|research| {
+                    let mut executables = std::collections::BTreeMap::new();
+                    if let Some(executable) = codex.as_deref() {
+                        executables.insert("codex", executable.to_path_buf());
+                    }
+                    if let Some(executable) = claude.as_deref() {
+                        executables.insert("claude-code", executable.to_path_buf());
+                    }
+                    if !writable || executables.is_empty() {
+                        return Ok((research, None));
+                    }
+                    match crazyagent::team::runtime::start_for_engine(
+                        runtime_dir,
+                        Path::new(&args[2]),
+                        Path::new(&args[3]),
+                        executables,
+                    ) {
+                        Ok(team) => Ok((research, Some(team))),
+                        Err(error) => {
+                            if let Some(research) = research {
+                                research.stop();
+                            }
+                            Err(error)
+                        }
+                    }
+                })
+                .and_then(|(research, team)| {
                     let mut output = io::stdout().lock();
                     match writeln!(output, "ready").and_then(|()| output.flush()) {
-                        Ok(()) => Ok(research),
+                        Ok(()) => Ok((research, team)),
                         Err(error) => {
                             if let Some(research) = research {
                                 research.stop();
@@ -319,8 +363,8 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         }
                     }
                 });
-            let research = match ready {
-                Ok(research) => research,
+            let (research, team) = match ready {
+                Ok(started) => started,
                 Err(error) => {
                     return match service.shutdown().await {
                         Ok(()) => Err(error),
@@ -331,6 +375,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(research) = research {
                 let _ = tokio::task::spawn_blocking(move || research.stop()).await;
+            }
+            if let Some(team) = team {
+                let _ = tokio::task::spawn_blocking(move || team.stop()).await;
             }
             result
         }
@@ -448,15 +495,31 @@ mod tests {
     use super::*;
 
     fn engine_arguments() -> Vec<OsString> {
-        ["engine", "/private/tmp/runtime", "/global.toml", "/project.toml", "e.sock"]
-            .into_iter().map(OsString::from).collect()
+        [
+            "engine",
+            "/private/tmp/runtime",
+            "/global.toml",
+            "/project.toml",
+            "e.sock",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
     }
 
     #[test]
     fn engine_options_preserve_writable_settings_with_codex_in_both_orders() {
         for options in [
-            vec!["--writable-settings", "--codex-executable", "/official/codex"],
-            vec!["--codex-executable", "/official/codex", "--writable-settings"],
+            vec![
+                "--writable-settings",
+                "--codex-executable",
+                "/official/codex",
+            ],
+            vec![
+                "--codex-executable",
+                "/official/codex",
+                "--writable-settings",
+            ],
         ] {
             let mut arguments = engine_arguments();
             arguments.extend(options.into_iter().map(OsString::from));
@@ -480,7 +543,11 @@ mod tests {
             vec!["--writable-settings", "--writable-settings"],
             vec!["--codex-executable"],
             vec!["--unknown"],
-            vec!["--codex-executable", "/official/codex", "--codex-executable"],
+            vec![
+                "--codex-executable",
+                "/official/codex",
+                "--codex-executable",
+            ],
         ] {
             let mut arguments = engine_arguments();
             arguments.extend(options.into_iter().map(OsString::from));

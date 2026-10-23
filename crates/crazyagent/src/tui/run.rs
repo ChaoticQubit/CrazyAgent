@@ -269,6 +269,7 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Conversation(job) => connection.conversation(*job),
         Request::Master(job) => connection.master(*job),
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),
+        Request::Settings(job) => connection.settings(*job),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

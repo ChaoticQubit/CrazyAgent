@@ -1,4 +1,7 @@
 use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use crate::harnesses::launch::LaunchError;
+use crate::launch_context::AgentContext;
+use crate::protocol::ProjectId;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -12,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
+static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -24,13 +28,12 @@ const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
-const CLAUDE_ARGUMENTS: [&str; 11] = [
+const CONTEXT_BUSY: &str = "launch_home_busy";
+const CLAUDE_ARGUMENTS: [&str; 9] = [
     "--print",
     "--output-format",
     "text",
     "--strict-mcp-config",
-    "--mcp-config",
-    "{\"mcpServers\":{}}",
     "--setting-sources",
     "",
     "--settings",
@@ -78,6 +81,14 @@ impl ResearchHarness {
             "codex" => Some(Self::Codex),
             "claude" | "claude-code" => Some(Self::ClaudeCode),
             _ => None,
+        }
+    }
+
+    /// The harness id the launch-context seam installs project context for.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
         }
     }
 
@@ -146,6 +157,7 @@ pub enum RunError {
     Invalid(String),
     Jobs(JobError),
     Sandbox(SandboxError),
+    Context(LaunchError),
     Io(io::Error),
 }
 
@@ -155,6 +167,7 @@ impl fmt::Display for RunError {
             Self::Invalid(reason) => write!(f, "research refused: {reason}"),
             Self::Jobs(error) => write!(f, "{error}"),
             Self::Sandbox(error) => write!(f, "{error}"),
+            Self::Context(error) => write!(f, "research context: {}", error.0),
             Self::Io(error) => write!(f, "research I/O: {error}"),
         }
     }
@@ -292,7 +305,8 @@ impl ResearchRunner {
     }
 
     /// Claims every job of `project` for the account's harness that the
-    /// per-project limit allows right now and runs each on its own thread.
+    /// per-project limit allows right now, at most `running_max` in one call
+    /// even while runs hand busy jobs back, and runs each on its own thread.
     pub fn spawn_ready(
         self: &Arc<Self>,
         project: String,
@@ -304,10 +318,15 @@ impl ResearchRunner {
         let Ok(jobs) = ResearchJobs::open(&self.database) else {
             return handles;
         };
-        while !self.is_stopping()
-            && let Ok(Some(job)) =
+        for _ in 0..self.limits.running_max {
+            if self.is_stopping() {
+                break;
+            }
+            let Ok(Some(job)) =
                 jobs.claim_harness(&project, harness, &self.claimer, self.limits.running_max)
-        {
+            else {
+                break;
+            };
             let runner = self.clone();
             let project = project.clone();
             let root = root.clone();
@@ -324,8 +343,8 @@ impl ResearchRunner {
                     },
                 )
             }));
-            assert!(handles.len() <= self.limits.running_max as usize);
         }
+        assert!(handles.len() <= self.limits.running_max as usize);
         handles
     }
 
@@ -403,13 +422,19 @@ impl ResearchRunner {
                 let status = jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
                 Ok(run(status, None, Some(group)))
             }
+            Err(RunError::Context(LaunchError(code))) if code == CONTEXT_BUSY => {
+                jobs.release(job.id, &self.claimer)?;
+                let status = jobs
+                    .get(job.id)?
+                    .map_or(ResearchStatus::Queued, |job| job.status);
+                Ok(run(status, None, None))
+            }
             Err(error) => {
-                jobs.fail(
-                    job.id,
-                    &self.claimer,
-                    "Could not prepare the research sandbox",
-                    self.limits.attempts_max,
-                )?;
+                let reason = match error {
+                    RunError::Context(_) => "Could not give the agent this project's context",
+                    _ => "Could not prepare the research sandbox",
+                };
+                jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
                 Err(error)
             }
         }
@@ -429,13 +454,13 @@ impl ResearchRunner {
         if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
+        let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
+        let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
         let agent = self.state.join("agents").join(&name);
-        private_directory(&agent)?;
-        let tmp = agent.join("tmp");
-        private_directory(&tmp)?;
         let home = match account {
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => {
+                private_directory(&agent)?;
                 let home = agent.join("home");
                 private_directory(&home)?;
                 home
@@ -444,6 +469,12 @@ impl ResearchRunner {
             | ResearchAccount::ManagedClaude { home, .. } => home.canonicalize()?,
         };
         let harness = account.harness();
+        let installed = context
+            .install(harness.id(), &home, job.tools)
+            .map_err(RunError::Context)?;
+        private_directory(&agent)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
         let executable = match harness {
             ResearchHarness::Codex => self.codex.as_path(),
             ResearchHarness::ClaudeCode => self
@@ -457,31 +488,14 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
-        if let Some(install) = executable.canonicalize()?.parent() {
-            sandbox = sandbox.allow_read(install)?;
+        for folder in read_folders(executable, &context, job.tools)? {
+            sandbox = sandbox.allow_read(&folder)?;
         }
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
-        fs::create_dir_all(root.join("worktrees"))?;
-        let mut git = sandbox.command(&profile, Path::new(GIT));
-        git.args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-        ])
-        .arg(&worktree)
-        .arg("HEAD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
-            return Err(RunError::Invalid("git worktree add failed".into()));
-        }
+        add_worktree(&sandbox, &profile, &worktree)?;
         drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
@@ -494,6 +508,7 @@ impl ResearchRunner {
             }
             ResearchHarness::ClaudeCode => {
                 claude_arguments(&mut command, &home, &tmp, job.tools, account)?;
+                command.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
         };
@@ -502,6 +517,7 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        assert!(!carries_secret(&command, &context));
         let mut child = command.spawn()?;
         let group = child.id();
         assert!(group > 1);
@@ -537,6 +553,7 @@ impl ResearchRunner {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let ending = self.supervise(jobs, job, &mut child, group, &counted)?;
+        drop(installed);
         Ok((ending, group, output))
     }
 
@@ -625,7 +642,45 @@ impl ResearchRunner {
     }
 }
 
-fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
+/// Lists the folders an agent's sandbox must let it read beyond its home:
+/// the harness install folder and, with tools on, the folder of every
+/// approved MCP command server. Takes the harness executable, the project
+/// context and the tools switch. Returns the canonical folders, sorted and
+/// without repeats, or an error for a server executable that does not exist.
+fn read_folders(
+    executable: &Path,
+    context: &AgentContext,
+    tools: bool,
+) -> Result<Vec<PathBuf>, RunError> {
+    let mut executables = vec![executable.to_path_buf()];
+    if tools {
+        executables.extend(context.read_paths());
+    }
+    let mut folders = Vec::with_capacity(executables.len());
+    for executable in executables {
+        if let Some(folder) = executable.canonicalize()?.parent() {
+            folders.push(folder.to_path_buf());
+        }
+    }
+    folders.sort();
+    folders.dedup();
+    Ok(folders)
+}
+
+/// Reports whether any MCP secret of the project context appears in the
+/// command's program, arguments or environment.
+fn carries_secret(command: &Command, context: &AgentContext) -> bool {
+    context.exposes_secret(command.get_program().as_encoded_bytes())
+        || command
+            .get_args()
+            .any(|argument| context.exposes_secret(argument.as_encoded_bytes()))
+        || command.get_envs().any(|(name, value)| {
+            context.exposes_secret(name.as_encoded_bytes())
+                || value.is_some_and(|value| context.exposes_secret(value.as_encoded_bytes()))
+        })
+}
+
+pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
             Ok(SandboxRemote::AnyHost(443))
@@ -811,7 +866,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+/// Makes the project folder a git repository with one empty start commit and
+/// worktrees/ and context/ excluded, once per process at a time.
+/// Takes the project folder and a private temporary home for git.
+pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if root.join(".git").is_dir() {
         return Ok(());
     }
@@ -856,6 +917,43 @@ fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(info.join("exclude"))?;
     exclude.write_all(b"/worktrees/\n/context/\n")?;
+    Ok(())
+}
+
+/// Adds a detached git worktree at `worktree` inside the sandbox's project
+/// folder, running git under the installed profile with hooks disabled.
+/// Takes the sandbox, its installed profile and the new worktree path.
+pub(crate) fn add_worktree(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+) -> Result<(), RunError> {
+    let _setup = REPOSITORY_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let worktrees = sandbox.project_root().join("worktrees");
+    if worktree.parent() != Some(worktrees.as_path()) {
+        return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
+    }
+    fs::create_dir_all(&worktrees)?;
+    let mut git = sandbox.command(profile, Path::new(GIT));
+    git.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+    ])
+    .arg(worktree)
+    .arg("HEAD")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
+        return Err(RunError::Invalid("git worktree add failed".into()));
+    }
+    assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
 }
 

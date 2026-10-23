@@ -2,13 +2,11 @@ pub mod pool_editor;
 pub mod pools;
 pub mod profile;
 
-use super::{Flow, Place, Screen, SettingsSection};
+use super::{Flow, Screen, SettingsSection};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Tab, draw_lines, hint, sections_hint, tab_strip};
+use crate::tui::frame::{Tab, draw_lines, tab_strip};
 use crate::tui::glyphs::Section;
-use crate::tui::keys::Key;
-use crate::tui::text::{indent, styled, wrap};
-use crate::tui::theme::Role;
+use crate::tui::text::indent;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -42,7 +40,9 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
                     count(&ctx.store.accounts, |rows| rows.len().to_string())
                 }
                 SettingsSection::Pools => count(&ctx.store.pools, |pools| pools.len().to_string()),
-                SettingsSection::Harnesses => count(&ctx.store.harnesses, ToString::to_string),
+                SettingsSection::Harnesses => {
+                    count(&ctx.store.harnesses, |(found, all)| format!("{found} of {all}"))
+                }
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
                 SettingsSection::Plugins | SettingsSection::Profile => String::new(),
             },
@@ -84,67 +84,16 @@ pub fn step(section: SettingsSection, forward: bool, ctx: &mut Ctx) -> Flow {
 pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
     match section {
         SettingsSection::Pools => Box::new(pools::Pools::new()),
+        SettingsSection::Accounts => Box::new(super::settings_accounts::Accounts::new()),
+        SettingsSection::Harnesses => Box::new(super::settings_harnesses::Harnesses::new()),
+        SettingsSection::Memory => Box::new(super::settings_memory::Memory::new()),
+        SettingsSection::Plugins => Box::new(super::settings_plugins::Plugins::new()),
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
-        other => Box::new(Pending::new(other)),
     }
 }
 
 /// Builds the Add account flow.
 /// Input: the context. Output: its first screen.
 pub fn open_add_account(_ctx: &mut Ctx) -> Box<dyn Screen> {
-    Box::new(Pending::new(SettingsSection::Accounts))
-}
-
-/// A Settings section whose engine call is not in this build.
-/// Input: the section. Output: its tab strip and "Not ready yet."; it shows no
-/// data.
-pub struct Pending {
-    section: SettingsSection,
-}
-
-impl Pending {
-    /// The placeholder for one section.
-    /// Input: the section. Output: the screen.
-    pub fn new(section: SettingsSection) -> Self {
-        Self { section }
-    }
-}
-
-impl Screen for Pending {
-    fn crumbs(&self) -> Vec<String> {
-        vec!["Settings".into(), self.section.label().into()]
-    }
-
-    fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        vec![sections_hint(ctx.glyphs), hint("Esc", "Home")]
-    }
-
-    fn key(&mut self, _key: &Key, _ctx: &mut Ctx) -> Flow {
-        Flow::Ignored
-    }
-
-    fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
-        step(self.section, forward, ctx)
-    }
-
-    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
-        let mut content = vec![
-            styled(self.section.label(), Role::Accent, &ctx.theme),
-            Line::default(),
-            Line::raw("Not ready yet."),
-        ];
-        content.extend(
-            wrap(
-                "This build of CrazyAgent cannot show this section yet. Nothing here is hidden from you.",
-                area.width as usize - 4,
-            )
-            .into_iter()
-            .map(|line| styled(line, Role::Muted, &ctx.theme)),
-        );
-        draw_page(frame, area, self.section, content, None, ctx)
-    }
-
-    fn place(&self) -> Option<Place> {
-        Some(Place::Settings(self.section))
-    }
+    Box::new(super::settings_add_account::AddAccount::new())
 }

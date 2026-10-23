@@ -4,10 +4,6 @@ use crate::engine::EngineError;
 use crate::engine::owner::{AccountCheck, AccountPage, AccountSecret};
 use crate::protocol::CredentialRef;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "built by the Settings > Accounts view")
-)]
 pub(in crate::tui) enum AccountsRequest {
     Catalog,
     List {

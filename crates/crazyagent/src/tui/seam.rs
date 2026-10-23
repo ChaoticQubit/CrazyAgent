@@ -74,6 +74,7 @@ pub enum Request {
     Conversation(Box<ConversationJob>),
     Master(Box<master_session::Job>),
     Wire { command: Command, revision: Cursor },
+    Settings(Box<super::client::settings::SettingsJob>),
     Reconnect,
 }
 
@@ -91,6 +92,7 @@ impl std::fmt::Debug for Request {
             Self::Conversation(_) => "Conversation",
             Self::Master(_) => "Master",
             Self::Wire { .. } => "Wire",
+            Self::Settings(_) => "Settings",
             Self::Reconnect => "Reconnect",
         })
     }
