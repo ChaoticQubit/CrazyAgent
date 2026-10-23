@@ -1283,24 +1283,6 @@ fn verify_preparation(
     Ok(record)
 }
 
-fn block_unsupported_backend(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    session: &mut MasterSessionView,
-    turn: &mut MasterTurnView,
-) -> Result<bool, EngineError> {
-    if session.selection.backend != MasterBackend::Claude || !turn.phase.outstanding() {
-        return Ok(false);
-    }
-    if turn.phase != MasterTurnPhase::Queued {
-        return Err(error("master_runtime_backend_unsupported"));
-    }
-    turn.phase = MasterTurnPhase::Blocked;
-    turn.reason = Some(MasterReason::UnsupportedCapability);
-    persist_runtime(tx, config, session, turn)?;
-    Ok(true)
-}
-
 /// Blocks a queued turn that cannot run until the owner acts: no current
 /// sign-in, or a master opened before the settings or engine changed.
 /// Input: the failure that stopped the turn. Output: true when the turn was
@@ -1337,9 +1319,6 @@ fn prepare_turn(
     turn: &mut MasterTurnView,
 ) -> Result<MasterRuntimeResult, EngineError> {
     current_scope(tx, config, sources, host, session, turn)?;
-    if block_unsupported_backend(tx, config, session, turn)? {
-        return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
-    }
     if turn.phase == MasterTurnPhase::Prepared {
         verify_preparation(tx, config, host, session, turn)?;
         if !preflight_turn(tx, config, session, turn)? {
@@ -1531,7 +1510,7 @@ fn provision_bootstrap(
     let tx = db.transaction().map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
-    if turn.phase != MasterTurnPhase::Queued || session.selection.backend == MasterBackend::Claude {
+    if turn.phase != MasterTurnPhase::Queued {
         return Ok(());
     }
     if !preflight_turn(&tx, config, &mut session, &mut turn)? {
@@ -2026,7 +2005,6 @@ pub(super) fn runtime(
                 tx.commit().map_err(error)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
             }
-            block_unsupported_backend(&tx, config, &mut session, &mut turn)?;
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
@@ -2050,9 +2028,6 @@ pub(super) fn runtime(
             if turn.phase != MasterTurnPhase::Prepared {
                 tx.commit().map_err(error)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn)));
-            }
-            if session.selection.backend == MasterBackend::Claude {
-                return Err(error("master_runtime_backend_unsupported"));
             }
             current_scope(&tx, config, sources, host, &session, &turn)?;
             let record = verify_preparation(&tx, config, host, &session, &turn)?;

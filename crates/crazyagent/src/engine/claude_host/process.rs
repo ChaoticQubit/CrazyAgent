@@ -80,6 +80,7 @@ pub(super) fn run(
     };
     command.env_clear().env("HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)
         .env("TERM", "dumb")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .process_group(0);

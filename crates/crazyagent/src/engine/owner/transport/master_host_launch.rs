@@ -45,7 +45,6 @@ impl OwnerRuntimeHandle {
         prepared: &PreparedMasterTurn,
         profile: &NativeProfileUse,
     ) -> Result<MasterHostLaunch, EngineError> {
-        require_master_tool_policy()?;
         validate_master_binding(prepared)?;
         let binding = prepared.profile.binding();
         let host = self.identity();
@@ -55,14 +54,28 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.authority.root.verify()?;
-        let executable = self.registered_codex_executable()?;
         let home = profile.profile_path()?;
-        let command = master_command(
-            executable.verified_path()?,
-            &home,
-            &prepared.cwd,
-            &prepared.attempt.connection.model.id,
-        )?;
+        let model = &prepared.attempt.connection.model.id;
+        let (command, executable) = match prepared.session.selection.backend {
+            MasterBackend::Codex => {
+                require_master_tool_policy()?;
+                let executable = self.registered_codex_executable()?;
+                let command =
+                    master_command(executable.verified_path()?, &home, &prepared.cwd, model)?;
+                (command, executable)
+            }
+            MasterBackend::Claude => {
+                let executable = self.registered_claude_executable()?;
+                let command = crate::engine::claude_host::launch_command(
+                    executable.verified_path()?,
+                    &prepared.cwd,
+                    &home,
+                    model,
+                )?;
+                (command, executable)
+            }
+            MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        };
         let artifact_sha256 = executable.verified_sha256()?;
         if !is_hex_id(&artifact_sha256) {
             return Err(failure("master_runtime_binding"));
@@ -107,7 +120,10 @@ fn require_master_tool_policy() -> Result<(), EngineError> {
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
     let binding = prepared.profile.binding();
     let lease = &prepared.lease;
-    if prepared.session.selection.backend != MasterBackend::Codex {
+    if !matches!(
+        prepared.session.selection.backend,
+        MasterBackend::Codex | MasterBackend::Claude
+    ) {
         return Err(failure("master_runtime_backend_unsupported"));
     }
     if prepared.session.current_turn.is_none()

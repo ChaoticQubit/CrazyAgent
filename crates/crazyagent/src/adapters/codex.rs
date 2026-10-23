@@ -206,6 +206,7 @@ enum Operation {
     AccountLogout,
     ThreadStart {
         cwd: String,
+        tools: bool,
     },
     TurnStart,
     Interrupt {
@@ -388,16 +389,35 @@ impl CodexProtocol {
     }
 
     pub fn start_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "on-request", "read-only")
+    }
+
+    /// Starts a thread whose tools run without approval prompts and without Codex's
+    /// own sandbox, for a process the caller already confines in an OS sandbox.
+    /// Input: absolute working directory. Output: the encoded `thread/start` request.
+    pub fn start_tool_thread(&mut self, cwd: &Path) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(cwd, "never", "danger-full-access")
+    }
+
+    fn start_thread_with(
+        &mut self,
+        cwd: &Path,
+        approval: &'static str,
+        sandbox: &'static str,
+    ) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Ready)?;
         if self.has_pending_login() {
             return Err(ProtocolError::InvalidState);
         }
         let cwd = valid_path(cwd).ok_or(ProtocolError::InvalidInput)?;
         let bytes = self.request(
-            Operation::ThreadStart { cwd: cwd.into() },
+            Operation::ThreadStart {
+                cwd: cwd.into(),
+                tools: sandbox == "danger-full-access",
+            },
             json!({
-                "cwd":cwd,"approvalPolicy":"on-request",
-                "approvalsReviewer":"user","sandbox":"read-only"
+                "cwd":cwd,"approvalPolicy":approval,
+                "approvalsReviewer":"user","sandbox":sandbox
             }),
         )?;
         self.phase = State::ThreadStarting;
@@ -795,14 +815,20 @@ impl CodexProtocol {
                 self.phase = State::Initialized;
                 Ok(Some(Event::Initialized))
             }
-            Operation::ThreadStart { cwd } => {
+            Operation::ThreadStart { cwd, tools } => {
+                let (approval, sandbox) = if *tools {
+                    ("never", "dangerFullAccess")
+                } else {
+                    ("on-request", "readOnly")
+                };
                 if result["cwd"] != *cwd
-                    || result["approvalPolicy"] != "on-request"
+                    || result["approvalPolicy"] != approval
                     || result["approvalsReviewer"] != "user"
-                    || result["sandbox"]["type"] != "readOnly"
-                    || result["sandbox"]
-                        .get("networkAccess")
-                        .is_some_and(|v| v != false)
+                    || result["sandbox"]["type"] != sandbox
+                    || (!*tools
+                        && result["sandbox"]
+                            .get("networkAccess")
+                            .is_some_and(|v| v != false))
                 {
                     return Err(ProtocolError::InvalidMessage);
                 }
@@ -1039,7 +1065,7 @@ impl CodexProtocol {
                 .login_completed(&params)
                 .map(|control| Some(Event::AuthControl(control))),
             "thread/started" => {
-                if let Some((_, Operation::ThreadStart { cwd })) = self.pending.clone() {
+                if let Some((_, Operation::ThreadStart { cwd, .. })) = self.pending.clone() {
                     return self.observe_thread(&params["thread"], &cwd);
                 }
                 let id = identifier(&params["thread"]["id"])?;
