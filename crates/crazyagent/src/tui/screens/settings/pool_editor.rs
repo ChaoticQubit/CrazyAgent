@@ -118,6 +118,10 @@ impl PoolEditor {
         view
     }
 
+    fn page(&self) -> usize {
+        self.rows.saturating_sub(1).max(1)
+    }
+
     fn follow(&mut self, count: usize) {
         self.cursor = self.cursor.min(count.saturating_sub(1));
         if self.cursor < self.offset {
@@ -215,8 +219,8 @@ impl PoolEditor {
         match key {
             Key::Up => self.cursor = self.cursor.saturating_sub(1),
             Key::Down => self.cursor = (self.cursor + 1).min(count.saturating_sub(1)),
-            Key::PageUp => self.cursor = self.cursor.saturating_sub(self.rows),
-            Key::PageDown => self.cursor = (self.cursor + self.rows).min(count.saturating_sub(1)),
+            Key::PageUp => self.cursor = self.cursor.saturating_sub(self.page()),
+            Key::PageDown => self.cursor = (self.cursor + self.page()).min(count.saturating_sub(1)),
             Key::Home => self.cursor = 0,
             Key::End => self.cursor = count.saturating_sub(1),
             Key::Char(' ') => self.toggle(ctx),
@@ -763,7 +767,19 @@ mod tests {
         editor.key(&Key::End, &mut ctx);
         assert_eq!((editor.cursor, editor.offset), (39, 31));
         editor.key(&Key::PageUp, &mut ctx);
-        assert_eq!((editor.cursor, editor.offset), (30, 30));
+        assert_eq!(
+            (editor.cursor, editor.offset),
+            (31, 31),
+            "a page is the visible rows minus one"
+        );
+        editor.key(&Key::PageUp, &mut ctx);
+        assert_eq!((editor.cursor, editor.offset), (23, 23));
+        editor.key(&Key::PageDown, &mut ctx);
+        assert_eq!((editor.cursor, editor.offset), (31, 23));
+        editor.key(&Key::PageDown, &mut ctx);
+        assert_eq!((editor.cursor, editor.offset), (39, 31));
+        editor.key(&Key::PageDown, &mut ctx);
+        assert_eq!((editor.cursor, editor.offset), (39, 31));
         editor.key(&Key::Home, &mut ctx);
         assert_eq!((editor.cursor, editor.offset), (0, 0));
     }
