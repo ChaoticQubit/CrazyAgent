@@ -29,7 +29,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .skip-link:focus { top: var(--space-2); }
 
 .icon { display: inline-block; flex: none; vertical-align: middle; }
-.icon.spin { animation: spin 1s linear infinite; }
+@media (prefers-reduced-motion: no-preference) { .icon.spin { animation: spin 1s linear infinite; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .brand-mark { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; font-size: 15px; line-height: 20px; letter-spacing: -0.02em; color: var(--text); }

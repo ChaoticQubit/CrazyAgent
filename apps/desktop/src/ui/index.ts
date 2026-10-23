@@ -1,7 +1,7 @@
 export { Button, type ButtonVariant } from "./button";
 export { TextField, TextArea, SecretField, Select, SearchField, ChipInput, addChip, type SelectOption } from "./field";
 export { Switch, Checkbox, Segmented, RadioCard } from "./toggle";
-export { StatusBadge, statusTone, Notice, Banner, Toast, EmptyState, NotReady, LoadError, Skeleton, CapacityMeter, type Tone } from "./feedback";
+export { StatusBadge, statusTone, statusIcon, Notice, Banner, Toast, EmptyState, NotReady, LoadError, Skeleton, CapacityMeter, type Tone } from "./feedback";
 export { Dialog, Drawer, ConfirmDialog, Menu, type MenuItem } from "./overlay";
 export { PageHeader, Tabs, Panel, type TabLink } from "./layout";
 export { WindowedList, windowRange } from "./windowed-list";

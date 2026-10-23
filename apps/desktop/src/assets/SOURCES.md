@@ -15,7 +15,7 @@ Google Fonts' own repository (`google/fonts`) ships only TTF files for these fam
 
 ## Icons (`icons/`, ISC license, `icons/LICENSE`)
 
-Lucide 1.61.0, from `https://raw.githubusercontent.com/lucide-icons/lucide/1.61.0/icons/<name>.svg` and `https://raw.githubusercontent.com/lucide-icons/lucide/1.61.0/LICENSE`. Every file is parsed by `parseSvg` in `src/ui/icon.tsx`, which accepts only basic shapes with geometry attributes.
+Lucide 1.61.0, from `https://raw.githubusercontent.com/lucide-icons/lucide/1.61.0/icons/<name>.svg` and `https://raw.githubusercontent.com/lucide-icons/lucide/1.61.0/LICENSE`. `hourglass`, `circle-stop`, `power-off` and `lightbulb` were copied from the design agent's vendored set in `docs/design/desktop/brand/icons/lucide/`, which uses the same Lucide 1.61.0 tag. Every file is parsed by `parseSvg` in `src/ui/icon.tsx`, which accepts only basic shapes with geometry attributes.
 
 ## Provider and harness logos (`logos/`, CC0 1.0, `logos/LICENSE.md`)
 
