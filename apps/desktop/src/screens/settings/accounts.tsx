@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { listAccounts, poolSummaries, type AccountView, type PoolSummary } from "../../api";
 import { useLoad, type Loaded } from "../../state";
-import { Button, EmptyState, LoadError, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton, StatusBadge, WindowedList } from "../../ui";
+import { Button, EmptyState, LoadError, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton, StatusBadge, WindowedList, navigate } from "../../ui";
+import { AccountDrawer } from "./account-drawer";
+import { AddAccountDialog } from "./add-account";
 
 /** Filters accounts by search text (name, provider or method), provider and status.
  * Inputs: accounts and the three filters ("" means all). Output: the matching accounts. */
@@ -76,8 +78,20 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry }: {
  * Input: whether the Add account dialog opens on arrival. */
 export function Accounts({ adding }: { adding: boolean }) {
   const [accounts, reload] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
-  const [, setOpen] = useState<AccountView>();
-  const [, setAdd] = useState(adding);
-  return <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={setOpen} onRetry={reload} />;
+  const [pools, reloadPools] = useLoad(poolSummaries);
+  const [opened, setOpened] = useState<AccountView>();
+  const [add, setAdd] = useState(adding);
+  useEffect(() => { if (adding) setAdd(true); }, [adding]);
+  const list = accounts.kind === "ok" ? accounts.value : [];
+  const current = opened && (list.find((account) => account.id === opened.id) ?? opened);
+  const refresh = () => { reload(); reloadPools(); };
+  return <>
+    <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={setOpened} onRetry={reload} />
+    <AddAccountDialog open={add} accounts={list} onAdded={refresh} onClose={() => {
+      setAdd(false);
+      if (adding) navigate({ name: "settings", tab: "accounts" }, true);
+    }} />
+    <AccountDrawer account={current} pools={pools.kind === "ok" ? pools.value : undefined} onClose={() => setOpened(undefined)}
+      onChanged={(account) => { if (account) setOpened(account); refresh(); }} />
+  </>;
 }

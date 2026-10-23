@@ -1,35 +1,11 @@
+import "./load-source.mjs";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
-import { registerHooks } from "node:module";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { transformSync } from "rolldown/utils";
-
-const sourceRoot = new URL("../src/", import.meta.url).href;
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith(".") && context.parentURL?.startsWith(sourceRoot)) {
-      for (const extension of [".ts", ".tsx"]) {
-        const candidate = new URL(specifier + extension, context.parentURL);
-        if (existsSync(candidate)) return nextResolve(candidate.href, context);
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (!url.startsWith(sourceRoot) || !/\.tsx?$/.test(url)) return nextLoad(url, context);
-    const transformed = transformSync(fileURLToPath(url), readFileSync(new URL(url), "utf8"), {
-      target: "es2022", sourceType: "module", jsx: { runtime: "automatic" },
-    });
-    assert.deepEqual(transformed.errors, [], "production modules must load before behavior assertions");
-    return { format: "module", source: transformed.code, shortCircuit: true };
-  },
-});
 
 const auth = await import("../src/native-auth.ts");
-const { NativeAuthPanel } = await import("../src/screens/native-auth.tsx");
+const { SignInPanel } = await import("../src/screens/settings/sign-in.tsx");
 const unitUrl = "https://claude.com/cai/oauth/authorize?client_id=SYNTHETIC_UNIT_CLIENT&state=SYNTHETIC_UNIT_OAUTH_STATE";
 
 function parserState() {
@@ -48,8 +24,11 @@ function parserState() {
   };
 }
 
-function panel(state, blocked = false) {
-  return renderToStaticMarkup(createElement(NativeAuthPanel, { state, blocked }));
+function panel(state) {
+  const forbidden = () => { throw new Error("static rendering must not start, cancel or send anything"); };
+  const claude = state.context.harness === "claude";
+  return renderToStaticMarkup(createElement(SignInPanel, { provider: claude ? "claude" : "chatgpt", method: claude ? "claude_official" : "codex_browser",
+    state, onStart: forbidden, onCancel: forbidden, onCheck: forbidden, onClaudeCode: forbidden }));
 }
 
 test("Claude parser rejects nonofficial destinations rather than treating an unknown challenge as safe", () => {
@@ -161,21 +140,22 @@ test("real panel rendering uses the complete official URL and a separate masked 
   let markup;
   assert.doesNotThrow(() => { markup = panel(state); }, "actual production panel must render the typed Claude challenge safely");
   assert.ok(markup.includes(unitUrl.replaceAll("&", "&amp;")), "the complete supplied official URL must survive rendering without replacement or truncation");
-  const input = markup.match(/<input\b[^>]*data-testid="native-auth-claude-code"[^>]*>/)?.[0];
+  const input = markup.match(/<input\b[^>]*id="claude-sign-in-code"[^>]*>/)?.[0];
   assert.ok(input, "observed fallback prompt must expose its separate input");
   assert.match(input, /type="password"/);
   assert.match(input, /maxLength="8192"/i);
   assert.match(input, /autoComplete="off"/i);
   assert.doesNotMatch(input, /\b(?:name|value)=/);
-  assert.match(markup, /Send code once/);
+  assert.match(markup, />Send code<\/button>/);
+  assert.match(markup, /It&#x27;s sent once and not kept\./);
   const noPrompt = structuredClone(state);
   noPrompt.presentation.challenge.accepts_code = false;
   noPrompt.presentation.challenge.prompt_id = null;
   const waiting = panel(noPrompt);
   assert.ok(waiting.includes(unitUrl.replaceAll("&", "&amp;")));
-  assert.doesNotMatch(waiting, /native-auth-claude-code/);
-  assert.doesNotMatch(panel(auth.reduceNativeAuth(state, { kind: "close" })), /SYNTHETIC_UNIT_OAUTH_STATE|native-auth-claude-code/);
-  assert.doesNotMatch(panel(auth.reduceNativeAuth(state, { kind: "invalidate" })), /SYNTHETIC_UNIT_OAUTH_STATE|native-auth-claude-code/);
+  assert.doesNotMatch(waiting, /claude-sign-in-code/);
+  assert.doesNotMatch(panel(auth.reduceNativeAuth(state, { kind: "close" })), /SYNTHETIC_UNIT_OAUTH_STATE|claude-sign-in-code/);
+  assert.doesNotMatch(panel(auth.reduceNativeAuth(state, { kind: "invalidate" })), /SYNTHETIC_UNIT_OAUTH_STATE|claude-sign-in-code/);
   assert.ok(Buffer.byteLength(markup) < 65536);
 });
 
@@ -192,6 +172,6 @@ test("Codex parser and command behavior remain separate from Claude fallback inp
   assert.equal(auth.nativeClaudeInputAllowed(state, false), false);
   assert.deepEqual(auth.reduceNativeAuth(state, { kind: "claude_input_begin", request: 21 }), state);
   assert.match(panel(state), /SYNTHETIC_CODEX_STATE/);
-  assert.doesNotMatch(panel(state), /native-auth-claude-code/);
+  assert.doesNotMatch(panel(state), /claude-sign-in-code/);
 });
 
