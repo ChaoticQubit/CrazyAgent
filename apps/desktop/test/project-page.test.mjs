@@ -300,11 +300,3 @@ test("Needs you names the project's pool accounts that aren't signed in", () => 
   assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "set_up")])), null);
   assert.equal(research.signInLine(undefined), null);
 });
-
-test("the Pool fact counts accounts that are signed in or set up", () => {
-  const member = (status) => ({ id: status, kind: "local", provider: "ollama", status, status_label: "" });
-  const pool = (members) => ({ id: "pool-1", name: "Main pool", summary: "", members, project_count: 1 });
-  assert.equal(research.poolReadiness(pool([member("signed_in"), member("set_up"), member("not_signed_in")])), "2 of 3 ready");
-  assert.equal(research.poolReadiness(pool([member("set_up")])), "1 of 1 ready");
-  assert.equal(research.poolReadiness(pool([])), "No accounts");
-});

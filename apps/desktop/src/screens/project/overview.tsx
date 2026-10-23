@@ -5,11 +5,11 @@ import { failureCopy, loadProjectMcpServers, loadProjectMemories, loadProjectSki
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { poolName, poolSummary } from "../new-project/wizard";
+import { poolName, poolReadiness, poolSummary } from "../new-project/wizard";
 import { onFact, useList } from "./plugins";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, poolReadiness, signInLine, suggestedLine, tildePath, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, memoryGroups, researchRow, signInLine, suggestedLine, tildePath, waitingLine } from "./research";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",

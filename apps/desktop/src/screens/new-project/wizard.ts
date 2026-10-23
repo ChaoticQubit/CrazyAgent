@@ -1,4 +1,4 @@
-import type { HarnessEntry } from "../../api";
+import type { HarnessEntry, PoolSummary } from "../../api";
 import type { Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
@@ -350,11 +350,32 @@ export function poolSummary(members: ModelConnection[]): string {
   return [...counts].map(([label, count]) => `${count} ${label}`).join(", ");
 }
 
-/** Picks the pool to preselect: the one with the most accounts.
- * Input: the pools. Output: its id, or null when there are none. */
-export function preselectPool(pools: PoolChoice[]): string | null {
+/** Counts a pool's accounts that can work now: signed in, or set up with a key or URL.
+ * Input: the pool's summary. Output: the count. */
+export function readyCount(pool: PoolSummary): number {
+  return pool.members.filter((member) => member.status !== "not_signed_in").length;
+}
+
+/** A pool's readiness in the design's words, such as "3 ready, 1 not signed in".
+ * Input: the pool's summary. Output: the line. */
+export function poolReadiness(pool: PoolSummary): string {
+  if (pool.members.length === 0) return "No accounts";
+  const ready = readyCount(pool);
+  const waiting = pool.members.length - ready;
+  const first = ready === 0 ? "None ready" : `${ready} ready`;
+  return waiting === 0 ? first : `${first}, ${waiting} not signed in`;
+}
+
+/** Picks the pool to preselect: the one with the most ready accounts when the summaries are
+ * known, else the one with the most accounts; the first wins a tie.
+ * Inputs: the pools and their summaries, if known. Output: its id, or null when there are none. */
+export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []): string | null {
+  const score = (choice: PoolChoice) => {
+    const summary = summaries.find((item) => item.id === choice.pool.id);
+    return summaries.length ? (summary ? readyCount(summary) : 0) : choice.pool.members.length;
+  };
   let best: PoolChoice | undefined;
-  for (const choice of pools) if (!best || choice.pool.members.length > best.pool.members.length) best = choice;
+  for (const choice of pools) if (!best || score(choice) > score(best)) best = choice;
   return best?.pool.id ?? null;
 }
 

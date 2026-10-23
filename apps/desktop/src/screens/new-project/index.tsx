@@ -1,5 +1,5 @@
-import { harnessCatalog, nextGeneration } from "../../api";
-import type { HarnessEntry, Result } from "../../api";
+import { harnessCatalog, nextGeneration, poolSummaries } from "../../api";
+import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import { assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, setupProject } from "../../api-projects";
 import type { Platform, PoolChoice, ProjectCatalog, ResearchKind } from "../../api-projects";
@@ -51,6 +51,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [catalog, setCatalog] = useState<Result<ProjectCatalog>>();
   const [harnesses, setHarnesses] = useState<Result<HarnessEntry[]>>();
   const [pools, setPools] = useState<Result<PoolChoice[]>>();
+  const [summaries, setSummaries] = useState<PoolSummary[]>([]);
   const [names, setNames] = useState<string[]>([]);
   const [teamEdited, setTeamEdited] = useState(Boolean(kept?.draft.team));
   const [stackQuery, setStackQuery] = useState("");
@@ -86,11 +87,13 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   useEffect(() => {
     void harnessCatalog().then(setHarnesses);
     void loadProjects().then((result) => { if (result.kind === "ok") setNames(result.value.map((item) => item.name)); });
-    void loadPools().then((result) => {
+    void Promise.all([loadPools(), poolSummaries()]).then(([result, summaries]) => {
       setPools(result);
+      const ready = summaries.kind === "ok" ? summaries.value : [];
+      setSummaries(ready);
       if (result.kind === "ok" && !kept?.draft.poolChosen) {
         setDraftState((prior) => {
-          const next = { ...prior, pool: preselectPool(result.value) };
+          const next = { ...prior, pool: preselectPool(result.value, ready) };
           kept = { draft: next, step: kept?.step ?? step };
           return next;
         });
@@ -309,7 +312,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           {pools?.kind === "error" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools.code)}</p>}
           {poolValue && poolValue.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
             <button type="button" className="btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
-          {poolValue && <PoolPicker name="np-pool" pools={poolValue} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}
+          {poolValue && <PoolPicker name="np-pool" pools={poolValue} summaries={summaries} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>

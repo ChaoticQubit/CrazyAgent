@@ -1,4 +1,4 @@
-import { nextGeneration } from "../../api";
+import { nextGeneration, poolSummaries } from "../../api";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { assignPool, failureCopy, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
@@ -9,7 +9,7 @@ import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
 import { poolName, teamValid } from "../new-project/wizard";
 import { folderLabel } from "./overview";
-import { ProjectServers, ProjectSkills } from "./plugins";
+import { ProjectServers, ProjectSkills, useList } from "./plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -36,6 +36,7 @@ function setupOf(setup: StoredSetup, team: TeamPlan) {
 
 function PoolSection({ data }: { data: ProjectData }) {
   const pools = valueOf(data.pools);
+  const [summaries] = useList(poolSummaries, data.id);
   const [choice, setChoice] = useState<string | null>(data.assigned?.pool.id ?? null);
   const [state, setState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   useEffect(() => { setChoice(data.assigned?.pool.id ?? null); }, [data.assigned?.pool.id]);
@@ -66,7 +67,7 @@ function PoolSection({ data }: { data: ProjectData }) {
     {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
-    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} value={choice} later={false} onChange={setChoice} />}
+    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries?.kind === "ok" ? summaries.value : []} value={choice} later={false} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
     <div><button type="button" className="btn primary" disabled={!choice || choice === data.assigned?.pool.id || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
   </div>;
