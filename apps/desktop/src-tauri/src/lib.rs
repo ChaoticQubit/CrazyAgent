@@ -22,6 +22,7 @@ use crazyagent::project_setup::{
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::team::TeamStatus;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
@@ -282,6 +283,67 @@ async fn desktop_delete_project_context(
     lock(&state)?
         .delete_project_context(&id, path, generation)
         .await
+}
+
+#[tauri::command]
+async fn desktop_team_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<TeamStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_status(&id).await
+}
+
+#[tauri::command]
+async fn desktop_team_message(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_message(&id, text, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_delegate(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    harness: Option<String>,
+    prompt: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .team_delegate(&id, harness, prompt, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_cancel(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    task: Option<i64>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_cancel(&id, task, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_keep_warm(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_keep_warm(&id, on, generation).await
 }
 
 #[tauri::command]
@@ -644,6 +706,11 @@ pub fn run() {
             desktop_save_research_to_memory,
             desktop_add_project_documents,
             desktop_delete_project_context,
+            desktop_team_status,
+            desktop_team_message,
+            desktop_team_delegate,
+            desktop_team_cancel,
+            desktop_team_keep_warm,
             desktop_project_memories,
             desktop_review_memory,
             desktop_open_project,
