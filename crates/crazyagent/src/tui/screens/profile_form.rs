@@ -142,7 +142,10 @@ impl ProfileForm {
         if let Some(current) = self.focus {
             self.check(current);
         }
-        let next = match self.focus.and_then(|slot| slots.iter().position(|s| *s == slot)) {
+        let next = match self
+            .focus
+            .and_then(|slot| slots.iter().position(|s| *s == slot))
+        {
             Some(index) if forward => slots[(index + 1) % slots.len()],
             Some(index) => slots[(index + slots.len() - 1) % slots.len()],
             None => slots[0],
@@ -295,11 +298,29 @@ impl ProfileForm {
         }
     }
 
-    fn choice_row(&self, label: &str, options: [(bool, &str); 2], focused: bool, ctx: &Ctx) -> Line<'static> {
-        let label_style = if focused { ctx.theme.accent } else { ctx.theme.text };
+    fn choice_row(
+        &self,
+        label: &str,
+        options: [(bool, &str); 2],
+        focused: bool,
+        ctx: &Ctx,
+    ) -> Line<'static> {
+        let label_style = if focused {
+            ctx.theme.accent
+        } else {
+            ctx.theme.text
+        };
         join([
-            pad(Line::from(Span::styled(label.to_owned(), label_style)), CHOICE_LABEL_WIDTH, ctx.glyphs),
-            pad(Line::raw(radio(options[0].0, options[0].1)), CHOICE_WIDTH, ctx.glyphs),
+            pad(
+                Line::from(Span::styled(label.to_owned(), label_style)),
+                CHOICE_LABEL_WIDTH,
+                ctx.glyphs,
+            ),
+            pad(
+                Line::raw(radio(options[0].0, options[0].1)),
+                CHOICE_WIDTH,
+                ctx.glyphs,
+            ),
             Line::raw(radio(options[1].0, options[1].1)),
         ])
     }
@@ -357,7 +378,11 @@ impl ProfileForm {
             let focused = self.focus == Some(Slot::Colors);
             out.push(Line::from(Span::styled(
                 "Colors",
-                if focused { ctx.theme.accent } else { ctx.theme.heading },
+                if focused {
+                    ctx.theme.accent
+                } else {
+                    ctx.theme.heading
+                },
             )));
             out.push(Line::raw(
                 Colors::ALL
@@ -400,7 +425,10 @@ mod tests {
         assert!(form.typing());
         assert_eq!(form.key(&Key::Tab), FormKey::Handled);
         assert_eq!(form.focus(), Some(Slot::Role));
-        assert_eq!(form.name.error.as_deref(), Some("Enter your name to continue."));
+        assert_eq!(
+            form.name.error.as_deref(),
+            Some("Enter your name to continue.")
+        );
         for _ in 0..5 {
             form.key(&Key::Tab);
         }
@@ -464,7 +492,12 @@ mod tests {
     fn engine_limits_show_under_the_field() {
         let mut form = ProfileForm::new(None, None);
         typed(&mut form, "Mira");
-        form.stack.set(&(0..13).map(|index| format!("tech{index}")).collect::<Vec<_>>().join(","));
+        form.stack.set(
+            &(0..13)
+                .map(|index| format!("tech{index}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         assert_eq!(form.profile(), Err(Slot::Stack));
         assert_eq!(
             form.stack.error.as_deref(),

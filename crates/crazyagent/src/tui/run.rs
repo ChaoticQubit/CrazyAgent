@@ -43,11 +43,12 @@ impl Drop for Extras {
 /// Inputs: an environment lookup and the engine socket shown when it is down.
 /// Output: the context, or the one-line refusal for `TERM=dumb`.
 pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<Ctx, TuiError> {
-    let depth = theme::depth(&var).ok_or_else(|| {
-        TuiError("CrazyAgent needs a full terminal. TERM is set to dumb.".into())
-    })?;
+    let depth = theme::depth(&var)
+        .ok_or_else(|| TuiError("CrazyAgent needs a full terminal. TERM is set to dumb.".into()))?;
     let prefs = prefs::default_path(var("HOME").as_deref());
-    let colors = prefs.as_deref().map_or(Colors::default(), prefs::load_colors);
+    let colors = prefs
+        .as_deref()
+        .map_or(Colors::default(), prefs::load_colors);
     let appearance = if colors == Colors::FollowMacos {
         theme::system_appearance()
     } else {
@@ -66,12 +67,16 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
         .map_err(|error| TuiError(error.to_string()))?;
-    let ctx = context(|name| std::env::var(name).ok(), socket.display().to_string())?;
+    let ctx = context(
+        |name| std::env::var(name).ok(),
+        socket.display().to_string(),
+    )?;
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
     let _guard = TerminalGuard::enter()?;
     let _extras = Extras::enter()?;
-    let (width, height) = crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
+    let (width, height) =
+        crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(std::io::stdout()),
         TerminalOptions {
@@ -175,7 +180,9 @@ fn drive(
                 if appearance != shell.ctx.appearance {
                     let colors = shell.ctx.colors;
                     shell.ctx.restyle(colors, appearance);
-                    terminal.clear().map_err(|error| TuiError(error.to_string()))?;
+                    terminal
+                        .clear()
+                        .map_err(|error| TuiError(error.to_string()))?;
                     dirty = true;
                 }
             }
@@ -187,14 +194,19 @@ fn drive(
 
 /// Turns one owner worker event into a shell arrival.
 /// Input: the event. Output: the arrival screens react to.
-fn owner_arrival(event: OwnerEvent) -> Arrival {
+pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
     match event {
-        OwnerEvent::Access { ready: true, .. } => Arrival::Connected,
+        OwnerEvent::Access {
+            ready: true,
+            identity,
+            ..
+        } => Arrival::Connected(identity),
         OwnerEvent::Access { problem, .. } => Arrival::Disconnected(problem),
         OwnerEvent::Shell(event) => match *event {
             ShellEvent::Profile(result) => Arrival::Profile(result),
             ShellEvent::ProfileSaved(result) => Arrival::ProfileSaved(result),
             ShellEvent::Pools(result) => Arrival::Pools(result),
+            ShellEvent::PoolProjects(result) => Arrival::PoolProjects(result),
             ShellEvent::Projects(result) => Arrival::Projects(result),
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
@@ -215,6 +227,7 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
             generation: shell.ctx.next_generation(),
         }),
         Request::Pools => connection.shell(ShellRequest::Pools),
+        Request::PoolProjects => connection.shell(ShellRequest::PoolProjects),
         Request::Projects => connection.shell(ShellRequest::Projects),
         Request::EditPool { change } => connection.shell(ShellRequest::EditPool {
             change,

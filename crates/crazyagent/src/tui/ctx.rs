@@ -1,7 +1,8 @@
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{AccountRow, ProjectCard, Request};
+use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
+use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use std::collections::VecDeque;
@@ -50,6 +51,7 @@ pub struct Store {
     pub profile: Load<Option<OwnerProfile>>,
     pub projects: Load<Vec<ProjectCard>>,
     pub pools: Load<Vec<PoolSummary>>,
+    pub pool_projects: Load<Vec<PoolScope>>,
     pub accounts: Load<Vec<AccountRow>>,
     pub harnesses: Load<usize>,
     pub memory: Load<usize>,
@@ -62,6 +64,7 @@ impl Default for Store {
             profile: Load::Idle,
             projects: Load::Idle,
             pools: Load::Idle,
+            pool_projects: Load::Idle,
             accounts: Load::NotReady,
             harnesses: Load::NotReady,
             memory: Load::NotReady,
@@ -71,7 +74,8 @@ impl Default for Store {
 }
 
 /// Everything a screen needs besides its own state: look, size, engine data,
-/// and the queues for requests and messages.
+/// the owner identity of the current trusted connection, and the queues for
+/// requests and messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -85,6 +89,7 @@ pub struct Ctx {
     pub tick: u64,
     pub store: Store,
     pub link: Link,
+    pub identity: Option<OwnerConnectionIdentity>,
     pub socket: String,
     pub home: Option<String>,
     pub prefs: Option<std::path::PathBuf>,
@@ -116,6 +121,7 @@ impl Ctx {
             tick: 0,
             store: Store::default(),
             link: Link::Connecting,
+            identity: None,
             socket,
             home: None,
             prefs: None,
@@ -143,7 +149,7 @@ impl Ctx {
         }
         let read = matches!(
             request,
-            Request::Profile | Request::Pools | Request::Projects
+            Request::Profile | Request::Pools | Request::PoolProjects | Request::Projects
         );
         if read
             && self
@@ -162,7 +168,12 @@ impl Ctx {
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
-            Request::Pools if self.store.pools.ready().is_none() => self.store.pools = Load::Loading,
+            Request::Pools if self.store.pools.ready().is_none() => {
+                self.store.pools = Load::Loading
+            }
+            Request::PoolProjects if self.store.pool_projects.ready().is_none() => {
+                self.store.pool_projects = Load::Loading
+            }
             Request::Projects if self.store.projects.ready().is_none() => {
                 self.store.projects = Load::Loading
             }
@@ -225,5 +236,79 @@ impl Ctx {
     /// Input: none. Output: true at 100 columns and up.
     pub fn wide(&self) -> bool {
         self.width >= 100
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::glyphs::UNICODE;
+
+    fn ctx() -> Ctx {
+        Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn queued_reads_are_not_repeated_and_reconnect_jumps_the_queue() {
+        let mut ctx = ctx();
+        ctx.request(Request::Projects);
+        ctx.request(Request::Pools);
+        ctx.request(Request::Projects);
+        ctx.request(Request::Reconnect);
+        assert_eq!(ctx.queued(), 2);
+        assert_eq!(ctx.store.projects, Load::Loading);
+        assert!(ctx.take_reconnect());
+        assert!(!ctx.take_reconnect(), "one ask, one reconnect");
+        assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+        ctx.request(Request::Projects);
+        assert_eq!(ctx.queued(), 2, "a sent read may be asked for again");
+    }
+
+    #[test]
+    fn a_refresh_keeps_shown_data_instead_of_a_spinner() {
+        let mut ctx = ctx();
+        ctx.store.pools = Load::Ready(Vec::new());
+        ctx.request(Request::Pools);
+        assert_eq!(ctx.store.pools, Load::Ready(Vec::new()));
+        ctx.request(Request::Profile);
+        assert_eq!(ctx.store.profile, Load::Loading);
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_says_so() {
+        let mut ctx = ctx();
+        for _ in 0..QUEUE_MAX {
+            ctx.request(Request::EditPool {
+                change: crate::tui::seam::PoolChange::Remove {
+                    id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                },
+            });
+        }
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        ctx.request(Request::Pools);
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        assert_eq!(
+            ctx.message().unwrap().lead,
+            "Too many requests are waiting."
+        );
+        assert_eq!(
+            ctx.store.pools,
+            Load::Idle,
+            "a refused read leaves the data alone"
+        );
+    }
+
+    #[test]
+    fn generations_are_nonzero_and_increase() {
+        let mut ctx = ctx();
+        let first = ctx.next_generation();
+        assert!(first > 0);
+        assert!(ctx.next_generation() > first);
     }
 }

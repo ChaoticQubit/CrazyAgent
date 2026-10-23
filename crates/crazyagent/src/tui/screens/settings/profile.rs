@@ -154,12 +154,20 @@ impl Screen for ProfilePage {
         let wide = ctx.wide();
         let (content, cursor) = match &self.form {
             Some(form) => {
-                let limit = if wide { FORM_WIDTH } else { area.width as usize - 4 };
+                let limit = if wide {
+                    FORM_WIDTH
+                } else {
+                    area.width as usize - 4
+                };
                 let (lines, cursor) = form.lines(limit, wide, "Save changes", ctx);
                 if wide {
                     let mut content = vec![
                         styled("Profile", Role::Accent, &ctx.theme),
-                        styled("Agents read this before they start.", Role::Muted, &ctx.theme),
+                        styled(
+                            "Agents read this before they start.",
+                            Role::Muted,
+                            &ctx.theme,
+                        ),
                         Line::default(),
                     ];
                     content.extend(lines);

@@ -36,7 +36,12 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
     ),
     (
         Status::Needs,
-        &["Not signed in", "Needs approval", "Needs a pool", "Needs you"],
+        &[
+            "Not signed in",
+            "Needs approval",
+            "Needs a pool",
+            "Needs you",
+        ],
     ),
     (
         Status::Active,
@@ -133,9 +138,7 @@ pub struct Glyphs {
 pub static UNICODE: Glyphs = Glyphs {
     ascii: false,
     status: ["✓", "✗", "!", "▸", "◌", "⊘", "◧", "?", "✧"],
-    sections: [
-        "@", "⊞", "❯", "✦", "⁂", "◉", "☰", "◫", "»", "⊛", "⧉",
-    ],
+    sections: ["@", "⊞", "❯", "✦", "⁂", "◉", "☰", "◫", "»", "⊛", "⧉"],
     providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "•"],
     research: ["◔", "≷", "◬", "▭", "≣"],
     hline: "─",
@@ -160,9 +163,7 @@ pub static UNICODE: Glyphs = Glyphs {
 pub static ASCII: Glyphs = Glyphs {
     ascii: true,
     status: ["+", "x", "!", ">", "o", "-", "~", "?", "*"],
-    sections: [
-        "@", "#", "$", "&", "*", "o", "=", "=", ">", "*", "[",
-    ],
+    sections: ["@", "#", "$", "&", "*", "o", "=", "=", ">", "*", "["],
     providers: ["O", "O", "C", "A", "R", "U", "L", "*"],
     research: ["$", "v", "^", "[", "="],
     hline: "-",
@@ -273,9 +274,18 @@ mod tests {
     #[test]
     fn locale_picks_unicode_only_for_utf8() {
         assert!(unicode_locale(env(&[("LANG", "en_US.UTF-8")])));
-        assert!(unicode_locale(env(&[("LC_CTYPE", "en_GB.utf8"), ("LANG", "C")])));
-        assert!(!unicode_locale(env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")])));
-        assert!(unicode_locale(env(&[("LC_ALL", ""), ("LANG", "en_US.UTF-8")])));
+        assert!(unicode_locale(env(&[
+            ("LC_CTYPE", "en_GB.utf8"),
+            ("LANG", "C")
+        ])));
+        assert!(!unicode_locale(env(&[
+            ("LC_ALL", "C"),
+            ("LANG", "en_US.UTF-8")
+        ])));
+        assert!(unicode_locale(env(&[
+            ("LC_ALL", ""),
+            ("LANG", "en_US.UTF-8")
+        ])));
         assert!(!unicode_locale(env(&[])));
         assert!(Glyphs::detect(env(&[("LANG", "POSIX")])).ascii);
         assert!(!Glyphs::detect(env(&[("LC_ALL", "de_DE.UTF-8")])).ascii);
@@ -288,7 +298,10 @@ mod tests {
         assert_eq!(Status::of("Done 10:38"), Some(Status::Ok));
         assert_eq!(Status::of("Can't reach this URL"), Some(Status::Fail));
         assert_eq!(Status::of("Not signed in"), Some(Status::Needs));
-        assert_eq!(Status::of("Starts after Readings API"), Some(Status::Waiting));
+        assert_eq!(
+            Status::of("Starts after Readings API"),
+            Some(Status::Waiting)
+        );
         assert_eq!(Status::of("Signing in..."), Some(Status::Active));
         assert_eq!(Status::of("Not installed"), Some(Status::Off));
         assert_eq!(Status::of("Signed"), None);

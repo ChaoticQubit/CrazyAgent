@@ -38,7 +38,9 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
             label: section.label().into(),
             section: Some(glyph(*section)),
             count: match section {
-                SettingsSection::Accounts => count(&ctx.store.accounts, |rows| rows.len().to_string()),
+                SettingsSection::Accounts => {
+                    count(&ctx.store.accounts, |rows| rows.len().to_string())
+                }
                 SettingsSection::Pools => count(&ctx.store.pools, |pools| pools.len().to_string()),
                 SettingsSection::Harnesses => count(&ctx.store.harnesses, ToString::to_string),
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
