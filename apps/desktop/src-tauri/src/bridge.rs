@@ -24,12 +24,12 @@ pub mod master;
 pub mod memory;
 mod model_access;
 mod native_auth;
-pub mod project_setup;
-mod owner_setup;
-mod team;
-mod plugins;
 pub mod open;
+mod owner_setup;
 pub mod picker;
+mod plugins;
+pub mod project_setup;
+mod team;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -451,27 +451,37 @@ impl NativeBridge {
             OwnerMutation::SetupProject { project_id, .. } => {
                 ("setup_project", Some(project_id.as_str().to_owned()), None)
             }
-            OwnerMutation::SaveResearchToMemory { project_id, .. } => {
-                ("research_memory", Some(project_id.as_str().to_owned()), None)
-            }
-            OwnerMutation::AddProjectDocuments { project_id, .. } => {
-                ("project_documents", Some(project_id.as_str().to_owned()), None)
-            }
-            OwnerMutation::DeleteProjectContext { project_id, .. } => {
-                ("project_context_delete", Some(project_id.as_str().to_owned()), None)
-            }
+            OwnerMutation::SaveResearchToMemory { project_id, .. } => (
+                "research_memory",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
+            OwnerMutation::AddProjectDocuments { project_id, .. } => (
+                "project_documents",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
+            OwnerMutation::DeleteProjectContext { project_id, .. } => (
+                "project_context_delete",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::Team { action } => {
                 ("team", Some(action.project().as_str().to_owned()), None)
             }
-            OwnerMutation::UpdateProjectSetup { project_id, .. } => {
-                ("project_setup_update", Some(project_id.as_str().to_owned()), None)
-            }
+            OwnerMutation::UpdateProjectSetup { project_id, .. } => (
+                "project_setup_update",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::RemoveProject { project_id } => {
                 ("project_remove", Some(project_id.as_str().to_owned()), None)
             }
-            OwnerMutation::CancelResearch { project_id, .. } => {
-                ("research_cancel", Some(project_id.as_str().to_owned()), None)
-            }
+            OwnerMutation::CancelResearch { project_id, .. } => (
+                "research_cancel",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::RetryResearch { project_id, .. } => {
                 ("research_retry", Some(project_id.as_str().to_owned()), None)
             }
@@ -498,12 +508,18 @@ impl NativeBridge {
                 crazyagent::memory::library::LibraryAction::Forget { project_id, .. } => {
                     ("memory_forget", Some(project_id.as_str().to_owned()), None)
                 }
-                crazyagent::memory::library::LibraryAction::Remember { project_id, .. } => {
-                    ("memory_remember", Some(project_id.as_str().to_owned()), None)
-                }
+                crazyagent::memory::library::LibraryAction::Remember { project_id, .. } => (
+                    "memory_remember",
+                    Some(project_id.as_str().to_owned()),
+                    None,
+                ),
                 crazyagent::memory::library::LibraryAction::SaveSelection {
                     project_id, ..
-                } => ("memory_selection", Some(project_id.as_str().to_owned()), None),
+                } => (
+                    "memory_selection",
+                    Some(project_id.as_str().to_owned()),
+                    None,
+                ),
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }

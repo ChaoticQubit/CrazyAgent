@@ -230,8 +230,16 @@ fn engine_codex_executable_relative_path_rejects_before_config_or_runtime_io() {
     ];
     for suffix in [
         vec!["--codex-executable", "relative-codex"],
-        vec!["--writable-settings", "--codex-executable", "relative-codex"],
-        vec!["--codex-executable", "relative-codex", "--writable-settings"],
+        vec![
+            "--writable-settings",
+            "--codex-executable",
+            "relative-codex",
+        ],
+        vec![
+            "--codex-executable",
+            "relative-codex",
+            "--writable-settings",
+        ],
     ] {
         let mut args = base.clone();
         args.extend(suffix.into_iter().map(OsString::from));
@@ -265,14 +273,28 @@ fn native_auth_custodian_cli_explicit_codex_keeps_private_bootstrap_requirement(
 fn native_auth_custodian_cli_explicit_codex_rejects_invalid_pin_before_bootstrap() {
     let root = private_root();
     for (executable, digest, expected) in [
-        (OsString::from("relative-codex"), "0".repeat(64), "native_auth_host_executable_unsafe"),
-        (root.path().join("codex").into_os_string(), "0".repeat(63), "native_auth_host_executable_digest_invalid"),
-        (root.path().join("codex").into_os_string(), "A".repeat(64), "native_auth_host_executable_digest_invalid"),
+        (
+            OsString::from("relative-codex"),
+            "0".repeat(64),
+            "native_auth_host_executable_unsafe",
+        ),
+        (
+            root.path().join("codex").into_os_string(),
+            "0".repeat(63),
+            "native_auth_host_executable_digest_invalid",
+        ),
+        (
+            root.path().join("codex").into_os_string(),
+            "A".repeat(64),
+            "native_auth_host_executable_digest_invalid",
+        ),
     ] {
         let mut args = arguments(root.path());
         args.extend([
-            OsString::from("--codex-executable"), executable,
-            OsString::from("--codex-sha256"), digest.into(),
+            OsString::from("--codex-executable"),
+            executable,
+            OsString::from("--codex-sha256"),
+            digest.into(),
         ]);
         assert_rejection(observe(root.path(), &args, &[], true), expected);
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);

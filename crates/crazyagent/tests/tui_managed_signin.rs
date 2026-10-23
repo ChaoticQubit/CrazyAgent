@@ -264,10 +264,9 @@ async fn verify_catalog(root: &Path) {
     assert_eq!(identifiers.len(), 4);
     assert_eq!(pool.members, vec![connection.id.clone()]);
     assert!(!pool.fallback_allowed);
-    let mut owner =
-        OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
-            .await
-            .unwrap();
+    let mut owner = OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+        .await
+        .unwrap();
     for (collection, expected) in [
         (
             ModelAccessCollection::Accounts,
@@ -417,7 +416,9 @@ async fn managed_signin_blank_label_persists_generated_catalog_before_auth_metho
     if outcome.is_ok() {
         let path = root.path().to_path_buf();
         if let Err(error) = tokio::spawn(async move { verify_catalog(&path).await }).await {
-            outcome = Err(format!("Real managed sign-in catalog readback failed: {error}"));
+            outcome = Err(format!(
+                "Real managed sign-in catalog readback failed: {error}"
+            ));
         }
     }
     let cleanup = service.shutdown().await;

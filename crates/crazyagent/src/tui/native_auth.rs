@@ -249,19 +249,33 @@ impl State {
     /// Input: the current time. Output: whether a read was queued; never while a Claude
     /// code is being typed, a confirmation is open or another request is in flight.
     pub(super) fn poll_pending(&mut self, now: std::time::Instant) -> bool {
-        if !self.open || !self.connected || !self.inspected || self.loading()
-            || self.confirmation.is_some() || self.claude_code.accepts_code()
+        if !self.open
+            || !self.connected
+            || !self.inspected
+            || self.loading()
+            || self.confirmation.is_some()
+            || self.claude_code.accepts_code()
         {
             return false;
         }
-        let moving = self.retained.as_ref().and_then(|retained| retained.fact.as_ref()).is_some_and(|fact| {
-            matches!(
-                fact.phase,
-                NativeAuthPhase::Starting | NativeAuthPhase::AwaitingOwner
-                    | NativeAuthPhase::CheckingAccount | NativeAuthPhase::Cancelling
-            )
-        });
-        if !moving || self.polled.is_some_and(|last| now < last + std::time::Duration::from_secs(2)) {
+        let moving = self
+            .retained
+            .as_ref()
+            .and_then(|retained| retained.fact.as_ref())
+            .is_some_and(|fact| {
+                matches!(
+                    fact.phase,
+                    NativeAuthPhase::Starting
+                        | NativeAuthPhase::AwaitingOwner
+                        | NativeAuthPhase::CheckingAccount
+                        | NativeAuthPhase::Cancelling
+                )
+            });
+        if !moving
+            || self
+                .polled
+                .is_some_and(|last| now < last + std::time::Duration::from_secs(2))
+        {
             return false;
         }
         self.polled = Some(now);
@@ -296,7 +310,10 @@ impl State {
         }
         if self.selected == 0
             && self.confirmation.is_none()
-            && matches!(event, UiEvent::Character(_) | UiEvent::Backspace | UiEvent::Submit)
+            && matches!(
+                event,
+                UiEvent::Character(_) | UiEvent::Backspace | UiEvent::Submit
+            )
             && self.connected
             && self.inspected
             && self.flight.is_none()
@@ -595,11 +612,7 @@ impl State {
         } else {
             self.claude_code.clear();
         }
-        self.presentation = if present {
-            Some(reply)
-        } else {
-            None
-        };
+        self.presentation = if present { Some(reply) } else { None };
     }
 
     pub(super) fn last_authentication(&self, basis: Option<&Basis>) -> Vec<String> {
@@ -779,7 +792,9 @@ pub(super) fn public_problem(problem: &str) -> &'static str {
         "native_auth_not_active" => "native_auth_not_active",
         "native_auth_operation_missing" => "native_auth_operation_missing",
         "native_auth_recovery_required" => "native_auth_recovery_required",
-        "native_auth_sign_in_expired" => "Sign-in code expired before approval; start sign-in again",
+        "native_auth_sign_in_expired" => {
+            "Sign-in code expired before approval; start sign-in again"
+        }
         "native_auth_operation_conflict" => "native_auth_operation_conflict",
         "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
         "native_auth_operation_capacity" => "native_auth_operation_capacity",

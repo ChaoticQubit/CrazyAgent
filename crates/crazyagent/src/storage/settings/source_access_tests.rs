@@ -182,14 +182,24 @@ fn settings_source_access_stale_configuration_is_rejected() {
         "settings_source_conflict"
     );
     let actual = verified_source_hash_at(&current, &fixture.global, &fixture.project).unwrap();
-    assert_eq!(actual, verified_source_hash(&current, Some(&fixture.sources)).unwrap());
+    assert_eq!(
+        actual,
+        verified_source_hash(&current, Some(&fixture.sources)).unwrap()
+    );
     assert_ne!(actual, before);
 }
 
 #[test]
 fn settings_source_access_unsafe_files_and_parents_are_rejected() {
     for project in [false, true] {
-        for mutation in ["symlink", "hardlink", "file_mode", "parent_mode", "size", "utf8"] {
+        for mutation in [
+            "symlink",
+            "hardlink",
+            "file_mode",
+            "parent_mode",
+            "size",
+            "utf8",
+        ] {
             let fixture = Fixture::new(true);
             let path = if project {
                 &fixture.project

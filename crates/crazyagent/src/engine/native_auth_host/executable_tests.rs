@@ -27,9 +27,16 @@ fn native_auth_registered_executable_verified_sha256_matches_actual_bytes() {
     let path = executable(root.path(), "codex");
     let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
     let digest = registered.verified_sha256().unwrap();
-    assert_eq!(digest, format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap())));
+    assert_eq!(
+        digest,
+        format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap()))
+    );
     assert_eq!(digest.len(), 64);
-    assert!(digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
 }
 
 #[test]
@@ -60,14 +67,17 @@ fn native_auth_custodian_command_keeps_self_and_codex_pins_distinct() {
     let command = super::custodian_command(&path, root.path(), Some(&codex)).unwrap();
     assert_eq!(command.get_program(), path.as_os_str());
     let arguments: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
-    assert_eq!(arguments, vec![
-        std::ffi::OsString::from("native-auth-custodian"),
-        root.path().as_os_str().to_owned(),
-        std::ffi::OsString::from("--codex-executable"),
-        codex_path.into_os_string(),
-        std::ffi::OsString::from("--codex-sha256"),
-        codex.verified_sha256().unwrap().into(),
-    ]);
+    assert_eq!(
+        arguments,
+        vec![
+            std::ffi::OsString::from("native-auth-custodian"),
+            root.path().as_os_str().to_owned(),
+            std::ffi::OsString::from("--codex-executable"),
+            codex_path.into_os_string(),
+            std::ffi::OsString::from("--codex-sha256"),
+            codex.verified_sha256().unwrap().into(),
+        ]
+    );
     assert_eq!(command.get_envs().count(), 0);
     assert_eq!(command.get_current_dir(), Some(root.path()));
 }
@@ -78,10 +88,13 @@ fn native_auth_custodian_command_without_codex_preserves_default_entry() {
     let path = executable(root.path(), "crazyagent");
     let command = super::custodian_command(&path, root.path(), None).unwrap();
     let arguments: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
-    assert_eq!(arguments, vec![
-        std::ffi::OsString::from("native-auth-custodian"),
-        root.path().as_os_str().to_owned(),
-    ]);
+    assert_eq!(
+        arguments,
+        vec![
+            std::ffi::OsString::from("native-auth-custodian"),
+            root.path().as_os_str().to_owned(),
+        ]
+    );
 }
 
 #[test]
@@ -221,7 +234,10 @@ fn native_auth_executable_bound_admits_large_harness_builds_and_refuses_beyond_i
         .set_len(super::EXECUTABLE_BYTES_MAX + 1)
         .unwrap();
     assert_eq!(
-        RegisteredNativeAuthHost::capture(&oversized).err().unwrap().0,
+        RegisteredNativeAuthHost::capture(&oversized)
+            .err()
+            .unwrap()
+            .0,
         "native_auth_host_executable_unsafe"
     );
 }

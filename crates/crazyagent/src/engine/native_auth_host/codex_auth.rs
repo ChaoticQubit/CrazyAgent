@@ -1,5 +1,5 @@
 use super::custody::{CustodySession, Retirement, cleanup_owned_group};
-use crate::adapters::codex::{AuthControl, CodexProtocol, Event, LoginChallenge, FRAME_BYTES_MAX};
+use crate::adapters::codex::{AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge};
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
@@ -72,8 +72,16 @@ impl Pipe {
     fn new(descriptor: OwnedFd) -> Result<Self, EngineError> {
         let flags = fcntl_getfl(&descriptor).map_err(io_error)?;
         fcntl_setfl(&descriptor, flags | OFlags::NONBLOCK).map_err(io_error)?;
-        assert!(fcntl_getfl(&descriptor).map_err(io_error)?.contains(OFlags::NONBLOCK));
-        Ok(Self { descriptor, bytes: 0, eof: false })
+        assert!(
+            fcntl_getfl(&descriptor)
+                .map_err(io_error)?
+                .contains(OFlags::NONBLOCK)
+        );
+        Ok(Self {
+            descriptor,
+            bytes: 0,
+            eof: false,
+        })
     }
 
     fn read(&mut self) -> Result<Vec<u8>, EngineError> {
@@ -111,15 +119,29 @@ struct Pipes {
 
 impl Pipes {
     fn take(child: &mut Child) -> Result<Self, EngineError> {
-        let input: OwnedFd = child.stdin.take().ok_or_else(|| failure("native_auth_codex_pipe_missing"))?.into();
-        let output = child.stdout.take().ok_or_else(|| failure("native_auth_codex_pipe_missing"))?;
-        let errors = child.stderr.take().ok_or_else(|| failure("native_auth_codex_pipe_missing"))?;
+        let input: OwnedFd = child
+            .stdin
+            .take()
+            .ok_or_else(|| failure("native_auth_codex_pipe_missing"))?
+            .into();
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| failure("native_auth_codex_pipe_missing"))?;
+        let errors = child
+            .stderr
+            .take()
+            .ok_or_else(|| failure("native_auth_codex_pipe_missing"))?;
         let flags = fcntl_getfl(&input).map_err(io_error)?;
         fcntl_setfl(&input, flags | OFlags::NONBLOCK).map_err(io_error)?;
         assert!(child.stdin.is_none());
         assert!(child.stdout.is_none());
         assert!(child.stderr.is_none());
-        Ok(Self { input, output: Pipe::new(output.into())?, errors: Pipe::new(errors.into())? })
+        Ok(Self {
+            input,
+            output: Pipe::new(output.into())?,
+            errors: Pipe::new(errors.into())?,
+        })
     }
 }
 
@@ -174,14 +196,20 @@ impl Driver<'_> {
     }
 
     async fn check(&mut self) -> Result<(), EngineError> {
-        if matches!(self.session.check(self.channel).await?, NativeAuthCustodyControl::Cancel) {
+        if matches!(
+            self.session.check(self.channel).await?,
+            NativeAuthCustodyControl::Cancel
+        ) {
             self.cancel_requested = true;
         }
         Ok(())
     }
 
     async fn observe(&mut self, event: AuthControl) -> Result<(), EngineError> {
-        if matches!(self.session.observe_codex(self.channel, event).await?, NativeAuthCustodyControl::Cancel) {
+        if matches!(
+            self.session.observe_codex(self.channel, event).await?,
+            NativeAuthCustodyControl::Cancel
+        ) {
             self.cancel_requested = true;
         }
         Ok(())
@@ -203,12 +231,19 @@ impl Driver<'_> {
         let frame = self.protocol.initialized().map_err(protocol_error)?;
         self.write(frame, false).await?;
         let frame = match self.action {
-            NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser } => self.protocol.start_chatgpt_login(),
-            NativeAuthAction::SignIn { method: NativeAuthMethod::CodexDeviceCode } => self.protocol.start_device_code_login(),
-            NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting } => return self.read_account().await,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            } => self.protocol.start_chatgpt_login(),
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexDeviceCode,
+            } => self.protocol.start_device_code_login(),
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexExisting,
+            } => return self.read_account().await,
             NativeAuthAction::Logout => self.protocol.logout_account(),
             _ => return Err(failure("native_auth_codex_method_unsupported")),
-        }.map_err(protocol_error)?;
+        }
+        .map_err(protocol_error)?;
         self.write(frame, false).await
     }
 
@@ -216,7 +251,8 @@ impl Driver<'_> {
         match event {
             AuthControl::LoginStarted { ref challenge, .. } => {
                 self.login_id = Some(match challenge {
-                    LoginChallenge::Browser { login_id, .. } | LoginChallenge::DeviceCode { login_id, .. } => login_id.clone(),
+                    LoginChallenge::Browser { login_id, .. }
+                    | LoginChallenge::DeviceCode { login_id, .. } => login_id.clone(),
                 });
                 self.observe(event).await?;
                 if let Some(completed) = self.completion.take() {
@@ -270,7 +306,10 @@ impl Driver<'_> {
         let Some(login_id) = self.login_id.as_ref() else {
             return Ok(());
         };
-        let frame = self.protocol.cancel_login(login_id).map_err(protocol_error)?;
+        let frame = self
+            .protocol
+            .cancel_login(login_id)
+            .map_err(protocol_error)?;
         self.write(frame, true).await?;
         self.cancel_sent = true;
         assert!(self.cancel_sent);
@@ -303,7 +342,14 @@ impl Driver<'_> {
                 self.cancel_requested = true;
             }
             self.cancel().await?;
-            if self.pipes.output.eof || self.session.child_mut()?.try_wait().map_err(io_error)?.is_some() {
+            if self.pipes.output.eof
+                || self
+                    .session
+                    .child_mut()?
+                    .try_wait()
+                    .map_err(io_error)?
+                    .is_some()
+            {
                 self.protocol.finish().map_err(protocol_error)?;
                 return Err(failure("native_auth_codex_exited_before_observation"));
             }
@@ -320,12 +366,19 @@ pub(in crate::engine) async fn run(
 ) -> Result<Retirement, EngineError> {
     let action = channel.fact().action.clone();
     let run_time = match action {
-        NativeAuthAction::SignIn { method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode } => SIGN_IN_TIME,
-        NativeAuthAction::SignIn { method: NativeAuthMethod::CodexExisting } => CHECK_TIME_MAX,
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
+        } => SIGN_IN_TIME,
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::CodexExisting,
+        } => CHECK_TIME_MAX,
         NativeAuthAction::Logout => LOGOUT_TIME,
         _ => return Err(failure("native_auth_codex_method_unsupported")),
     };
-    if matches!(session.check(channel).await?, NativeAuthCustodyControl::Cancel) {
+    if matches!(
+        session.check(channel).await?,
+        NativeAuthCustodyControl::Cancel
+    ) {
         return Err(failure("native_auth_cancelled"));
     }
     let home = session.profile_path()?;
@@ -338,9 +391,18 @@ pub(in crate::engine) async fn run(
     }
     let pipes = Pipes::take(session.child_mut()?)?;
     let mut driver = Driver {
-        session: &mut session, channel, pipes, protocol: CodexProtocol::new(), action,
-        login_id: None, completion: None, account_requested: false, cancel_requested: false,
-        cancel_sent: false, done: false, deadline: Instant::now() + run_time,
+        session: &mut session,
+        channel,
+        pipes,
+        protocol: CodexProtocol::new(),
+        action,
+        login_id: None,
+        completion: None,
+        account_requested: false,
+        cancel_requested: false,
+        cancel_sent: false,
+        done: false,
+        deadline: Instant::now() + run_time,
     };
     let result = driver.run().await;
     drop(driver);

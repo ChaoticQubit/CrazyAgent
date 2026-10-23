@@ -422,7 +422,11 @@ async fn local_none_commits_private_profile_and_recovers_original_receipt_withou
         assert_no_auth(&case);
         let focus = ui.app.focus();
         ui.key(KeyCode::BackTab);
-        assert_ne!(ui.app.focus(), focus, "a finished setup panel must not trap focus");
+        assert_ne!(
+            ui.app.focus(),
+            focus,
+            "a finished setup panel must not trap focus"
+        );
         assert!(!views::body(&ui.app).contains("Private profile setup"));
     })
     .await;

@@ -442,14 +442,14 @@ async fn verify_registration(root: &Path, mode: &str) {
         .unwrap();
     let registrations: Vec<_> = records
         .into_iter()
-        .filter_map(
-            |(id, hash, body)| match serde_json::from_slice::<OwnerResult>(&body).unwrap() {
+        .filter_map(|(id, hash, body)| {
+            match serde_json::from_slice::<OwnerResult>(&body).unwrap() {
                 OwnerResult::RcliProfileRegistered { registration } => {
                     Some((id, hash, registration))
                 }
                 _ => None,
-            },
-        )
+            }
+        })
         .collect();
     assert_eq!(registrations.len(), 1);
     let (operation, hash, metadata) = &registrations[0];

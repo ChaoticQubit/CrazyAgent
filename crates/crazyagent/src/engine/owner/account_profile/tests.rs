@@ -44,10 +44,17 @@ fn imp1035_secret_bounds_and_debug_are_explicit() {
         let secret = AccountSecret::new(vec![b'x'; length]).unwrap();
         assert_eq!(format!("{secret:?}"), "AccountSecret([REDACTED])");
     }
-    for bytes in [Vec::new(), vec![b'x'; 8193], b"a\0b".to_vec(),
-        b"a\nb".to_vec(), b"a\rb".to_vec()]
-    {
-        assert_eq!(AccountSecret::new(bytes).err().unwrap().0, "account_secret_invalid");
+    for bytes in [
+        Vec::new(),
+        vec![b'x'; 8193],
+        b"a\0b".to_vec(),
+        b"a\nb".to_vec(),
+        b"a\rb".to_vec(),
+    ] {
+        assert_eq!(
+            AccountSecret::new(bytes).err().unwrap().0,
+            "account_secret_invalid"
+        );
     }
 }
 
@@ -62,7 +69,8 @@ fn imp1035_scope_admits_actual_api_key_and_none_connections() {
             &expected.expected_config_id,
             &expected.expected_source_hash,
             &connection,
-        ).unwrap();
+        )
+        .unwrap();
     }
 }
 
@@ -79,13 +87,16 @@ fn imp1035_scope_rejects_each_stale_actor_pin() {
             3 => submitted.connection = reference("different-connection"),
             _ => unreachable!(),
         }
-        assert!(authorize_account_profile_scope(
-            &submitted,
-            &current.expected_database_instance,
-            &current.expected_config_id,
-            &current.expected_source_hash,
-            &connection,
-        ).is_err());
+        assert!(
+            authorize_account_profile_scope(
+                &submitted,
+                &current.expected_database_instance,
+                &current.expected_config_id,
+                &current.expected_source_hash,
+                &connection,
+            )
+            .is_err()
+        );
     }
 }
 
@@ -96,13 +107,19 @@ fn imp1035_configuration_does_not_use_native_managed_admission() {
         profile_ref: reference("native-profile"),
     };
     let expected = scope(&connection);
-    assert_eq!(authorize_account_profile_scope(
-        &expected,
-        &expected.expected_database_instance,
-        &expected.expected_config_id,
-        &expected.expected_source_hash,
-        &connection,
-    ).err().unwrap().0, "account_profile_auth_unsupported");
+    assert_eq!(
+        authorize_account_profile_scope(
+            &expected,
+            &expected.expected_database_instance,
+            &expected.expected_config_id,
+            &expected.expected_source_hash,
+            &connection,
+        )
+        .err()
+        .unwrap()
+        .0,
+        "account_profile_auth_unsupported"
+    );
 }
 
 #[test]
@@ -112,13 +129,16 @@ fn imp1035_none_configuration_rejects_hosted_endpoint() {
         url: "https://example.invalid/v1".into(),
     };
     let expected = scope(&connection);
-    assert!(authorize_account_profile_scope(
-        &expected,
-        &expected.expected_database_instance,
-        &expected.expected_config_id,
-        &expected.expected_source_hash,
-        &connection,
-    ).is_err());
+    assert!(
+        authorize_account_profile_scope(
+            &expected,
+            &expected.expected_database_instance,
+            &expected.expected_config_id,
+            &expected.expected_source_hash,
+            &connection,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -145,10 +165,18 @@ fn imp1035_receipt_is_configured_only_and_contains_none_profile_join() {
             historical_replay: true,
         },
     };
-    let AccountProfileOutcome::ConfiguredOnly { receipt, historical_replay } = reply.outcome
-    else { panic!("configured-only receipt required") };
+    let AccountProfileOutcome::ConfiguredOnly {
+        receipt,
+        historical_replay,
+    } = reply.outcome
+    else {
+        panic!("configured-only receipt required")
+    };
     assert!(historical_replay);
     assert_eq!(receipt.profile_ref, reference("owner-generated-profile"));
-    assert!(matches!(receipt.connection.auth, ModelAuthentication::None {}));
+    assert!(matches!(
+        receipt.connection.auth,
+        ModelAuthentication::None {}
+    ));
     assert_eq!(receipt.profile_generation, 1);
 }

@@ -29,14 +29,23 @@ pub(super) struct HostProcess {
 
 impl HostProcess {
     pub(super) fn spawn(mut command: Command) -> Result<Self, ProtocolError> {
-        let mut child = command.spawn().map_err(|_| error("rcli_master_spawn_failed"))?;
+        let mut child = command
+            .spawn()
+            .map_err(|_| error("rcli_master_spawn_failed"))?;
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
         let stderr = child.stderr.take().expect("configured host error pipe");
         let process = Self {
-            child, stdin: Some(stdin), stdout: Some(stdout), stderr: Some(stderr),
-            pending: Vec::new(), stdout_bytes: 0, stderr_bytes: 0, status: None,
-            group_absent: false, clean: false,
+            child,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            pending: Vec::new(),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            status: None,
+            group_absent: false,
+            clean: false,
         };
         assert!(process.child.id() > 1);
         assert!(process.pending.is_empty());
@@ -52,7 +61,10 @@ impl HostProcess {
         let deadline = Instant::now() + WRITE_TIME;
         let mut written = 0;
         while written < bytes.len() && Instant::now() < deadline {
-            let input = self.stdin.as_mut().ok_or_else(|| error("rcli_master_input_closed"))?;
+            let input = self
+                .stdin
+                .as_mut()
+                .ok_or_else(|| error("rcli_master_input_closed"))?;
             match input.write(&bytes[written..]) {
                 Ok(0) => return Err(error("rcli_master_input_closed")),
                 Ok(count) => written += count,
@@ -64,7 +76,9 @@ impl HostProcess {
                 Err(_) => return Err(error("rcli_master_input_failed")),
             }
         }
-        if written != bytes.len() { return Err(error("rcli_master_input_deadline")); }
+        if written != bytes.len() {
+            return Err(error("rcli_master_input_deadline"));
+        }
         assert_eq!(written, bytes.len());
         Ok(())
     }
@@ -80,13 +94,18 @@ impl HostProcess {
                 return Ok(Some(std::mem::take(&mut self.pending)));
             }
             let remaining = (target - self.pending.len()).min(scratch.len());
-            let Some(output) = self.stdout.as_mut() else { return Err(self.exit_error()); };
+            let Some(output) = self.stdout.as_mut() else {
+                return Err(self.exit_error());
+            };
             match output.read(&mut scratch[..remaining]) {
                 Ok(0) => {
                     self.stdout = None;
                     self.reap()?;
-                    return Err(if self.pending.is_empty() { self.exit_error() }
-                        else { error("rcli_master_truncated_event") });
+                    return Err(if self.pending.is_empty() {
+                        self.exit_error()
+                    } else {
+                        error("rcli_master_truncated_event")
+                    });
                 }
                 Ok(count) => {
                     self.stdout_bytes += count;
@@ -105,12 +124,16 @@ impl HostProcess {
         if self.pending.len() == target && target > 4 {
             return Ok(Some(std::mem::take(&mut self.pending)));
         }
-        if self.status.is_some() { return Err(self.exit_error()); }
+        if self.status.is_some() {
+            return Err(self.exit_error());
+        }
         Ok(None)
     }
 
     fn frame_size(&self) -> Result<usize, ProtocolError> {
-        if self.pending.len() < 4 { return Ok(4); }
+        if self.pending.len() < 4 {
+            return Ok(4);
+        }
         let header: [u8; 4] = self.pending[..4].try_into().expect("complete host header");
         let length = u32::from_be_bytes(header) as usize;
         if length == 0 || length > FRAME_BYTES_MAX {
@@ -124,9 +147,14 @@ impl HostProcess {
     fn read_stderr(&mut self) -> Result<(), ProtocolError> {
         let mut scratch = [0; 1024];
         for _ in 0..16 {
-            let Some(output) = self.stderr.as_mut() else { return Ok(()); };
+            let Some(output) = self.stderr.as_mut() else {
+                return Ok(());
+            };
             match output.read(&mut scratch) {
-                Ok(0) => { self.stderr = None; return Ok(()); }
+                Ok(0) => {
+                    self.stderr = None;
+                    return Ok(());
+                }
                 Ok(count) => {
                     self.stderr_bytes += count;
                     if self.stderr_bytes > STDERR_BYTES_MAX {
@@ -153,7 +181,10 @@ impl HostProcess {
 
     fn reap(&mut self) -> Result<(), ProtocolError> {
         if self.status.is_none() {
-            self.status = self.child.try_wait().map_err(|_| error("rcli_master_wait_failed"))?;
+            self.status = self
+                .child
+                .try_wait()
+                .map_err(|_| error("rcli_master_wait_failed"))?;
         }
         Ok(())
     }
@@ -208,7 +239,9 @@ impl HostProcess {
     }
 
     pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
-        if self.clean { return Ok(()); }
+        if self.clean {
+            return Ok(());
+        }
         self.stdin = None;
         self.stdout = None;
         self.stderr = None;
@@ -225,7 +258,11 @@ impl HostProcess {
                 self.clean = true;
                 assert!(self.stdin.is_none());
                 assert!(self.status.is_some());
-                return if uncertain { Err(error("rcli_master_cleanup_incomplete")) } else { Ok(()) };
+                return if uncertain {
+                    Err(error("rcli_master_cleanup_incomplete"))
+                } else {
+                    Ok(())
+                };
             }
             if !terminated && started.elapsed() >= Duration::from_millis(250) {
                 uncertain |= self.signal(Signal::TERM).is_err();
@@ -257,7 +294,9 @@ fn nonblocking(descriptor: &impl AsFd) -> Result<(), ProtocolError> {
     fcntl_setfl(descriptor, flags | OFlags::NONBLOCK)
         .map_err(|_| error("rcli_master_pipe_failed"))?;
     let actual = fcntl_getfl(descriptor).map_err(|_| error("rcli_master_pipe_failed"))?;
-    if !actual.contains(OFlags::NONBLOCK) { return Err(error("rcli_master_pipe_failed")); }
+    if !actual.contains(OFlags::NONBLOCK) {
+        return Err(error("rcli_master_pipe_failed"));
+    }
     assert!(actual.contains(OFlags::NONBLOCK));
     assert!(actual.contains(flags));
     Ok(())
@@ -272,12 +311,21 @@ mod tests {
     #[test]
     fn exited_unreaped_host_group_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exit 0"]).stdin(Stdio::piped()).stdout(Stdio::piped())
-            .stderr(Stdio::piped()).process_group(0);
+        command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
         let mut process = HostProcess::spawn(command).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while rustix::process::test_kill_process_group(process.group()) != Err(rustix::io::Errno::PERM) {
-            assert!(Instant::now() < deadline, "host did not become an exited unreaped group");
+        while rustix::process::test_kill_process_group(process.group())
+            != Err(rustix::io::Errno::PERM)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "host did not become an exited unreaped group"
+            );
             thread::sleep(Duration::from_millis(10));
         }
         assert!(process.status.is_none());
@@ -291,15 +339,27 @@ mod tests {
     #[test]
     fn exited_group_member_reaped_by_its_own_parent_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sleep");
-        command.arg("0.3").stdin(Stdio::piped()).stdout(Stdio::piped())
-            .stderr(Stdio::piped()).process_group(0);
+        command
+            .arg("0.3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
         let mut process = HostProcess::spawn(command).unwrap();
         let group = i32::try_from(process.child.id()).unwrap();
-        let mut member = Command::new("/bin/sh").args(["-c", "exit 0"]).process_group(group)
-            .spawn().unwrap();
+        let mut member = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(group)
+            .spawn()
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while rustix::process::test_kill_process_group(process.group()) != Err(rustix::io::Errno::PERM) {
-            assert!(Instant::now() < deadline, "group did not hold only exited members");
+        while rustix::process::test_kill_process_group(process.group())
+            != Err(rustix::io::Errno::PERM)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "group did not hold only exited members"
+            );
             thread::sleep(Duration::from_millis(10));
         }
         let reaper = thread::spawn(move || {

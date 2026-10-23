@@ -30,9 +30,7 @@ impl NativeBridge {
         }
         self.project
             .as_ref()
-            .filter(|selected| {
-                ticket.len() <= 20 && ticket == selected.generation.to_string()
-            })
+            .filter(|selected| ticket.len() <= 20 && ticket == selected.generation.to_string())
             .map(|selected| selected.id.clone())
             .ok_or_else(|| failure("stale_selection"))
     }
@@ -49,7 +47,10 @@ impl NativeBridge {
         let OwnerData::ProjectMaster { session } = state.data else {
             return Err(failure("unexpected_reply"));
         };
-        if session.as_ref().is_some_and(|value| value.project_id != project_id) {
+        if session
+            .as_ref()
+            .is_some_and(|value| value.project_id != project_id)
+        {
             return Err(failure("unexpected_reply"));
         }
         bounded(MasterState {
@@ -69,13 +70,18 @@ impl NativeBridge {
     ) -> Result<MasterTurns, BridgeError> {
         let project_id = self.master_project(ticket)?;
         let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
-        if cursor.as_ref().is_some_and(|value| {
-            value.project_id != project_id || value.session_id != session_id
-        }) {
+        if cursor
+            .as_ref()
+            .is_some_and(|value| value.project_id != project_id || value.session_id != session_id)
+        {
             return Err(failure("stale_master"));
         }
         let current = self.master_state(ticket).await?;
-        if !current.session.as_ref().is_some_and(|value| value.session_id == session_id) {
+        if !current
+            .session
+            .as_ref()
+            .is_some_and(|value| value.session_id == session_id)
+        {
             return Err(failure("stale_master"));
         }
         let state = self
@@ -169,7 +175,11 @@ impl NativeBridge {
         if text.trim().is_empty() || text.len() > 8192 || text.contains('\0') {
             return Err(failure("conversation_text_bounds"));
         }
-        let action = MasterOwnerAction::Submit { project_id, session_id, text: text.into() };
+        let action = MasterOwnerAction::Submit {
+            project_id,
+            session_id,
+            text: text.into(),
+        };
         self.apply_master(ticket, action, generation).await
     }
 
@@ -206,7 +216,10 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = self.master_project(ticket)?;
         let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
-        let action = MasterOwnerAction::Close { project_id, session_id };
+        let action = MasterOwnerAction::Close {
+            project_id,
+            session_id,
+        };
         self.apply_master(ticket, action, generation).await
     }
 }
@@ -285,7 +298,10 @@ fallback_allowed = false
             let _ = body.await;
         }
         let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
-        assert!(matches!(cleanup, Ok(Ok(()))), "actual engine cleanup failed");
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
         result
             .expect("real master bridge case exceeded 20 seconds")
             .expect("real master bridge assertion failed after engine cleanup")
@@ -309,7 +325,9 @@ fallback_allowed = false
                     project_id: project_id.clone(),
                     spec: ProjectSpec {
                         name: "Real master bridge project".into(),
-                        repositories: vec![declared.to_str().ok_or("private path encoding")?.into()],
+                        repositories: vec![
+                            declared.to_str().ok_or("private path encoding")?.into(),
+                        ],
                     },
                 },
                 1,
@@ -319,7 +337,9 @@ fallback_allowed = false
             .send_pending()
             .await
             .map_err(|error| error.to_string())?;
-        assert!(matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied));
+        assert!(
+            matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+        );
         let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
         bridge.connect().await.map_err(|error| error.code)?;
         let selected = bridge.open_project("p").await.map_err(|error| error.code)?;
@@ -329,7 +349,10 @@ fallback_allowed = false
             })
             .await
             .map_err(|error| error.to_string())?;
-        assert!(matches!(absent.data, OwnerData::ProjectMaster { session: None }));
+        assert!(matches!(
+            absent.data,
+            OwnerData::ProjectMaster { session: None }
+        ));
         let empty = bridge
             .master_state(&selected.ticket)
             .await
@@ -387,7 +410,12 @@ fallback_allowed = false
         let mut forged = serde_json::to_value(&open).unwrap();
         forged["owner_id"] = serde_json::json!("browser-cannot-supply-authority");
         assert!(serde_json::from_value::<MasterOwnerAction>(forged).is_err());
-        assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+        assert!(
+            bridge
+                .pending_intent()
+                .map_err(|error| error.code)?
+                .is_none()
+        );
         let opened = bridge
             .apply_master(&selected.ticket, open, 1)
             .await
@@ -407,10 +435,16 @@ fallback_allowed = false
         let OwnerData::ProjectMaster { session } = actual.data else {
             return Err("actual master session read required".into());
         };
-        assert_eq!(serde_json::to_value(&read.session).unwrap(), serde_json::to_value(&session).unwrap());
+        assert_eq!(
+            serde_json::to_value(&read.session).unwrap(),
+            serde_json::to_value(&session).unwrap()
+        );
         let session = session.ok_or("actual configured master session missing")?;
         assert_eq!(session.phase, MasterSessionPhase::Configured);
-        assert_eq!(session.owner.operation_id.as_str(), opened.intent.operation_id);
+        assert_eq!(
+            session.owner.operation_id.as_str(),
+            opened.intent.operation_id
+        );
         assert_eq!(session.project_id, project_id);
         assert!(session.current_turn.is_none());
         let submitted = bridge
@@ -443,7 +477,10 @@ fallback_allowed = false
         let OwnerData::ProjectMasterTurns { page } = actual.data else {
             return Err("actual master turns required".into());
         };
-        assert_eq!(serde_json::to_value(&turns.page).unwrap(), serde_json::to_value(&page).unwrap());
+        assert_eq!(
+            serde_json::to_value(&turns.page).unwrap(),
+            serde_json::to_value(&page).unwrap()
+        );
         assert_eq!(page.turns.len(), 1);
         assert_eq!(page.turns[0].id.as_str(), submitted.intent.operation_id);
         assert_eq!(page.turns[0].phase, MasterTurnPhase::Queued);
@@ -503,12 +540,21 @@ fallback_allowed = false
             .master_turns(&selected.ticket, session.session_id.as_str(), None)
             .await
             .map_err(|error| error.code)?;
-        assert_eq!(serde_json::to_value(&cancelled_turns.page).unwrap(), serde_json::to_value(&page).unwrap());
+        assert_eq!(
+            serde_json::to_value(&cancelled_turns.page).unwrap(),
+            serde_json::to_value(&page).unwrap()
+        );
         let final_state = bridge
             .master_state(&selected.ticket)
             .await
             .map_err(|error| error.code)?;
-        assert!(final_state.session.ok_or("configured session missing after cancel")?.current_turn.is_none());
+        assert!(
+            final_state
+                .session
+                .ok_or("configured session missing after cancel")?
+                .current_turn
+                .is_none()
+        );
         let closed = bridge
             .close_master(&selected.ticket, session.session_id.as_str(), 4)
             .await
@@ -518,11 +564,18 @@ fallback_allowed = false
             .master_state(&selected.ticket)
             .await
             .map_err(|error| error.code)?;
-        assert!(after_close
-            .session
-            .is_none_or(|closed| closed.phase == MasterSessionPhase::Closed));
+        assert!(
+            after_close
+                .session
+                .is_none_or(|closed| closed.phase == MasterSessionPhase::Closed)
+        );
         assert!(!declared.exists());
-        assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+        assert!(
+            bridge
+                .pending_intent()
+                .map_err(|error| error.code)?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -554,7 +607,10 @@ fallback_allowed = false
             let _ = body.await;
         }
         let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
-        assert!(matches!(cleanup, Ok(Ok(()))), "actual engine cleanup failed");
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
         result
             .expect("real default master case exceeded 20 seconds")
             .expect("real default master assertion failed after engine cleanup")
@@ -567,31 +623,62 @@ fallback_allowed = false
                 .await
                 .map_err(|error| error.to_string())?;
         for (generation, id) in [(1, "p"), (2, "q")] {
-            observer.read(OwnerRead::Capabilities).await.map_err(|error| error.to_string())?;
+            observer
+                .read(OwnerRead::Capabilities)
+                .await
+                .map_err(|error| error.to_string())?;
             observer
                 .begin_mutation(
                     OwnerMutation::CreateProject {
                         project_id: ProjectId::new(id).unwrap(),
                         spec: ProjectSpec {
                             name: format!("Default master {id}"),
-                            repositories: vec![root.join(id).to_str().ok_or("private path encoding")?.into()],
+                            repositories: vec![
+                                root.join(id)
+                                    .to_str()
+                                    .ok_or("private path encoding")?
+                                    .into(),
+                            ],
                         },
                     },
                     generation,
                 )
                 .map_err(|error| error.to_string())?;
-            let created = observer.send_pending().await.map_err(|error| error.to_string())?;
-            assert!(matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied));
+            let created = observer
+                .send_pending()
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(
+                matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+            );
         }
         let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
         bridge.connect().await.map_err(|error| error.code)?;
         let unassigned = bridge.open_project("q").await.map_err(|error| error.code)?;
-        let refused = bridge.open_default_master(&unassigned.ticket, 1).await.unwrap_err();
+        let refused = bridge
+            .open_default_master(&unassigned.ticket, 1)
+            .await
+            .unwrap_err();
         assert_eq!(refused.code, "master_open_unavailable");
-        assert!(bridge.master_state(&unassigned.ticket).await.map_err(|error| error.code)?.session.is_none());
-        assert!(bridge.pending_intent().map_err(|error| error.code)?.is_none());
+        assert!(
+            bridge
+                .master_state(&unassigned.ticket)
+                .await
+                .map_err(|error| error.code)?
+                .session
+                .is_none()
+        );
+        assert!(
+            bridge
+                .pending_intent()
+                .map_err(|error| error.code)?
+                .is_none()
+        );
         let selected = bridge.open_project("p").await.map_err(|error| error.code)?;
-        let stale = bridge.open_default_master(&unassigned.ticket, 2).await.unwrap_err();
+        let stale = bridge
+            .open_default_master(&unassigned.ticket, 2)
+            .await
+            .unwrap_err();
         assert_eq!(stale.code, "stale_selection");
         let opened = bridge
             .open_default_master(&selected.ticket, 3)
@@ -599,20 +686,36 @@ fallback_allowed = false
             .expect("Start master must open through the actual owner controller");
         assert_eq!(opened.outcome, ActionOutcome::Applied);
         assert!(!opened.pending);
-        let state = bridge.master_state(&selected.ticket).await.map_err(|error| error.code)?;
-        let session = state.session.ok_or("Start master left no configured session")?;
+        let state = bridge
+            .master_state(&selected.ticket)
+            .await
+            .map_err(|error| error.code)?;
+        let session = state
+            .session
+            .ok_or("Start master left no configured session")?;
         assert_eq!(session.phase, MasterSessionPhase::Configured);
         assert_eq!(session.selection.backend, MasterBackend::Rcli);
         assert_eq!(session.selection.pool_ref.as_str(), "configured-pool");
-        assert_eq!(session.selection.target_profile_ref.as_str(), "configured-profile");
-        assert_eq!(session.selection.route.account_ref.as_str(), "configured-account");
+        assert_eq!(
+            session.selection.target_profile_ref.as_str(),
+            "configured-profile"
+        );
+        assert_eq!(
+            session.selection.route.account_ref.as_str(),
+            "configured-account"
+        );
         let refused_text = bridge
             .submit_master(&selected.ticket, session.session_id.as_str(), "  ", 4)
             .await
             .unwrap_err();
         assert_eq!(refused_text.code, "conversation_text_bounds");
         let sent = bridge
-            .submit_master(&selected.ticket, session.session_id.as_str(), "Say hello.", 5)
+            .submit_master(
+                &selected.ticket,
+                session.session_id.as_str(),
+                "Say hello.",
+                5,
+            )
             .await
             .map_err(|error| error.code)?;
         assert_eq!(sent.outcome, ActionOutcome::Applied);
@@ -623,7 +726,14 @@ fallback_allowed = false
         assert_eq!(turns.page.turns.len(), 1);
         assert_eq!(turns.page.turns[0].id.as_str(), sent.intent.operation_id);
         let other = bridge.open_project("q").await.map_err(|error| error.code)?;
-        assert!(bridge.master_state(&other.ticket).await.map_err(|error| error.code)?.session.is_none());
+        assert!(
+            bridge
+                .master_state(&other.ticket)
+                .await
+                .map_err(|error| error.code)?
+                .session
+                .is_none()
+        );
         Ok(())
     }
 }
