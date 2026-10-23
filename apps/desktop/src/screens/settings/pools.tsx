@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { deletePool, listAccounts, poolSummaries, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
+import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
@@ -46,6 +46,24 @@ export function deleteRefusal(pool: PoolSummary): string {
   const count = pool.project_count;
   const users = count === 1 ? "1 project uses it" : count > 1 ? `${count} projects use it` : "A project uses it";
   return `Can't delete ${pool.name}. ${users}. Choose another pool for ${count === 1 ? "it" : "them"} first.`;
+}
+
+/** The accounts newly added to a pool that agents can use only after the engine sets them
+ * up: saved-key and URL accounts (subscriptions sign in instead). Inputs: the members before
+ * and after saving, and the known accounts. Output: those accounts, in member order. */
+export function setupTargets(previous: string[], members: string[], accounts: AccountView[]): AccountView[] {
+  const known = new Map(accounts.map((account) => [account.id, account]));
+  return members.filter((id) => !previous.includes(id)).map((id) => known.get(id))
+    .filter((account): account is AccountView => account !== undefined && (account.method === "api_key" || account.method === "url"));
+}
+
+/** The note after saving a pool when some accounts are not ready for agents yet.
+ * Input: the failed accounts with plain messages. Output: one sentence, or undefined. */
+export function setupNote(failures: { name: string; message: string }[]): string | undefined {
+  if (failures.length === 0) return undefined;
+  const names = failures.map((failure) => failure.name);
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${list} ${names.length === 1 ? "isn't" : "aren't"} ready for agents yet. ${failures[0]!.message}`;
 }
 
 /** The pool list as a pure view. Inputs: the pools read and the new, edit, delete and retry
@@ -210,7 +228,17 @@ export function Pools({ creating }: { creating: boolean }) {
     const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
     return <PoolEditorView key={editing.id ?? "new"} pool={pool} accounts={accounts} onCancel={leave} onSave={async (name, members) => {
       const saved = session.noteResult(await savePool(editing.id, name, members));
-      if (saved.kind === "ok") { session.showToast(`${name.trim()} saved.`); reload(); leave(); }
+      if (saved.kind !== "ok") return saved;
+      const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
+      const failures: { name: string; message: string }[] = [];
+      for (const account of targets) {
+        const ready = session.noteResult(await readyForAgents(account.id));
+        if (ready.kind !== "ok") failures.push({ name: account.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
+      }
+      setRefusal(setupNote(failures));
+      session.showToast(`${name.trim()} saved.`);
+      reload();
+      leave();
       return saved;
     }} />;
   }

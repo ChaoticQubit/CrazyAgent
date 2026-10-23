@@ -1,6 +1,6 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import { errorMessage, retryBusy } from "./engine-client";
-import type { AccountPool, IntentReceipt, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SkillView } from "./engine-client";
+import type { AccountPool, AccountProfileView, IntentReceipt, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SkillView } from "./engine-client";
 
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
 
@@ -64,6 +64,10 @@ const COPY: Record<string, string> = {
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
+  rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
+  native_profile_in_use: "An agent is using this account now. Try again after it stops.",
+  account_profile_operations_full: "This engine can't set up more accounts for agents.",
+  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -262,6 +266,29 @@ export function localModels(url: string): Promise<Result<string[]>> {
  * Input: account id. Output: the record with its edit ticket. */
 export function signInRecord(id: string): Promise<Result<ModelAccessDetail>> {
   return call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+}
+
+const PROFILE_NOT_NEEDED = new Set(["account_profile_harness_unsupported", "account_profile_auth_unsupported"]);
+
+/** Tells whether a refusal to set an account up for agents only means it needs no harness
+ * profile (for example a harness that reads the key itself). Input: the error code. */
+export function profileNotNeeded(code: string): boolean {
+  return PROFILE_NOT_NEEDED.has(code);
+}
+
+/** Sets a saved-key, URL or local account up for agents once it is in a pool. No key is
+ * sent: the engine uses the key it already holds. Input: account id. Output: ok when the
+ * engine configured it or it needs no profile, otherwise a plain error. */
+export async function readyForAgents(id: string): Promise<Result<void>> {
+  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+  if (detail.kind !== "ok") return detail;
+  const configured = await call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  if (configured.kind === "error" && profileNotNeeded(configured.code)) return { kind: "ok", value: undefined };
+  if (configured.kind !== "ok") return configured;
+  if (configured.value.pending || configured.value.reply.outcome === "not_recorded") {
+    return { kind: "error", code: "account_profile_outcome_unknown_read_same_request", message: plainError("account_profile_outcome_unknown_read_same_request") };
+  }
+  return { kind: "ok", value: undefined };
 }
 
 export interface PoolMember {
