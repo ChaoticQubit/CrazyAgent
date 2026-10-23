@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { harnessCatalog, listAccounts, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result } from "../../api";
+import { harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { waitingLine } from "../project/research";
 
 export interface SetupItem {
   id: "accounts" | "pools" | "harnesses";
@@ -21,6 +22,7 @@ const LIVE_AGENT = new Set(["starting", "working"]);
 const LIVE_TASK = new Set(["queued", "needs_pool", "running"]);
 const ACTIVITY_POLL_MS = 10000;
 const ACTIVITY_PROJECTS_MAX = 60;
+const NEEDS_SHOWN = 3;
 
 /** What a project card says about its work: the research line, the working-agents line, whether
  * research waits for a pool, and whether anything is still moving so the dashboard keeps reading. */
@@ -36,14 +38,14 @@ export interface CardActivity {
  * not ready or failed adds nothing. Inputs: the two reads, undefined while loading.
  * Output: the card lines, null for a line with nothing to say. */
 export function cardActivity(team: Result<Pick<TeamStatus, "agents" | "tasks">> | undefined,
-  research: Result<{ jobs: Pick<ResearchJob, "status">[] }> | undefined): CardActivity {
+  research: Result<{ jobs: ResearchJob[] }> | undefined): CardActivity {
   const crew = team?.kind === "ok" ? team.value : null;
   const jobs = research?.kind === "ok" ? research.value.jobs : null;
   const count = (status: string) => jobs?.filter((job) => job.status === status).length ?? 0;
   const waiting = count("needs_pool") > 0;
   let line: string | null = null;
   if (jobs && jobs.length > 0) {
-    line = waiting ? "Research waits for a pool" : `Research ${count("done")} of ${jobs.length} done`;
+    line = waiting ? waitingLine(jobs) : `Research ${count("done")} of ${jobs.length} done`;
     if (!waiting && count("failed") > 0) line += `, ${count("failed")} failed`;
     if (!waiting && count("cancelled") > 0) line += `, ${count("cancelled")} stopped`;
   }
@@ -100,11 +102,44 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
   return { items, visible: !(accountsDone && poolsDone) };
 }
 
-/** Lists accounts that need the owner, for the Needs you strip: at most three rows plus the
- * total. Input: the accounts read. Output: rows and the total count. */
-export function needsYou(accounts: Loaded<AccountView[]>): { rows: AccountView[]; total: number } {
-  const all = accounts.kind === "ok" ? accounts.value.filter((account) => account.status === "not_signed_in") : [];
-  return { rows: all.slice(0, 3), total: all.length };
+/** One Needs you row: the project it is about (none for an account), one sentence and one link. */
+export interface NeedRow {
+  key: string;
+  icon: IconName;
+  project: string | null;
+  text: string;
+  action: string;
+  href: string;
+}
+
+/** Lists what needs the owner across projects, for the Needs you strip: accounts that are not
+ * signed in, research waiting for a pool, then suggested memories grouped by project. Inputs:
+ * the accounts read, the projects, each project's card activity and the suggestions read.
+ * Output: the first three rows, every row and the total. */
+export function needsYou(accounts: Loaded<AccountView[]>, projects: ProjectRow[] = [], activity: Map<string, CardActivity> = new Map(),
+  suggestions: Loaded<Suggestion[]> = { kind: "loading" }): { rows: NeedRow[]; all: NeedRow[]; total: number } {
+  const all: NeedRow[] = [];
+  for (const account of accounts.kind === "ok" ? accounts.value : []) {
+    if (account.status !== "not_signed_in") continue;
+    all.push({ key: `account-${account.id}`, icon: "circle-alert", project: null, text: `${account.name} isn't signed in.`,
+      action: "Sign in again", href: formatRoute({ name: "settings", tab: "accounts" }) });
+  }
+  for (const project of projects) {
+    const work = activity.get(project.id);
+    if (!work?.waiting || !work.research) continue;
+    all.push({ key: `pool-${project.id}`, icon: "layers", project: project.name, text: work.research,
+      action: "Choose pool", href: `${formatRoute({ name: "project", id: project.id, tab: "settings" })}?section=pool` });
+  }
+  const memories = new Map<string, { name: string; count: number }>();
+  for (const item of suggestions.kind === "ok" ? suggestions.value : []) {
+    const seen = memories.get(item.project_id);
+    memories.set(item.project_id, { name: item.project_name, count: (seen?.count ?? 0) + 1 });
+  }
+  for (const [id, { name, count }] of memories) {
+    all.push({ key: `memory-${id}`, icon: "brain", project: name, text: `${count} suggested ${count === 1 ? "memory" : "memories"} to review.`,
+      action: "Review", href: formatRoute({ name: "settings", tab: "memory" }) });
+  }
+  return { rows: all.slice(0, NEEDS_SHOWN), all, total: all.length };
 }
 
 function SetupPanel({ items }: { items: SetupItem[] }) {
@@ -140,27 +175,31 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
   return <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>;
 }
 
-/** Home as a pure view of its engine reads: the Needs you strip, project cards with their live
- * work or the empty state, and the Get set up panel while setup is incomplete. Inputs: the four
- * reads, each card's activity when read, and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, activity, onRetryProjects }: {
+/** Home as a view of its engine reads: the Needs you strip (three rows, Show all for the rest),
+ * project cards with their live work or the empty state, and the Get set up panel while setup is
+ * incomplete. Inputs: the four reads, each card's activity and the suggested memories when read,
+ * and a retry for the project list. */
+export function HomeView({ projects, accounts, pools, harnesses, activity, suggestions, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
   pools: Loaded<PoolSummary[]>;
   harnesses: Loaded<HarnessEntry[]>;
   activity?: Map<string, CardActivity>;
+  suggestions?: Loaded<Suggestion[]>;
 }) {
   const setup = setupSteps(accounts, pools, harnesses);
-  const needs = needsYou(accounts);
+  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions);
+  const [expanded, setExpanded] = useState(false);
   return <>
     <PageHeader title="Projects" actions={<a className="btn primary" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>} />
     {needs.total > 0 && <section className="needs" aria-label="Needs you">
-      {needs.rows.map((account) => <div className="need" key={account.id}>
-        <span className="row"><Icon name="circle-alert" /><span>{account.name} isn't signed in.</span></span>
-        <a className="btn small" href={formatRoute({ name: "settings", tab: "accounts" })}>Sign in again</a>
+      {(expanded ? needs.all : needs.rows).map((row) => <div className="need" key={row.key}>
+        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{row.project}</strong>{" "}</>}{row.text}</span></span>
+        <a className="btn small" href={row.href}>{row.action}</a>
       </div>)}
-      {needs.total > 3 && <a className="btn quiet small" href={formatRoute({ name: "settings", tab: "accounts" })}>Show all ({needs.total})</a>}
+      {needs.total > NEEDS_SHOWN && <Button variant="quiet" size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+        {expanded ? "Show fewer" : `Show all (${needs.total})`}</Button>}
     </section>}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
       <Projects projects={projects} activity={activity} onRetry={onRetryProjects} />
@@ -169,14 +208,22 @@ export function HomeView({ projects, accounts, pools, harnesses, activity, onRet
   </>;
 }
 
-/** Home: loads accounts, pools and harnesses for the setup panel and each project's live work,
- * and renders HomeView with the session's projects. */
+/** Home: loads accounts, pools and harnesses for the setup panel, each project's live work and
+ * the suggested memories for Needs you, and renders HomeView with the session's projects. */
 export function Home() {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts);
   const [pools] = useLoad(poolSummaries);
   const [harnesses] = useLoad(harnessCatalog);
-  const activity = useProjectActivity(session.projects.kind === "ok" ? session.projects.value.map((project) => project.id) : []);
-  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} activity={activity}
+  const projects = session.projects.kind === "ok" ? session.projects.value : [];
+  const activity = useProjectActivity(projects.map((project) => project.id));
+  const [suggestions, setSuggestions] = useState<Loaded<Suggestion[]>>({ kind: "loading" });
+  const named = projects.map((project) => `${project.id}\t${project.name}`).join("\n");
+  useEffect(() => {
+    let live = true;
+    void memorySuggestions(projects).then((found) => { if (live) setSuggestions(found); });
+    return () => { live = false; };
+  }, [named]);
+  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} activity={activity} suggestions={suggestions}
     onRetryProjects={() => void session.refreshProjects()} />;
 }

@@ -143,7 +143,9 @@ test("a project card sums up live agents and research from the team and research
   assert.deepEqual(cardActivity(team(["idle", "working", "stopped"]), research(["done", "running", "queued"])),
     { research: "Research 1 of 3 done", agents: "2 agents working", waiting: false, live: true });
   assert.deepEqual(cardActivity(team(["idle"]), research(["needs_pool", "needs_pool"])),
-    { research: "Research waits for a pool", agents: "No agents working", waiting: true, live: true });
+    { research: "Research is waiting for a pool.", agents: "No agents working", waiting: true, live: true });
+  assert.equal(cardActivity(team(["idle"]), { kind: "ok", value: { jobs: [{ id: 1, status: "needs_pool", error: "No account in this project's pool can run this research" }] } }).research,
+    "Research is waiting: No account in this project's pool can run this research.");
   assert.deepEqual(cardActivity(team(["idle"]), research(["done", "failed", "cancelled"])),
     { research: "Research 1 of 3 done, 1 failed, 1 stopped", agents: "No agents working", waiting: false, live: false });
   assert.deepEqual(cardActivity(team(["working"]), research([])), { research: null, agents: "1 agent working", waiting: false, live: true });
@@ -164,8 +166,40 @@ test("a project card sums up live agents and research from the team and research
   const second = cards.slice(cards.indexOf('aria-label="Quayside"'));
   assert.match(first, /<span class="activity">.*Research 1 of 2 done<\/span>/);
   assert.match(first, /<span class="activity">.*2 agents working<\/span>/);
-  assert.match(second, /<span class="activity warn">.*Research waits for a pool<\/span>/);
+  assert.match(second, /<span class="activity warn">.*Research is waiting for a pool\.<\/span>/);
   assert.match(second, /No agents working/);
   assert.doesNotMatch(view(undefined), /class="activity/);
   assert.doesNotMatch(view(new Map()), /class="activity/);
+});
+
+test("Needs you lists accounts to sign in, research waiting for a pool and memories to review", () => {
+  const accounts = ok([account({ id: "a1", name: "Claude 1", status: "not_signed_in", status_label: "Not signed in" }), account({ id: "a2", name: "Codex", status: "signed_in" })]);
+  const projects = [{ id: "p1", name: "Harbor Notes", repository_count: 0 }, { id: "p 2", name: "Quayside", repository_count: 0 }];
+  const jobs = (status) => ({ kind: "ok", value: { jobs: [{ id: 1, status, error: null }] } });
+  const activity = new Map([["p1", cardActivity({ kind: "not_ready" }, jobs("running"))], ["p 2", cardActivity({ kind: "not_ready" }, jobs("needs_pool"))]]);
+  const suggestion = (project_id, project_name, id) => ({ project_id, project_name, id, version: 1, text: "A fact" });
+  const suggestions = ok([suggestion("p1", "Harbor Notes", "m1"), suggestion("p1", "Harbor Notes", "m2"), suggestion("p 2", "Quayside", "m3")]);
+  const needs = needsYou(accounts, projects, activity, suggestions);
+  assert.deepEqual(needs.all.map((row) => [row.project, row.text, row.action, row.href]), [
+    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts"],
+    ["Quayside", "Research is waiting for a pool.", "Choose pool", "#/projects/p%202/settings?section=pool"],
+    ["Harbor Notes", "2 suggested memories to review.", "Review", "#/settings/memory"],
+    ["Quayside", "1 suggested memory to review.", "Review", "#/settings/memory"],
+  ]);
+  assert.equal(needs.total, 4);
+  assert.deepEqual(needs.rows, needs.all.slice(0, 3));
+  assert.equal(new Set(needs.all.map((row) => row.key)).size, 4);
+  assert.deepEqual(needsYou(accounts, projects, new Map(), { kind: "not_ready" }).all.map((row) => row.text), ["Claude 1 isn't signed in."]);
+  assert.equal(needsYou({ kind: "loading" }).total, 0);
+
+  const markup = renderToStaticMarkup(createElement(HomeView, {
+    projects: ok(projects), accounts, pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
+    harnesses: ok([]), onRetryProjects: () => {}, activity, suggestions,
+  }));
+  assert.match(markup, /<section class="needs" aria-label="Needs you">/);
+  assert.match(markup, /<strong>Quayside<\/strong> Research is waiting for a pool\./);
+  assert.match(markup, /<a class="btn small" href="#\/projects\/p%202\/settings\?section=pool">Choose pool<\/a>/);
+  assert.match(markup, /<strong>Harbor Notes<\/strong> 2 suggested memories to review\./);
+  assert.doesNotMatch(markup, /1 suggested memory to review/);
+  assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
 });
