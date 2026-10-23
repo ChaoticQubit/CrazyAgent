@@ -35,6 +35,9 @@ fn main() {
         "desktop_open_master",
         "desktop_submit_master",
         "desktop_close_master",
+        "desktop_owner_profile",
+        "desktop_save_owner_profile",
+        "desktop_pool_summaries",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

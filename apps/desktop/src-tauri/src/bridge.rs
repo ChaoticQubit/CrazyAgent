@@ -20,6 +20,7 @@ mod account_setup;
 pub mod master;
 mod model_access;
 mod native_auth;
+mod owner_setup;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -434,6 +435,7 @@ impl NativeBridge {
                 mutation: ConversationMutation::ReplaceBrief { project_id, .. },
             } => ("brief", Some(project_id.as_str().to_owned()), None),
             OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
+            OwnerMutation::SaveOwnerProfile { .. } => ("owner_profile", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
@@ -832,6 +834,14 @@ fn rejection_code(code: &str) -> &'static str {
         "model_access_missing" => "model_access_missing",
         "model_access_referenced" => "model_access_referenced",
         "model_access_edit_bounds" => "model_access_edit_bounds",
+        "pool_member_limit" => "pool_member_limit",
+        "pool_in_use" => "pool_in_use",
+        "pool_name_bounds" => "pool_name_bounds",
+        "owner_profile_name" => "owner_profile_name",
+        "owner_profile_role" => "owner_profile_role",
+        "owner_profile_bio" => "owner_profile_bio",
+        "owner_profile_stack" => "owner_profile_stack",
+        "owner_profile_bounds" => "owner_profile_bounds",
         "stale_brief_version" => "stale_brief_version",
         "conversation_capacity" => "conversation_capacity",
         "project_missing" => "project_missing",
