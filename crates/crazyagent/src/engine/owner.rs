@@ -150,6 +150,9 @@ pub enum OwnerMutation {
     SaveOwnerProfile {
         profile: crate::owner_profile::OwnerProfile,
     },
+    Memory {
+        action: crate::memory::library::LibraryAction,
+    },
     ProposeBaseline {
         draft: BaselineDraft,
     },
@@ -273,6 +276,12 @@ impl OwnerMutation {
                 profile.validate()?;
                 Command::OwnerProfile {
                     profile: profile.clone(),
+                }
+            }
+            Self::Memory { action } => {
+                action.validate()?;
+                Command::OwnerMemory {
+                    action: action.clone(),
                 }
             }
             Self::ProposeBaseline { draft } => Command::ProposeBaseline {
@@ -409,6 +418,18 @@ pub enum OwnerRead {
         offset: u64,
     },
     OwnerProfile,
+    Memories {
+        scope: crate::memory::library::MemoryScope,
+        search: Option<String>,
+        before: Option<u64>,
+        limit: u8,
+    },
+    Memory {
+        memory_id: RequestId,
+    },
+    ApprovedMemories {
+        project_id: ProjectId,
+    },
     PoolSummaries {
         offset: u8,
     },
@@ -470,7 +491,13 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
+            | Self::Memory { .. }
+            | Self::ApprovedMemories { .. }
             | Self::PoolSummaries { .. } => return Ok(None),
+            Self::Memories { search, limit, .. } => {
+                crate::memory::library::validate_page(search.as_deref(), *limit)?;
+                return Ok(None);
+            }
             Self::ProjectCatalog { research, .. } => {
                 if research.len() > crate::project_setup::ResearchKind::ALL.len() {
                     return Err(failure("research_duplicate"));
@@ -789,6 +816,15 @@ pub enum OwnerData {
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    Memories {
+        page: crate::memory::library::MemoryPage,
+    },
+    Memory {
+        memory: Option<crate::memory::library::SavedMemory>,
+    },
+    ApprovedMemories {
+        memories: crate::memory::library::ApprovedMemories,
     },
     PoolSummaries {
         pools: Vec<crate::pools::PoolSummary>,

@@ -906,6 +906,7 @@ fn apply(
         Command::OwnerConversation { .. }
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
+            | Command::OwnerMemory { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1071,6 +1072,9 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
+        Command::OwnerMemory { action } => {
+            crate::memory::library::execute(tx, config, action, revision)
+        }
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
             crate::verification::execute(tx, config, command)
         }
@@ -1955,6 +1959,18 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::Memories {
+            scope,
+            search,
+            before,
+            limit,
+        } => crate::memory::library::page(&tx, scope, search.as_deref(), *before, *limit)?,
+        OwnerRead::Memory { memory_id } => OwnerData::Memory {
+            memory: crate::memory::library::get(&tx, memory_id)?,
+        },
+        OwnerRead::ApprovedMemories { project_id } => OwnerData::ApprovedMemories {
+            memories: crate::memory::library::approved_for_project(&tx, project_id)?,
+        },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
         OwnerRead::Page {
             view,

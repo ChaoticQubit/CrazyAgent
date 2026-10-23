@@ -474,6 +474,7 @@ pub enum SetupQuery {
         decision: crate::memory::ReviewDecision,
         generation: u64,
     },
+    Library(crate::memory::library::LibraryQuery),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -485,6 +486,7 @@ pub enum SetupView {
     Item(ContextChunk),
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
+    Library(crate::memory::library::LibraryView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

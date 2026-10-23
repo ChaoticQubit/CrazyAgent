@@ -160,6 +160,10 @@ pub enum Command {
         profile: crate::owner_profile::OwnerProfile,
     },
     #[serde(skip_deserializing)]
+    OwnerMemory {
+        action: crate::memory::library::LibraryAction,
+    },
+    #[serde(skip_deserializing)]
     ProposeBaseline {
         draft: crate::verification::BaselineDraft,
     },

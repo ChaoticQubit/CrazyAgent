@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+pub mod library;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgePolicy {
@@ -339,7 +341,8 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
         UNIQUE(project,destination));
         CREATE TABLE IF NOT EXISTS knowledge_watermarks
         (project TEXT NOT NULL, destination TEXT NOT NULL, ordinal INTEGER NOT NULL,
-        PRIMARY KEY(project,destination));").map_err(error)
+        PRIMARY KEY(project,destination));").map_err(error)?;
+    library::initialize(connection)
 }
 
 pub(crate) fn capacity(
