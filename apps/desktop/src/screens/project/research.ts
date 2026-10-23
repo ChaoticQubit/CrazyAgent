@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob } from "../../api-projects";
+import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary } from "../../api";
 import type { MasterState, MasterTurn } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
@@ -28,6 +28,79 @@ export function ago(at: number, now: number): string {
   if (hours < 24) return `${hours} h ago`;
   const days = Math.floor(hours / 24);
   return days === 1 ? "Yesterday" : `${days} days ago`;
+}
+
+const PROMPT_LINE_MAX = 140;
+
+/** The first line of a task prompt, cut to fit one row. Input: the prompt. Output: the line. */
+export function firstLine(text: string): string {
+  const line = text.trim().split("\n", 1)[0].trim();
+  return line.length > PROMPT_LINE_MAX ? `${line.slice(0, PROMPT_LINE_MAX - 1)}...` : line;
+}
+
+/** Maps a team agent's engine status to the design's status word. Input: the status. Output: the word. */
+export function teamAgentWord(status: TeamAgentStatus): string {
+  switch (status) {
+    case "starting": return "Starting";
+    case "idle": return "Ready";
+    case "working": return "Running";
+    case "stopped": return "Stopped";
+    case "failed": return "Failed";
+  }
+}
+
+/** Maps a team task's engine status to the design's status word. Input: the status. Output: the word. */
+export function teamTaskWord(status: TeamTaskStatus): string {
+  switch (status) {
+    case "queued": return "Queued";
+    case "needs_pool": return "Needs a pool";
+    case "running": return "Running";
+    case "done": return "Done";
+    case "failed": return "Failed";
+    case "cancelled": return "Stopped";
+  }
+}
+
+export interface TeamRow {
+  key: string;
+  title: string;
+  harness: string;
+  word: string;
+  detail: string;
+  turns: number | null;
+  stop: { task: number; label: "Stop" | "Cancel" } | null;
+}
+
+const WAITING: TeamTaskStatus[] = ["queued", "needs_pool"];
+
+/** Lists the live team for the Agents tab: each agent with the task it holds, then the tasks no
+ * agent holds. "running" keeps agents that have not stopped and tasks still to finish.
+ * Inputs: the team status and the filter. Output: the rows in engine order. */
+export function teamRows(status: Pick<TeamStatus, "agents" | "tasks">, filter: "running" | "all"): TeamRow[] {
+  const task = (id: number | null) => status.tasks.find((item) => item.id === id);
+  const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamRow => {
+    const held = task(agent.task);
+    return {
+      key: `agent-${agent.id}`,
+      title: agent.role === "master" ? "Master" : "Agent",
+      harness: agent.harness,
+      word: teamAgentWord(agent.status),
+      detail: agent.problem ?? (held ? firstLine(held.prompt) : ""),
+      turns: agent.turns,
+      stop: held?.status === "running" ? { task: held.id, label: "Stop" } : null,
+    };
+  });
+  const holding = new Set(status.agents.map((agent) => agent.task).filter((id) => id !== null));
+  const tasks = status.tasks.filter((item) => !holding.has(item.id) && (filter === "all" || WAITING.includes(item.status) || item.status === "running")).map((item): TeamRow => ({
+    key: `task-${item.id}`,
+    title: "Task",
+    harness: item.harness,
+    word: teamTaskWord(item.status),
+    detail: item.problem ?? firstLine(item.prompt),
+    turns: null,
+    stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
+  }));
+  return [...agents, ...tasks];
 }
 
 /** The Overview fact for skills or MCP servers: how many are on in this project. An item is on

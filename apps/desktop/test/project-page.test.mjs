@@ -341,3 +341,54 @@ test("a memory note must have text and fit the engine's 2,000 byte limit", async
   assert.equal(context.noteError("a".repeat(2001)), "This is too long for one memory. Keep it under 2,000 characters.");
   assert.equal(context.noteError("é".repeat(1001)), "This is too long for one memory. Keep it under 2,000 characters.");
 });
+
+const teamAgent = (id, status, extra = {}) => ({ id, role: "sub", harness: "codex", tools: true, account: null, worktree: null, status, status_label: "", task: null, turns: 0, problem: null, process_group: null, created_ms: 0, heartbeat_ms: 0, stopped_ms: null, ...extra });
+const teamTask = (id, status, extra = {}) => ({ id, source: "master", harness: "codex", tools: true, prompt: `Task ${id}`, status, status_label: "", agent: null, attempts: 1, result: null, problem: null, delivered: false, output_bytes: 0, created_ms: 0, started_ms: null, finished_ms: null, ...extra });
+
+test("team agents and tasks use the design's status words", () => {
+  assert.deepEqual(["starting", "idle", "working", "stopped", "failed"].map(research.teamAgentWord), ["Starting", "Ready", "Running", "Stopped", "Failed"]);
+  assert.deepEqual(["queued", "needs_pool", "running", "done", "failed", "cancelled"].map(research.teamTaskWord), ["Queued", "Needs a pool", "Running", "Done", "Failed", "Stopped"]);
+});
+
+test("team rows show live agents with their task, then tasks no agent holds", () => {
+  const status = {
+    agents: [
+      teamAgent(1, "working", { role: "master", harness: "claude" }),
+      teamAgent(2, "working", { task: 10, turns: 3 }),
+      teamAgent(3, "stopped"),
+      teamAgent(4, "failed", { problem: "Codex stopped answering." }),
+    ],
+    tasks: [
+      teamTask(10, "running", { agent: 2, prompt: "Build the login screen\nwith tests" }),
+      teamTask(11, "queued", { prompt: "Write the README" }),
+      teamTask(12, "needs_pool"),
+      teamTask(13, "done", { agent: 3 }),
+    ],
+  };
+  const running = research.teamRows(status, "running");
+  assert.deepEqual(running.map((row) => [row.key, row.title, row.word, row.detail, row.stop]), [
+    ["agent-1", "Master", "Running", "", null],
+    ["agent-2", "Agent", "Running", "Build the login screen", { task: 10, label: "Stop" }],
+    ["task-11", "Task", "Queued", "Write the README", { task: 11, label: "Cancel" }],
+    ["task-12", "Task", "Needs a pool", "Task 12", { task: 12, label: "Cancel" }],
+  ]);
+  assert.equal(running[1].turns, 3);
+  const all = research.teamRows(status, "all");
+  assert.deepEqual(all.map((row) => row.key), ["agent-1", "agent-2", "agent-3", "agent-4", "task-11", "task-12", "task-13"]);
+  assert.equal(all.find((row) => row.key === "agent-4").detail, "Codex stopped answering.");
+  assert.equal(all.find((row) => row.key === "task-13").stop, null);
+  assert.deepEqual(research.teamRows({ agents: [], tasks: [] }, "all"), []);
+});
+
+test("a long task prompt shows its first line, cut to fit a row", () => {
+  assert.equal(research.firstLine("  one\ntwo"), "one");
+  assert.equal(research.firstLine("x".repeat(200)), `${"x".repeat(139)}...`);
+  assert.equal(research.firstLine(""), "");
+});
+
+test("the Agents tab labels research and asks the engine for the live team", async () => {
+  const agents = await import("../src/screens/project/agents.tsx");
+  const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));
+  assert.match(markup, /<h3>Research<\/h3><ul class="pj-rows" aria-label="Research agents">/);
+  assert.match(markup, /Loading the team\.\.\./);
+});

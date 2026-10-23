@@ -264,6 +264,45 @@ export function saveResearchToMemory(id: string, research: ResearchKind, section
   return call<IntentReceipt>("desktop_save_research_to_memory", { id, research, section, generation });
 }
 
+export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
+export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+
+export interface TeamAgent {
+  id: number;
+  role: "master" | "sub";
+  harness: string;
+  status: TeamAgentStatus;
+  task: number | null;
+  turns: number;
+  problem: string | null;
+}
+
+export interface TeamTask {
+  id: number;
+  harness: string;
+  prompt: string;
+  status: TeamTaskStatus;
+  agent: number | null;
+  problem: string | null;
+}
+
+export interface TeamStatus {
+  agents: TeamAgent[];
+  tasks: TeamTask[];
+}
+
+/** Reads the project's live team: its agents and the tasks the master or owner handed out.
+ * Input: the project id. Output: the team status. */
+export function loadTeamStatus(id: string): Promise<Result<TeamStatus>> {
+  return call<TeamStatus>("desktop_team_status", { id });
+}
+
+/** Stops a running team task or cancels a waiting one. Inputs: the project id, the task id
+ * and a generation. Output: the engine receipt. */
+export function cancelTeamTask(id: string, task: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_cancel", { id, task, generation });
+}
+
 export const RESEARCH_LOG_LINES_MAX = 200;
 
 /** Reads the latest plain lines of one research agent's log.
