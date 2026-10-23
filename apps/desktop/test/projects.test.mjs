@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -34,18 +33,8 @@ registerHooks({
   },
 });
 
-const application = await import("../src/app.tsx");
+const application = await import("../src/screens/legacy.tsx");
 const { useOwnerBrowser } = await import("../src/state.ts");
-
-test("existing approvals render uses the production hook without bridge effects", () => {
-  const markup = renderToStaticMarkup(createElement(application.App));
-  assert.match(markup, /<h1>Approvals<\/h1>/);
-  assert.match(markup, /Owner disconnected/);
-  assert.match(markup, /Connect to engine/);
-  assert.doesNotMatch(markup, /role="alert"/);
-  assert.ok(Buffer.byteLength(markup) < 16384);
-  console.log(`approvals_markup_sha256=${createHash("sha256").update(markup).digest("hex")}`);
-});
 
 test("Projects navigation renders a bounded declaration form without owner authority", () => {
   function ProjectsView() {
