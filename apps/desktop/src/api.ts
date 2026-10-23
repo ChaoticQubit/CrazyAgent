@@ -66,7 +66,7 @@ const COPY: Record<string, string> = {
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
   link_not_allowed: "CrazyAgent only opens web links that start with https:// or http://.",
-  open_failed: "macOS couldn't open this. Try again.",
+  open_failed: "Your Mac couldn't open this. Try again.",
   project_folder_missing: "The project folder isn't on this Mac anymore.",
   context_item_not_openable: "CrazyAgent opens only documents inside the project folder.",
   rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
