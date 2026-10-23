@@ -114,7 +114,7 @@ pub(in crate::engine) fn launch_command(
         .current_dir(project_root)
         .env_clear()
         .env("HOME", profile_home)
-        .env("CLAUDE_CONFIG_DIR", profile_home.join(".claude"))
+        .env("CLAUDE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());

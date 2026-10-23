@@ -103,10 +103,9 @@ fn claude_launch_sets_only_selected_profile_environment() {
         OsStr::new("HOME"),
         Some(directories.home.as_os_str())
     )));
-    let configuration = directories.home.join(".claude");
     assert!(environment.contains(&(
         OsStr::new("CLAUDE_CONFIG_DIR"),
-        Some(configuration.as_os_str())
+        Some(directories.home.as_os_str())
     )));
     assert!(environment.iter().all(|(key, _)| {
         matches!(key.to_str(), Some("HOME" | "CLAUDE_CONFIG_DIR" | "TERM"))
