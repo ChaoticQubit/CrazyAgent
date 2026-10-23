@@ -30,6 +30,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 mod account_profile;
+mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
@@ -1633,6 +1634,9 @@ async fn serve_authenticated_owner(
         }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("harness_catalog").is_some() {
+            return harness_catalog::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("native_auth").is_some() {
             return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])

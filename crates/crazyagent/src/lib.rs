@@ -7,6 +7,7 @@ pub mod config;
 pub mod conversation;
 pub mod coordination;
 pub mod engine;
+pub mod harnesses;
 pub mod isolation;
 pub mod master_session;
 pub mod memory;
