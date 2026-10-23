@@ -281,6 +281,12 @@ fallback_allowed = false
 
     impl Fixture {
         async fn start() -> Self {
+            Self::start_with_timeout(2000).await
+        }
+
+        async fn start_with_timeout(timeout_ms: u64) -> Self {
+            let config = CONFIG.replace("timeout_ms = 2000", &format!("timeout_ms = {timeout_ms}"));
+            assert!(config.contains(&format!("timeout_ms = {timeout_ms}\n")));
             let root = tempfile::Builder::new()
                 .prefix("ca-mrl-")
                 .tempdir_in("/private/tmp")
@@ -289,7 +295,7 @@ fallback_allowed = false
             let state = root.path().join("state");
             private_directory(&state);
             let global = root.path().join("global.toml");
-            private_file(&global, CONFIG.as_bytes());
+            private_file(&global, config.as_bytes());
             let home = root.path().join("configured-home");
             private_directory(&home);
             private_directory(&home.join(".backboard"));
@@ -478,6 +484,15 @@ fallback_allowed = false
             worktree_lease: prepared.worktree_lease.clone(),
             lease: prepared.lease.clone(),
         }
+    }
+
+    #[tokio::test]
+    async fn rcli_launch_prepares_when_worktree_provisioning_outlasts_the_owner_timeout() {
+        let case = Fixture::start_with_timeout(100).await;
+        assert_eq!(case.prepared.cwd, PathBuf::from(&case.prepared.lease.path));
+        assert!(case.prepared.cwd.join(".git").is_file());
+        assert_eq!(case.profile.profile_path().unwrap(), case.home);
+        case.close().await;
     }
 
     #[tokio::test]

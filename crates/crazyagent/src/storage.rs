@@ -30,6 +30,11 @@ mod native_auth_host_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
+/// Upper bound on waiting for a master runtime job. Preparing a master turn provisions
+/// a Git worktree inside the storage actor, which can outlast the owner request timeout
+/// on a busy machine.
+pub(crate) const MASTER_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub(crate) enum Job {
     Accounts(
         Admission,
@@ -131,6 +136,20 @@ pub(crate) enum Job {
 
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
+}
+
+impl Job {
+    /// Chooses how long a caller waits for this job's reply.
+    /// Input: the owner request timeout from settings. Output: that timeout, or at
+    /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
+    pub(crate) fn reply_deadline(&self, owner_timeout: std::time::Duration) -> std::time::Duration {
+        let deadline = match self {
+            Self::MasterRuntime(..) => owner_timeout.max(MASTER_RUNTIME_TIMEOUT),
+            _ => owner_timeout,
+        };
+        assert!(deadline >= owner_timeout);
+        deadline
+    }
 }
 
 impl Storage {

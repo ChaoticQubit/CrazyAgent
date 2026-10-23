@@ -1270,11 +1270,13 @@ impl Engine {
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
+        let job = build(send);
+        let deadline = job.reply_deadline(self.timeout);
         self.storage
             .sender
-            .try_send(build(send))
+            .try_send(job)
             .map_err(|_| failure("owner_queue_not_submitted"))?;
-        tokio::time::timeout(self.timeout, receive)
+        tokio::time::timeout(deadline, receive)
             .await
             .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
