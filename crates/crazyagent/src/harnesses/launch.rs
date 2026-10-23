@@ -1,6 +1,6 @@
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
-use crate::adapters::events::{EventKind, TurnOutcome};
+use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use serde::Serialize;
@@ -720,6 +720,15 @@ impl Driver {
                                 EventKind::ToolUse { name, .. } => {
                                     events.push(LaunchEvent::ToolUse { name })
                                 }
+                                EventKind::AssistantError { code } => {
+                                    events.push(LaunchEvent::TurnError {
+                                        rate_limited: rate_limited(&code),
+                                    })
+                                }
+                                EventKind::RateLimitObserved {
+                                    status: RateLimitStatus::Rejected,
+                                    ..
+                                } => events.push(LaunchEvent::TurnError { rate_limited: true }),
                                 EventKind::TurnFinished { outcome, .. } => {
                                     *interrupt = None;
                                     events.push(LaunchEvent::TurnFinished {
@@ -962,3 +971,6 @@ impl Drop for Session {
         self.stop_group();
     }
 }
+
+#[cfg(test)]
+mod tests;
