@@ -81,6 +81,9 @@ fn main() {
         "desktop_project_plugins",
         "desktop_pick_folder",
         "desktop_pick_documents",
+        "desktop_open_link",
+        "desktop_reveal_project_folder",
+        "desktop_open_context_item",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

@@ -85,6 +85,9 @@
     "allow-desktop-check-mcp-server",
     "allow-desktop-project-plugins",
     "allow-desktop-pick-folder",
-    "allow-desktop-pick-documents"
+    "allow-desktop-pick-documents",
+    "allow-desktop-open-link",
+    "allow-desktop-reveal-project-folder",
+    "allow-desktop-open-context-item"
   ]
 }

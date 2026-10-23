@@ -874,6 +874,33 @@ async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, Br
 }
 
 #[tauri::command]
+async fn desktop_open_link(window: WebviewWindow, url: String) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    bridge::open::open_link(&url).await
+}
+
+#[tauri::command]
+async fn desktop_reveal_project_folder(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.reveal_project_folder(&id).await
+}
+
+#[tauri::command]
+async fn desktop_open_context_item(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    path: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.open_context_item(&id, &path).await
+}
+
+#[tauri::command]
 async fn desktop_model_access_page(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1055,6 +1082,9 @@ pub fn run() {
             desktop_project_plugins,
             desktop_pick_folder,
             desktop_pick_documents,
+            desktop_open_link,
+            desktop_reveal_project_folder,
+            desktop_open_context_item,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
