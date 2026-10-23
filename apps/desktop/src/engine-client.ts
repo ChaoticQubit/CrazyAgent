@@ -620,6 +620,7 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  paused: boolean;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
@@ -651,6 +652,10 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

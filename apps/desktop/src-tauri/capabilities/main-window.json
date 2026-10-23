@@ -30,6 +30,7 @@
     "allow-desktop-team-delegate",
     "allow-desktop-team-cancel",
     "allow-desktop-team-keep-warm",
+    "allow-desktop-team-pause",
     "allow-desktop-project-memories",
     "allow-desktop-review-memory",
     "allow-desktop-memories",

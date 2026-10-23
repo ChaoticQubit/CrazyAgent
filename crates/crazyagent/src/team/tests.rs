@@ -728,6 +728,128 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
 }
 
 #[test]
+fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-paused",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-paused", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+        TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        },
+        TeamAction::KeepWarm {
+            project_id: project.clone(),
+            on: true,
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.commit().unwrap();
+    assert!(status(&connection, &setup).unwrap().paused);
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    team.tick().unwrap();
+    team.tick().unwrap();
+    let held = status(&connection, &setup).unwrap();
+    assert!(held.paused);
+    assert_eq!(
+        held.messages
+            .iter()
+            .map(|m| (m.author, m.state))
+            .collect::<Vec<_>>(),
+        [(MessageAuthor::Owner, MessageState::Pending)],
+        "a paused team keeps the owner's message for later"
+    );
+    assert_eq!(held.tasks[0].status, TaskStatus::Queued);
+    assert_eq!(held.tasks[0].attempts, 0);
+    assert!(held.agents.is_empty());
+    assert!(!team.has_live_agents());
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Resume {
+                project_id: project.clone(),
+            }
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    team.tick().unwrap();
+    let resumed = status(&connection, &setup).unwrap();
+    assert!(!resumed.paused);
+    assert_eq!(
+        resumed
+            .messages
+            .iter()
+            .map(|m| (m.author, m.state, m.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+            (
+                MessageAuthor::Engine,
+                MessageState::Note,
+                "The master could not start: codex is not installed."
+            ),
+        ],
+        "after resume the engine tries to start the master again"
+    );
+    team.shutdown().unwrap();
+}
+
+#[test]
 fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();

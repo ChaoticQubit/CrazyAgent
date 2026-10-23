@@ -9,12 +9,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
     "desktop_team_cancel",
     "desktop_team_keep_warm",
+    "desktop_team_pause",
 ];
 
 #[test]
@@ -98,6 +99,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let team = bridge.team_status(&id).await?;
     assert_eq!((team.min_agents, team.max_agents), (1, 3));
     assert!(!team.keep_warm);
+    assert!(!team.paused);
     assert_eq!(
         team.harnesses
             .iter()
@@ -167,6 +169,18 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge.team_status(&id).await?.tasks[0].status,
         TaskStatus::Cancelled
     );
+    let paused = bridge.team_pause(&id, true, 8).await?;
+    assert!(
+        matches!(paused.outcome, ActionOutcome::Applied),
+        "{paused:?}"
+    );
+    assert!(bridge.team_status(&id).await?.paused);
+    let resumed = bridge.team_pause(&id, false, 9).await?;
+    assert!(
+        matches!(resumed.outcome, ActionOutcome::Applied),
+        "{resumed:?}"
+    );
+    assert!(!bridge.team_status(&id).await?.paused);
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,
         "project_setup_missing"

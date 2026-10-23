@@ -313,6 +313,12 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    Pause {
+        project_id: ProjectId,
+    },
+    Resume {
+        project_id: ProjectId,
+    },
 }
 
 impl TeamAction {
@@ -343,7 +349,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } => Ok(()),
+            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
         }
     }
 
@@ -355,7 +361,9 @@ impl TeamAction {
             Self::Message { project_id, .. }
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
-            | Self::KeepWarm { project_id, .. } => project_id,
+            | Self::KeepWarm { project_id, .. }
+            | Self::Pause { project_id }
+            | Self::Resume { project_id } => project_id,
         }
     }
 }
@@ -608,6 +616,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
                 until_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_paused_projects (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
             );",
         )
         .map_err(error)
@@ -836,6 +848,23 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::Pause { .. } => {
+            tx.execute(
+                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
+                 ON CONFLICT(project) DO NOTHING",
+                params![project.as_str(), now],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::Resume { .. } => {
+            tx.execute(
+                "DELETE FROM team_paused_projects WHERE project=?1",
+                [project.as_str()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
     }
 }
 
@@ -908,6 +937,7 @@ pub struct TeamHarness {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    pub paused: bool,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
@@ -997,6 +1027,19 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         .map_err(error)
 }
 
+/// Tells whether the owner paused the project's whole team.
+/// Takes a connection and the project.
+/// Returns true from a pause until the owner resumes the team.
+pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_paused_projects WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.
 /// Takes a connection and the stored setup.
 /// Returns bounded lists in creation order.
@@ -1069,6 +1112,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        paused: paused(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,

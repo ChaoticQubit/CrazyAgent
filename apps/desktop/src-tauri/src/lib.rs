@@ -471,6 +471,18 @@ async fn desktop_team_keep_warm(
 }
 
 #[tauri::command]
+async fn desktop_team_pause(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paused: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_pause(&id, paused, generation).await
+}
+
+#[tauri::command]
 async fn desktop_open_project(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1133,6 +1145,7 @@ pub fn run() {
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_pause,
             desktop_project_memories,
             desktop_review_memory,
             desktop_memories,

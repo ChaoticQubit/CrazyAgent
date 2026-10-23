@@ -170,6 +170,7 @@ struct Worker {
     busy: Option<Busy>,
     idle_since: Instant,
     stopping: bool,
+    held: bool,
     managed: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
@@ -385,6 +386,10 @@ impl TeamRuntime {
         let Some(stored) = self.stored(project)? else {
             return Ok(());
         };
+        if super::paused(&self.connection, project)? {
+            self.hold(project);
+            return Ok(());
+        }
         let paused = self.paused()?;
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
@@ -415,6 +420,50 @@ impl TeamRuntime {
                     params![stored.project_id.as_str(), slot.harness, to, from],
                 )
                 .map_err(error)?;
+        }
+        Ok(())
+    }
+
+    /// Stops every agent of a paused project; their work goes back to wait for the resume.
+    fn hold(&mut self, project: &ProjectId) {
+        for worker in self.workers.values_mut() {
+            if &worker.project == project && !worker.held {
+                worker.held = true;
+                worker.stopping = true;
+                worker.cancel.store(true, Ordering::SeqCst);
+                let _ = worker.orders.send(Order::Stop);
+            }
+        }
+    }
+
+    /// Returns a held agent's work to its queue without spending an attempt: a task waits
+    /// again (or is cancelled when the owner asked for that) and a message waits again.
+    fn release(&mut self, busy: Busy) -> Result<(), EngineError> {
+        match busy {
+            Busy::Task(task) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
+                         WHERE id=?1 AND status='running' AND cancel_requested=0",
+                        [task],
+                    )
+                    .map_err(error)?;
+                self.connection
+                    .execute(
+                        "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
+                         WHERE id=?1 AND status='running'",
+                        params![task, now_ms()],
+                    )
+                    .map_err(error)?;
+            }
+            Busy::Message(message) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_messages SET state='pending' WHERE id=?1 AND state='sent'",
+                        [message],
+                    )
+                    .map_err(error)?;
+            }
         }
         Ok(())
     }
@@ -1096,6 +1145,7 @@ impl TeamRuntime {
                 busy: None,
                 idle_since: Instant::now(),
                 stopping: false,
+                held: false,
                 managed,
                 grants: 0,
                 thread: Some(thread),
@@ -1274,6 +1324,7 @@ impl TeamRuntime {
                 worker.idle_since = Instant::now();
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
+                let held = worker.held;
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                 }
@@ -1281,6 +1332,7 @@ impl TeamRuntime {
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
                 match busy {
+                    Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
                     Some(Busy::Task(task)) => self.finish_task(task, &text, end)?,
                     Some(Busy::Message(message)) => {
                         self.finish_message(&project, message, &text, end)?
@@ -1305,6 +1357,7 @@ impl TeamRuntime {
                     }
                 }
                 match worker.busy {
+                    Some(busy) if worker.held => self.release(busy)?,
                     Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed)?,
                     Some(Busy::Message(message)) => {
                         self.finish_message(&worker.project, message, "", TurnEnd::Closed)?
