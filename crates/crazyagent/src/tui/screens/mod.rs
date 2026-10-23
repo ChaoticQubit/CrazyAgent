@@ -17,7 +17,6 @@ pub mod settings_harnesses;
 pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
-pub mod stub;
 pub mod welcome;
 
 #[cfg(test)]
