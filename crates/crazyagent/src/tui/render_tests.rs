@@ -3,6 +3,7 @@ use super::ctx::{Ctx, Link, Load};
 use super::frame::Message;
 use super::glyphs::{ASCII, Glyphs, UNICODE};
 use super::keys::Key;
+use super::screens::new_project_page::kept_draft;
 use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::{ProjectCard, ResearchCounts};
 use super::shell::Shell;
@@ -422,6 +423,66 @@ fn home_frames_match_the_design() {
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 0, 0, 0)])));
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 2, 0, 0)])));
     check("home-ready-80", &render(&mut shell, 80, 24), &[]);
+}
+
+#[test]
+fn home_lists_a_kept_new_project_draft_first_and_enter_continues_it() {
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(projects());
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    shell.key(Key::Char('n'));
+    keys(&mut shell, "Saltmarsh");
+    shell.key(Key::Esc);
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert_eq!(kept_draft().as_deref(), Some("Saltmarsh"));
+
+    let rows = render(&mut shell, 80, 24);
+    assert!(rows[2].starts_with("  Projects  3 "), "{}", rows[2]);
+    assert!(rows[4].starts_with("  ▌ Saltmarsh "), "{}", rows[4]);
+    assert!(rows[4].trim_end().ends_with(" Draft"), "{}", rows[4]);
+    assert_eq!(rows[5].trim_end(), "  ▌ Not created yet.");
+    assert_eq!(rows[6].trim_end(), "  ▌ Enter continues the draft.");
+    assert!(rows[8].starts_with("    Tidepool "), "{}", rows[8]);
+
+    shell.key(Key::Char('/'));
+    keys(&mut shell, "ledger");
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        !rows.iter().any(|row| row.contains("Saltmarsh")),
+        "the filter hides a draft it does not match"
+    );
+    assert!(rows.iter().any(|row| row.contains("Ledgerline")));
+    shell.key(Key::Esc);
+
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    assert_eq!(kept_draft(), None, "the wizard took the draft back");
+    let rows = render(&mut shell, 80, 24);
+    assert!(rows.iter().any(|row| row.contains("Saltmarsh")));
+}
+
+#[test]
+fn home_shows_a_kept_draft_instead_of_the_empty_state() {
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(Vec::new());
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    shell.key(Key::Char('n'));
+    keys(&mut shell, "Saltmarsh");
+    shell.key(Key::Esc);
+    shell.key(Key::Esc);
+
+    let rows = render(&mut shell, 80, 24);
+    assert_eq!(
+        rows[2].trim_end(),
+        format!("  Projects{}Most recent first", " ".repeat(51))
+    );
+    assert!(rows[4].starts_with("  ▌ Saltmarsh "), "{}", rows[4]);
+    assert!(!rows.iter().any(|row| row.contains("No projects yet.")));
 }
 
 const UNCOUNTED: [(&str, &str); 2] = [
