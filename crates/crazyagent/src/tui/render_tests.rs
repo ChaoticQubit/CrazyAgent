@@ -456,3 +456,111 @@ fn overlay_frames_match_the_design() {
     shell.key(Key::Enter);
     assert!(shell.quitting());
 }
+
+const POOL_ROWS: [(&str, &str, &str); 23] = [
+    ("Anthropic API - team", "Anthropic API", "Key saved"),
+    ("ChatGPT Plus - spare 1", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Plus - spare 2", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Plus - spare 3", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Plus - spare 4", "ChatGPT / Codex", "Not signed in"),
+    ("ChatGPT Pro - main", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Team - seat 01", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Team - seat 02", "ChatGPT / Codex", "Signed in"),
+    ("ChatGPT Team - seat 03", "ChatGPT / Codex", "Signed in"),
+    ("Claude Max - work", "Claude", "Signed in"),
+    ("Claude Max - work 2", "Claude", "Signed in"),
+    ("Claude Pro - personal", "Claude", "Not signed in"),
+    ("Claude Team - seat 01", "Claude", "Signed in"),
+    ("Claude Team - seat 02", "Claude", "Signed in"),
+    ("Claude Team - seat 03", "Claude", "Signed in"),
+    ("Claude Team - seat 04", "Claude", "Signed in"),
+    ("Claude Team - seat 05", "Claude", "Signed in"),
+    ("Claude Team - seat 06", "Claude", "Signed in"),
+    ("Claude Team - seat 07", "Claude", "Signed in"),
+    ("LM Studio on mini", "Local model", "Can't reach this URL"),
+    ("Ollama on this Mac", "Local model", "Connected"),
+    ("OpenAI API - billing", "OpenAI API", "Key saved"),
+    ("OpenRouter - shared", "OpenRouter", "Key saved"),
+];
+
+fn accounts() -> Vec<super::seam::AccountRow> {
+    (0..240)
+        .map(|index| {
+            let (name, provider, status) = POOL_ROWS
+                .get(index)
+                .map(|(name, provider, status)| (name.to_string(), *provider, *status))
+                .unwrap_or_else(|| (format!("Zeta seat {index:03}"), "Claude", "Signed in"));
+            super::seam::AccountRow {
+                id: CredentialRef::new(format!("account-{index:03}")).unwrap(),
+                name,
+                provider: provider.into(),
+                status: status.into(),
+            }
+        })
+        .collect()
+}
+
+fn same_bar(rows: &[String], column: usize) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            row.chars()
+                .enumerate()
+                .map(|(index, character)| if index == column && character == '█' { '│' } else { character })
+                .collect()
+        })
+        .collect()
+}
+
+fn check_without_thumb(name: &str, actual: &[String], width: u16) {
+    save(name, actual);
+    let column = width as usize - 3;
+    let expected = same_bar(&fixture(name, &[]), column);
+    let actual = same_bar(actual, column);
+    let wrong: Vec<String> = expected
+        .iter()
+        .zip(&actual)
+        .enumerate()
+        .filter(|(_, (want, got))| want != got)
+        .map(|(row, (want, got))| format!("row {row}\n want |{want}|\n got  |{got}|"))
+        .collect();
+    assert_eq!(expected.len(), actual.len(), "{name}: row count");
+    assert!(wrong.is_empty(), "{name} differs:\n{}", wrong.join("\n"));
+}
+
+fn pick(shell: &mut Shell, indexes: &[usize]) {
+    shell.key(Key::Home);
+    let mut at = 0;
+    for index in indexes {
+        while at < *index {
+            shell.key(Key::Down);
+            at += 1;
+        }
+        shell.key(Key::Char(' '));
+    }
+}
+
+#[test]
+fn pool_editor_frames_match_the_design() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut ctx = ready(width, height);
+        ctx.store.accounts = Load::Ready(accounts());
+        ctx.store.pools = Load::Ready(pools());
+        let mut shell = shell_at(ctx, Place::NewPool);
+        keys(&mut shell, "Build team");
+        shell.key(Key::Tab);
+        pick(&mut shell, &[0, 1, 5, 6, 9, 12, 13]);
+        shell.key(Key::Home);
+        shell.key(Key::Down);
+        shell.key(Key::Down);
+        check_without_thumb(&format!("pool-editor-{width}"), &render(&mut shell, width, height), width);
+    }
+
+    let mut ctx = ready(80, 24);
+    ctx.store.accounts = Load::Ready(accounts());
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::NewPool);
+    keys(&mut shell, "Build team");
+    shell.key(Key::Tab);
+    pick(&mut shell, &(0..16).collect::<Vec<_>>());
+    check_without_thumb("pool-editor-full-80", &render(&mut shell, 80, 24), 80);
+}
