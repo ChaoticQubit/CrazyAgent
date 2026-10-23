@@ -205,6 +205,7 @@ test("the Needs you line for waiting research uses the engine's reason when it g
 const tabData = (jobs) => ({
   id: "p-1", name: "Harbor Notes", setup: undefined, research: { kind: "ok", value: { project_id: "p-1", jobs } }, context: undefined,
   pools: undefined, harnesses: undefined, assigned: null, now: 1_000 + 60_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+  team: { result: undefined, at: 0 }, reloadTeam: () => {},
 });
 
 test("an agent that started offers View log, only a running one offers Stop", async () => {
@@ -419,4 +420,13 @@ test("team tasks waiting for a pool ask the owner for one, with the engine's rea
     "2 team tasks wait: No account in this project's pool can run codex.");
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
   assert.equal(research.teamWaitingLine([]), null);
+});
+
+test("Pause all agents says what stops, or that nothing is running", () => {
+  assert.deepEqual(research.pauseSummary([teamTask(1, "running"), teamTask(2, "running"), teamTask(3, "queued"), teamTask(4, "needs_pool"), teamTask(5, "done")]),
+    { count: 4, line: "2 running tasks stop and 2 waiting tasks are cancelled." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "running")]), { count: 1, line: "1 running task stops." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "queued")]), { count: 1, line: "1 waiting task is cancelled." });
+  assert.deepEqual(research.pauseSummary([teamTask(1, "done"), teamTask(2, "cancelled")]), { count: 0, line: "No team agents are working or waiting." });
+  assert.deepEqual(research.pauseSummary([]), { count: 0, line: "No team agents are working or waiting." });
 });

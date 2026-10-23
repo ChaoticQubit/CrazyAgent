@@ -1,8 +1,7 @@
 import { listAccounts, nextGeneration } from "../../api";
-import type { HarnessEntry, Result } from "../../api";
+import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
 import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState } from "../../api-projects";
-import type { TeamStatus } from "../../api-projects";
 import { useLoad } from "../../state";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
@@ -12,14 +11,9 @@ import { MarkdownView } from "./markdown";
 import { teamPanel } from "./research";
 import type { TeamFilter, TeamTaskRow } from "./research";
 import { NotReady } from "./shared";
-import type { ProjectData } from "./shared";
+import type { ProjectData, TeamRead } from "./shared";
 
 const TEAM_POLL_MS = 3000;
-
-export interface TeamRead {
-  result: Result<TeamStatus> | undefined;
-  at: number;
-}
 
 /** Reads the project's live team now and every few seconds while shown; stops asking when the
  * engine has no team command. Input: the project id. Output: the latest read with its time, and a reload. */

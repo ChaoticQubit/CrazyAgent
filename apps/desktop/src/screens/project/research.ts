@@ -139,6 +139,18 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
   return { agents, tasks };
 }
 
+/** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
+ * cancelled. Input: the team tasks. Output: how many it touches and the confirm line. */
+export function pauseSummary(tasks: Pick<TeamStatus["tasks"][number], "status">[]): { count: number; line: string } {
+  const running = tasks.filter((task) => task.status === "running").length;
+  const waiting = tasks.filter((task) => WAITING.includes(task.status)).length;
+  const parts = [
+    running ? `${running} running ${running === 1 ? "task stops" : "tasks stop"}` : "",
+    waiting ? `${waiting} waiting ${waiting === 1 ? "task is" : "tasks are"} cancelled` : "",
+  ].filter((part) => part !== "");
+  return { count: running + waiting, line: parts.length ? `${parts.join(" and ")}.` : "No team agents are working or waiting." };
+}
+
 /** The Needs you line for team tasks that wait for a pool account, with the engine's first
  * reason when it gave one. Input: the team tasks. Output: the line, or null when none wait. */
 export function teamWaitingLine(tasks: Pick<TeamStatus["tasks"][number], "status" | "problem">[]): string | null {

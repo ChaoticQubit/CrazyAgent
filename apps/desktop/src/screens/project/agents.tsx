@@ -8,7 +8,7 @@ import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { nearBottom, researchRow, teamPanel } from "./research";
 import type { ResearchRow } from "./research";
-import { TeamPanel, useTeam } from "./team";
+import { TeamPanel } from "./team";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
@@ -67,7 +67,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
-  const [team, reloadTeam] = useTeam(data.id);
+  const team = data.team;
   const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
@@ -92,7 +92,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={reloadTeam} />
+    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={data.reloadTeam} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);

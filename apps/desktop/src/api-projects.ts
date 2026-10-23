@@ -272,9 +272,10 @@ export function loadTeamStatus(id: string): Promise<Result<TeamStatus>> {
   return call<TeamStatus>("desktop_team_status", { id });
 }
 
-/** Stops a running team task or cancels a waiting one. Inputs: the project id, the task id
- * and a generation. Output: the engine receipt. */
-export function cancelTeamTask(id: string, task: number, generation: number): Promise<Result<IntentReceipt>> {
+/** Stops a running team task or cancels a waiting one; with no task id it does this for every
+ * team task of the project at once. Inputs: the project id, the task id or null and a generation.
+ * Output: the engine receipt. */
+export function cancelTeamTask(id: string, task: number | null, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_cancel", { id, task, generation });
 }
 

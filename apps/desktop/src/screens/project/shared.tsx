@@ -1,6 +1,12 @@
 import type { HarnessEntry, Result } from "../../api";
 import { Icon, StatusBadge, type Tone } from "../../ui";
-import type { PoolChoice, ProjectContext, ResearchJob, StoredSetup } from "../../api-projects";
+import type { PoolChoice, ProjectContext, ResearchJob, StoredSetup, TeamStatus } from "../../api-projects";
+
+/** The latest live team read and when it arrived, in milliseconds. */
+export interface TeamRead {
+  result: Result<TeamStatus> | undefined;
+  at: number;
+}
 
 export interface ProjectData {
   id: string;
@@ -16,6 +22,8 @@ export interface ProjectData {
   notify: (message: string) => void;
   reload: () => void;
   reloadPools: () => void;
+  team: TeamRead;
+  reloadTeam: () => void;
 }
 
 /** Reads a result's value. Input: an engine result. Output: its value, or null. */
