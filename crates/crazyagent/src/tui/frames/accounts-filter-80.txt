@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts                                           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts                                     240 accounts   3 need attention  
+  / claude max█                                                                 
+                                                                                
+    Name                     Provider           Status                  Pools   
+    Claude Max - work        ✻ Claude           ✓ Signed in             1       
+    Claude Max - work 2      ✻ Claude           ✓ Signed in             1       
+    Claude Max - review      ✻ Claude           ✓ Signed in             -       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  Showing 3 of 240                                                              
+                                                                                
+ Enter Keep filter  ↓ To the list  Esc Clear filter                      ? Help 

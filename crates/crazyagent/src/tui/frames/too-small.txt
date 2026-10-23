@@ -1,0 +1,12 @@
+                                                  
+ CrazyAgent needs a bigger window                 
+                                                  
+ Make it at least 80 x 24.                        
+ Now 50 x 12.                                     
+                                                  
+ Ctrl-Q Quit                                      
+                                                  
+                                                  
+                                                  
+                                                  
+                                                  

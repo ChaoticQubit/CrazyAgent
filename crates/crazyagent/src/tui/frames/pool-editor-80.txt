@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Pools  /  New pool                                 
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────━━━━━━━───────────────────────────────────────────────────────────
+  New pool                                                    7 of 15 selected  
+  Pool name                                                                     
+  [ Build team                                                   ]              
+                                                                                
+  Accounts  / Filter                                     v  Show selected only  
+        Account                     Provider           Status                   
+    [x] Anthropic API - team        ✻ Anthropic API    ✓ Key saved           █  
+    [x] ChatGPT Plus - spare 1      ⬡ ChatGPT / Codex  ✓ Signed in           █  
+  > [ ] ChatGPT Plus - spare 2      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [ ] ChatGPT Plus - spare 3      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [ ] ChatGPT Plus - spare 4      ⬡ ChatGPT / Codex  ! Not signed in       │  
+    [x] ChatGPT Pro - main          ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [x] ChatGPT Team - seat 01      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [ ] ChatGPT Team - seat 02      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+    [ ] ChatGPT Team - seat 03      ⬡ ChatGPT / Codex  ✓ Signed in           │  
+  Showing 1-9 of 240                                                            
+                                                                                
+  [ Save pool ]   [ Cancel ]                                                    
+                                                                                
+ Space Select  / Filter  v Selected only  Tab Next  Esc Cancel           ? Help 

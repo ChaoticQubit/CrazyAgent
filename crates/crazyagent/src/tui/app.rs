@@ -861,6 +861,7 @@ impl App {
                 }
             }
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
+            OwnerEvent::Shell(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
                     self.setup_view = Some((event.query, view));

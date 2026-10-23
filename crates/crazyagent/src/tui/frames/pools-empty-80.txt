@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Pools                                              
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────━━━━━━━───────────────────────────────────────────────────────────
+  Pools                                                                         
+                                                                                
+  No pools yet.                                                                 
+  A pool groups up to 15 accounts for your projects to use. Each project uses   
+  one pool, and its agents share those accounts.                                
+                                                                                
+  [> New pool ]                                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Enter New pool  Shift-←→ Sections  Esc Home                             ? Help 

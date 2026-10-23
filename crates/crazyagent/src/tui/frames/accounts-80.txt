@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Accounts                                           
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts                                     240 accounts   3 need attention  
+  /  Filter by name, provider, status or pool                                   
+                                                                                
+    Name                     Provider           Status                  Pools   
+  > Claude Pro - personal    ✻ Claude           ! Not signed in         1    █  
+    ChatGPT Plus - spare 4   ⬡ ChatGPT / Codex  ! Not signed in         -    │  
+    LM Studio on mini        ⌂ Local model      ✗ Can't reach this URL  1    │  
+    Anthropic API - team     ✻ Anthropic API    ✓ Key saved             1    │  
+    ChatGPT Plus - spare 1   ⬡ ChatGPT / Codex  ✓ Signed in             2    │  
+    ChatGPT Plus - spare 2   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Plus - spare 3   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Pro - main       ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Team - seat 01   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Team - seat 02   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
+    ChatGPT Team - seat 03   ⬡ ChatGPT / Codex  ✓ Signed in             -    │  
+    Claude Max - work        ✻ Claude           ✓ Signed in             1    │  
+                                                                                
+  Showing 1-12 of 240. Needs attention first, then by name.                     
+                                                                                
+ a Add account  Enter Open  / Filter  f Needs attention  Space Select    ? Help 

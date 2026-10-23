@@ -1,0 +1,24 @@
+ CrazyAgent  /  Settings  /  Memory                                             
+────────────────────────────────────────────────────────────────────────────────
+  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
+──────────────────────────────────────────────────────────━━━━━━━━──────────────
+  Memory                                                                        
+                                                                                
+  No memories yet.                                                              
+  When agents find something worth keeping, the project shows it under "Save    
+  to memory". One click saves it here, and every project can use it.            
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Shift-←→ Sections  Esc Home                                             ? Help 

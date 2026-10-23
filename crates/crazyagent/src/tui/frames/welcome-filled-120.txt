@@ -1,0 +1,36 @@
+ CrazyAgent  /  Welcome                                                                                                 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                        
+  Welcome to CrazyAgent                     Name                                                            Required    
+                                            [ Mira Okafor                                                          ]    
+  Tell us a little about you. Every                                                                                     
+  agent reads this before it starts,        Role                                                                        
+  so its work fits how you work.            [ Founder and full-stack developer                                     ]    
+                                                                                                                        
+  Only your name is required. You can       Short bio                                                                   
+  change all of it later in Settings,       [ Building tools for marine researchers. Ten years of TypeScript,      ]    
+  Profile.                                  [ learning Rust.                                                       ]    
+                                                                                                                        
+                                            Preferred stack                                                             
+                                            [ TypeScript, React, Rust, Postgres                                    ]    
+                                                                                                                        
+                                            Working style                                                               
+                                            Replies               (*) Short       ( ) Detailed                          
+                                            Before big changes    (*) Ask first   ( ) Act first                         
+                                                                                                                        
+                                            [> Save and continue ]                                                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Enter Save and continue   Shift-Tab Previous field   Ctrl-Q Quit                                                ? Help 
