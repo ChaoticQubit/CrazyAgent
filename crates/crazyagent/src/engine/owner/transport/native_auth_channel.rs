@@ -555,34 +555,34 @@ impl OwnerRuntimeHandle {
         &self,
         admission: Admission,
         work: NativeAuthWork,
-    ) -> Result<(), (EngineError, NativeAuthWork)> {
+    ) -> Result<(), (EngineError, Box<NativeAuthWork>)> {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
-            Err(_) => return Err((failure("native_auth_host_unavailable"), work)),
+            Err(_) => return Err((failure("native_auth_host_unavailable"), Box::new(work))),
         };
         let mut registration = match self.authority.native_auth_host.lock() {
             Ok(registration) => registration,
-            Err(_) => return Err((failure("native_auth_recovery_required"), work)),
+            Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
         registration.frozen = true;
         if registration.disabled || registration.executable.is_none() {
-            return Err((failure("native_auth_host_unavailable"), work));
+            return Err((failure("native_auth_host_unavailable"), Box::new(work)));
         }
         if let Err(error) = self
             .authority
             .verify_native_auth_admission(&admission, work.fact())
         {
-            return Err((error, work));
+            return Err((error, Box::new(work)));
         }
         let mut current = match self.authority.native_auth.lock() {
             Ok(current) => current,
-            Err(_) => return Err((failure("native_auth_recovery_required"), work)),
+            Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
         if current.as_ref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if current.is_some() {
-            return Err((failure("native_auth_host_busy"), work));
+            return Err((failure("native_auth_host_busy"), Box::new(work)));
         }
         let fact = work.fact().clone();
         let host = NativeAuthDispatchHost {
@@ -687,9 +687,7 @@ impl OwnerRuntimeHandle {
                 Ok(()) => Ok(begun.reply),
                 Err((_error, work)) => self
                     .engine
-                    .native_auth_job(|reply| {
-                        Job::NativeAuthFinish(admission, Box::new(work), reply)
-                    })
+                    .native_auth_job(|reply| Job::NativeAuthFinish(admission, work, reply))
                     .await
                     .map_err(|error| {
                         if error.0 == "owner_queue_not_submitted" {
