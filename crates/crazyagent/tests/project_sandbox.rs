@@ -210,7 +210,11 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
     assert!(worktree.join(".git").is_file());
-    let hook = case.project.join(".git").join("hooks").join("post-checkout");
+    let hook = case
+        .project
+        .join(".git")
+        .join("hooks")
+        .join("post-checkout");
     let output = run(
         &sandbox,
         &profile,
@@ -266,14 +270,26 @@ fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     assert!(ProjectSandbox::new(&owner_home(), &case.home, &case.tmp, network()).is_err());
     assert!(ProjectSandbox::new(Path::new("/"), &case.home, &case.tmp, network()).is_err());
     assert!(
-        ProjectSandbox::new(&case.project, &owner_home().join(".codex"), &case.tmp, network())
-            .is_err()
+        ProjectSandbox::new(
+            &case.project,
+            &owner_home().join(".codex"),
+            &case.tmp,
+            network()
+        )
+        .is_err()
     );
     let quote = case.root.join("bad\"name");
     fs::create_dir_all(&quote).unwrap();
     assert!(ProjectSandbox::new(&quote, &case.home, &case.tmp, network()).is_err());
-    assert!(ProjectSandbox::new(&case.project.join("missing"), &case.home, &case.tmp, network())
-        .is_err());
+    assert!(
+        ProjectSandbox::new(
+            &case.project.join("missing"),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
     let sandbox = sandbox(&case, network());
     assert!(sandbox.install(&case.project.join("inside.sb")).is_err());
     assert!(sandbox.install(&case.home.join("home.sb")).is_err());
@@ -284,5 +300,8 @@ fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     assert!(text.starts_with("(version 1)\n(deny default)\n"));
     assert!(!text.contains("(allow network*)"));
     use std::os::unix::fs::PermissionsExt;
-    assert_eq!(fs::metadata(&profile).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }

@@ -284,7 +284,9 @@ impl ProjectSandbox {
             .iter()
             .any(|root| target.starts_with(root))
         {
-            return Err(invalid("profile must live outside the sandbox's writable roots"));
+            return Err(invalid(
+                "profile must live outside the sandbox's writable roots",
+            ));
         }
         let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
@@ -354,7 +356,9 @@ fn granted_root(root: &Path, owner: &Path) -> Result<(), SandboxError> {
         }
     }
     if !root.is_dir() || root.canonicalize()? != root {
-        return Err(invalid("sandbox roots must be existing canonical directories"));
+        return Err(invalid(
+            "sandbox roots must be existing canonical directories",
+        ));
     }
     Ok(())
 }
