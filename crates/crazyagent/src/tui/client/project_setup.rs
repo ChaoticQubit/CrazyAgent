@@ -65,6 +65,12 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::Log { project, job } => SetupView::Log(
+                controller
+                    .research_log(project, job)
+                    .await
+                    .map_err(problem)?,
+            ),
             SetupQuery::Memories { project, after } => SetupView::Memories(
                 controller
                     .project_memories(project, after)
@@ -145,6 +151,33 @@ impl NativeOwner {
                         controller
                             .delete_project_context(project_id, path, generation)
                             .await
+                    }
+                    SetupAction::Update {
+                        project_id,
+                        expected_revision,
+                        name,
+                        setup,
+                    } => {
+                        controller
+                            .update_project_setup(
+                                project_id,
+                                expected_revision,
+                                name,
+                                setup,
+                                generation,
+                            )
+                            .await
+                    }
+                    SetupAction::Remove { project_id } => {
+                        controller.remove_project(project_id, generation).await
+                    }
+                    SetupAction::CancelResearch { project_id, job } => {
+                        controller
+                            .cancel_research(project_id, job, generation)
+                            .await
+                    }
+                    SetupAction::RetryResearch { project_id, job } => {
+                        controller.retry_research(project_id, job, generation).await
                     }
                 }
                 .map_err(problem)?;
@@ -521,6 +554,90 @@ mod tests {
         app.apply_owner(OwnerEvent::Setup(Box::new(missing)))
             .unwrap();
         assert_eq!(app.setup_problem.as_deref(), Some("project_setup_missing"));
+
+        let Ok(SetupView::Jobs(jobs)) = native
+            .project_setup(SetupQuery::Jobs {
+                project: project.clone(),
+            })
+            .await
+            .result
+        else {
+            panic!("jobs required");
+        };
+        let first = jobs[0].id;
+        let Ok(SetupView::Log(lines)) = native
+            .project_setup(SetupQuery::Log {
+                project: project.clone(),
+                job: first,
+            })
+            .await
+            .result
+        else {
+            panic!("log required");
+        };
+        assert!(lines.is_empty(), "no agent ran yet");
+        let Ok(SetupView::Setup(Some(stored))) = native
+            .project_setup(SetupQuery::Setup {
+                project: project.clone(),
+            })
+            .await
+            .result
+        else {
+            panic!("setup required");
+        };
+        let edited = ProjectSetup {
+            about: "Terminal-first notes for teams.".into(),
+            tech_stack: stored.tech_stack.clone(),
+            platforms: stored.platforms.clone(),
+            research: stored.research.clone(),
+            pool: None,
+            team: None,
+            documents: vec![],
+        };
+        for action in [
+            SetupAction::CancelResearch {
+                project_id: project.clone(),
+                job: first,
+            },
+            SetupAction::RetryResearch {
+                project_id: project.clone(),
+                job: first,
+            },
+            SetupAction::Update {
+                project_id: project.clone(),
+                expected_revision: stored.revision,
+                name: Some("Team notes".into()),
+                setup: edited,
+            },
+            SetupAction::Remove {
+                project_id: project.clone(),
+            },
+        ] {
+            app.request_setup_change(action.clone()).unwrap();
+            let query = app.take_setup_query().unwrap();
+            let event = native.project_setup(query).await;
+            app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+            assert!(
+                matches!(
+                    &app.setup_view,
+                    Some((
+                        SetupQuery::Change { .. },
+                        SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+                    ))
+                ),
+                "{action:?}"
+            );
+        }
+        let Ok(SetupView::Setup(removed)) = native
+            .project_setup(SetupQuery::Setup {
+                project: project.clone(),
+            })
+            .await
+            .result
+        else {
+            panic!("setup read required");
+        };
+        assert!(removed.is_none(), "a removed project has no setup");
         drop(native);
         service.shutdown().await.unwrap();
     }

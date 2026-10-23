@@ -10,7 +10,7 @@ use bridge::{
     ProjectPage,
 };
 use bridge::picker::Pick;
-use bridge::project_setup::MemoryItem;
+use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::AgentView;
@@ -496,6 +496,68 @@ async fn desktop_team_hand_off(
     lock(&state)?
         .team_hand_off(&id, reply, step, generation)
         .await
+}
+
+#[tauri::command]
+async fn desktop_update_project_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    setup: ProjectSetup,
+    name: Option<String>,
+    revision: Option<u64>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .update_project_setup(&id, setup, name, revision, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_remove_project(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_project(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_cancel_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.cancel_research(&id, job, generation).await
+}
+
+#[tauri::command]
+async fn desktop_retry_research(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.retry_research(&id, job, generation).await
+}
+
+#[tauri::command]
+async fn desktop_research_log(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    job: i64,
+) -> Result<ResearchLog, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.research_log(&id, job).await
 }
 
 #[tauri::command]
@@ -1203,6 +1265,11 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_update_project_setup,
+            desktop_remove_project,
+            desktop_cancel_research,
+            desktop_retry_research,
+            desktop_research_log,
             desktop_project_memories,
             desktop_review_memory,
             desktop_memories,

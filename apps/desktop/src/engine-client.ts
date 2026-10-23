@@ -686,6 +686,43 @@ export function teamHandOff(id: string, reply: number, step: number, generation:
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
 }
 
+/** Changes a project's name, description, stack, platforms, research, pool and team.
+ * Inputs: project id, the new setup, a generation, an optional new name and the setup revision
+ * shown (the engine's current one when null). Output: the engine receipt. */
+export function updateProjectSetup(
+  id: string,
+  setup: ProjectSetup,
+  generation: number,
+  name: string | null = null,
+  revision: number | null = null,
+): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
+}
+
+/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
+ * Inputs: project id and a generation. Output: the engine receipt. */
+export function removeProject(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_remove_project", { id, generation });
+}
+
+/** Stops one research job; a running agent's whole process group stops.
+ * Inputs: project id, job id and a generation. Output: the engine receipt. */
+export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_cancel_research", { id, job, generation });
+}
+
+/** Queues a failed or cancelled research job again.
+ * Inputs: project id, job id and a generation. Output: the engine receipt. */
+export function retryResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_retry_research", { id, job, generation });
+}
+
+/** Reads the last plain lines of one research job's output, with secrets hidden.
+ * Inputs: project id and job id. Output: the lines, oldest first. */
+export function researchLog(id: string, job: number): Promise<{ lines: string[] }> {
+  return invoke<{ lines: string[] }>("desktop_research_log", { id, job });
+}
+
 export function openProject(id: string): Promise<ProjectDetail> {
   return invoke<ProjectDetail>("desktop_open_project", { id });
 }
