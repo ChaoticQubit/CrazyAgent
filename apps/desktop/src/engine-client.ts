@@ -157,6 +157,7 @@ export function errorMessage(error: unknown): string {
     server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
+    server_secret_duplicate: "Each secret needs its own name.",
     server_secret_not_found: "This secret was removed.",
     server_secret_invalid: "Enter the secret on one line, up to 8192 characters.",
     server_changed: "This server changed. Review it again before approving.",

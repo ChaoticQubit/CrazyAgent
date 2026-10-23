@@ -525,3 +525,68 @@ async fn mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
     drop(controller);
     case.close().await;
 }
+
+#[tokio::test]
+async fn a_server_whose_secret_cannot_be_saved_is_not_left_behind() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let spec = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+    };
+    let duplicate = controller
+        .add_mcp_server(
+            Scope::Global,
+            "twice".into(),
+            spec.clone(),
+            vec![
+                ("TOKEN".into(), secret("first")),
+                ("TOKEN".into(), secret("second")),
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate.0, "server_secret_duplicate");
+    assert!(plain_problem(&duplicate.0).is_some());
+    assert!(controller.plugin_servers(None).await.unwrap().is_empty());
+
+    fs::create_dir(root.join("plugins")).unwrap();
+    fs::set_permissions(root.join("plugins"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(root.join("plugins/secrets")).unwrap();
+    fs::set_permissions(
+        root.join("plugins/secrets"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let unsafe_store = controller
+        .add_mcp_server(
+            Scope::Global,
+            "tools".into(),
+            spec.clone(),
+            vec![("TOKEN".into(), secret("dummy-value"))],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unsafe_store.0, "plugin_store_unsafe");
+    assert!(controller.plugin_servers(None).await.unwrap().is_empty());
+    assert!(files_under(&root.join("plugins/secrets")).is_empty());
+
+    fs::set_permissions(
+        root.join("plugins/secrets"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let added = controller
+        .add_mcp_server(
+            Scope::Global,
+            "tools".into(),
+            spec,
+            vec![("TOKEN".into(), secret("dummy-value"))],
+        )
+        .await
+        .unwrap();
+    assert!(added.secrets[0].saved);
+    drop(controller);
+    case.close().await;
+}
