@@ -165,17 +165,18 @@ impl Drop for InertChild {
 
 impl Sentinel {
     fn start(root: &Path) -> Self {
-        let child = Command::new("/bin/sleep")
-            .arg("30")
-            .env_clear()
-            .envs(environment(root))
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .env_clear()
+                .envs(environment(root))
+                .current_dir(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
         Self { child }
     }
 

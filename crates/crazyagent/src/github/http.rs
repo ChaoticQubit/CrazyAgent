@@ -101,7 +101,7 @@ impl Request<'_> {
     /// `github_unreachable` when curl could not finish the exchange.
     pub(super) fn send(&self) -> Result<Reply, EngineError> {
         let (mut command, mut config) = self.command()?;
-        let spawned = command.spawn();
+        let spawned = crate::spawn_gate::spawn(&mut command);
         let mut child = match spawned {
             Ok(child) => child,
             Err(_) => {

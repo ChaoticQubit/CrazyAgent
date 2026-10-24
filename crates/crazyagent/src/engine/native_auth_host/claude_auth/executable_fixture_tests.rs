@@ -21,15 +21,16 @@ fn registered_cat_fixture_reports_actual_exit_and_stderr() {
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let registered = RegisteredNativeAuthHost::capture(&executable).unwrap();
     let digest = registered.verified_sha256().unwrap();
-    let mut child = Command::new(registered.verified_path().unwrap())
-        .env_clear()
-        .current_dir(&home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(registered.verified_path().unwrap())
+            .env_clear()
+            .current_dir(&home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0),
+    )
+    .unwrap();
     let initial = child.try_wait().unwrap();
     drop(child.stdin.take().unwrap());
     let deadline = Instant::now() + Duration::from_secs(2);

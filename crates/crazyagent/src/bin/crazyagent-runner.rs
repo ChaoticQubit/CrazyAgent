@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use crazyagent::protocol;
+#[cfg(unix)]
+use crazyagent::spawn_gate;
 
 #[cfg(unix)]
 #[path = "../runner.rs"]

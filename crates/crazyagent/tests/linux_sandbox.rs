@@ -6,7 +6,6 @@ use crazyagent::sandbox::{
 };
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -67,14 +66,15 @@ fn run(sandbox: &dyn Sandbox, case: &Case, script: &str) -> Output {
         .arg("-c")
         .arg(script)
         .current_dir(case.project.join("worktrees"));
-    sandbox
-        .wrap(&harness)
-        .unwrap()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap()
+    crazyagent::spawn_gate::output(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap()
 }
 
 fn boundary_script(case: &Case) -> String {
@@ -168,8 +168,8 @@ fn bubblewrap_holds_the_same_project_boundary() {
 #[test]
 fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
     let case = case();
-    let allowed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let denied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let allowed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let denied = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let allowed_port = allowed.local_addr().unwrap().port();
     let denied_port = denied.local_addr().unwrap().port();
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(allowed_port)]);
@@ -187,14 +187,15 @@ fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
              (exec 3<>/dev/tcp/127.0.0.1/{denied_port}) 2>/dev/null && echo denied; true"
         ))
         .current_dir(&case.project);
-    let output = sandbox
-        .wrap(&harness)
-        .unwrap()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout), "allowed\n");
     let bubblewrap = LinuxSandbox::new(
         policy(&case, network),

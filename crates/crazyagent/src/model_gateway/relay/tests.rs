@@ -23,7 +23,7 @@ struct Provider {
 
 impl Provider {
     fn start(mut answer: impl FnMut(&Incoming, &mut TcpStream) + Send + 'static) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -31,7 +31,7 @@ impl Provider {
         let (recorded, stopping) = (Arc::clone(&seen), Arc::clone(&stop));
         let thread = std::thread::spawn(move || {
             while !stopping.load(Ordering::Acquire) {
-                let Ok((mut stream, _)) = listener.accept() else {
+                let Ok((mut stream, _)) = crate::spawn_gate::accept_tcp_std(&listener) else {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 };
@@ -94,7 +94,7 @@ fn header<'a>(incoming: &'a Incoming, name: &str) -> Option<&'a str> {
 /// Sends one raw request to the relay and reads the whole reply.
 /// Output: the status code, the header block and the body.
 fn send(port: u16, raw: &[u8]) -> (u16, String, Vec<u8>) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.write_all(raw).unwrap();
     let mut reply = Vec::new();
@@ -311,7 +311,7 @@ fn streamed_replies_reach_the_harness_before_the_provider_finishes() {
         stream.write_all(b"data: two\n\n").unwrap();
     });
     let relay = Relay::start(&provider.origin(), key()).unwrap();
-    let mut stream = TcpStream::connect(("127.0.0.1", relay.port())).unwrap();
+    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream
         .write_all(&post(

@@ -1426,13 +1426,17 @@ fn concurrent_agent_setups_create_one_project_repository() {
     for setup in setups {
         setup.join().unwrap().unwrap();
     }
-    let commits = std::process::Command::new("/usr/bin/git")
-        .args(["-C", root.to_str().unwrap(), "rev-list", "--count", "HEAD"])
-        .env_clear()
-        .env("HOME", &base)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let commits = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args(["-C", root.to_str().unwrap(), "rev-list", "--count", "HEAD"])
+            .env_clear()
+            .env("HOME", &base)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(commits.status.success());
     assert_eq!(String::from_utf8_lossy(&commits.stdout).trim(), "1");
     let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();

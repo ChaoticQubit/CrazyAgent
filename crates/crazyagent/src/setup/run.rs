@@ -31,9 +31,8 @@ pub fn run_bounded(
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| InstallError("setup_install_failed"))?;
+    let mut child =
+        crate::spawn_gate::spawn(command).map_err(|_| InstallError("setup_install_failed"))?;
     let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {

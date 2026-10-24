@@ -26,7 +26,6 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
 
 const CATALOG: &str = r#"
@@ -54,7 +53,7 @@ fallback_allowed = false
 
 async fn exchange(root: &Path, command: Value) -> std::io::Result<Value> {
     tokio::time::timeout(Duration::from_secs(3), async {
-        let mut stream = UnixStream::connect(root.join("control.sock")).await?;
+        let mut stream = crazyagent::spawn_gate::connect_unix(root.join("control.sock")).await?;
         let request = json!({"protocol_version": PROTOCOL_VERSION, "command": command});
         stream.write_all(&encode_frame(&request).unwrap()).await?;
         let mut header = [0; 4];
@@ -82,14 +81,15 @@ impl Runner {
             .mode(0o600)
             .open(root.join("stderr.log"))
             .unwrap();
-        let process = ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
-            .arg("serve")
-            .arg(root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .unwrap();
+        let process = crazyagent::spawn_gate::spawn(
+            ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
+                .arg("serve")
+                .arg(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr),
+        )
+        .unwrap();
         Self {
             root: root.to_owned(),
             process,
@@ -122,14 +122,15 @@ impl Runner {
 
     fn signal(&self, signal: &str) {
         assert!(matches!(signal, "-STOP" | "-CONT"));
-        let mut process = ProcessCommand::new("/bin/kill")
-            .arg(signal)
-            .arg(self.process.id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut process = crazyagent::spawn_gate::spawn(
+            ProcessCommand::new("/bin/kill")
+                .arg(signal)
+                .arg(self.process.id().to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         let result = loop {
             if let Some(status) = process.try_wait().unwrap() {
@@ -267,25 +268,26 @@ fn owner_request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerReq
 fn git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> String {
     let output_path = root.join(format!("git-{label}.out"));
     let error_path = root.join(format!("git-{label}.err"));
-    let mut process = ProcessCommand::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-            "-C",
-        ])
-        .arg(repository)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(fs::File::create(&output_path).unwrap())
-        .stderr(fs::File::create(error_path).unwrap())
-        .spawn()
-        .unwrap();
+    let mut process = crazyagent::spawn_gate::spawn(
+        ProcessCommand::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(repository)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(&output_path).unwrap())
+            .stderr(fs::File::create(error_path).unwrap()),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let result = loop {
         if let Some(status) = process.try_wait().unwrap() {

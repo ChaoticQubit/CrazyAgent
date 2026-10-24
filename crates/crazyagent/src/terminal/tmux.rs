@@ -159,27 +159,28 @@ impl Tmux {
         {
             return Err(failure("terminal_folder_unsafe"));
         }
-        let mut child = Command::new(executable)
-            .args(["-u", "-f", "/dev/null", "-S"])
-            .arg(&socket)
-            .args([
-                "-C",
-                "new-session",
-                "-A",
-                "-s",
-                SESSION,
-                "-n",
-                HOLDER,
-                "cat",
-            ])
-            .env_clear()
-            .env("PATH", SERVER_PATH)
-            .current_dir(&self.folder)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| failure("terminal_unavailable"))?;
+        let mut child = crate::spawn_gate::spawn(
+            Command::new(executable)
+                .args(["-u", "-f", "/dev/null", "-S"])
+                .arg(&socket)
+                .args([
+                    "-C",
+                    "new-session",
+                    "-A",
+                    "-s",
+                    SESSION,
+                    "-n",
+                    HOLDER,
+                    "cat",
+                ])
+                .env_clear()
+                .env("PATH", SERVER_PATH)
+                .current_dir(&self.folder)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|_| failure("terminal_unavailable"))?;
         let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
             let _ = child.wait();

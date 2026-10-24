@@ -4,7 +4,6 @@ use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -58,7 +57,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.output().unwrap()
+    crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
 fn owner_home() -> PathBuf {
@@ -194,12 +193,13 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
             "start",
         ],
     ] {
-        let status = std::process::Command::new("/usr/bin/git")
-            .args(arguments)
-            .current_dir(&case.project)
-            .env("HOME", &case.home)
-            .status()
-            .unwrap();
+        let status = crazyagent::spawn_gate::status(
+            std::process::Command::new("/usr/bin/git")
+                .args(arguments)
+                .current_dir(&case.project)
+                .env("HOME", &case.home),
+        )
+        .unwrap();
         assert!(status.success());
     }
     let script = format!(
@@ -238,8 +238,8 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
 #[test]
 fn network_is_open_only_when_tools_are_on() {
     let case = case();
-    let allowed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    let allowed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let other = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let allowed_port = allowed.local_addr().unwrap().port();
     let other_port = other.local_addr().unwrap().port();
     let connect = |sandbox: &ProjectSandbox, name: &str, port: u16| {
@@ -331,12 +331,13 @@ fn wrap_puts_an_existing_harness_command_under_the_sandbox_and_keeps_only_safe_e
         .env("HOME", owner_home())
         .current_dir(case.project.join("worktrees"));
     let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
-    let output = wrapped
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        wrapped
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -396,12 +397,13 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     let direct = installed.wrap(&harness).unwrap();
     assert_eq!(wrapped.get_program(), direct.get_program());
     assert!(wrapped.get_args().eq(direct.get_args()));
-    let output = wrapped
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        wrapped
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

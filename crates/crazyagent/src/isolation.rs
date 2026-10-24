@@ -332,7 +332,7 @@ fn collect_boundary(
     write_json(&artifacts.join("settings.json"), &settings)?;
     write_json(&artifacts.join("profile.json"), profile)?;
     write_new(&artifacts.join("probe.cjs"), PROBE.as_bytes())?;
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).map_err(|error| {
         BoundaryError::Unavailable(format!(
             "loopback listener: {error}; artifacts {}",
             artifacts.display()
@@ -340,7 +340,7 @@ fn collect_boundary(
     })?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
-    let positive = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
+    let positive = crate::spawn_gate::connect_tcp_std_timeout(&address, Duration::from_secs(1))?;
     let accepted = accept_control(&listener, Duration::from_secs(1))?;
     drop(positive);
     drop(accepted);
@@ -430,7 +430,7 @@ fn collect_boundary(
                 .iter()
                 .all(|path| fs::read(path).is_ok_and(|v| v == CREDENTIAL.as_bytes())),
     );
-    let no_connection = match listener.accept() {
+    let no_connection = match crate::spawn_gate::accept_tcp_std(&listener) {
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
         Ok(_) => false,
         Err(error) => return Err(error.into()),
@@ -755,7 +755,7 @@ fn record_case(cases: &mut BTreeMap<String, bool>, name: &str, outcome: bool) {
 fn accept_control(listener: &TcpListener, timeout: Duration) -> Result<TcpStream, BoundaryError> {
     let started = Instant::now();
     loop {
-        match listener.accept() {
+        match crate::spawn_gate::accept_tcp_std(listener) {
             Ok((stream, _)) => return Ok(stream),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if started.elapsed() >= timeout {
@@ -819,22 +819,23 @@ fn bounded_command(
     let node_dir = dependency_executable.parent().unwrap();
     let path = std::env::join_paths([node_dir, Path::new("/usr/bin"), Path::new("/bin")])
         .map_err(|error| BoundaryError::InvalidProfile(error.to_string()))?;
-    let mut child = Command::new(executable)
-        .args(args)
-        .current_dir(cwd)
-        .env_clear()
-        .env("PATH", path)
-        .env("HOME", cwd)
-        .env("TMPDIR", cwd)
-        .env("LANG", "C")
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| {
-            BoundaryError::Unavailable(format!("launch {}: {error}", executable.display()))
-        })?;
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(executable)
+            .args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", cwd)
+            .env("TMPDIR", cwd)
+            .env("LANG", "C")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .process_group(0),
+    )
+    .map_err(|error| {
+        BoundaryError::Unavailable(format!("launch {}: {error}", executable.display()))
+    })?;
     let result = (|| {
         let started = Instant::now();
         loop {
@@ -928,12 +929,12 @@ mod tests {
 
     #[test]
     fn positive_loopback_control_waits_for_connection() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let sender = thread::spawn(move || {
             thread::sleep(Duration::from_millis(40));
-            TcpStream::connect_timeout(&address, Duration::from_secs(1)).unwrap()
+            crate::spawn_gate::connect_tcp_std_timeout(&address, Duration::from_secs(1)).unwrap()
         });
         let result = accept_control(&listener, Duration::from_secs(1));
         let _connection = sender.join().unwrap();
@@ -978,7 +979,7 @@ mod tests {
 
     #[test]
     fn positive_loopback_control_has_a_deadline() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let result = accept_control(&listener, Duration::from_millis(20));
         assert!(matches!(result, Err(BoundaryError::Unavailable(_))));

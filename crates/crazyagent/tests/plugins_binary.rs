@@ -19,18 +19,19 @@ struct Engine {
 impl Engine {
     fn start(root: &Path, run: &str) -> Self {
         let stdout = root.join(format!("{run}.stdout"));
-        let child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .stdin(Stdio::null())
-            .stdout(File::create(&stdout).unwrap())
-            .stderr(File::create(root.join(format!("{run}.stderr"))).unwrap())
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .stdin(Stdio::null())
+                .stdout(File::create(&stdout).unwrap())
+                .stderr(File::create(root.join(format!("{run}.stderr"))).unwrap()),
+        )
+        .unwrap();
         let mut engine = Self { child };
         let deadline = Instant::now() + Duration::from_secs(30);
         while std::fs::read(&stdout).unwrap() != b"ready\n" {
@@ -45,10 +46,12 @@ impl Engine {
     }
 
     fn stop(&mut self) {
-        let terminated = Command::new("/bin/kill")
-            .args(["-s", "TERM", &self.child.id().to_string()])
-            .status()
-            .unwrap();
+        let terminated = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "TERM",
+            &self.child.id().to_string(),
+        ]))
+        .unwrap();
         assert!(terminated.success());
         let deadline = Instant::now() + Duration::from_secs(20);
         while self.child.try_wait().unwrap().is_none() {

@@ -35,9 +35,8 @@ pub fn run(
     for (name, value) in env {
         command.env(name, value);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| InstallError("setup_install_failed"))?;
+    let mut child =
+        crate::spawn_gate::spawn(&mut command).map_err(|_| InstallError("setup_install_failed"))?;
     let pid = child.id();
     let stdout = child.stdout.take();
     let reader = std::thread::Builder::new()

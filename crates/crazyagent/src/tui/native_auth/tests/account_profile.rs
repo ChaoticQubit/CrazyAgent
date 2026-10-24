@@ -365,7 +365,7 @@ fn local_receipt(
 #[tokio::test]
 async fn local_none_commits_private_profile_and_recovers_original_receipt_without_endpoint_io() {
     run(|case| async move {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let (mut ui, connection) = local(&case, &listener).await;
         let original = std::fs::read(&case.global).unwrap();
@@ -416,7 +416,12 @@ async fn local_none_commits_private_profile_and_recovers_original_receipt_withou
             )
             .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+        assert_eq!(
+            crate::spawn_gate::accept_tcp_std(&listener)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
         assert_no_secret_persistence(&case);
         assert_private(&ui);
         assert_no_auth(&case);

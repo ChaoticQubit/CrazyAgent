@@ -950,8 +950,7 @@ impl Session {
                     .stdin(Stdio::from(io.child_input))
                     .stdout(Stdio::from(io.child_output))
                     .stderr(Stdio::null());
-                child = command
-                    .spawn()
+                child = crate::spawn_gate::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 drop(command);
                 stdin = Some(io.input);
@@ -962,8 +961,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                child = command
-                    .spawn()
+                child = crate::spawn_gate::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -1189,16 +1187,17 @@ impl DurableIo {
                 _ => return Err(failure("launch_state_in_use")),
             }
         }
-        let made = Command::new(MKFIFO)
-            .arg("-m")
-            .arg("600")
-            .arg(&input)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|_| failure("launch_state_unavailable"))?;
+        let made = crate::spawn_gate::status(
+            Command::new(MKFIFO)
+                .arg("-m")
+                .arg("600")
+                .arg(&input)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|_| failure("launch_state_unavailable"))?;
         let fifo =
             std::fs::symlink_metadata(&input).map_err(|_| failure("launch_state_unavailable"))?;
         if !made.success()

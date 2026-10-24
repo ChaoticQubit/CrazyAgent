@@ -48,19 +48,20 @@ fn fallback_cleanup(child: &mut Child) -> io::Result<()> {
 
 impl InertChild {
     fn spawn(root: &Path, executable: &str, arguments: &[&str]) -> Self {
-        let child = Command::new(executable)
-            .args(arguments)
-            .env_clear()
-            .env("PATH", "/ca799-selected-path")
-            .env("HOME", root)
-            .env("TMPDIR", root)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new(executable)
+                .args(arguments)
+                .env_clear()
+                .env("PATH", "/ca799-selected-path")
+                .env("HOME", root)
+                .env("TMPDIR", root)
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         Self { child: Some(child) }
     }
 

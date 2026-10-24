@@ -675,7 +675,7 @@ impl ResearchRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert!(!carries_secret(&command, &context));
-        let mut running = AgentProcess::new(command.spawn()?)?;
+        let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
         for (stream, name) in [
@@ -1012,7 +1012,7 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut running = AgentProcess::new(command.spawn()?)?;
+        let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
         let counted = Arc::new(AtomicU64::new(0));
         let mut drains = Vec::with_capacity(2);
         let streams = [
@@ -1469,7 +1469,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        wait_bounded(command.spawn()?, SETUP_TIMEOUT)
+        wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)
     };
     let created = git(&["init", "-q", "--template="])?
         && git(&[
@@ -1540,7 +1540,7 @@ pub(crate) fn add_worktree(
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
-    if !wait_bounded(git.spawn()?, SETUP_TIMEOUT)? {
+    if !wait_bounded(crate::spawn_gate::spawn(&mut git)?, SETUP_TIMEOUT)? {
         return Err(RunError::Invalid("git worktree add failed".into()));
     }
     assert!(worktree.starts_with(sandbox.project_root()));
@@ -1670,14 +1670,15 @@ impl Lifeline {
     pub(crate) fn watch(group: u32) -> io::Result<Self> {
         use std::os::unix::process::CommandExt;
         assert!(group > 1);
-        let child = Command::new("/bin/sh")
-            .env_clear()
-            .args(["-c", LIFELINE, "lifeline", &group.to_string()])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()?;
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .env_clear()
+                .args(["-c", LIFELINE, "lifeline", &group.to_string()])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )?;
         Ok(Self {
             child,
             released: false,
@@ -2199,14 +2200,16 @@ mod tests {
     }
 
     fn group_members(group: u32) -> usize {
-        let output = Command::new("/usr/bin/pgrep")
-            .env_clear()
-            .arg("-g")
-            .arg(group.to_string())
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/pgrep")
+                .env_clear()
+                .arg("-g")
+                .arg(group.to_string())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .stdout(std::process::Stdio::piped()),
+        )
+        .unwrap();
         String::from_utf8_lossy(&output.stdout).lines().count()
     }
 
@@ -2214,15 +2217,16 @@ mod tests {
     fn an_agent_dropped_while_a_panic_unwinds_leaves_no_process_in_its_group() {
         use std::os::unix::process::CommandExt;
         const MID_RUN: &str = "the run fails while its agent and the agent's child are running";
-        let child = Command::new("/bin/sh")
-            .env_clear()
-            .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .env_clear()
+                .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
         let group = child.id();
         let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -2244,15 +2248,16 @@ mod tests {
     fn a_lifeline_kills_its_agent_group_only_when_its_pipe_closes_without_done() {
         use std::os::unix::process::CommandExt;
         let spawn = || {
-            let agent = Command::new("/bin/sh")
-                .env_clear()
-                .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .unwrap();
+            let agent = crate::spawn_gate::spawn(
+                Command::new("/bin/sh")
+                    .env_clear()
+                    .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0),
+            )
+            .unwrap();
             let until = Instant::now() + Duration::from_secs(10);
             while group_members(agent.id()) < 2 {
                 assert!(Instant::now() < until, "the agent never started its child");

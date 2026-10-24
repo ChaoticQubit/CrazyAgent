@@ -207,15 +207,16 @@ impl OwnedProcess {
         bounds: ProcessBounds,
     ) -> io::Result<Self> {
         let run_deadline = bounds.validate(Instant::now())?;
-        let mut child = command
-            .env_clear()
-            .envs(environment.iter().map(|(key, value)| (key, value)))
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
+        let mut child = crate::spawn_gate::spawn(
+            command
+                .env_clear()
+                .envs(environment.iter().map(|(key, value)| (key, value)))
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0),
+        )?;
         let identity = DirectIdentity {
             pid: child.id(),
             process_group: child.id(),

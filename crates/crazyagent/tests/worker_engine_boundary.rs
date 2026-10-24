@@ -24,21 +24,22 @@ impl Drop for EngineProcess {
 }
 
 fn launch(root: &Path, artifacts: &Path) -> EngineProcess {
-    let child = ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .args(["engine"])
-        .arg(root)
-        .arg(root.join("global.toml"))
-        .arg(root.join("project.toml"))
-        .arg("engine.sock")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root)
-        .env("TMPDIR", root)
-        .stdin(Stdio::null())
-        .stdout(fs::File::create(artifacts.join("engine.stdout")).unwrap())
-        .stderr(fs::File::create(artifacts.join("engine.stderr")).unwrap())
-        .spawn()
-        .expect("launch actual disposable engine executable");
+    let child = crazyagent::spawn_gate::spawn(
+        ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(["engine"])
+            .arg(root)
+            .arg(root.join("global.toml"))
+            .arg(root.join("project.toml"))
+            .arg("engine.sock")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root)
+            .env("TMPDIR", root)
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(artifacts.join("engine.stdout")).unwrap())
+            .stderr(fs::File::create(artifacts.join("engine.stderr")).unwrap()),
+    )
+    .expect("launch actual disposable engine executable");
     let mut process = EngineProcess(child);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

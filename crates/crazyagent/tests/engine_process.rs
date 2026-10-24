@@ -19,16 +19,17 @@ impl Drop for Process {
 }
 
 fn launch(root: &std::path::Path, endpoint: &str) -> Process {
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .arg("engine")
-        .arg(root)
-        .arg(root.join("global.toml"))
-        .arg(root.join("project.toml"))
-        .arg(endpoint)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = crazyagent::spawn_gate::spawn(
+        std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .arg("engine")
+            .arg(root)
+            .arg(root.join("global.toml"))
+            .arg(root.join("project.toml"))
+            .arg(endpoint)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     let stdout = child.stdout.take().unwrap();
     let process = Process(child);
     let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -63,7 +64,7 @@ async fn disconnect_kill_restart_and_replay_executes_once() {
             },
         },
     };
-    let mut stream = tokio::net::UnixStream::connect(root.path().join("first.sock"))
+    let mut stream = crazyagent::spawn_gate::connect_unix(root.path().join("first.sock"))
         .await
         .unwrap();
     stream

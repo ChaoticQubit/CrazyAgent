@@ -10,7 +10,7 @@ use crazyagent::project_setup::ProjectSetup;
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -76,12 +76,12 @@ fn record(stream: TcpStream, bodies: Bodies) {
 }
 
 fn capture() -> (u16, Bodies) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies: Bodies = Arc::new(Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
             let sink = sink.clone();
             std::thread::spawn(move || record(stream, sink));
         }
@@ -206,12 +206,13 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
     fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let work = private_directory(&base.join("work"));
     assert!(
-        std::process::Command::new("/usr/bin/git")
-            .args(["init", "-q"])
-            .arg(&work)
-            .status()
-            .unwrap()
-            .success()
+        crazyagent::spawn_gate::status(
+            std::process::Command::new("/usr/bin/git")
+                .args(["init", "-q"])
+                .arg(&work)
+        )
+        .unwrap()
+        .success()
     );
     for (harness, binary, suffix) in [("codex", "codex", "/v1"), ("claude-code", "claude", "")] {
         let connection = rusqlite::Connection::open_with_flags(

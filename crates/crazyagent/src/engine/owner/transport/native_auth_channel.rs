@@ -1714,7 +1714,7 @@ impl NativeAuthCustodyChannel {
         let (generation, host, binding) = runner_binding(input)?;
         let root = Root::open(&generation)?;
         let socket = root.socket_identity()?;
-        let mut stream = UnixStream::connect(root.path.join(SOCKET))
+        let mut stream = crate::spawn_gate::connect_unix(root.path.join(SOCKET))
             .await
             .map_err(io_error)?;
         verify_peer(&stream)?;
@@ -2347,14 +2347,15 @@ fallback_allowed = false
 
         async fn retire(&mut self) -> NativeAuthFact {
             let mut session = CustodySession::new(self.guard.take().unwrap());
-            let mut child = ProcessCommand::new("/bin/cat")
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .unwrap();
+            let mut child = crate::spawn_gate::spawn(
+                ProcessCommand::new("/bin/cat")
+                    .env_clear()
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0),
+            )
+            .unwrap();
             let input = child.stdin.take().unwrap();
             session.retain_child(child).unwrap();
             drop(input);
@@ -2635,26 +2636,30 @@ fallback_allowed = false
 "#;
 
     fn master_git(home: &std::path::Path, repository: &std::path::Path, arguments: &[&str]) {
-        let output = ProcessCommand::new("/usr/bin/git")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(["-c", "user.name=Signed-in master fixture"])
-            .args(["-c", "user.email=signed-in-master@example.invalid"])
-            .arg("-C")
-            .arg(repository)
-            .args(arguments)
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::output(
+            ProcessCommand::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(["-c", "user.name=Signed-in master fixture"])
+                .args(["-c", "user.email=signed-in-master@example.invalid"])
+                .arg("-C")
+                .arg(repository)
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
         assert!(
             output.status.success(),
             "actual Git fixture failed: {output:?}"

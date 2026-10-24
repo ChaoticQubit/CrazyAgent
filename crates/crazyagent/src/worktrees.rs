@@ -165,43 +165,44 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
 }
 
 fn git(repository: &Path, args: &[&str]) -> Result<Vec<u8>, EngineError> {
-    let child = Process::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ATTR_NOSYSTEM", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .arg("--no-replace-objects")
-        .arg("--no-optional-locks")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.attributesFile=/dev/null",
-            "-c",
-            "submodule.recurse=false",
-            "-c",
-            "protocol.allow=never",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-        ])
-        .arg("--git-dir")
-        .arg(repository.join(".git"))
-        .arg("--work-tree")
-        .arg(repository)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(error)?;
+    let child = crate::spawn_gate::spawn(
+        Process::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .arg("--no-replace-objects")
+            .arg("--no-optional-locks")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "submodule.recurse=false",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+            ])
+            .arg("--git-dir")
+            .arg(repository.join(".git"))
+            .arg("--work-tree")
+            .arg(repository)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(error)?;
     collect_git_output(child)
 }
 

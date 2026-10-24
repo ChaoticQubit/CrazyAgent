@@ -99,15 +99,16 @@ impl Case {
     }
 
     fn child_reaped(&mut self) -> Retirement {
-        let mut child = Command::new("/bin/cat")
-            .env_clear()
-            .current_dir(&self.home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut child = crate::spawn_gate::spawn(
+            Command::new("/bin/cat")
+                .env_clear()
+                .current_dir(&self.home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
         let input = child.stdin.take().unwrap();
         let direct = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
         let session = self.session.as_mut().unwrap();

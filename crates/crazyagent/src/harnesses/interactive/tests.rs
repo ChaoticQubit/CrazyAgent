@@ -336,13 +336,17 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_inside_the_sandbox() {
     assert!(built.argv.iter().any(|argument| argument
         == "model_providers.crazyagent={name=\"CrazyAgent\",base_url=\"https://models.example.test/v1\",wire_api=\"responses\",env_key=\"CRAZYAGENT_API_KEY\"}"));
 
-    let output = std::process::Command::new(&built.argv[0])
-        .args(&built.argv[1..])
-        .env_clear()
-        .envs(built.env.iter().map(|(name, value)| (name, value)))
-        .current_dir(&built.cwd)
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        std::process::Command::new(&built.argv[0])
+            .args(&built.argv[1..])
+            .env_clear()
+            .envs(built.env.iter().map(|(name, value)| (name, value)))
+            .current_dir(&built.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "{output:?}");
     let seen = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -355,13 +359,17 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_inside_the_sandbox() {
     );
 
     std::fs::remove_file(&key_file).unwrap();
-    let missing = std::process::Command::new(&built.argv[0])
-        .args(&built.argv[1..])
-        .env_clear()
-        .envs(built.env.iter().map(|(name, value)| (name, value)))
-        .current_dir(&built.cwd)
-        .output()
-        .unwrap();
+    let missing = crate::spawn_gate::output(
+        std::process::Command::new(&built.argv[0])
+            .args(&built.argv[1..])
+            .env_clear()
+            .envs(built.env.iter().map(|(name, value)| (name, value)))
+            .current_dir(&built.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(!missing.status.success(), "no key file, no harness");
     assert!(!String::from_utf8_lossy(&missing.stdout).contains("CODEX_HOME="));
 }
@@ -481,10 +489,14 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
             .iter()
             .any(|(name, _)| name == "ANTHROPIC_API_KEY")
     );
-    let helper = std::process::Command::new("/bin/sh")
-        .args(["-c", settings["apiKeyHelper"].as_str().unwrap()])
-        .output()
-        .unwrap();
+    let helper = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", settings["apiKeyHelper"].as_str().unwrap()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert_eq!(String::from_utf8(helper.stdout).unwrap(), KEY);
 
     let local = case.request(

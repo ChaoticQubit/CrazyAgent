@@ -58,7 +58,7 @@ pub fn check_stdio(
     for (name, value) in secrets {
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
-    let mut child = process.spawn().map_err(|e| match e.kind() {
+    let mut child = crate::spawn_gate::spawn(&mut process).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => "server_command_not_found",
         std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",
         _ => "server_cant_start",

@@ -245,7 +245,15 @@ mod tests {
             .find(|path| path.is_file());
         match installed {
             Some(tmux) => {
-                let report = Command::new(tmux).arg("-V").output().unwrap().stdout;
+                let report = crate::spawn_gate::output(
+                    Command::new(tmux)
+                        .arg("-V")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped()),
+                )
+                .unwrap()
+                .stdout;
                 let report = String::from_utf8(report).unwrap();
                 assert!(report.contains(found.unwrap().as_str()), "{report}");
             }

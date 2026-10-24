@@ -1122,7 +1122,8 @@ impl OwnerServer {
                 });
             }
             root.verify()?;
-            let listener = UnixListener::bind(root.path.join(SOCKET)).map_err(io_error)?;
+            let listener =
+                crate::spawn_gate::bind_unix(root.path.join(SOCKET)).map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
             created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
@@ -1288,7 +1289,7 @@ impl OwnerServer {
                         _ => {}
                     }
                 }
-                accepted=self.listener.accept() => {
+                accepted=crate::spawn_gate::accept_unix(&self.listener) => {
                     let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
                     if handshakes.len()>=3 {drop(stream);continue;}
                     let timeout=self.timeout;
@@ -2029,7 +2030,7 @@ async fn runner_control(
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
-        let mut stream = UnixStream::connect(root.path.join("control.sock"))
+        let mut stream = crate::spawn_gate::connect_unix(root.path.join("control.sock"))
             .await
             .map_err(io_error)?;
         verify_peer(&stream)?;
@@ -2282,34 +2283,35 @@ async fn observe_dispatch(
 ) -> Result<DispatchSnapshot, EngineError> {
     let metadata = dispatch_files(&snapshot.seal)?;
     let mut child = DispatchGit(
-        std::process::Command::new("/usr/bin/git")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .args([
-                "--no-replace-objects",
-                "--no-optional-locks",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "protocol.allow=never",
-            ])
-            .arg("--git-dir")
-            .arg(&metadata)
-            .arg("--work-tree")
-            .arg(&snapshot.seal.path)
-            .args(["rev-parse", "--verify", "HEAD"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(io_error)?,
+        crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args([
+                    "--no-replace-objects",
+                    "--no-optional-locks",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "protocol.allow=never",
+                ])
+                .arg("--git-dir")
+                .arg(&metadata)
+                .arg("--work-tree")
+                .arg(&snapshot.seal.path)
+                .args(["rev-parse", "--verify", "HEAD"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .map_err(io_error)?,
     );
     let mut output = child
         .0
@@ -2433,7 +2435,7 @@ impl RunnerClient {
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
-            let mut stream = UnixStream::connect(generation.path.join(SOCKET))
+            let mut stream = crate::spawn_gate::connect_unix(generation.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
             verify_peer(&stream)?;
@@ -2645,7 +2647,7 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = UnixStream::connect(self.root.path.join(SOCKET))
+            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
             verify_peer(&stream)?;
@@ -3040,7 +3042,10 @@ fallback_allowed = false
         std::fs::create_dir(&long).unwrap();
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = long.join(SOCKET);
-        let expected = UnixListener::bind(&path).err().unwrap().to_string();
+        let expected = crate::spawn_gate::bind_unix(&path)
+            .err()
+            .unwrap()
+            .to_string();
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Arc::new(
@@ -3124,8 +3129,12 @@ fallback_allowed = false
         let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();
-        let mut client = UnixStream::connect(root.path().join(SOCKET)).await.unwrap();
-        let (stream, _) = server.listener.accept().await.unwrap();
+        let mut client = crate::spawn_gate::connect_unix(root.path().join(SOCKET))
+            .await
+            .unwrap();
+        let (stream, _) = crate::spawn_gate::accept_unix(&server.listener)
+            .await
+            .unwrap();
         nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::SndBuf, &1024usize)
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)

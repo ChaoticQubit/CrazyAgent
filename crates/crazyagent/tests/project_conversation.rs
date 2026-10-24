@@ -850,7 +850,7 @@ async fn ordinary_wire_and_typed_legacy_call_cannot_mutate_owner_conversation() 
     let before = counts(root.path());
     let body = serde_json::to_value(&wire).unwrap();
     assert!(serde_json::from_value::<WireRequest>(body).is_err());
-    let mut socket = tokio::net::UnixStream::connect(root.path().join("engine.sock"))
+    let mut socket = crazyagent::spawn_gate::connect_unix(root.path().join("engine.sock"))
         .await
         .unwrap();
     socket
@@ -893,7 +893,7 @@ async fn discarded_real_socket_ack_reconciles_one_atomic_effect_and_event() {
     auth[..4].copy_from_slice(b"CAO1");
     auth[4] = 0;
     auth[5..].copy_from_slice(&key);
-    let mut stream = tokio::net::UnixStream::connect(service.owner_path.join("owner.sock"))
+    let mut stream = crazyagent::spawn_gate::connect_unix(service.owner_path.join("owner.sock"))
         .await
         .unwrap();
     stream.write_all(&auth).await.unwrap();

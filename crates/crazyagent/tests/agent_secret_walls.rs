@@ -62,7 +62,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, program: &str, args: &[&str]) -
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.output().unwrap()
+    crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
 fn shell(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
@@ -87,10 +87,14 @@ fn random_hex(bytes: usize) -> String {
 }
 
 fn default_keychain() -> PathBuf {
-    let output = Command::new("/usr/bin/security")
-        .args(["default-keychain", "-d", "user"])
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/security")
+            .args(["default-keychain", "-d", "user"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     PathBuf::from(text.trim().trim_matches('"'))
@@ -417,14 +421,15 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
         .env("ANTHROPIC_API_KEY", "crazyagent-local")
         .env("TERM", "dumb")
         .current_dir(&case.project);
-    let output = sandbox
-        .wrap(&profile, &harness)
-        .unwrap()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        sandbox
+            .wrap(&profile, &harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -474,13 +479,13 @@ fn sandboxed_agent_git_has_no_credential_helper_and_gets_no_password() {
     assert_eq!(String::from_utf8_lossy(&helpers.stdout).trim(), "");
     sandbox.install(&profile).unwrap();
     let mut fill = sandbox.command(&profile, Path::new("/usr/bin/git"));
-    let mut child = fill
-        .args(["credential", "fill"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = crazyagent::spawn_gate::spawn(
+        fill.args(["credential", "fill"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     child
         .stdin
         .take()

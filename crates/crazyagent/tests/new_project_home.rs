@@ -25,14 +25,18 @@ fn names(folder: &Path) -> Vec<String> {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .arg("-C")
-        .arg(folder)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(folder)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

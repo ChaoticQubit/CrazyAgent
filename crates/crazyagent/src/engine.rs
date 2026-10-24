@@ -145,7 +145,9 @@ impl Client {
         }
         verify_endpoint(&self.socket)?;
         tokio::time::timeout(self.timeout, async {
-            let mut stream = UnixStream::connect(&self.socket).await.map_err(io_error)?;
+            let mut stream = crate::spawn_gate::connect_unix(&self.socket)
+                .await
+                .map_err(io_error)?;
             verify_peer(&stream)?;
             if let Some(binding) = &self.binding {
                 binding.verify()?;
@@ -215,7 +217,7 @@ impl Server {
             _ => return Err(EngineError("socket_path_already_exists".into())),
         }
         let directory = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
-        let listener = UnixListener::bind(socket).map_err(io_error)?;
+        let listener = crate::spawn_gate::bind_unix(socket).map_err(io_error)?;
         let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
         let checked = (|| {
             if !metadata.file_type().is_socket()
@@ -276,7 +278,7 @@ impl Server {
                 result = clients.join_next(), if !clients.is_empty() => {
                     if let Some(Err(error)) = result { break Err(io_error(error)); }
                 }
-                accepted = self.listener.accept() => {
+                accepted = crate::spawn_gate::accept_unix(&self.listener) => {
                     let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
                     if clients.len() >= self.clients_max { drop(stream); continue; }
                     let engine = self.engine.clone();
@@ -699,14 +701,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn peer_without_kernel_credentials_is_rejected() {
-        let socket = nix::sys::socket::socket(
-            nix::sys::socket::AddressFamily::Unix,
-            nix::sys::socket::SockType::Stream,
-            nix::sys::socket::SockFlag::empty(),
-            None,
-        )
-        .unwrap();
-        let stream = std::os::unix::net::UnixStream::from(socket);
+        let stream = crate::spawn_gate::unconnected_unix_stream().unwrap();
         stream.set_nonblocking(true).unwrap();
         let stream = UnixStream::from_std(stream).unwrap();
         assert!(verify_peer(&stream).is_err());

@@ -94,16 +94,17 @@ impl Case {
     }
 
     fn retain(&mut self, program: &str, args: &[&str]) {
-        let child = Command::new(program)
-            .args(args)
-            .env_clear()
-            .current_dir(&self.home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new(program)
+                .args(args)
+                .env_clear()
+                .current_dir(&self.home)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
         if let Err((error, mut child)) = self.session.as_mut().unwrap().retain_child(child) {
             let _ = child.kill();
             let _ = child.wait();
@@ -154,15 +155,16 @@ fn native_auth_codex_retirement_requires_a_spawned_child() {
 #[test]
 fn native_auth_codex_retirement_accepts_a_reaped_child_and_absent_group() {
     let mut case = Case::new();
-    let mut child = Command::new("/bin/cat")
-        .env_clear()
-        .current_dir(&case.home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        Command::new("/bin/cat")
+            .env_clear()
+            .current_dir(&case.home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0),
+    )
+    .unwrap();
     let input = child.stdin.take().unwrap();
     if let Err((error, mut child)) = case.session.as_mut().unwrap().retain_child(child) {
         drop(input);

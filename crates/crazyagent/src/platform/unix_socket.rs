@@ -4,7 +4,9 @@ pub(crate) use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf, ReadHalf};
 pub(crate) use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(not(unix))]
-pub(crate) use unavailable::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, UnixListener, UnixStream};
+pub(crate) use unavailable::{
+    OwnedReadHalf, OwnedWriteHalf, ReadHalf, SocketAddr, UnixListener, UnixStream,
+};
 
 #[cfg(not(unix))]
 mod unavailable {

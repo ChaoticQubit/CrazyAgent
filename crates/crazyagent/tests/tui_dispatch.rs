@@ -67,12 +67,13 @@ impl OwnedProcess {
                 .open(path)
                 .unwrap()
         };
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(log(&stdout))
-            .stderr(log(&stderr))
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(log(&stdout))
+                .stderr(log(&stderr)),
+        )
+        .unwrap();
         eprintln!("tui-dispatch owned {label} pid={}", child.id());
         Self {
             child,

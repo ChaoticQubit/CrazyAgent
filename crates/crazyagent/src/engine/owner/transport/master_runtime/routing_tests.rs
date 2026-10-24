@@ -146,29 +146,30 @@ fn applied(reply: &OwnerReply) {
 }
 
 fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-    let mut child = std::process::Command::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(["-c", "user.name=Master routing fixture"])
-        .args(["-c", "user.email=master-routing@example.invalid"])
-        .arg("-C")
-        .arg(repository)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(["-c", "user.name=Master routing fixture"])
+            .args(["-c", "user.email=master-routing@example.invalid"])
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let deadline = Instant::now() + TEST_BOUND;
     loop {
         let failure = match child.try_wait() {

@@ -61,7 +61,7 @@ fn shell(installed: &InstalledSandbox, cwd: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.output().unwrap()
+    crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
 fn quoted(path: &Path) -> String {

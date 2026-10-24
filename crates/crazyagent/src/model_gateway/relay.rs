@@ -153,7 +153,7 @@ impl Relay {
         assert!(is_placeholder(&token));
         let scratch = std::env::temp_dir().join(format!("crazyagent-relay-{}", random_hex(8)?));
         private_scratch(&scratch).map_err(|_| failure("model_relay_unavailable"))?;
-        let bound = TcpListener::bind(("127.0.0.1", 0)).and_then(|listener| {
+        let bound = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).and_then(|listener| {
             listener.set_nonblocking(true)?;
             let port = listener.local_addr()?.port();
             Ok((listener, port))
@@ -226,7 +226,7 @@ impl Drop for Active<'_> {
 
 fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
     while !shared.stop.load(Ordering::Acquire) {
-        let (stream, peer) = match listener.accept() {
+        let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
             Err(_) => {
                 std::thread::sleep(POLL);
@@ -313,9 +313,8 @@ fn exchange(reader: &mut impl BufRead, stream: &mut TcpStream, shared: &Shared) 
         body_file.as_ref().map(|file| file.0.as_path()),
     )
     .map_err(|_| 400_u16)?;
-    let mut child = upstream_command(&shared.upstream)
-        .spawn()
-        .map_err(|_| 502_u16)?;
+    let mut child =
+        crate::spawn_gate::spawn(&mut upstream_command(&shared.upstream)).map_err(|_| 502_u16)?;
     let written = child.stdin.take().map(|mut input| input.write_all(&config));
     config.fill(0);
     if !matches!(written, Some(Ok(()))) {

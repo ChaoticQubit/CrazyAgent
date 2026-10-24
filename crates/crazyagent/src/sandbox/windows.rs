@@ -570,24 +570,26 @@ mod tests {
             .arg("/C")
             .arg(format!("echo changed>{}", brief.display()))
             .current_dir(&folders.project);
-        let status = Sandbox::wrap(&installed, &overwrite)
-            .unwrap()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
+        let status = crate::spawn_gate::status(
+            Sandbox::wrap(&installed, &overwrite)
+                .unwrap()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         assert!(!status.success());
         assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\r\n");
         let mut shell = Command::new(cmd());
         shell.arg("/K").current_dir(&folders.project);
-        let mut running = Sandbox::wrap(&installed, &shell)
-            .unwrap()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut running = crate::spawn_gate::spawn(
+            Sandbox::wrap(&installed, &shell)
+                .unwrap()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let mut stdin = running.stdin.take().unwrap();
         let stdout = running.stdout.take().unwrap();
         let (events, received) = mpsc::channel();

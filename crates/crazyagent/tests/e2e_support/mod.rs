@@ -29,35 +29,38 @@ const PANES_MAX: usize = 16;
 /// Reports whether a process with this id still exists.
 /// Input: a process id. Output: true while `kill -0` succeeds for it.
 pub fn alive(pid: u32) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    crazyagent::spawn_gate::status(
+        Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
 }
 
 /// Lists the process ids every pane of a test tmux server runs.
 /// Input: the tmux binary and server socket. Output: at most 16 pane process ids;
 /// none when the server is already gone.
 pub fn pane_pids(tmux: &Path, socket: &Path) -> Vec<u32> {
-    Command::new(tmux)
-        .arg("-S")
-        .arg(socket)
-        .args(["list-panes", "-a", "-F", "#{pane_pid}"])
-        .env_remove("TMUX")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| line.trim().parse().ok())
-                .take(PANES_MAX)
-                .collect()
-        })
-        .unwrap_or_default()
+    crazyagent::spawn_gate::output(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(["list-panes", "-a", "-F", "#{pane_pid}"])
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(std::process::Stdio::piped()),
+    )
+    .map(|output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .take(PANES_MAX)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Test processes started from this test binary's `crazyagent` that must not outlive
@@ -74,23 +77,26 @@ impl Drop for Survivors {
             std::thread::sleep(Duration::from_millis(50));
         }
         for pid in self.0.iter().copied().filter(|pid| alive(*pid)) {
-            let command = Command::new("ps")
-                .args(["-o", "command=", "-p", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-                .unwrap_or_default();
+            let command = crazyagent::spawn_gate::output(
+                Command::new("ps")
+                    .args(["-o", "command=", "-p", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .stdout(std::process::Stdio::piped()),
+            )
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default();
             if !command.contains(ENGINE) {
                 continue;
             }
             eprintln!("test process {pid} outlived its terminal; killing it: {command}");
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crazyagent::spawn_gate::status(
+                Command::new("/bin/kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
             let killed = Instant::now() + PANE_EXIT_TIME;
             while alive(pid) && Instant::now() < killed {
                 std::thread::sleep(Duration::from_millis(50));
@@ -104,15 +110,16 @@ impl Drop for Survivors {
 /// survive the hang-up are killed by `Survivors`.
 pub fn stop_tmux(tmux: &Path, socket: &Path) {
     let _survivors = Survivors(pane_pids(tmux, socket));
-    let _ = Command::new(tmux)
-        .arg("-S")
-        .arg(socket)
-        .arg("kill-server")
-        .env_remove("TMUX")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crazyagent::spawn_gate::status(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .arg("kill-server")
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
 }
 
 /// Makes a private scratch folder with a short path, so engine and tmux socket paths
@@ -179,18 +186,19 @@ impl Engine {
     pub fn launch(&mut self) {
         assert!(self.child.is_none());
         let root = self.root.path();
-        let mut child = Command::new(ENGINE)
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(ENGINE)
+                .arg("engine")
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -219,10 +227,12 @@ impl Engine {
     /// Output: its stderr text.
     pub fn stop(&mut self) -> String {
         let mut child = self.child.take().expect("the engine is running");
-        let signalled = Command::new("/bin/kill")
-            .args(["-s", "TERM", &child.id().to_string()])
-            .status()
-            .unwrap();
+        let signalled = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "TERM",
+            &child.id().to_string(),
+        ]))
+        .unwrap();
         assert!(signalled.success());
         let deadline = Instant::now() + STOP_TIME;
         let status = loop {
@@ -429,19 +439,22 @@ pub fn profile() -> OwnerProfile {
 /// settings never change the result. Inputs: the folder and arguments.
 /// Output: git's output; a failed git fails the test with its stderr.
 pub fn git(folder: &Path, args: &[&str]) -> Output {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(folder)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_AUTHOR_NAME", "E2E Owner")
-        .env("GIT_AUTHOR_EMAIL", "e2e@example.invalid")
-        .env("GIT_COMMITTER_NAME", "E2E Owner")
-        .env("GIT_COMMITTER_EMAIL", "e2e@example.invalid")
-        .stdin(Stdio::null())
-        .output()
-        .expect(GIT);
+    let output = crazyagent::spawn_gate::output(
+        Command::new("git")
+            .args(args)
+            .current_dir(folder)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_AUTHOR_NAME", "E2E Owner")
+            .env("GIT_AUTHOR_EMAIL", "e2e@example.invalid")
+            .env("GIT_COMMITTER_NAME", "E2E Owner")
+            .env("GIT_COMMITTER_EMAIL", "e2e@example.invalid")
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .expect(GIT);
     assert!(
         output.status.success(),
         "git {args:?}: {}",

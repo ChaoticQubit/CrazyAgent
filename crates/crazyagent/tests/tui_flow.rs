@@ -8,14 +8,18 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn optimized_python_qualification_refuses_before_argument_parsing() {
-    let output = Command::new("python3")
-        .arg("-O")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/qualification/tui_flow.py"
-        ))
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("python3")
+            .arg("-O")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/qualification/tui_flow.py"
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert_eq!(
@@ -26,15 +30,19 @@ fn optimized_python_qualification_refuses_before_argument_parsing() {
 
 #[test]
 fn real_engine_and_tui_complete_the_local_pty_flow() {
-    let output = Command::new("python3")
-        .env_remove("PYTHONOPTIMIZE")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/qualification/tui_flow.py"
-        ))
-        .arg(env!("CARGO_BIN_EXE_crazyagent"))
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("python3")
+            .env_remove("PYTHONOPTIMIZE")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/qualification/tui_flow.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_crazyagent"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -47,13 +55,14 @@ fn cli(arguments: &[&str]) -> std::process::Output {
     let root = tempfile::tempdir().unwrap();
     let stdout = std::fs::File::create(root.path().join("stdout")).unwrap();
     let stderr = std::fs::File::create(root.path().join("stderr")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .unwrap();
+    let mut child = crazyagent::spawn_gate::spawn(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -450,15 +459,19 @@ async fn real_wire_data_preserves_selection_and_scopes_configuration() {
 
 #[test]
 fn shared_screen_decoder_preserves_terminal_cells() {
-    let output = Command::new("python3")
-        .env_remove("PYTHONOPTIMIZE")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/qualification/test_tui_flow.py"
-        ))
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("python3")
+            .env_remove("PYTHONOPTIMIZE")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/qualification/test_tui_flow.py"
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",
