@@ -37,6 +37,7 @@ mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
+mod projects_home;
 pub(crate) mod terminal;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
@@ -1711,6 +1712,18 @@ async fn serve_authenticated_owner(
         let request: OwnerRequest =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;
+        if projects_home::handles(&request) {
+            return projects_home::serve(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                request,
+                deadline,
+            )
+            .await;
+        }
         let id = request.request_id.clone();
         let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
         let foreground = matches!(
