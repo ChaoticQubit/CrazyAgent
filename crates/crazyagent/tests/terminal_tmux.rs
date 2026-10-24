@@ -198,7 +198,7 @@ fn arguments_and_environment_reach_the_agent_exactly() {
         &[
             "/bin/sh",
             "-c",
-            "printf '%s|%s|' \"$1\" \"$FOO\"; exec cat",
+            "printf '%s|%s|%s|' \"$1\" \"$FOO\" \"${TMUX-unset}\"; exec cat",
             "sh",
             tricky,
         ],
@@ -207,7 +207,7 @@ fn arguments_and_environment_reach_the_agent_exactly() {
     let mut stream = host.attach(&agent).unwrap();
     let mut seen = stream.screen.clone();
     assert!(
-        read_until(&mut stream, &mut seen, b"line2|bar $baz|"),
+        read_until(&mut stream, &mut seen, b"line2|bar $baz|unset|"),
         "{}",
         String::from_utf8_lossy(&seen)
     );

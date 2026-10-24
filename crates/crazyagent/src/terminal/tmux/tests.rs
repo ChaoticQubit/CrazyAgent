@@ -84,7 +84,7 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     };
     assert_eq!(
         spawn_line(&agent, &command).unwrap(),
-        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -e \"FOO=bar baz\" -- /usr/bin/env \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -e \"FOO=bar baz\" -- /usr/bin/env -u TMUX -u TMUX_PANE \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
     );
     let refused = |change: fn(&mut InteractiveCommand)| {
         let mut bad = command.clone();
