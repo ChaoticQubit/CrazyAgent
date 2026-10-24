@@ -28,6 +28,8 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Approved",
             "Saved",
             "Replied",
+            "Found",
+            "Installed",
         ],
     ),
     (
@@ -45,7 +47,13 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
     ),
     (
         Status::Active,
-        &["Running", "Thinking...", "Signing in...", "Starting"],
+        &[
+            "Running",
+            "Thinking...",
+            "Signing in...",
+            "Starting",
+            "Installing",
+        ],
     ),
     (
         Status::Waiting,

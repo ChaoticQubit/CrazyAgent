@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
 import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { FoundProjects } from "../intake/found";
 import { waitingLine } from "../project/research";
 
 export interface SetupItem {
@@ -175,11 +176,12 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
   return <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>;
 }
 
-/** Home as a view of its engine reads: the Needs you strip (three rows, Show all for the rest),
- * project cards with their live work or the empty state, and the Get set up panel while setup is
+/** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
+ * the Needs you strip (three rows, Show all for the rest), the projects folder section, project
+ * cards with their live work or the empty state, and the Get set up panel while setup is
  * incomplete. Inputs: the four reads, each card's activity and the suggested memories when read,
- * and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, activity, suggestions, onRetryProjects }: {
+ * the projects folder section and a retry for the project list. */
+export function HomeView({ projects, accounts, pools, harnesses, activity, suggestions, found, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
@@ -187,12 +189,17 @@ export function HomeView({ projects, accounts, pools, harnesses, activity, sugge
   harnesses: Loaded<HarnessEntry[]>;
   activity?: Map<string, CardActivity>;
   suggestions?: Loaded<Suggestion[]>;
+  found?: ReactNode;
 }) {
   const setup = setupSteps(accounts, pools, harnesses);
   const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions);
   const [expanded, setExpanded] = useState(false);
   return <>
-    <PageHeader title="Projects" actions={<a className="btn primary" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>} />
+    <PageHeader title="Projects" actions={<>
+      <a className="btn" href={formatRoute({ name: "add-project", way: "clone" })}><Icon name="link" size={15} />Clone from GitHub</a>
+      <a className="btn" href={formatRoute({ name: "add-project", way: "folder" })}><Icon name="folder-open" size={15} />Add folder</a>
+      <a className="btn primary" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>
+    </>} />
     {needs.total > 0 && <section className="needs" aria-label="Needs you">
       {(expanded ? needs.all : needs.rows).map((row) => <div className="need" key={row.key}>
         <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{row.project}</strong>{" "}</>}{row.text}</span></span>
@@ -201,6 +208,7 @@ export function HomeView({ projects, accounts, pools, harnesses, activity, sugge
       {needs.total > NEEDS_SHOWN && <Button variant="quiet" size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
         {expanded ? "Show fewer" : `Show all (${needs.total})`}</Button>}
     </section>}
+    {found}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
       <Projects projects={projects} activity={activity} onRetry={onRetryProjects} />
       {setup.visible && <SetupPanel items={setup.items} />}
@@ -225,5 +233,5 @@ export function Home() {
     return () => { live = false; };
   }, [named]);
   return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} activity={activity} suggestions={suggestions}
-    onRetryProjects={() => void session.refreshProjects()} />;
+    found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
 }

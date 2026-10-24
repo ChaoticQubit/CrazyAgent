@@ -1,0 +1,13 @@
+.in-page { display: grid; gap: var(--space-4); max-width: 760px; align-content: start; }
+.in-found { display: grid; gap: var(--space-2); margin-bottom: var(--space-6); }
+.in-panel { padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.in-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.in-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px var(--space-4); align-items: center; padding: 12px 16px;
+  border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.in-row-main { display: grid; gap: 4px; min-width: 0; }
+.in-code { margin: 0; font: 600 28px/36px var(--mono); letter-spacing: .12em; color: var(--text); }
+.in-steps { list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-3); margin: 0; padding: 0; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.in-steps li[aria-current="step"] { color: var(--text); font-weight: 600; }
+@media (max-width: 640px) {
+  .in-row { grid-template-columns: minmax(0, 1fr); }
+}
