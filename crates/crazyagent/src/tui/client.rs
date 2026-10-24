@@ -28,6 +28,7 @@ mod claude_code;
 mod project_setup;
 pub(super) mod settings;
 mod shell;
+pub(super) mod terminal;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {
@@ -52,6 +53,7 @@ enum Job {
     Setup(Box<SetupQuery>),
     Shell(Box<crate::tui::seam::ShellRequest>),
     Settings(Box<settings::SettingsJob>),
+    TeamGraph(Box<ProjectId>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -163,6 +165,10 @@ pub(super) enum OwnerEvent {
     Setup(Box<SetupEvent>),
     Shell(Box<crate::tui::seam::ShellEvent>),
     Settings(Box<settings::SettingsEvent>),
+    TeamGraph {
+        project: ProjectId,
+        result: Result<Box<crate::team::TeamGraph>, String>,
+    },
     Access {
         ready: bool,
         problem: String,
@@ -547,6 +553,24 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::TeamGraph(project) => {
+                            let result = match native.as_mut() {
+                                Some(native) => runtime.block_on(native.team_graph(&project)),
+                                None => Err("trusted_connection_unavailable".into()),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::TeamGraph {
+                                        project: *project,
+                                        result,
+                                    },
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Evidence {
                             project,
                             generation,
@@ -726,6 +750,13 @@ impl Connection {
 
     pub(super) fn dispatch(&mut self, query: dispatch::Query) -> Result<(), String> {
         self.owner_job(Job::Dispatch(Box::new(query)))
+    }
+
+    /// Reads one project's team graph for the Team screen.
+    /// Input: the project. Output: Ok once queued; the graph comes back as
+    /// `OwnerEvent::TeamGraph`.
+    pub(super) fn team_graph(&mut self, project: ProjectId) -> Result<(), String> {
+        self.owner_job(Job::TeamGraph(Box::new(project)))
     }
 
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
@@ -1063,6 +1094,33 @@ impl NativeOwner {
             return Err("rcli_registration_stale_connection; inspect Settings".into());
         }
         Ok(())
+    }
+
+    /// Reads one project's team graph on the trusted owner connection.
+    /// Input: the project. Output: the graph, or the engine's plain problem code.
+    async fn team_graph(
+        &mut self,
+        project: &ProjectId,
+    ) -> Result<Box<crate::team::TeamGraph>, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        match controller
+            .read(OwnerRead::TeamGraph {
+                project_id: project.clone(),
+            })
+            .await
+        {
+            Ok(reply) => match reply.data {
+                OwnerData::TeamGraph { graph } if graph.project_id == *project => Ok(graph),
+                _ => Err("team_graph_reply_mismatch".into()),
+            },
+            Err(error) => Err(bounded_problem(&error.0)),
+        }
     }
 
     async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {

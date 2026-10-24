@@ -215,6 +215,11 @@ impl Shell {
     pub fn resize(&mut self, width: u16, height: u16) {
         self.ctx.width = width;
         self.ctx.height = height;
+        let ctx = &mut self.ctx;
+        self.stack
+            .last_mut()
+            .expect("the stack is never empty")
+            .resized(ctx);
     }
 
     /// True while something on screen animates, so the loop ticks.
@@ -341,13 +346,23 @@ impl Shell {
         }
     }
 
-    /// Handles one key: overlays first, then the global keys, then the top
-    /// screen; an Esc the screen ignores goes back.
+    /// Handles one key: overlays first, then a screen in raw mode takes every
+    /// key, then the global keys, then the top screen; an Esc the screen
+    /// ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
+        }
+        if self.top().raw() {
+            let ctx = &mut self.ctx;
+            let flow = self
+                .stack
+                .last_mut()
+                .expect("the stack is never empty")
+                .key(&key, ctx);
+            return self.apply(flow);
         }
         let modal = self.top().modal(&self.ctx).is_some();
         let typing = self.top().typing();
