@@ -14,7 +14,8 @@ const FORM_WIDTH: usize = 72;
 const INTRO_WIDTH: usize = 38;
 const INTRO_GAP: usize = 4;
 
-/// The first-run page: asks for the owner's profile once, then opens Home.
+/// The first-run page: asks for the owner's profile once, then opens the
+/// projects folder page.
 /// Input: keys for the form, the save reply. Output: the welcome text and the
 /// profile form; at 120 columns the form sits in a 72-column column.
 pub struct Welcome {
@@ -88,7 +89,7 @@ impl Screen for Welcome {
                     ctx.store.profile = Load::Ready(Some(profile));
                 }
                 ctx.say(Message::success("Saved.", "Welcome to CrazyAgent."));
-                Flow::Replace(open(&Place::Home, ctx))
+                Flow::Replace(open(&Place::HomeFolder { first_run: true }, ctx))
             }
             Arrival::ProfileSaved(Err(code)) if self.form.saving => {
                 self.form.saving = false;

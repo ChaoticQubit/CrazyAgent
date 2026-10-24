@@ -1382,49 +1382,13 @@ impl Wizard {
     /// Takes the wizard's path field.
     /// Returns true when the text changed.
     pub fn complete_path(&mut self) -> bool {
-        let typed = self.path.value().to_owned();
-        let (folder, prefix) = match typed.rfind('/') {
-            Some(at) => (&typed[..=at], &typed[at + 1..]),
-            None => return false,
-        };
-        let Some(directory) = expand(folder, self.home.as_deref()) else {
-            return false;
-        };
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            return false;
-        };
-        let mut matches: Vec<(String, bool)> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().into_string().ok()?;
-                let hidden = name.starts_with('.') && !prefix.starts_with('.');
-                (name.starts_with(prefix) && !hidden).then(|| (name, entry.path().is_dir()))
-            })
-            .collect();
-        matches.sort();
-        let completed = match matches.as_slice() {
-            [] => return false,
-            [(name, true)] => format!("{folder}{name}/"),
-            [(name, false)] => format!("{folder}{name}"),
-            many => {
-                let first = &many[0].0;
-                let common = first
-                    .char_indices()
-                    .map(|(at, c)| at + c.len_utf8())
-                    .take_while(|end| {
-                        many.iter()
-                            .all(|(name, _)| name.starts_with(&first[..*end]))
-                    })
-                    .last()
-                    .unwrap_or(0);
-                format!("{folder}{}", &first[..common])
+        match complete(self.path.value(), self.home.as_deref(), false) {
+            Some(completed) => {
+                self.path.set(&completed);
+                true
             }
-        };
-        if completed == typed {
-            return false;
+            None => false,
         }
-        self.path.set(&completed);
-        true
     }
 
     fn document_key(&mut self, key: KeyEvent) -> Reply {
@@ -1700,7 +1664,50 @@ pub(in crate::tui) fn display_path(path: &str, home: Option<&Path>) -> String {
     }
 }
 
-fn expand(typed: &str, home: Option<&Path>) -> Option<PathBuf> {
+/// Completes a typed path from its folder's entries, like a shell: one match
+/// completes fully, several complete to their common start; hidden entries
+/// need a typed dot. Takes the text, the home for `~` and whether only
+/// folders count. Returns the new text, or none when nothing changes.
+pub(in crate::tui) fn complete(typed: &str, home: Option<&Path>, folders: bool) -> Option<String> {
+    let at = typed.rfind('/')?;
+    let (folder, prefix) = (&typed[..=at], &typed[at + 1..]);
+    let directory = expand(folder, home)?;
+    let entries = std::fs::read_dir(&directory).ok()?;
+    let mut matches: Vec<(String, bool)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let hidden = name.starts_with('.') && !prefix.starts_with('.');
+            let dir = entry.path().is_dir();
+            (name.starts_with(prefix) && !hidden && (dir || !folders)).then_some((name, dir))
+        })
+        .collect();
+    matches.sort();
+    let completed = match matches.as_slice() {
+        [] => return None,
+        [(name, true)] => format!("{folder}{name}/"),
+        [(name, false)] => format!("{folder}{name}"),
+        many => {
+            let first = &many[0].0;
+            let common = first
+                .char_indices()
+                .map(|(at, c)| at + c.len_utf8())
+                .take_while(|end| {
+                    many.iter()
+                        .all(|(name, _)| name.starts_with(&first[..*end]))
+                })
+                .last()
+                .unwrap_or(0);
+            format!("{folder}{}", &first[..common])
+        }
+    };
+    (completed != typed).then_some(completed)
+}
+
+/// Turns a typed path into an absolute one, reading a leading `~` as home.
+/// Takes the text and the home folder.
+/// Returns the absolute path, or none for a relative path or a missing home.
+pub(in crate::tui) fn expand(typed: &str, home: Option<&Path>) -> Option<PathBuf> {
     let path = if typed == "~" {
         home?.to_path_buf()
     } else if let Some(rest) = typed.strip_prefix("~/") {
