@@ -160,12 +160,13 @@ export function missingLabels(missing: string[]): string[] {
   return [...new Set(missing)].map((item) => MISSING_LABELS[item] ?? displayText(item.replaceAll("_", " ")));
 }
 
-/** Starts the review form from the mapping agent's draft, keeping the saved pool and team.
- * Inputs: the onboarding view and the saved setup. Output: the form draft. */
+/** Starts the review form from the mapping agent's draft, keeping the saved pool and team. A
+ * missing or blank proposed name falls back to the saved name, since the reply comes from another
+ * process. Inputs: the onboarding view and the saved setup. Output: the form draft. */
 export function onboardingDraft(view: OnboardingView, stored: StoredSetup): ProjectDraft {
   return {
     ...draftOf(stored),
-    name: view.name.trim() || stored.name,
+    name: (view.name ?? "").trim() || stored.name,
     about: view.draft.about,
     stack: [...view.draft.tech_stack],
     platforms: [...view.draft.platforms],
