@@ -29,12 +29,13 @@ struct OwnedProcess {
 
 impl OwnedProcess {
     fn signal(&self, signal: &str) -> bool {
-        ProcessCommand::new("/bin/kill")
-            .args([signal, &format!("-{}", self.pid)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        crazyagent::spawn_gate::status(
+            ProcessCommand::new("/bin/kill")
+                .args([signal, &format!("-{}", self.pid)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|s| s.success())
     }
 
     fn absent(&self) -> bool {
@@ -207,12 +208,13 @@ async fn observe(observer: &mut OwnerController) -> TestResult<Value> {
 }
 
 fn group(command: &mut ProcessCommand, evidence: &Path, name: &str) -> TestResult<OwnedProcess> {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(File::create_new(evidence.join(format!("{name}.stdout")))?)
-        .stderr(File::create_new(evidence.join(format!("{name}.stderr")))?)
-        .process_group(0)
-        .spawn()?;
+    let child = crazyagent::spawn_gate::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(File::create_new(evidence.join(format!("{name}.stdout")))?)
+            .stderr(File::create_new(evidence.join(format!("{name}.stderr")))?)
+            .process_group(0),
+    )?;
     let pid = child.id();
     Ok(OwnedProcess { child, pid })
 }
@@ -277,7 +279,7 @@ async fn window_case(
         .to_path_buf();
     let app = std::env::var("CRAZYAGENT_DESKTOP_TEST_APP")?;
     let node = std::env::var("CRAZYAGENT_NODE")?;
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", 0))?;
     let number = port.local_addr()?.port();
     drop(port);
     std::fs::create_dir(evidence.join("home"))?;
@@ -405,9 +407,13 @@ async fn window_case(
                         }
                         let deadline = Instant::now() + Duration::from_secs(2);
                         loop {
-                            let status = ProcessCommand::new("/bin/ps")
-                                .args(["-o", "state=", "-p", &owned.pid.to_string()])
-                                .output()?;
+                            let status = crazyagent::spawn_gate::output(
+                                ProcessCommand::new("/bin/ps")
+                                    .args(["-o", "state=", "-p", &owned.pid.to_string()])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped()),
+                            )?;
                             let stopped = String::from_utf8(status.stdout)?.trim().starts_with('T');
                             if stopped == (action == "pause") {
                                 break;
@@ -814,7 +820,7 @@ async fn project_phase(
     for name in ["home", "tmp", "webdriver"] {
         project_private_directory(&phase.join(name))?;
     }
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let listener = crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     drop(listener);
     let mut command = ProcessCommand::new(&node);
@@ -878,7 +884,7 @@ async fn project_phase(
     .await;
     let cleaned = driver.finish();
     let mut port_error = None;
-    let closed = match std::net::TcpStream::connect_timeout(
+    let closed = match crazyagent::spawn_gate::connect_tcp_std_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_millis(500),
     ) {
