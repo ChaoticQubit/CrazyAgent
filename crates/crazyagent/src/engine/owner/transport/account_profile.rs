@@ -35,7 +35,7 @@ enum WireReply {
         settled: bool,
     },
     Capabilities {
-        reply: AccountAuthCapabilitiesReply,
+        reply: Box<AccountAuthCapabilitiesReply>,
     },
     Rejected {
         request_id: RequestId,
@@ -83,7 +83,7 @@ impl OwnerClient {
             .await
             .map_err(|failure| failure.error)?
         {
-            WireReply::Capabilities { reply } => Ok(reply),
+            WireReply::Capabilities { reply } => Ok(*reply),
             _ => Err(unknown()),
         }
     }
