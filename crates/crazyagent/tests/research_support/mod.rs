@@ -18,11 +18,14 @@ pub const SETTINGS: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations
 
 /// A real engine runtime folder: `engine.db` holding projects created through
 /// the owner client of a real engine, one engine-made folder per project in
-/// `projects/`, and a private `research/` state folder for the runner. The
-/// engine is stopped once the projects exist, so only the runner uses it.
+/// a separate projects home, and a private `research/` state folder for the
+/// runner. The engine is stopped once the projects exist, so only the runner
+/// uses it.
 pub struct EngineRuntime {
     _temp: tempfile::TempDir,
+    _home: tempfile::TempDir,
     pub root: PathBuf,
+    pub home: PathBuf,
     pub database: PathBuf,
     pub state: PathBuf,
     pub global: PathBuf,
@@ -43,43 +46,65 @@ impl EngineRuntime {
         fs::write(&global, SETTINGS).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let project_settings = root.join("project.toml");
+        let home_temp = tempfile::Builder::new()
+            .prefix("ca-home-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let home = home_temp.path().canonicalize().unwrap();
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap()
-            .block_on(create_projects(&root, &global, &project_settings, projects));
+            .block_on(create_projects(
+                &root,
+                &global,
+                &project_settings,
+                &home,
+                projects,
+            ));
         let state = root.join("research");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             _temp: temp,
+            _home: home_temp,
             database: root.join("engine.db"),
             state,
             root,
+            home,
             global,
             project_settings,
         }
     }
 
-    /// The canonical folder the engine made for `project`.
+    /// The canonical folder the engine made for `project` in the home.
     pub fn folder(&self, project: &str) -> PathBuf {
-        let folder = self
-            .root
-            .join("projects")
-            .join(project)
-            .canonicalize()
-            .unwrap();
-        assert!(folder.join("context").join("brief.md").is_file());
+        let name = crazyagent::projects_home::slug(project).unwrap();
+        let folder = self.home.join(name).canonicalize().unwrap();
+        assert!(crazyagent_in(&folder).join("context/brief.md").is_file());
         folder
+    }
+
+    /// The `.crazyagent` folder holding `project`'s context and worktrees.
+    pub fn crazyagent(&self, project: &str) -> PathBuf {
+        crazyagent_in(&self.folder(project))
     }
 }
 
-/// Creates projects through the owner client of a running engine.
+/// The `.crazyagent` folder of an engine-made project folder.
+fn crazyagent_in(folder: &Path) -> PathBuf {
+    let inner = crazyagent::projects_home::state_folder(folder);
+    assert_eq!(inner, folder.join(".crazyagent"));
+    inner
+}
+
+/// Creates projects in `home` through the owner client of a running engine.
 pub async fn create_projects(
     root: &Path,
     global: &Path,
     project_settings: &Path,
+    home: &Path,
     projects: &[(&str, &str)],
 ) {
     let (stop, stopped) = watch::channel(false);
@@ -95,15 +120,26 @@ pub async fn create_projects(
     let mut owner = OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(5))
         .await
         .unwrap();
-    setup_projects(&mut owner, projects).await;
+    setup_projects(&mut owner, home, projects).await;
     drop(owner);
     service.shutdown().await.unwrap();
     drop(stop);
 }
 
-/// Creates each `(project id, about)` pair through an attached owner client.
-pub async fn setup_projects(owner: &mut OwnerController, projects: &[(&str, &str)]) {
-    for (generation, (id, about)) in (1_u64..).zip(projects) {
+/// Sets `home` as the projects home, then creates each `(project id, about)`
+/// pair in it through an attached owner client.
+pub async fn setup_projects(owner: &mut OwnerController, home: &Path, projects: &[(&str, &str)]) {
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            assert_eq!(operation.result, OwnerResult::Applied)
+        }
+        other => panic!("setting the projects home must commit: {other:?}"),
+    }
+    for (generation, (id, about)) in (2_u64..).zip(projects) {
         let response = owner
             .setup_project(
                 ProjectId::new(*id).unwrap(),
