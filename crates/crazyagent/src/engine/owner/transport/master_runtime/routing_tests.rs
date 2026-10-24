@@ -422,8 +422,7 @@ impl Fixture {
         else {
             panic!("actual committed session missing");
         };
-        let session = *session;
-        session
+        *session
     }
 
     async fn commit_owner(

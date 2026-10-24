@@ -305,8 +305,7 @@ impl Fixture {
         let OwnerData::ProjectMaster { session } = state.data else {
             panic!("actual master view missing");
         };
-        let session = session.map(|session| *session);
-        session
+        session.map(|session| *session)
     }
 
     async fn turns(
