@@ -16,7 +16,6 @@ url = "=2.5.8"
 sha2 = "=0.10.9"
 getrandom = "=0.4.3"
 subtle = "=2.6.1"
-rustix = { version = "=1.1.5", features = ["fs", "process"] }
 rusqlite = { version = "=0.40.2", default-features = false }
 tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde"] }
@@ -27,6 +26,7 @@ notify = "=8.2.0"
 vt100 = "=0.15.2"
 
 [target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs", "process"] }
 nix = { version = "=0.28.0", default-features = false, features = ["socket", "user"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]

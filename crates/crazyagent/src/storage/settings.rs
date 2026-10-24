@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{edit_model_access, resolve_config_bytes};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -40,6 +41,7 @@ struct SourceFile {
     name: OsString,
 }
 
+#[cfg(unix)]
 fn private(metadata: &std::fs::Metadata, directory: bool) -> Result<(), EngineError> {
     if metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o077 != 0
@@ -54,11 +56,21 @@ fn private(metadata: &std::fs::Metadata, directory: bool) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
 fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
 impl SourceFile {
+    /// Refuses to open a settings source without Unix owner, mode and inode checks.
+    /// Takes the source path, unused.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    fn open(_path: &Path) -> Result<Self, EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn open(path: &Path) -> Result<Self, EngineError> {
         let name = path
             .file_name()
@@ -88,6 +100,7 @@ impl SourceFile {
         Ok(source)
     }
 
+    #[cfg(unix)]
     fn verify(&self) -> Result<(), EngineError> {
         let metadata = std::fs::symlink_metadata(&self.path).map_err(error)?;
         private(&metadata, true)?;
@@ -97,6 +110,15 @@ impl SourceFile {
         Ok(())
     }
 
+    /// Refuses to read a file beside a settings source without directory-relative opens.
+    /// Takes the file name, unused.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    fn read_name(&self, _name: &std::ffi::OsStr) -> Result<FileState, EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn read_name(&self, name: &std::ffi::OsStr) -> Result<FileState, EngineError> {
         self.verify()?;
         let fd = match rustix::fs::openat(
@@ -162,6 +184,15 @@ pub(crate) struct SettingsSources {
 }
 
 impl SettingsSources {
+    /// Refuses to hold the writable settings sources without a Unix file lease.
+    /// Takes the global and project paths, unused.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    pub(super) fn open(_global: &Path, _project: &Path) -> Result<Self, EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    #[cfg(unix)]
     pub(super) fn open(global: &Path, project: &Path) -> Result<Self, EngineError> {
         let global = SourceFile::open(global)?;
         let project = SourceFile::open(project)?;
@@ -210,6 +241,15 @@ impl SettingsSources {
         )
     }
 
+    /// Refuses to read the held settings sources without a Unix file lease.
+    /// Takes the held sources.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    fn snapshot(&self) -> Result<SourceState, EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn snapshot(&self) -> Result<SourceState, EngineError> {
         let named = self.global.read_name(&self.lease_name)?;
         if named.identity != Some(identity(&self.lease.metadata().map_err(error)?)) {
@@ -226,6 +266,15 @@ impl SettingsSources {
         self.snapshot()?.config()
     }
 
+    /// Refuses to publish a settings change without directory-relative renames.
+    /// Takes the database and pending change, both unused.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    fn publish(&self, _db: &Connection, _pending: &mut Pending) -> Result<(), EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn publish(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
         let current = self.snapshot()?;
         if current.source_id != pending.old.source_id || current.project != pending.old.project {

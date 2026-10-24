@@ -6,6 +6,7 @@ use crate::plugins::{
     SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
@@ -169,6 +170,15 @@ fn new_id(prefix: &str) -> Result<String, EngineError> {
     Ok(format!("{prefix}-{}", &random[..24]))
 }
 
+/// Refuses the private plugin store where Unix owner and mode checks do not exist.
+/// Takes the folder path, unused.
+/// Returns `plugin_store_unavailable` until Windows has its own owner-only folder check.
+#[cfg(not(unix))]
+fn private_directory(_path: &Path) -> Result<(), EngineError> {
+    Err(error("plugin_store_unavailable"))
+}
+
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<(), EngineError> {
     let unavailable = || error("plugin_store_unavailable");
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
@@ -210,6 +220,7 @@ fn valid_reference(reference: &str) -> bool {
     })
 }
 
+#[cfg(unix)]
 fn secrets_directory(root: &Path) -> Result<std::fs::File, EngineError> {
     let path = store_folder(root, &[SECRETS])?;
     let directory = std::fs::File::from(
@@ -246,6 +257,20 @@ pub(crate) fn new_secret_reference() -> Result<String, EngineError> {
 /// Saves one MCP server secret as a private 0600 file named by its reference.
 /// Inputs: the engine root, a fresh reference and the secret bytes, which are zeroed after
 /// writing. Output: Ok, or a code with no file left behind.
+#[cfg(not(unix))]
+pub(crate) fn store_secret(
+    _root: &Path,
+    _reference: &str,
+    mut secret: Vec<u8>,
+) -> Result<(), EngineError> {
+    secret.fill(0);
+    Err(error("plugin_secret_store_unavailable"))
+}
+
+/// Saves one MCP server secret as a private 0600 file named by its reference.
+/// Inputs: the engine root, a fresh reference and the secret bytes, which are zeroed after
+/// writing. Output: Ok, or a code with no file left behind.
+#[cfg(unix)]
 pub(crate) fn store_secret(
     root: &Path,
     reference: &str,
@@ -286,6 +311,14 @@ pub(crate) fn store_secret(
 
 /// Reads one MCP server secret for a launch or a check. Inputs: the engine root and the
 /// reference from the effective set. Output: the secret bytes; callers zero them after use.
+#[cfg(not(unix))]
+pub(crate) fn read_secret(_root: &Path, _reference: &str) -> Result<Vec<u8>, EngineError> {
+    Err(error("plugin_secret_store_unavailable"))
+}
+
+/// Reads one MCP server secret for a launch or a check. Inputs: the engine root and the
+/// reference from the effective set. Output: the secret bytes; callers zero them after use.
+#[cfg(unix)]
 pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
     if !valid_reference(reference) {
@@ -330,6 +363,14 @@ pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, Engin
 
 /// Deletes one MCP server secret file. Inputs: the engine root and the reference.
 /// Output: Ok when the file is gone, including when it was already missing.
+#[cfg(not(unix))]
+pub(crate) fn remove_secret(_root: &Path, _reference: &str) -> Result<(), EngineError> {
+    Err(error("plugin_secret_store_unavailable"))
+}
+
+/// Deletes one MCP server secret file. Inputs: the engine root and the reference.
+/// Output: Ok when the file is gone, including when it was already missing.
+#[cfg(unix)]
 pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineError> {
     if !valid_reference(reference) {
         return Ok(());
