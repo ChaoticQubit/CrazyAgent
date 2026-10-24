@@ -556,12 +556,15 @@ fn a_command_without_a_full_path_is_refused_on_the_edit_page() {
 fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
     let tidepool = crate::protocol::ProjectId::new("tidepool").unwrap();
     let back = |flow: Flow| match flow {
-        Flow::Open(Place::Project { id, name, tab }) => {
-            assert_eq!(id.as_str(), "tidepool");
-            assert_eq!(name, "Tidepool");
-            assert_eq!(tab, ProjectTab::Settings);
-        }
-        other => panic!("the project's Settings tab expected, got {other:?}"),
+        Flow::Replace(screen) => match screen.place() {
+            Some(Place::Project { id, name, tab }) => {
+                assert_eq!(id.as_str(), "tidepool");
+                assert_eq!(name, "Tidepool");
+                assert_eq!(tab, ProjectTab::Settings);
+            }
+            other => panic!("the project's Settings tab expected, got {other:?}"),
+        },
+        other => panic!("the form must give way to the project page, got {other:?}"),
     };
     let mut ctx = plugin_ctx(80, 24);
     let mut form = AddPlugin::skill().for_project(tidepool.clone(), "Tidepool".into());

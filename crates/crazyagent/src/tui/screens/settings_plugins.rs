@@ -964,9 +964,13 @@ fn place_of(project: Option<&(ProjectId, String)>) -> Place {
     }
 }
 
-fn back_to(project: Option<&(ProjectId, String)>) -> Flow {
+/// Leaves a plugin form for the page it replaced.
+/// Takes the form's project, if any, and the context to open that page with.
+/// Returns a replace with the project's Settings tab or the Plugins page; the
+/// form already reports the project's place, so opening that place would be a no-op.
+fn back_to(project: Option<&(ProjectId, String)>, ctx: &mut Ctx) -> Flow {
     match project {
-        Some(_) => Flow::Open(place_of(project)),
+        Some(_) => Flow::Replace(super::open(&place_of(project), ctx)),
         None => Flow::Replace(Box::new(Plugins::new())),
     }
 }
@@ -1058,8 +1062,8 @@ impl AddPlugin {
         }
     }
 
-    fn back(&self) -> Flow {
-        back_to(self.project.as_ref())
+    fn back(&self, ctx: &mut Ctx) -> Flow {
+        back_to(self.project.as_ref(), ctx)
     }
 
     fn new(kind: Kind) -> Self {
@@ -1377,7 +1381,7 @@ impl Screen for AddPlugin {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match key {
-            Key::Esc => return self.back(),
+            Key::Esc => return self.back(ctx),
             Key::Tab | Key::Down => self.move_focus(true),
             Key::BackTab | Key::Up => self.move_focus(false),
             Key::Enter => match self.focus {
@@ -1414,7 +1418,7 @@ impl Screen for AddPlugin {
                     ),
                     "",
                 ));
-                self.back()
+                self.back(ctx)
             }
             Ok(None) => {
                 ctx.say(Message::success(
@@ -1425,7 +1429,7 @@ impl Screen for AddPlugin {
                     },
                     "",
                 ));
-                self.back()
+                self.back(ctx)
             }
             Err(code) => {
                 let problem = plugin_plain(code);
@@ -1763,7 +1767,7 @@ impl Screen for EditServer {
         }
         let count = self.server.secrets.len();
         match (self.focus, key) {
-            (_, Key::Esc) => return back_to(self.project.as_ref()),
+            (_, Key::Esc) => return back_to(self.project.as_ref(), ctx),
             (_, Key::Tab) => self.move_focus(true),
             (_, Key::BackTab) => self.move_focus(false),
             (EditFocus::List, Key::Up) => self.selected = self.selected.saturating_sub(1),
