@@ -1,6 +1,6 @@
 use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
-use super::{Step, now_ms};
+use super::{MappingFacts, Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 use crate::research::accounts::SettingsResolver;
@@ -35,6 +35,7 @@ const GRAPH_NOT_STARTED: &str = "Graph build could not start";
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
 const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
+pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
 /// How long each onboarding step may run before it fails as out of time.
@@ -433,22 +434,40 @@ fn mapping_step(
         wall_time: work.limits.mapping_time,
     };
     match work.runner.run_read_only(&run, beat) {
-        Ok(ReadOnlyEnding::Answered(text)) => {
-            let answer = draft::parse_answer(&text);
-            let merged = draft::merge(&base, &answer, &found, &stack);
-            if draft::write_overview(&layout, &answer.overview).is_err()
-                || draft::save(&layout, &merged).is_err()
-            {
-                return (Step::failed(DRAFT_UNSAVED), base);
-            }
-            (Step::Done, merged)
-        }
+        Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(reason), base),
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
         Ok(ReadOnlyEnding::Stopped) | Err(RunError::Busy) => (Step::Waiting, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }
+}
+
+/// Finishes a mapping step from the agent's answer: merges its fields into the gaps of
+/// `base`, saves the draft and writes `overview.md` when none exists yet. An answer with
+/// no overview text, while no overview is kept from before, fails the step with
+/// [`MAPPING_NO_OVERVIEW`] and still keeps the merged draft. Takes the `.crazyagent`
+/// folder, the draft so far, the answer text and the facts the manifests gave.
+/// Returns the step's ending and the draft to keep.
+pub(crate) fn answered(
+    layout: &Path,
+    base: &Drafted,
+    text: &str,
+    found: &MappingFacts,
+    stack: &[String],
+) -> (Step, Drafted) {
+    let answer = draft::parse_answer(text);
+    let merged = draft::merge(base, &answer, found, stack);
+    let Ok(wrote) = draft::write_overview(layout, &answer.overview) else {
+        return (Step::failed(DRAFT_UNSAVED), base.clone());
+    };
+    if draft::save(layout, &merged).is_err() {
+        return (Step::failed(DRAFT_UNSAVED), base.clone());
+    }
+    if !wrote && draft::overview(layout).is_none() {
+        return (Step::failed(MAPPING_NO_OVERVIEW), merged);
+    }
+    (Step::Done, merged)
 }
 
 /// The graphify executable this machine has, looked up again on each call:
