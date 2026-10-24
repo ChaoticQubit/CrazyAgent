@@ -952,5 +952,5 @@ fn render_claude_account(status: &claude::AuthStatus) -> String {
     output
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::resolve_config;
 use crazyagent::conversation::{ConversationContent, ConversationMutation, ConversationPage};
 use crazyagent::engine::bootstrap::EngineService;

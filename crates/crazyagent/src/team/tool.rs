@@ -252,6 +252,6 @@ pub fn clear(drop: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]
 mod tests;

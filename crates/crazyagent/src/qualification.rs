@@ -425,7 +425,7 @@ where
     deserializer.deserialize_map(UniqueMap(std::marker::PhantomData))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

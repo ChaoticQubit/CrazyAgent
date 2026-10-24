@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 use std::fs;
 use std::path::{Path, PathBuf};

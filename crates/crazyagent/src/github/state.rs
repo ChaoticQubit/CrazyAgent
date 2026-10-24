@@ -10,6 +10,7 @@ use std::path::Path;
 
 const CONFIG: &str = "github.toml";
 const STATE: &str = "github.json";
+#[cfg(unix)]
 const FILE_BYTES_MAX: u64 = 4096;
 const CLIENT_ID_BYTES_MAX: usize = 64;
 

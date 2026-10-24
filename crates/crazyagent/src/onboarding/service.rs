@@ -3,10 +3,14 @@ use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
 use super::{Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
+#[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
+#[cfg(unix)]
+use crate::research::runner::ReadOnlyEnding;
+#[cfg(unix)]
+use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
-    RunError,
+    ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchRunner, RunError,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
@@ -21,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const STALE_MS: i64 = 30_000;
 const HEARTBEAT_MS: i64 = 5_000;
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const ENGINE_TICK: Duration = Duration::from_secs(2);
 const RUN_NAME_BYTES_MAX: usize = 96;
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
@@ -30,11 +35,14 @@ const MAPPING_HARNESSES: [ResearchHarness; 2] =
 /// The plain reason a mapping step fails with when neither Codex nor Claude
 /// Code is installed, so no agent can map the project.
 pub const CODEX_MISSING: &str = "codex not installed";
+#[cfg(unix)]
 const GRAPH_TIMED_OUT: &str = "Graph build ran out of time";
 const GRAPH_NOT_STARTED: &str = "Graph build could not start";
+#[cfg(unix)]
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
 const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
+#[cfg(unix)]
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
 /// How long each onboarding step may run before it fails as out of time.
@@ -382,9 +390,12 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         work.limits.graph_time,
         beat,
     ) {
+        #[cfg(unix)]
         Ok(GraphEnding::Built) => Step::Done,
         Ok(GraphEnding::Failed(reason)) => Step::failed(reason),
+        #[cfg(unix)]
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
+        #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::Waiting,
         Err(_) => Step::failed(GRAPH_NOT_STARTED),
     }
@@ -424,15 +435,19 @@ fn mapping_step(
         return (Step::failed(NO_ACCOUNT), base);
     };
     let name = run_name(claimed);
+    #[cfg(unix)]
     let prompt = draft::prompt(&evidence, &found);
     let run = ReadOnlyRun {
         name: &name,
+        #[cfg(unix)]
         folder: &claimed.repo,
+        #[cfg(unix)]
         prompt: &prompt,
         account: &account,
         wall_time: work.limits.mapping_time,
     };
     match work.runner.run_read_only(&run, beat) {
+        #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => {
             let answer = draft::parse_answer(&text);
             let merged = draft::merge(&base, &answer, &found, &stack);
@@ -443,9 +458,13 @@ fn mapping_step(
             }
             (Step::Done, merged)
         }
+        #[cfg(unix)]
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(reason), base),
+        #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
-        Ok(ReadOnlyEnding::Stopped) | Err(RunError::Busy) => (Step::Waiting, base),
+        #[cfg(unix)]
+        Ok(ReadOnlyEnding::Stopped) => (Step::Waiting, base),
+        Err(RunError::Busy) => (Step::Waiting, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }

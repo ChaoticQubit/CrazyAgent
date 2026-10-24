@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::accounts::{AccountDraft, AccountStatus, AccountView, Provider, SignInMethod};
 use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;

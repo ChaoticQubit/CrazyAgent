@@ -18,7 +18,7 @@ pub mod relay;
 #[cfg(test)]
 mod initial_conversation_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod configured_conversation_tests;
 #[cfg(test)]
 mod local_completion_tests;

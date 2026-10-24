@@ -11,7 +11,9 @@ use crate::protocol::{
     StoredProject, TaskId,
 };
 use crate::worktrees::{self, LeaseState, WorktreeLease};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -21,6 +23,7 @@ const RECEIPTS_MAX: i64 = 128;
 const RECEIPT_BYTES_MAX: usize = 32768;
 const SESSION_BYTES_MAX: i64 = 16384;
 const ADMISSION_BYTES_MAX: i64 = 16384;
+#[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE bootstrap_workspaces (
     session TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session AS BLOB)) BETWEEN 1 AND 128),
     allocation TEXT NOT NULL UNIQUE CHECK(length(CAST(allocation AS BLOB)) BETWEEN 1 AND 128),
@@ -48,6 +51,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+#[cfg(unix)]
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
     {
@@ -456,5 +460,5 @@ pub(super) fn ready(
     Ok((receipt.allocation, lease))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

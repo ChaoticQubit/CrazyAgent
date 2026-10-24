@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{
     EffectTiming, EffectiveConfig, Origin, SettingDescriptor, resolve_config,
 };

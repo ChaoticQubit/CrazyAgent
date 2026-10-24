@@ -88,6 +88,7 @@ struct StoredLease {
     metadata: Option<LeaseIdentity>,
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS worker_runner_registrations
         (id TEXT PRIMARY KEY, attempt TEXT NOT NULL UNIQUE, body BLOB NOT NULL CHECK(length(body)<=2048), active INTEGER NOT NULL CHECK(active IN (0,1)));
@@ -1041,6 +1042,7 @@ pub(crate) fn execute(
     Ok(result)
 }
 
+#[cfg(unix)]
 pub(crate) fn restart(db: &mut Connection, config: &EffectiveConfig) -> Result<(), EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

@@ -56,6 +56,7 @@ mod unavailable {
             Err(unavailable())
         }
 
+        #[cfg(unix)]
         pub(crate) fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
             match self {}
         }
@@ -66,6 +67,7 @@ mod unavailable {
     }
 
     impl UnixListener {
+        #[cfg(unix)]
         pub(crate) fn bind(_path: impl AsRef<Path>) -> io::Result<Self> {
             Err(unavailable())
         }

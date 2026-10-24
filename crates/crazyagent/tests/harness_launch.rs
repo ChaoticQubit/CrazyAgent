@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };

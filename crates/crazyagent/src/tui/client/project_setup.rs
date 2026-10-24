@@ -201,10 +201,10 @@ fn owner_result(response: OwnerResponse) -> Result<crate::engine::owner::OwnerRe
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod memory_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::engine::bootstrap::EngineService;

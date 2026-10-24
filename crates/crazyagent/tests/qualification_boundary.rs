@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::isolation::{
     BoundaryError, NetworkPolicy, ResourceLimits, SandboxProfile, run_boundary_probe,
 };

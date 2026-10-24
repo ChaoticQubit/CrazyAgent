@@ -16,13 +16,16 @@ use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
 use std::fs::File;
-use std::io::{Seek, Write};
+#[cfg(unix)]
+use std::io::Seek;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::time::Duration;
 
 const REPLY_BYTES_MAX: usize = 8192;
+#[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -169,7 +172,7 @@ impl Capture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod routing_tests;
 
 impl OwnerRuntimeHandle {
@@ -305,7 +308,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
             MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));
             }
@@ -658,7 +661,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::resolve_config;

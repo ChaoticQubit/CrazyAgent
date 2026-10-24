@@ -33,7 +33,7 @@ pub(super) mod terminal;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     Ordinary(Box<Client>),
     Paired {
         socket: PathBuf,
@@ -208,7 +208,7 @@ pub(super) struct Connection {
 }
 
 impl Connection {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn connect(client: Client) -> Result<Self, String> {
         Self::spawn(WorkerMode::Ordinary(Box::new(client)))
     }
@@ -243,7 +243,7 @@ impl Connection {
             .name("tui-client".into())
             .spawn(move || {
                 let (mut client, mut native) = match mode {
-                    #[cfg(test)]
+                    #[cfg(all(test, unix))]
                     WorkerMode::Ordinary(client) => (*client, None),
                     WorkerMode::Paired { socket, timeout } => {
                         let mut native = NativeOwner::new(socket, timeout);
@@ -1903,11 +1903,11 @@ fn bounded_problem(problem: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "dispatch_wiring_tests.rs"]
 mod dispatch_wiring_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod creation_recovery_tests {
     use super::*;
     use crate::engine::bootstrap::EngineService;
@@ -2474,7 +2474,7 @@ mod creation_recovery_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::engine::{Engine, Server};

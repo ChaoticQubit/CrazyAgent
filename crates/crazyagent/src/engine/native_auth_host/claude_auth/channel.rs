@@ -8,7 +8,7 @@ use crate::engine::owner::{AccountSecret, NativeAuthQuery};
 #[path = "channel_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "channel_actor_tests.rs"]
 mod actor_tests;
 
@@ -303,6 +303,7 @@ impl Authority {
     }
 }
 
+#[cfg(unix)]
 impl NativeAuthCustodyChannel {
     pub(crate) async fn observe_claude(
         &mut self,

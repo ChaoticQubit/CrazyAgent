@@ -441,7 +441,7 @@ fn transport(error: &EngineError, lost: &mut bool) -> String {
     bounded_problem(&error.0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::engine::bootstrap::EngineService;

@@ -1,20 +1,34 @@
+#[cfg(unix)]
 use super::{TOOL_NAME_BYTES_MAX, TOOLS_MAX};
+#[cfg(unix)]
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::process::{ChildStdin, ChildStdout};
+#[cfg(unix)]
+use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::mpsc::sync_channel;
+#[cfg(unix)]
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 pub const CHECK_TIME: Duration = Duration::from_secs(10);
 pub const LINE_BYTES_MAX: usize = 1024 * 1024;
 pub const OUTPUT_BYTES_MAX: usize = 4 * 1024 * 1024;
+#[cfg(unix)]
 const PAGES_MAX: u64 = 8;
+#[cfg(unix)]
 const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
 
+#[cfg(unix)]
 type Line = Result<Vec<u8>, &'static str>;
 
 /// Starts a command MCP server, runs `initialize` and `tools/list`, then stops its whole
@@ -96,6 +110,7 @@ fn stop(pid: u32) {
     }
 }
 
+#[cfg(unix)]
 fn read_lines(stdout: ChildStdout, send: SyncSender<Line>) {
     let mut reader = BufReader::new(stdout);
     let mut total = 0usize;
@@ -123,6 +138,7 @@ fn read_lines(stdout: ChildStdout, send: SyncSender<Line>) {
     }
 }
 
+#[cfg(unix)]
 fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), &'static str> {
     let mut line = serde_json::to_vec(message).map_err(|_| "server_cant_start")?;
     line.push(b'\n');
@@ -132,6 +148,7 @@ fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), &'static str> {
         .map_err(|_| "server_exited")
 }
 
+#[cfg(unix)]
 fn answer(receive: &Receiver<Line>, id: u64, deadline: Instant) -> Result<Value, &'static str> {
     loop {
         let left = deadline
@@ -160,6 +177,7 @@ fn answer(receive: &Receiver<Line>, id: u64, deadline: Instant) -> Result<Value,
     }
 }
 
+#[cfg(unix)]
 fn talk(
     mut stdin: ChildStdin,
     receive: &Receiver<Line>,
@@ -221,7 +239,7 @@ fn talk(
     Ok(tools)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

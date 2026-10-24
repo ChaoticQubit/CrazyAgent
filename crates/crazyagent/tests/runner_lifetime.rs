@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::protocol::encode_frame;
 use serde_json::{Value, json};
 use std::fs;

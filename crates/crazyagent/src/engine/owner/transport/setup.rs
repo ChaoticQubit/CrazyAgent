@@ -1,12 +1,17 @@
 use super::*;
+#[cfg(unix)]
 use crate::plugins::ServerSpec;
+#[cfg(unix)]
 use crate::setup::fetch;
-use crate::setup::pack::{PackGroup, PackKind, PackManifestEntry, PackSource};
+use crate::setup::pack::{PackGroup, PackManifestEntry};
+#[cfg(unix)]
+use crate::setup::pack::{PackKind, PackSource};
 use crate::setup::progress::{self, Progress};
 use crate::setup::{Dependency, DependencyState, InstallError, Installer, PackState, plain_reason};
 use crate::storage::setup::Command;
 use tokio::sync::mpsc;
 
+#[cfg(unix)]
 struct Prepared {
     source: String,
     skills: Vec<PathBuf>,
@@ -144,8 +149,9 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     progress::with(root, |state| {
         state.dependencies.insert(dep, DependencyState::Installing);
     });
-    let outcome = tokio::task::spawn_blocking(move || {
-        installer.install(dep, &crate::setup::platform_pin(dep))
+    let outcome = tokio::task::spawn_blocking(move || match crate::setup::platform_pin(dep) {
+        Some(pin) => installer.install(dep, &pin),
+        None => Err(InstallError(crate::setup::PLATFORM_UNSUPPORTED)),
     })
     .await;
     let next = match outcome {
@@ -162,6 +168,7 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     });
 }
 
+#[cfg(unix)]
 fn source_key(source: &PackSource) -> String {
     match source {
         PackSource::Git { repo, commit, path } => {
@@ -173,6 +180,7 @@ fn source_key(source: &PackSource) -> String {
     }
 }
 
+#[cfg(unix)]
 fn prepare(
     installer: &dyn Installer,
     setup: &Path,
@@ -212,6 +220,7 @@ fn reason(code: &str) -> String {
         .to_owned()
 }
 
+#[cfg(unix)]
 async fn install_entry(
     sender: &mpsc::Sender<Job>,
     installer: Arc<dyn Installer>,
@@ -255,6 +264,41 @@ async fn install_entry(
     });
 }
 
+/// Marks one pack entry failed where its source cannot be fetched or unpacked, since the
+/// fetch and bundled steps keep Unix file modes. Takes the same inputs as the Unix version;
+/// only the engine root and the entry are used.
+#[cfg(not(unix))]
+async fn install_entry(
+    _sender: &mpsc::Sender<Job>,
+    _installer: Arc<dyn Installer>,
+    root: &Path,
+    _bundled: Option<PathBuf>,
+    entry: PackManifestEntry,
+) {
+    progress::with(root, |state| {
+        state.pack.insert(
+            entry.id,
+            PackState::Failed {
+                reason: reason(crate::setup::PLATFORM_UNSUPPORTED),
+            },
+        );
+    });
+}
+
+/// Unpacks the skills shipped inside the engine into the setup folder.
+/// Takes the setup folder. Returns their folder, or `None` when they cannot be unpacked.
+#[cfg(unix)]
+fn extract_bundled(setup: &Path) -> Option<PathBuf> {
+    crate::setup::bundled::extract(setup).ok()
+}
+
+/// Reports no bundled skills where they cannot be unpacked with their Unix file modes.
+/// Takes the setup folder, unused. Returns `None`.
+#[cfg(not(unix))]
+fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
+    None
+}
+
 async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackManifestEntry>) {
     let installer = platform_installer(root);
     for dep in Dependency::ALL {
@@ -262,7 +306,7 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
     }
     let _ = storage(sender, Command::Sweep).await;
     let setup = root.join("setup");
-    let bundled = tokio::task::spawn_blocking(move || crate::setup::bundled::extract(&setup).ok())
+    let bundled = tokio::task::spawn_blocking(move || extract_bundled(&setup))
         .await
         .ok()
         .flatten();

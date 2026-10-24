@@ -1,8 +1,8 @@
 use super::*;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod master_dispatch_tests;
 mod master_host_launch;
 mod master_rcli;
@@ -45,11 +45,11 @@ mod setup;
 pub(crate) mod terminal;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_auth_channel_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_auth_dispatch_diagnostic_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_auth_dispatch_lifetime_tests;
 
 const SOCKET: &str = "owner.sock";
@@ -85,6 +85,7 @@ impl Identity {
 struct Root {
     path: PathBuf,
     directory: File,
+    #[cfg(unix)]
     identity: Identity,
 }
 
@@ -276,8 +277,11 @@ struct Slot {
 }
 
 struct PinnedBootstrap {
+    #[cfg(unix)]
     file: File,
+    #[cfg(unix)]
     identity: Identity,
+    #[cfg(unix)]
     bytes: Vec<u8>,
     value: RunnerBootstrap,
 }
@@ -297,8 +301,11 @@ impl PinnedBootstrap {
             serde_json::from_slice(&bytes).map_err(|_| failure("runner_bootstrap_invalid"))?;
         value.validate()?;
         let pinned = Self {
+            #[cfg(unix)]
             identity: Identity::of(&file.metadata().map_err(io_error)?),
+            #[cfg(unix)]
             file,
+            #[cfg(unix)]
             bytes,
             value,
         };
@@ -316,8 +323,11 @@ impl PinnedBootstrap {
         file.write_all_at(&bytes, 0).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         let pinned = Self {
+            #[cfg(unix)]
             identity: Identity::of(&file.metadata().map_err(io_error)?),
+            #[cfg(unix)]
             file,
+            #[cfg(unix)]
             bytes,
             value,
         };
@@ -1730,7 +1740,7 @@ async fn read_owner_handshake(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn serve_owner(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -2021,14 +2031,6 @@ async fn runner_control(
     .map_err(|_| failure("runner_control_outcome_unknown"))?
 }
 
-/// Refuses to trust a dispatch directory without Unix owner, mode and inode checks.
-/// Takes the path and expected identity, both unused.
-/// Returns `dispatch_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn dispatch_directory(_path: &Path, _expected: &LeaseIdentity) -> Result<(), EngineError> {
-    Err(failure("dispatch_filesystem_unavailable"))
-}
-
 #[cfg(unix)]
 fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), EngineError> {
     if !path.is_absolute()
@@ -2064,14 +2066,6 @@ fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), Engin
         return Err(failure("dispatch_filesystem_identity_changed"));
     }
     Ok(())
-}
-
-/// Refuses to read a dispatch file without Unix owner, mode and inode checks.
-/// Takes the path and size limit, both unused.
-/// Returns `dispatch_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn dispatch_file(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
-    Err(failure("dispatch_filesystem_unavailable"))
 }
 
 #[cfg(unix)]
@@ -2110,14 +2104,6 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
         return Err(failure("dispatch_file_changed"));
     }
     Ok(bytes)
-}
-
-/// Refuses to trust Git metadata without Unix owner and mode checks.
-/// Takes the repository path, unused.
-/// Returns `dispatch_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn dispatch_config(_path: &Path) -> Result<(), EngineError> {
-    Err(failure("dispatch_filesystem_unavailable"))
 }
 
 #[cfg(unix)]
@@ -2210,6 +2196,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     let repository = Path::new(&seal.repository);
     let target = Path::new(&seal.path);
@@ -2244,8 +2231,10 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     Ok(metadata)
 }
 
+#[cfg(unix)]
 struct DispatchGit(std::process::Child);
 
+#[cfg(unix)]
 impl Drop for DispatchGit {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -2668,7 +2657,7 @@ impl OwnerClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::{EffectiveConfig, ModelConnection, resolve_config};
@@ -3211,5 +3200,5 @@ fallback_allowed = false
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_profile_tests;

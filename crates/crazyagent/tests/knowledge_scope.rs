@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::{
     assets::*,
     config::{EffectiveConfig, resolve_config},

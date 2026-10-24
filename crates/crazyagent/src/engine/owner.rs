@@ -89,6 +89,7 @@ pub(crate) struct HostStamp {
     pub(crate) engine_epoch: String,
 }
 
+#[cfg(unix)]
 pub(crate) struct Started {
     pub(crate) host: HostStamp,
     pub(crate) owners: [Registration; 2],

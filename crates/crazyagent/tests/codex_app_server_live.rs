@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::adapters::codex::{AuthControl, CodexProtocol, Event, LoginChallenge, State};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;

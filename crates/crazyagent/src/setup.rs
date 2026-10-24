@@ -210,7 +210,10 @@ pub trait Installer: Send + Sync {
     }
 }
 
-const REASONS: [(&str, &str); 22] = [
+/// The code every setup step reports on a system setup has no installer for yet.
+pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
+
+const REASONS: [(&str, &str); 23] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -284,6 +287,10 @@ const REASONS: [(&str, &str); 22] = [
         "pack_not_installed",
         "This entry is not installed yet. Run setup first.",
     ),
+    (
+        PLATFORM_UNSUPPORTED,
+        "Setup can't install this on this system yet. Install it yourself, then check again.",
+    ),
 ];
 
 /// Turns a setup code into the plain sentence the setup screen shows. Input: a code such
@@ -303,11 +310,40 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     Box::new(macos::MacInstaller::new(engine_root))
 }
 
+/// The installer on a system setup has none for yet: every lookup and install reports
+/// [`PLATFORM_UNSUPPORTED`], so the setup screen says so plainly instead of guessing.
+/// Input: the engine root, unused. Output: the installer.
+#[cfg(not(target_os = "macos"))]
+pub fn platform_installer(_engine_root: &std::path::Path) -> Box<dyn Installer> {
+    Box::new(UnsupportedInstaller)
+}
+
+#[cfg(not(target_os = "macos"))]
+struct UnsupportedInstaller;
+
+#[cfg(not(target_os = "macos"))]
+impl Installer for UnsupportedInstaller {
+    fn find(&self, _dep: Dependency) -> Result<Option<Version>, InstallError> {
+        Err(InstallError(PLATFORM_UNSUPPORTED))
+    }
+
+    fn install(&self, _dep: Dependency, _pin: &Pin) -> Result<Version, InstallError> {
+        Err(InstallError(PLATFORM_UNSUPPORTED))
+    }
+}
+
 /// The pinned install of one dependency on this platform. Input: the dependency.
-/// Output: its pin.
+/// Output: its pin, or `None` on a system setup has no installer for yet.
 #[cfg(target_os = "macos")]
-pub fn platform_pin(dep: Dependency) -> Pin {
-    macos::pin(dep)
+pub fn platform_pin(dep: Dependency) -> Option<Pin> {
+    Some(macos::pin(dep))
+}
+
+/// The pinned install of one dependency on a system setup has no installer for yet.
+/// Input: the dependency, unused. Output: `None`.
+#[cfg(not(target_os = "macos"))]
+pub fn platform_pin(_dep: Dependency) -> Option<Pin> {
+    None
 }
 
 /// One owner change to the default pack, as the owner mutations carry it: start setup

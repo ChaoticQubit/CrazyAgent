@@ -143,7 +143,7 @@ fn validate_prepared(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::{OwnerClient, OwnerRuntimeHandle};
     use crate::engine::bootstrap::{EngineService, NativeProfileUse, NativeProfileUsePurpose};

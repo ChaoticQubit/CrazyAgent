@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
     ModelAccessCollection, OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation,

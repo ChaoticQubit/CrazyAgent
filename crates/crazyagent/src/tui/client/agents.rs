@@ -3,7 +3,10 @@ use crate::agents::AgentView;
 use crate::engine::EngineError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "built by the agents view"))]
+#[cfg_attr(
+    not(all(test, unix)),
+    expect(dead_code, reason = "built by the agents view")
+)]
 pub(in crate::tui) enum AgentsRequest {
     List { project: Option<ProjectId> },
     Stop { id: String },
@@ -26,7 +29,10 @@ pub(in crate::tui) struct AgentsEvent {
 impl Connection {
     /// Queues one agent list or control on the paired owner connection. The reply
     /// arrives later as `OwnerEvent::Agents`. Input: the request. Output: queued or why not.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the agents view"))]
+    #[cfg_attr(
+        not(all(test, unix)),
+        expect(dead_code, reason = "called by the agents view")
+    )]
     pub(in crate::tui) fn agents(&mut self, request: AgentsRequest) -> Result<(), String> {
         self.owner_job(Job::Agents(Box::new(request)))
     }
@@ -65,7 +71,7 @@ impl NativeOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::agents::AgentState;

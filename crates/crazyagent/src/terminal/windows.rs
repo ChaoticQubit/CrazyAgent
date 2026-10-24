@@ -4,7 +4,7 @@ use super::{
     TerminalStream, VIEWERS_MAX, failure,
 };
 use crate::harnesses::interactive::InteractiveCommand;
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{Read, Write};

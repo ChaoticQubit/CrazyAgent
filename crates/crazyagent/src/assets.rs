@@ -2,14 +2,18 @@ use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::memory::{capacity, error, hash, principal, reject};
 use crate::protocol::*;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetScope {
@@ -94,6 +98,7 @@ pub enum AssetAction {
     },
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(

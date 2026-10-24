@@ -34,6 +34,7 @@ const HEARTBEAT: Duration = Duration::from_millis(250);
 const MODEL_BYTES_MAX: usize = 256;
 const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(unix)]
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LINKS_HEADING: &str = "## Links and references";
@@ -888,7 +889,9 @@ impl ResearchRunner {
 /// sandbox profile, `prompt` goes to it on stdin, `wall_time` bounds it.
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
+    #[cfg(unix)]
     pub folder: &'a Path,
+    #[cfg(unix)]
     pub prompt: &'a str,
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
@@ -898,9 +901,13 @@ pub(crate) struct ReadOnlyRun<'a> {
 /// of time, or stopped by its caller or the runner's shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadOnlyEnding {
+    #[cfg(unix)]
     Answered(String),
+    #[cfg(unix)]
     Failed(&'static str),
+    #[cfg(unix)]
     TimedOut,
+    #[cfg(unix)]
     Stopped,
 }
 
@@ -1482,9 +1489,24 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     Ok(())
 }
 
+/// Refuses to add a worktree with git under a Seatbelt profile, which Windows cannot load;
+/// no git runs unconfined in its place. Takes the sandbox, profile and worktree, all unused.
+/// Returns the sandbox's `Unavailable` refusal with the Seatbelt reason.
+#[cfg(not(unix))]
+pub(crate) fn add_worktree(
+    _sandbox: &ProjectSandbox,
+    _profile: &Path,
+    _worktree: &Path,
+) -> Result<(), RunError> {
+    Err(RunError::Sandbox(SandboxError::Unavailable(
+        crate::sandbox::windows::SEATBELT_MISSING.into(),
+    )))
+}
+
 /// Adds a detached git worktree at `worktree` inside the sandbox's project
 /// folder, running git under the installed profile with hooks disabled.
 /// Takes the sandbox, its installed profile and the new worktree path.
+#[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
     profile: &Path,
@@ -1520,20 +1542,35 @@ pub(crate) fn add_worktree(
 }
 
 fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
-    let group = child.id();
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status.success());
         }
         if started.elapsed() >= limit {
-            stop_group(group);
-            let _ = child.wait();
-            await_group_exit(group);
+            stop_timed_out(&mut child);
             return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Stops a setup command that ran past its limit: kills the process group it leads,
+/// reaps it and waits for the group to empty. Takes the command's process.
+#[cfg(unix)]
+fn stop_timed_out(child: &mut Child) {
+    let group = child.id();
+    stop_group(group);
+    let _ = child.wait();
+    await_group_exit(group);
+}
+
+/// Stops a setup command that ran past its limit where no process group exists: kills the
+/// command and reaps it. Takes the command's process.
+#[cfg(not(unix))]
+fn stop_timed_out(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A running agent and the process group it leads. Stopping it, which also
@@ -1881,7 +1918,7 @@ fn utc_date(time: SystemTime) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};

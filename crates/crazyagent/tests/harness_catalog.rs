@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::harnesses::{
     AccountKind, HarnessStatus, Search, ToolControl, catalog, spec, specs,
 };

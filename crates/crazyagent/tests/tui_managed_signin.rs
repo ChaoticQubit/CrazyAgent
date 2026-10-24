@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::{ModelAccess, ModelAuthentication, ModelEndpoint, resolve_config};
 use crazyagent::engine::bootstrap::EngineService;

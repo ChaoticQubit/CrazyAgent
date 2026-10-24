@@ -1,8 +1,10 @@
-use super::accounts::{AccountPick, SettingsResolver};
+use super::accounts::AccountPick;
+#[cfg(unix)]
+use super::accounts::SettingsResolver;
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
-use super::runner::{
-    ResearchHarness, ResearchLimits, ResearchRun, ResearchRunner, RunError, kind_label,
-};
+#[cfg(unix)]
+use super::runner::ResearchLimits;
+use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -13,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STALE_MS: u64 = 180_000;
 const RUNS_MAX: usize = 256;
+#[cfg(unix)]
 const ENGINE_TICK: Duration = Duration::from_secs(1);
 
 /// One research job as the UI polls it: plain title, plain status, an

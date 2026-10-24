@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{Origin, resolve_config};
 use crazyagent::engine::Engine;
 use crazyagent::engine::owner::*;

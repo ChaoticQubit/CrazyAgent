@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
