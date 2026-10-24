@@ -6,6 +6,7 @@ use crazyagent::qualification::{
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::ExitCode;
@@ -157,6 +158,7 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+#[cfg(unix)]
 fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
     let codex = match args.len() {
@@ -221,6 +223,45 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
             }
         })
         .map_err(|error| error.to_string())
+}
+
+/// Refuses the native sign-in custodian, which needs Unix fd handoff and process groups.
+/// Takes the command arguments, unused. Returns `native_auth_host_unavailable`.
+#[cfg(not(unix))]
+fn run_native_auth_custodian(_args: &[OsString]) -> Result<(), String> {
+    Err("native_auth_host_unavailable".into())
+}
+
+/// Registers the requests that stop the engine: SIGINT and SIGTERM.
+/// Must run inside the Tokio runtime. Returns a future that completes on the
+/// first request, or the registration error.
+#[cfg(unix)]
+fn shutdown_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, String> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
+    })
+}
+
+/// Registers the requests that stop the engine: Ctrl-C and console close.
+/// Must run inside the Tokio runtime. Returns a future that completes on the
+/// first request, or the registration error.
+#[cfg(windows)]
+fn shutdown_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, String> {
+    use tokio::signal::windows::{ctrl_c, ctrl_close};
+    let mut interrupt = ctrl_c().map_err(|e| e.to_string())?;
+    let mut close = ctrl_close().map_err(|e| e.to_string())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = close.recv() => {},
+        }
+    })
 }
 
 fn engine_options(args: &[OsString]) -> Result<(bool, Option<&Path>), String> {
@@ -317,18 +358,10 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .map_err(|e| e.to_string())?;
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|e| e.to_string())?;
+        let shutdown = shutdown_requested()?;
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let signal = tokio::spawn(async move {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-            }
+            shutdown.await;
             stop.send_replace(true);
         });
         let result = async {

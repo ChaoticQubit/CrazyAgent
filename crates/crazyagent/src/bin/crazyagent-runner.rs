@@ -11,6 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     assert_eq!(args.len(), 2);
     assert_eq!(args[0], "serve");
+    #[cfg(unix)]
     rustix::process::setsid().map_err(|error| format!("runner_session_detach: {error}"))?;
     runner::run(std::path::Path::new(&args[1])).await?;
     Ok(())
