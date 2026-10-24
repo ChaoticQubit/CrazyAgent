@@ -28,6 +28,7 @@ pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(test)]
 mod native_auth_host_tests;
+mod projects_home;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -113,6 +114,12 @@ pub(crate) enum Job {
         HostStamp,
         OwnerControl,
         oneshot::Sender<Result<Option<OwnerControlReply>, EngineError>>,
+    ),
+    HomeAddPlan(
+        Admission,
+        String,
+        crate::projects_home::AddMode,
+        oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
     OwnerApply(
         Admission,
@@ -215,6 +222,11 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut home_watch = if readonly {
+                    None
+                } else {
+                    projects_home::watch_saved(&connection)
+                };
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Accounts(admission, command, reply) => {
@@ -421,6 +433,14 @@ impl Storage {
                                 &control,
                             ));
                         }
+                        Job::HomeAddPlan(admission, source, mode, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_plan(&mut connection, &path, &admission, &source, mode)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::OwnerApply(admission, request, reply) => {
                             if matches!(
                                 &request.operation,
@@ -485,13 +505,19 @@ impl Storage {
                                 let _ = reply.send(result);
                                 continue;
                             }
-                            let _ = reply.send(owner_apply(
-                                &mut connection,
-                                &config,
-                                &path,
-                                &admission,
-                                &request,
-                            ));
+                            let set_home = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::SetProjectsHome { .. }
+                                }
+                            );
+                            let result =
+                                owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if set_home && result.is_ok() {
+                                drop(home_watch.take());
+                                home_watch = projects_home::watch_saved(&connection);
+                            }
+                            let _ = reply.send(result);
                         }
                         Job::OwnerRead(admission, query, reply) => {
                             if matches!(
@@ -519,6 +545,16 @@ impl Storage {
                                     sources.as_ref(),
                                     &admission,
                                     &query,
+                                ));
+                                continue;
+                            }
+                            if matches!(query, OwnerRead::ProjectsHome | OwnerRead::FoundProjects) {
+                                let _ = reply.send(projects_home::read(
+                                    &mut connection,
+                                    &config,
+                                    &admission,
+                                    &query,
+                                    home_watch.as_ref(),
                                 ));
                                 continue;
                             }
@@ -695,6 +731,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
+    crate::projects_home::initialize(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::assets::initialize(connection)?;
@@ -1127,6 +1164,7 @@ fn execute(
         Command::ProjectSetup { action } => {
             crate::project_setup::execute(tx, config, path, action, revision)
         }
+        Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
         Command::Team { action } => crate::team::execute(
             tx,
             &config.settings.model_access.clone().unwrap_or_default(),
