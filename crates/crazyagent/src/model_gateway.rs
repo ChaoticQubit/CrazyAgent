@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 #[path = "storage/model_gateway.rs"]
 mod persistence;
+pub mod relay;
 
 #[cfg(test)]
 mod initial_conversation_tests;

@@ -1,9 +1,11 @@
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, validate,
+    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, route,
+    validate,
 };
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
+use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -45,6 +47,7 @@ pub struct TerminalSession {
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
+    _relay: Option<Relay>,
 }
 
 struct KeyFile(PathBuf);
@@ -102,6 +105,13 @@ impl TerminalSession {
         if interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
         }
+        let (request, relay) = route(request)?;
+        assert!(
+            request
+                .account
+                .key()
+                .is_none_or(|key| is_placeholder(key.reveal()))
+        );
         let home = request.account.home().to_path_buf();
         let key = request
             .account
@@ -170,6 +180,7 @@ impl TerminalSession {
             ),
             _key: key,
             _context: installed,
+            _relay: relay,
         })
     }
 

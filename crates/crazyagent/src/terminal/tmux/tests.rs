@@ -84,14 +84,21 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     };
     assert_eq!(
         spawn_line(&agent, &command).unwrap(),
-        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -e \"FOO=bar baz\" -- /usr/bin/env -u TMUX -u TMUX_PANE \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+    );
+    let mut own_terminal = command.clone();
+    own_terminal.env.insert(0, ("TERM".into(), "dumb".into()));
+    assert!(
+        spawn_line(&agent, &own_terminal)
+            .unwrap()
+            .contains(" -- /usr/bin/env -i \"TERM=dumb\" \"FOO=bar baz\" \"/bin/sh\"")
     );
     let refused = |change: fn(&mut InteractiveCommand)| {
         let mut bad = command.clone();
         change(&mut bad);
         spawn_line(&agent, &bad).unwrap_err().0
     };
-    let changes: [fn(&mut InteractiveCommand); 9] = [
+    let changes: [fn(&mut InteractiveCommand); 12] = [
         |c| c.argv.clear(),
         |c| c.argv[0] = "-i".into(),
         |c| c.argv[0] = "A=b".into(),
@@ -100,9 +107,34 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
         |c| c.cwd = PathBuf::from("/tmp/#{pane_id}"),
         |c| c.env.push(("1BAD".into(), "x".into())),
         |c| c.env.push(("BAD-NAME".into(), "x".into())),
+        |c| c.env.push(("GH_TOKEN".into(), "planted".into())),
+        |c| {
+            c.env
+                .push(("SSH_AUTH_SOCK".into(), "/tmp/agent.sock".into()))
+        },
+        |c| {
+            c.env
+                .push(("ANTHROPIC_API_KEY".into(), "sk-ant-planted".into()))
+        },
         |c| c.argv.push("x".repeat(COMMAND_BYTES_MAX)),
     ];
     for change in changes {
         assert_eq!(refused(change), "terminal_command_invalid");
     }
+}
+
+#[test]
+fn show_environment_replies_name_only_the_variables_still_set() {
+    let reply: Vec<Vec<u8>> = [
+        "PATH=/usr/bin:/bin",
+        "-SSH_AUTH_SOCK",
+        "GH_TOKEN=planted=with=equals",
+        "EMPTY=",
+        "no-equals",
+    ]
+    .iter()
+    .map(|line| line.as_bytes().to_vec())
+    .collect();
+    assert_eq!(variable_names(&reply), ["PATH", "GH_TOKEN", "EMPTY"]);
+    assert!(variable_names(&[b"-REMOVED".to_vec()]).is_empty());
 }

@@ -1,7 +1,8 @@
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command,
+    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
+use crazyagent::model_gateway::relay::is_placeholder;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -133,33 +134,78 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
 }
 
 #[test]
-fn api_key_reaches_only_the_child_environment_never_the_arguments() {
+fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_relay_token() {
     let home = private_dir("ca-launch-home-");
     let work = private_dir("ca-launch-work-");
+    let keyed = || AccountBinding::ApiKey {
+        home: home.path().to_path_buf(),
+        key: Secret::new(DUMMY_KEY.into()).unwrap(),
+        base_url: None,
+    };
     for harness in ["codex", "claude-code"] {
-        let account = AccountBinding::ApiKey {
-            home: home.path().to_path_buf(),
-            key: Secret::new(DUMMY_KEY.into()).unwrap(),
-            base_url: None,
-        };
-        let built = command(&request(harness, home.path(), work.path(), account)).unwrap();
-        assert!(
-            arguments(&built)
-                .iter()
-                .all(|argument| !argument.contains(DUMMY_KEY)),
+        assert_eq!(
+            command(&request(harness, home.path(), work.path(), keyed()))
+                .unwrap_err()
+                .0,
+            "launch_environment_refused",
             "{harness}"
         );
-        let variable = if harness == "codex" {
-            "CRAZYAGENT_API_KEY"
+        let (routed, relay) = route(request(harness, home.path(), work.path(), keyed())).unwrap();
+        let relay = relay.unwrap();
+        assert!(is_placeholder(relay.token()));
+        let built = command(&routed).unwrap();
+        let variables = environment(&built);
+        let arguments = arguments(&built);
+        for text in arguments.iter().chain(variables.values()) {
+            assert!(!text.contains(DUMMY_KEY), "{harness}");
+        }
+        if harness == "codex" {
+            assert_eq!(
+                variables.get("CRAZYAGENT_API_KEY").map(String::as_str),
+                Some(relay.token())
+            );
+            assert_eq!(
+                relay.base_url(),
+                format!("http://127.0.0.1:{}/v1", relay.port())
+            );
+            let provider = format!(
+                "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{}\",wire_api=\"responses\",env_key=\"CRAZYAGENT_API_KEY\"}}",
+                relay.base_url()
+            );
+            assert!(arguments.contains(&provider), "{arguments:?}");
         } else {
-            "ANTHROPIC_API_KEY"
-        };
+            assert_eq!(
+                variables.get("ANTHROPIC_API_KEY").map(String::as_str),
+                Some(relay.token())
+            );
+            assert_eq!(
+                variables.get("ANTHROPIC_BASE_URL"),
+                Some(&format!("http://127.0.0.1:{}", relay.port()))
+            );
+        }
+        let (again, none) = route(routed).unwrap();
+        assert!(none.is_none());
         assert_eq!(
-            environment(&built).get(variable).map(String::as_str),
-            Some(DUMMY_KEY)
+            environment(&command(&again).unwrap()),
+            variables,
+            "{harness}"
         );
-        assert!(!format!("{:?}", Secret::new(DUMMY_KEY.into()).unwrap()).contains(DUMMY_KEY));
     }
+    let unsupported = LaunchRequest {
+        harness: "not-a-harness".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: work.path().to_path_buf(),
+        account: keyed(),
+        model: None,
+        tools: false,
+        sandbox_profile: Some(project_profile(work.path(), home.path())),
+        limits: LaunchLimits::default(),
+    };
+    assert_eq!(
+        route(unsupported).unwrap_err().0,
+        "launch_key_relay_unsupported"
+    );
+    assert!(!format!("{:?}", Secret::new(DUMMY_KEY.into()).unwrap()).contains(DUMMY_KEY));
 }
 
 #[test]
