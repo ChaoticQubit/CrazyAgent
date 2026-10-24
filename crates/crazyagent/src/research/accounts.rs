@@ -194,11 +194,16 @@ impl SettingsResolver {
     }
 
     /// The account an agent outside the research queue, such as onboarding's
-    /// mapping agent, runs on for `pool`: the pool's first member Codex can
-    /// use, else its first member Claude Code can use, with the same sign-in
-    /// check as [`Self::resolve`]. Rereads the settings on every call. Returns
-    /// `None` for an unknown pool or a pool with no usable member.
-    pub fn pool_pick(&self, pool: &CredentialRef) -> Option<ResearchAccount> {
+    /// mapping agent, runs on for `pool`: the pool's first member the first of
+    /// `harnesses` can use, else the next harness's, with the same sign-in
+    /// check as [`Self::resolve`]. `harnesses` are the installed ones, Codex
+    /// first. Rereads the settings on every call. Returns `None` for an
+    /// unknown pool, no harness, or a pool with no member they can use.
+    pub fn pool_pick(
+        &self,
+        pool: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> Option<ResearchAccount> {
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
         let chosen = access
@@ -214,9 +219,15 @@ impl SettingsResolver {
                     Err(code) => code == PROFILE_BUSY,
                 })
         };
-        ["codex", "claude-code"].into_iter().find_map(|harness| {
-            pool_account(&access, chosen, harness, &signed_in).map(|(_, account)| account)
-        })
+        let picked = harnesses.iter().find_map(|harness| {
+            pool_account(&access, chosen, harness.id(), &signed_in).map(|(_, account)| account)
+        });
+        assert!(
+            picked
+                .as_ref()
+                .is_none_or(|account| harnesses.contains(&account.harness()))
+        );
+        picked
     }
 
     /// Opens the engine database for one resolve, or `None` when it cannot be
