@@ -254,3 +254,111 @@ fn a_server_entry_starts_its_program_without_a_shell() {
         );
     }
 }
+
+fn shipped(id: &str) -> PackManifestEntry {
+    crate::setup::pack::default_pack()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .unwrap()
+}
+
+fn programs(bin: &Path, names: &[&str]) {
+    std::fs::create_dir_all(bin).unwrap();
+    for name in names {
+        let path = bin.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[test]
+fn the_shipped_mcp_entries_read_as_servers_without_a_shell() {
+    let work = tempfile::tempdir().unwrap();
+    let bin = work.path().join("bin");
+    let folder = work.path().join("entry");
+    std::fs::create_dir_all(&folder).unwrap();
+    programs(&bin, &["npx", "uv"]);
+    let lookup = |name: &str| {
+        let path = bin.join(name);
+        runnable(&path).then_some(path)
+    };
+    let program = |name: &str| bin.join(name).display().to_string();
+
+    let plan = server_plan(&shipped("context-mode"), &folder, &lookup).unwrap();
+    assert_eq!(plan.tool, None);
+    assert_eq!(
+        plan.spec,
+        ServerSpec::Stdio {
+            command: program("npx"),
+            args: vec!["-y".into(), "context-mode@1.0.169".into()],
+        }
+    );
+
+    let plan = server_plan(&shipped("serena"), &folder, &lookup).unwrap();
+    let ServerSpec::Stdio { command, args } = plan.spec else {
+        panic!("serena runs as a command");
+    };
+    assert_eq!(command, program("uv"));
+    assert_eq!(&args[..3], ["tool", "run", "--from"]);
+    assert!(args[3].starts_with("git+https://github.com/oraios/serena@"));
+    assert_eq!(
+        &args[4..],
+        ["serena", "start-mcp-server", "--project-from-cwd"]
+    );
+
+    let plan = server_plan(&shipped("linear"), &folder, &lookup).unwrap();
+    assert_eq!(
+        plan.spec,
+        ServerSpec::Http {
+            url: "https://mcp.linear.app/mcp".into()
+        }
+    );
+    assert_eq!(server_name(&shipped("linear")).unwrap(), "linear");
+}
+
+#[test]
+fn a_server_with_a_tool_step_finds_its_program_after_the_tool_is_installed() {
+    let work = tempfile::tempdir().unwrap();
+    let bin = work.path().join("bin");
+    let folder = work.path().join("entry");
+    std::fs::create_dir_all(&folder).unwrap();
+    programs(&bin, &["uv"]);
+    let lookup = |name: &str| {
+        let path = bin.join(name);
+        runnable(&path).then_some(path)
+    };
+
+    let plan = server_plan(&shipped("headroom"), &folder, &lookup).unwrap();
+    assert_eq!(plan.tool, Some(("headroom-ai".into(), "0.41.0".into())));
+    assert_eq!(
+        finish_plan(plan.clone(), &lookup).unwrap_err(),
+        InstallError("pack_server_command_missing")
+    );
+    programs(&bin, &["headroom"]);
+    assert_eq!(
+        finish_plan(plan, &lookup).unwrap(),
+        ServerSpec::Stdio {
+            command: bin.join("headroom").display().to_string(),
+            args: vec!["mcp".into(), "serve".into()],
+        }
+    );
+}
+
+#[test]
+fn skill_folders_are_found_a_few_levels_down_but_not_inside_a_skill() {
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path().join("repo");
+    skill(&root.join("graphify/skill"), "graphify", "Graph.");
+    skill(
+        &root.join("graphify/skill/nested"),
+        "nested",
+        "Inside a skill.",
+    );
+    skill(&root.join("a/b/c/d"), "too-deep", "Four levels down.");
+    assert_eq!(
+        skill_folders(&root).unwrap(),
+        vec![root.join("graphify/skill")]
+    );
+}

@@ -345,6 +345,21 @@ impl Installer for MacInstaller {
         Ok(self.locate(dep).map(|(_, version)| version))
     }
 
+    fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
+        private_folder(&self.setup)?;
+        self.uv_tool(package, &Version::parse(version)?, GRAPHIFY_PYTHON)
+    }
+
+    fn program(&self, name: &str) -> Option<PathBuf> {
+        if name.is_empty() || name.contains('/') || name.starts_with('.') {
+            return None;
+        }
+        self.search
+            .iter()
+            .map(|dir| dir.join(name))
+            .find(|candidate| runnable(candidate))
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         private_folder(&self.setup)?;
         let pinned = match pin {

@@ -181,13 +181,25 @@ pub struct SetupStatus {
 
 /// Finds and installs the app's system dependencies on one platform. `find` returns the
 /// installed version or none; `install` installs exactly the pin and returns the version
-/// now present. Implementations never use sudo and never change global configuration.
+/// now present; `install_tool` installs one pinned Python tool an MCP server needs into
+/// the app data folder; `program` finds a program setup installed or the system has.
+/// Implementations never use sudo and never change global configuration.
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
+
+    fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
+        let _ = (package, version);
+        Err(InstallError("setup_tool_unsupported"))
+    }
+
+    fn program(&self, name: &str) -> Option<std::path::PathBuf> {
+        let _ = name;
+        None
+    }
 }
 
-const REASONS: [(&str, &str); 20] = [
+const REASONS: [(&str, &str); 22] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -252,6 +264,14 @@ const REASONS: [(&str, &str); 20] = [
     (
         "pack_required",
         "This entry is always on and can't be removed.",
+    ),
+    (
+        "setup_tool_unsupported",
+        "This server's tool can't be installed on this system yet.",
+    ),
+    (
+        "pack_not_installed",
+        "This entry is not installed yet. Run setup first.",
     ),
 ];
 

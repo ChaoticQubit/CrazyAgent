@@ -36,6 +36,7 @@ mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
+mod setup;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
@@ -1675,6 +1676,9 @@ async fn serve_authenticated_owner(
         }
         if selector.get("plugins").is_some() {
             return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("setup").is_some() {
+            return setup::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("agents").is_some() {
             return agents::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;

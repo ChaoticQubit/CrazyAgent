@@ -15,6 +15,7 @@ const REPO_BYTES_MAX: usize = 512;
 const PATH_BYTES_MAX: usize = 256;
 const WORDS_MAX: usize = 33;
 const SKILLS_MAX: usize = crate::plugins::SKILLS_PER_SCOPE_MAX;
+const SKILL_DEPTH: usize = 3;
 const PROGRAM_FOLDERS: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const GIT_CONFIG: [&str; 14] = [
     "-c",
@@ -194,26 +195,49 @@ pub fn entry_folder(
     Ok(folder)
 }
 
-/// Lists the skill folders inside one entry folder: the folder itself when it holds a
-/// SKILL.md, otherwise each child folder that does, sorted by name and never through a
-/// link. Input: the entry folder. Output: 1 to 100 folders, or `pack_no_skills`.
-pub fn skill_folders(folder: &Path) -> Result<Vec<PathBuf>, InstallError> {
-    let has_skill =
-        |dir: &Path| std::fs::symlink_metadata(dir.join("SKILL.md")).is_ok_and(|m| m.is_file());
+fn has_skill(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join("SKILL.md")).is_ok_and(|m| m.is_file())
+}
+
+fn collect_skills(
+    folder: &Path,
+    depth: usize,
+    found: &mut Vec<PathBuf>,
+) -> Result<(), InstallError> {
+    if found.len() > SKILLS_MAX {
+        return Err(InstallError("pack_no_skills"));
+    }
     if has_skill(folder) {
-        return Ok(vec![folder.to_path_buf()]);
+        found.push(folder.to_path_buf());
+        return Ok(());
+    }
+    if depth == 0 {
+        return Ok(());
     }
     let entries = std::fs::read_dir(folder).map_err(|_| InstallError("pack_no_skills"))?;
-    let mut found = Vec::new();
+    let mut children = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| InstallError("pack_no_skills"))?;
         let path = entry.path();
         let hidden = entry.file_name().to_string_lossy().starts_with('.');
-        let directory = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
-        if !hidden && directory && has_skill(&path) {
-            found.push(path);
+        if !hidden && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            children.push(path);
         }
     }
+    children.sort();
+    for child in children {
+        collect_skills(&child, depth - 1, found)?;
+    }
+    Ok(())
+}
+
+/// Lists the skill folders inside one entry folder: the folder itself when it holds a
+/// SKILL.md, otherwise every folder below it that does, up to three levels down, never
+/// through a link or a hidden folder and never inside a skill folder already found.
+/// Input: the entry folder. Output: 1 to 100 folders in name order, or `pack_no_skills`.
+pub fn skill_folders(folder: &Path) -> Result<Vec<PathBuf>, InstallError> {
+    let mut found = Vec::new();
+    collect_skills(folder, SKILL_DEPTH, &mut found)?;
     found.sort();
     if found.is_empty() || found.len() > SKILLS_MAX {
         return Err(InstallError("pack_no_skills"));
@@ -241,46 +265,143 @@ pub fn server_name(entry: &PackManifestEntry) -> Result<String, InstallError> {
     Ok(name)
 }
 
-/// Builds how an MCP server entry starts from its `install` line: words split on spaces
-/// with no shell, the first naming the program (absolute, relative to the entry folder,
-/// or found in `<setup>/bin` and the usual program folders) and `{dir}` in any argument
-/// standing for the entry folder. Inputs: the setup folder, the entry and its folder.
-/// Output: a command spec, `pack_server_invalid` or `pack_server_command_missing`.
+/// How one MCP server entry is set up: an optional Python tool that `uv tool install`
+/// must install first, then how the server starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerPlan {
+    pub tool: Option<(String, String)>,
+    pub spec: ServerSpec,
+}
+
+fn default_program(setup: &Path, name: &str) -> Option<PathBuf> {
+    let mut folders = vec![setup.join("bin")];
+    folders.extend(PROGRAM_FOLDERS.iter().map(PathBuf::from));
+    folders
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| runnable(candidate))
+}
+
+/// Builds how an MCP server entry starts, looking programs up in `<setup>/bin` and the
+/// usual program folders. Same rules as `server_plan`, with no tool step allowed.
+/// Inputs: the setup folder, the entry and its folder. Output: the server spec.
 pub fn server_spec(
     setup: &Path,
     entry: &PackManifestEntry,
     folder: &Path,
 ) -> Result<ServerSpec, InstallError> {
+    let plan = server_plan(entry, folder, &|name| default_program(setup, name))?;
+    if plan.tool.is_some() {
+        return Err(InstallError("pack_server_invalid"));
+    }
+    Ok(plan.spec)
+}
+
+fn tool_step(text: &str) -> Result<(String, String), InstallError> {
     let invalid = InstallError("pack_server_invalid");
-    let words: Vec<&str> = entry.install.split_whitespace().collect();
+    let (package, version) = text.trim().split_once("==").ok_or(invalid)?;
+    let plain = |part: &str, extra: &[u8]| {
+        !part.is_empty()
+            && part.len() <= 64
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
+    };
+    if !plain(package, b"-_.") || !plain(version, b".-+") {
+        return Err(invalid);
+    }
+    Ok((package.to_owned(), version.to_owned()))
+}
+
+/// Reads how an MCP server entry starts from its `install` line, with no shell. The line
+/// is `add <https URL> as an HTTP MCP server`, or `[uv tool install <package>==<version>,
+/// then ]run <program> <args> as a stdio MCP server`, or plain program words. The program
+/// is absolute, relative to the entry folder, or found by `resolve`; `uvx` runs as
+/// `uv tool run`; `{dir}` in an argument stands for the entry folder. Text after the
+/// server phrase is a note. Inputs: the entry, its folder and the program lookup.
+/// Output: the plan, `pack_server_invalid` or `pack_server_command_missing`.
+pub fn server_plan(
+    entry: &PackManifestEntry,
+    folder: &Path,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<ServerPlan, InstallError> {
+    let invalid = InstallError("pack_server_invalid");
+    let line = entry.install.trim();
+    if let Some(rest) = line.strip_prefix("add ")
+        && let Some((url, _)) = rest.split_once(" as an HTTP MCP server")
+    {
+        let spec = ServerSpec::Http {
+            url: url.trim().to_owned(),
+        };
+        spec.validate().map_err(|_| invalid)?;
+        return Ok(ServerPlan { tool: None, spec });
+    }
+    let (tool, command) = match line.strip_prefix("uv tool install ") {
+        Some(rest) => {
+            let (step, command) = rest.split_once(", then run ").ok_or(invalid)?;
+            (Some(tool_step(step)?), command)
+        }
+        None => (None, line.strip_prefix("run ").unwrap_or(line)),
+    };
+    let command = command
+        .split_once(" as a stdio MCP server")
+        .map_or(command, |(words, _)| words);
+    let words: Vec<&str> = command.split_whitespace().collect();
     let (first, rest) = words.split_first().ok_or(invalid)?;
     if words.len() > WORDS_MAX {
         return Err(invalid);
     }
-    let program = if first.starts_with('/') {
+    let mut args: Vec<String> = Vec::new();
+    let program = if *first == "uvx" {
+        args.extend(["tool".to_owned(), "run".to_owned()]);
+        resolve("uv").ok_or(InstallError("pack_server_command_missing"))?
+    } else if first.starts_with('/') {
         PathBuf::from(first)
     } else if first.contains('/') {
         if !safe_relative(first) {
             return Err(invalid);
         }
         folder.join(first)
+    } else if tool.is_some() {
+        PathBuf::new()
     } else {
-        let mut folders = vec![setup.join("bin")];
-        folders.extend(PROGRAM_FOLDERS.iter().map(PathBuf::from));
-        folders
-            .into_iter()
-            .map(|dir| dir.join(first))
-            .find(|candidate| runnable(candidate))
-            .ok_or(InstallError("pack_server_command_missing"))?
+        resolve(first).ok_or(InstallError("pack_server_command_missing"))?
     };
-    if !runnable(&program) {
-        return Err(InstallError("pack_server_command_missing"));
-    }
     let dir = folder.to_str().ok_or(invalid)?;
-    let spec = ServerSpec::Stdio {
-        command: program.to_str().ok_or(invalid)?.to_owned(),
-        args: rest.iter().map(|word| word.replace("{dir}", dir)).collect(),
+    args.extend(rest.iter().map(|word| word.replace("{dir}", dir)));
+    let command = if program.as_os_str().is_empty() {
+        (*first).to_owned()
+    } else {
+        if !runnable(&program) {
+            return Err(InstallError("pack_server_command_missing"));
+        }
+        program.to_str().ok_or(invalid)?.to_owned()
     };
+    let spec = ServerSpec::Stdio { command, args };
+    if !program.as_os_str().is_empty() {
+        spec.validate().map_err(|_| invalid)?;
+    }
+    Ok(ServerPlan { tool, spec })
+}
+
+/// Finishes a plan whose program comes from its tool step: looks the program up again
+/// after the tool is installed and checks the final spec. Inputs: the plan and the
+/// program lookup. Output: a spec with an absolute command.
+pub fn finish_plan(
+    plan: ServerPlan,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<ServerSpec, InstallError> {
+    let invalid = InstallError("pack_server_invalid");
+    let ServerSpec::Stdio { command, args } = plan.spec else {
+        return Ok(plan.spec);
+    };
+    let command = if command.starts_with('/') {
+        command
+    } else {
+        let program = resolve(&command).ok_or(InstallError("pack_server_command_missing"))?;
+        program.to_str().ok_or(invalid)?.to_owned()
+    };
+    let spec = ServerSpec::Stdio { command, args };
     spec.validate().map_err(|_| invalid)?;
     Ok(spec)
 }
