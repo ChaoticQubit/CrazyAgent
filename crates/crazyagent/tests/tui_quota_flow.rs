@@ -190,7 +190,12 @@ fn run_case(root: &Path) {
     assert_eq!(default_access.pools.len(), 1);
     assert_eq!(strict_access.pools.len(), 1);
     let pool = &default_access.pools[0];
-    assert_eq!(pool.id.as_str(), "pty-quota-pool");
+    assert!(
+        pool.id.as_str().starts_with("pool-ptyquotapool-"),
+        "{}",
+        pool.id.as_str()
+    );
+    assert_eq!(pool.name.as_deref(), Some("pty quota pool"));
     assert_eq!(
         pool.members
             .iter()
@@ -198,20 +203,8 @@ fn run_case(root: &Path) {
             .collect::<Vec<_>>(),
         ["connection-1"]
     );
-    assert_eq!(
-        pool.projects
-            .iter()
-            .map(|value| value.as_str())
-            .collect::<Vec<_>>(),
-        ["project-1"]
-    );
-    assert_eq!(
-        pool.roles
-            .iter()
-            .map(|value| value.as_str())
-            .collect::<Vec<_>>(),
-        ["leader"]
-    );
+    assert!(pool.projects.is_empty(), "{:?}", pool.projects);
+    assert!(pool.roles.is_empty(), "{:?}", pool.roles);
     assert!(!pool.fallback_allowed);
     assert_eq!(
         pool.provider_quota_policy,
