@@ -366,6 +366,7 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(markup, /<legend>Workflow skills<\/legend>[\s\S]*superpowers/);
   assert.match(markup, /<legend>Context plugins<\/legend>[\s\S]*context-mode[\s\S]*MCP server/);
   assert.match(markup, /<legend>Optional<\/legend>[\s\S]*serena[\s\S]*off by default/);
+  assert.match(markup, /headroom[\s\S]*>On</);
   assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode, headroom\./);
   assert.match(markup, />Set up tools<\/button>/);
   assert.match(markup, />Skip for now<\/button>/);

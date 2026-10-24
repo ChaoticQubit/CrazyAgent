@@ -23,6 +23,7 @@ mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
+pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
@@ -155,6 +156,7 @@ pub(crate) enum Job {
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
     ),
+    Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
 }
@@ -647,6 +649,17 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::Setup(command, reply) => {
+                            let result = if readonly {
+                                Err(error("setup_readonly"))
+                            } else {
+                                match path.parent() {
+                                    Some(root) => setup::execute(&mut connection, root, command),
+                                    None => Err(error("setup_store_unavailable")),
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Config(next, reply) => {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 if sources.is_some() {
@@ -773,6 +786,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
+    setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
@@ -1026,6 +1040,7 @@ fn apply(
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
             | Command::OwnerMemory { .. }
+            | Command::OwnerSetup { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1200,6 +1215,7 @@ fn execute(
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
+        Command::OwnerSetup { action } => setup::apply_owner(tx, path, action),
         Command::ProjectSetup { action } => {
             crate::project_setup::execute(tx, config, path, action, revision)
         }
@@ -2127,6 +2143,9 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::SetupStatus => OwnerData::SetupStatus {
+            status: setup::status(&tx, path)?,
+        },
         OwnerRead::Memories {
             scope,
             search,

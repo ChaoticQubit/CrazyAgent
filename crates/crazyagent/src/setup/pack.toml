@@ -22,10 +22,10 @@ source = { kind = "git", repo = "https://github.com/obra/superpowers", commit = 
 id = "software-practices"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy every bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/marketplaces/software-practices/plugins/software-practices/skills" }
+source = { kind = "bundled", path = "skills/software-practices" }
 
 [[entries]]
 id = "ponytail"
@@ -40,10 +40,10 @@ source = { kind = "git", repo = "https://github.com/DietrichGebert/ponytail", co
 id = "tiger-style"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/tiger-style" }
+source = { kind = "bundled", path = "skills/tiger-style" }
 
 [[entries]]
 id = "grill-me"
@@ -58,46 +58,46 @@ source = { kind = "git", repo = "https://github.com/mattpocock/skills", commit =
 id = "linear-method"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/linear-method" }
+source = { kind = "bundled", path = "skills/linear-method" }
 
 [[entries]]
 id = "to-releases"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/to-releases" }
+source = { kind = "bundled", path = "skills/to-releases" }
 
 [[entries]]
 id = "to-features"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/to-features" }
+source = { kind = "bundled", path = "skills/to-features" }
 
 [[entries]]
 id = "to-linear-projects"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/to-linear-projects" }
+source = { kind = "bundled", path = "skills/to-linear-projects" }
 
 [[entries]]
 id = "security-audit"
 kind = "skill"
 group = "workflow"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/security-audit" }
+source = { kind = "bundled", path = "skills/security-audit" }
 
 [[entries]]
 id = "taste-skill"
@@ -112,19 +112,19 @@ source = { kind = "git", repo = "https://github.com/Leonxlnx/taste-skill", commi
 id = "html-explainer"
 kind = "skill"
 group = "design"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy the bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/skills/html-explainer" }
+source = { kind = "bundled", path = "skills/html-explainer" }
 
 [[entries]]
 id = "deep-docs"
 kind = "skill"
 group = "design"
-license = "LicenseRef-Owner-Authored"
+license = "Apache-2.0"
 on_by_default = true
 install = "copy every bundled skill folder into each agent's skills folder"
-source = { kind = "bundled", path = "agents/marketplaces/deep-docs/plugins/deep-docs/skills" }
+source = { kind = "bundled", path = "skills/deep-docs" }
 
 [[entries]]
 id = "caveman"

@@ -1,4 +1,4 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, bounded, failure};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
@@ -511,59 +511,83 @@ impl NativeBridge {
         bounded(receipt)
     }
 
-    fn setup_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
+    async fn setup_change(
+        &mut self,
+        mutation: OwnerMutation,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.controller()?.owner_client().map_err(setup_failure)
+        self.ready_for_intent(generation)?;
+        self.controller()?
+            .setup_status()
+            .await
+            .map_err(setup_failure)?;
+        self.controller()?
+            .begin_mutation(mutation, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        let receipt = self.deliver_intent(false).await?;
+        match receipt.outcome {
+            ActionOutcome::Applied => self.setup_status().await,
+            ActionOutcome::Rejected => Err(known(
+                receipt.rejection.unwrap_or("setup_failed"),
+                &SETUP_CODES,
+                "setup_failed",
+            )),
+            _ => Err(failure("setup_outcome_unknown")),
+        }
     }
 
     /// Reads setup: each dependency, each default-pack entry and whether setup is running.
     pub async fn setup_status(&mut self) -> Result<SetupStatus, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
         let status = self
-            .setup_ready()?
+            .controller()?
             .setup_status()
             .await
             .map_err(setup_failure)?;
         bounded(status)
     }
 
-    /// Starts setup with the ticked pack entries; the ticked MCP servers count as approved.
-    /// Input: the ticked entry ids. Output: the status as the run starts.
-    pub async fn run_setup(&mut self, pack: Vec<String>) -> Result<SetupStatus, BridgeError> {
+    /// Starts setup with the ticked pack entries as one owner intent; the ticked MCP servers
+    /// count as approved. Inputs: the ticked entry ids and a fresh draft generation.
+    /// Output: the status as the run starts; a refusal comes back as its plain code.
+    pub async fn run_setup(
+        &mut self,
+        pack: Vec<String>,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
         let pack = pack_ids(pack)?;
-        let status = self
-            .setup_ready()?
-            .run_setup(pack)
+        self.setup_change(OwnerMutation::RunSetup { pack }, generation)
             .await
-            .map_err(setup_failure)?;
-        bounded(status)
     }
 
-    /// Switches one installed pack entry on or off. Inputs: its id and the state.
+    /// Switches one installed pack entry on or off as one owner intent.
+    /// Inputs: its id, the state and a fresh draft generation. Output: the new status.
     pub async fn set_pack_entry(
         &mut self,
         id: String,
         on: bool,
+        generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        let status = self
-            .setup_ready()?
-            .set_pack_entry(id, on)
+        self.setup_change(OwnerMutation::SetPackEntry { id, on }, generation)
             .await
-            .map_err(setup_failure)?;
-        bounded(status)
     }
 
-    /// Removes one installed pack entry and what it added. Input: its id.
-    pub async fn remove_pack_entry(&mut self, id: String) -> Result<SetupStatus, BridgeError> {
+    /// Removes one installed pack entry and what it added, as one owner intent.
+    /// Inputs: its id and a fresh draft generation. Output: the new status.
+    pub async fn remove_pack_entry(
+        &mut self,
+        id: String,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        let status = self
-            .setup_ready()?
-            .remove_pack_entry(id)
+        self.setup_change(OwnerMutation::RemovePackEntry { id }, generation)
             .await
-            .map_err(setup_failure)?;
-        bounded(status)
     }
 
     /// Moves every project folder from the current projects home into a new one, after the

@@ -61,7 +61,7 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
     ["desktop_folder_size", "{ path }"], ["desktop_add_existing_folder", "{ source, mode, generation }"],
     ["desktop_start_onboarding", "{ path, pool, generation }"], ["desktop_onboarding", "{ id }"],
     ["desktop_github_token", "{ token }"], ["desktop_github_repos", "{ page }"], ["desktop_clone_repo", "{ fullName }"],
-    ["desktop_run_setup", "{ pack }"], ["desktop_set_pack_entry", "{ id, on }"], ["desktop_remove_pack_entry", "{ id }"],
+    ["desktop_run_setup", "{ pack, generation }"], ["desktop_set_pack_entry", "{ id, on, generation }"], ["desktop_remove_pack_entry", "{ id, generation }"],
     ["desktop_team_graph", "{ id }"],
   ]) assert.ok(client.includes(`("${command}", ${args})`), command);
   const lib = read("src-tauri/src/lib.rs");
@@ -70,7 +70,9 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
     ["desktop_add_existing_folder", ["source: String", "mode: AddMode", "generation: u64"]],
     ["desktop_start_onboarding", ["path: String", "pool: String", "generation: u64"]],
     ["desktop_clone_repo", ["full_name: String"]],
-    ["desktop_set_pack_entry", ["id: String", "on: bool"]],
+    ["desktop_set_pack_entry", ["id: String", "on: bool", "generation: u64"]],
+    ["desktop_run_setup", ["pack: Vec<String>", "generation: u64"]],
+    ["desktop_remove_pack_entry", ["id: String", "generation: u64"]],
   ]) {
     const start = lib.indexOf(`fn ${command}(`);
     assert.ok(start >= 0, command);
