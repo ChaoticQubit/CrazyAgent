@@ -19,6 +19,7 @@ pub mod owner_profile;
 pub mod plugins;
 pub mod pools;
 pub mod project_setup;
+pub mod projects_home;
 pub mod protocol;
 pub mod qualification;
 pub mod rcli_host;

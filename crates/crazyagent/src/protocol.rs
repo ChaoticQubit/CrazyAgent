@@ -184,6 +184,10 @@ pub enum Command {
         action: crate::project_setup::SetupAction,
     },
     #[serde(skip_deserializing)]
+    ProjectsHome {
+        action: crate::projects_home::HomeAction,
+    },
+    #[serde(skip_deserializing)]
     Team {
         action: crate::team::TeamAction,
     },
