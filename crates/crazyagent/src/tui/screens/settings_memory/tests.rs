@@ -335,6 +335,7 @@ fn research_suggestions_come_first_and_save_for_every_project() {
         &settings(SettingsEvent::SuggestionDone(found[0].clone(), Ok(()))),
         &mut ctx,
     );
+    assert_eq!(ctx.message().unwrap().lead, "Saved to memory.");
     let (lines, _) = screen.body(116, &ctx);
     assert!(texts(&lines)[0].contains("1 suggested"));
     assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
@@ -388,6 +389,20 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
     screen.key(&Key::Esc, &mut ctx);
     assert!(screen.modal(&ctx).is_none());
     assert_eq!(ctx.queued(), 0, "Esc decides nothing");
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Char('n'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::Suggestion { keep: false, .. }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(found[0].clone(), Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().lead, "Suggestion dismissed.");
+    let (lines, _) = screen.body(76, &ctx);
+    assert!(texts(&lines).iter().any(|line| line == "No memories yet."));
 }
 
 #[test]

@@ -131,7 +131,7 @@ pub struct Memory {
     deleting: bool,
     suggesting: bool,
     adding: bool,
-    deciding: Option<Suggestion>,
+    deciding: Option<(Suggestion, bool)>,
     scoped: Vec<MemoryScope>,
     selected: usize,
     offset: usize,
@@ -317,7 +317,7 @@ impl Memory {
             return;
         };
         let suggestion = item.clone();
-        self.deciding = Some(suggestion.clone());
+        self.deciding = Some((suggestion.clone(), keep));
         let generations = [ctx.next_generation(), ctx.next_generation()];
         send(
             ctx,
@@ -844,11 +844,22 @@ impl Screen for Memory {
                 }
             }
             Some(SettingsEvent::SuggestionDone(done, result))
-                if self.deciding.as_ref() == Some(done) =>
+                if self
+                    .deciding
+                    .as_ref()
+                    .is_some_and(|(asked, _)| asked == done) =>
             {
-                self.deciding = None;
+                let kept = self.deciding.take().is_some_and(|(_, keep)| keep);
                 match result {
                     Ok(()) => {
+                        ctx.say(Message::success(
+                            if kept {
+                                "Saved to memory."
+                            } else {
+                                "Suggestion dismissed."
+                            },
+                            "",
+                        ));
                         self.suggestions.retain(|item| item != done);
                         self.clamp(ctx);
                         self.reload(ctx);
