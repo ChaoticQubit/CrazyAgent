@@ -192,6 +192,7 @@ impl TerminalSession {
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: None,
+            _relay: None,
         })
     }
 

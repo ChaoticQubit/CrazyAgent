@@ -96,6 +96,13 @@ fn run(key_file: Option<&Path>) -> Run<'_> {
     }
 }
 
+fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    env.extend(
+        crate::sandbox::AGENT_GIT_ENV.map(|(name, value)| (name.to_owned(), value.to_owned())),
+    );
+    env
+}
+
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -169,12 +176,12 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
         assert_eq!(built.transcript, Transcript::Unavailable, "{id}");
         assert_eq!(
             built.env,
-            vec![
+            with_git_env(vec![
                 ("HOME".to_owned(), case.home().to_str().unwrap().to_owned()),
                 ("PATH".to_owned(), TOOLS_ON_PATH.to_owned()),
                 ("LANG".to_owned(), LOCALE.to_owned()),
                 ("LC_ALL".to_owned(), LOCALE.to_owned()),
-            ],
+            ]),
             "{id}"
         );
 
@@ -259,14 +266,14 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
         built.env,
-        vec![
+        with_git_env(vec![
             ("HOME".to_owned(), home.clone()),
             ("PATH".to_owned(), TOOLS_OFF_PATH.to_owned()),
             ("LANG".to_owned(), LOCALE.to_owned()),
             ("LC_ALL".to_owned(), LOCALE.to_owned()),
             ("CODEX_HOME".to_owned(), home.clone()),
             ("TMPDIR".to_owned(), home),
-        ]
+        ])
     );
     assert_eq!(
         built.transcript,
@@ -399,7 +406,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
         built.env,
-        vec![
+        with_git_env(vec![
             ("HOME".to_owned(), home.clone()),
             ("PATH".to_owned(), TOOLS_OFF_PATH.to_owned()),
             ("LANG".to_owned(), LOCALE.to_owned()),
@@ -411,7 +418,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
                 "1".to_owned()
             ),
-        ]
+        ])
     );
     let folder = claude_project_folder(&case.path().join("work")).unwrap();
     assert_eq!(
