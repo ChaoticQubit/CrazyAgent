@@ -114,3 +114,23 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
         super::pack::PackSource::Bundled { .. } => "Bundled with CrazyAgent".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_system_setup_cannot_install_on_shows_its_own_plain_reason() {
+        let unsupported = InstallError(super::super::PLATFORM_UNSUPPORTED);
+        let found = Dependency::ALL.map(|dep| (dep, Err(unsupported)));
+        let rows = dependency_rows(&Progress::default(), &found);
+        assert_eq!(rows.len(), Dependency::ALL.len());
+        for row in rows {
+            let DependencyState::Failed { reason } = row.state else {
+                panic!("{:?} is not failed", row.name);
+            };
+            assert_ne!(reason, super::super::plain_reason("setup_code_nobody_uses"));
+            assert!(reason.contains("this system"), "{reason}");
+        }
+    }
+}
