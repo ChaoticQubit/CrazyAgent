@@ -213,7 +213,8 @@ impl std::fmt::Debug for Flow {
 /// Input: keys after the global keys, arrivals from the engine. Output: body
 /// drawing, header crumbs and status, help-line hints, an optional modal.
 ///
-/// The rebuilt shell runs with `CRAZYAGENT_TUI=v1`; the design is
+/// The rebuilt shell is the default; `CRAZYAGENT_TUI=classic` keeps the
+/// tabbed shell. The design is
 /// `docs/design/tui/DESIGN.md` and `tui/frames/` holds its text renders.
 ///
 /// Adding a screen:

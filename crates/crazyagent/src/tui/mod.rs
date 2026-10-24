@@ -142,7 +142,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
         });
     });
     let result = (|| {
-        if std::env::var("CRAZYAGENT_TUI").is_ok_and(|value| value == "v1") {
+        if !std::env::var("CRAZYAGENT_TUI").is_ok_and(|value| value == "classic") {
             return run::run(client, &stopped);
         }
         let mut connection = Connection::connect_paired(client).map_err(TuiError)?;

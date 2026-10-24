@@ -65,7 +65,8 @@ class PtyProcess:
 def supervise(binary, socket, status, release):
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
     os.tcsetpgrp(0, os.getpgrp())
-    child = subprocess.Popen([binary, "tui", socket])
+    shell = os.environ.get("CRAZYAGENT_TUI", "classic")
+    child = subprocess.Popen([binary, "tui", socket], env=dict(os.environ, CRAZYAGENT_TUI=shell))
     os.write(status, (str(child.pid) + "\n").encode())
     os.write(status, (str(child.wait()) + "\n").encode())
     os.read(release, 1)
