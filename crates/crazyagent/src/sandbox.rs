@@ -128,6 +128,11 @@ const ENGINE_SECRET_FILES: &[&str] = &[
 
 const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys"];
 
+/// Why a sandbox root is refused when it equals, holds or sits inside a secret path from
+/// [`ProjectSandbox::secret_paths`]: an allow-list boundary such as Landlock or bubblewrap
+/// cannot carve the secret back out of a granted root.
+pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
+
 const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"];
 
 const AGENT_ENV_MAX: usize = 128;
@@ -379,8 +384,9 @@ pub struct ProjectSandbox {
 }
 
 impl ProjectSandbox {
-    /// Validates canonical, existing, quote-free directories that neither
-    /// contain nor sit inside the owner's home, `~/.codex` or `~/.claude`.
+    /// Validates canonical, existing, quote-free directories that do not contain the
+    /// owner's home, do not sit inside `~/.codex` or `~/.claude`, and neither hold nor sit
+    /// inside an owner or system secret path. Output: the sandbox, or `Invalid`.
     pub fn new(
         project_root: &Path,
         agent_home: &Path,
@@ -388,8 +394,9 @@ impl ProjectSandbox {
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
+        let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner)?;
+            granted_root(root, &owner, &secrets)?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -413,17 +420,17 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files and the
-    /// saved account keys. The agent's own home and temp dirs may sit inside it.
+    /// saved account keys. The agent's own home and temp dirs may sit inside it, but no
+    /// root granted so far may hold or sit inside one of those secrets.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = runtime.canonicalize()?;
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
-        for secret in self.engine_secrets_in(&runtime) {
-            if self.writable_roots().any(|root| root.starts_with(&secret)) {
-                return Err(invalid("agent roots must not sit in engine secrets"));
-            }
+        let secrets = self.engine_secrets_in(&runtime);
+        for root in self.writable_roots().chain(self.read_roots.iter()) {
+            clear_of_secrets(root, &secrets)?;
         }
         self.engine_runtime = Some(runtime);
         Ok(self)
@@ -441,11 +448,7 @@ impl ProjectSandbox {
     /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
     /// the system Keychains and, once guarded, the engine runtime's secrets.
     pub fn secret_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = OWNER_SECRET_PATHS
-            .iter()
-            .map(|path| self.owner_home.join(path))
-            .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
-            .collect();
+        let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home).collect();
         if let Some(runtime) = &self.engine_runtime {
             paths.extend(self.engine_secrets_in(runtime));
         }
@@ -453,24 +456,27 @@ impl ProjectSandbox {
     }
 
     /// Adds one writable worktree the agent may also start in, for a checkout the
-    /// engine keeps outside the project folder. Input: a canonical existing folder.
+    /// engine keeps outside the project folder. Input: a canonical existing folder that
+    /// neither holds nor sits inside a path from [`Self::secret_paths`].
     /// Output: the widened sandbox, or a refusal for an unsafe or extra root.
     pub fn allow_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
         if self.worktrees.len() >= WORKTREES_MAX {
             return Err(invalid("too many worktrees"));
         }
-        granted_root(worktree, &owner_home()?)?;
+        granted_root(worktree, &owner_home()?, &self.secret_paths())?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         Ok(self)
     }
 
-    /// Adds one extra read-only root, such as a harness install directory.
+    /// Adds one extra read-only root, such as a harness install directory. Input: a
+    /// canonical existing folder that neither holds nor sits inside a path from
+    /// [`Self::secret_paths`]. Output: the widened sandbox, or a refusal.
     pub fn allow_read(mut self, root: &Path) -> Result<Self, SandboxError> {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        granted_root(root, &owner_home()?)?;
+        granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
         Ok(self)
     }
@@ -821,7 +827,24 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
     Ok(home.canonicalize().unwrap_or(home))
 }
 
-fn granted_root(root: &Path, owner: &Path) -> Result<(), SandboxError> {
+fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
+    OWNER_SECRET_PATHS
+        .iter()
+        .map(move |path| owner.join(path))
+        .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
+}
+
+fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+    if secrets
+        .iter()
+        .any(|secret| root.starts_with(secret) || secret.starts_with(root))
+    {
+        return Err(invalid(SECRET_ROOT_REFUSED));
+    }
+    Ok(())
+}
+
+fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
     if !clean_absolute(root) || root.components().count() < 3 {
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
@@ -833,6 +856,7 @@ fn granted_root(root: &Path, owner: &Path) -> Result<(), SandboxError> {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
     }
+    clear_of_secrets(root, secrets)?;
     if !root.is_dir() || root.canonicalize()? != root {
         return Err(invalid(
             "sandbox roots must be existing canonical directories",
