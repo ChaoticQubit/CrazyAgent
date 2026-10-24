@@ -334,6 +334,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    KeepMaster {
+        project_id: ProjectId,
+        on: bool,
+    },
     Pause {
         project_id: ProjectId,
     },
@@ -381,7 +385,10 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
+            Self::KeepWarm { .. }
+            | Self::KeepMaster { .. }
+            | Self::Pause { .. }
+            | Self::Resume { .. } => Ok(()),
         }
     }
 
@@ -394,6 +401,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::KeepMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
             | Self::HandOff { project_id, .. } => project_id,
@@ -659,6 +667,14 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_paused_projects (
                 project TEXT PRIMARY KEY,
                 since_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_kept_masters (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_panes (
+                agent INTEGER PRIMARY KEY,
+                record TEXT NOT NULL
             );",
         )
         .map_err(error)
@@ -887,6 +903,23 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::KeepMaster { on: true, .. } => {
+            tx.execute(
+                "INSERT INTO team_kept_masters(project,since_ms) VALUES (?1,?2)
+                 ON CONFLICT(project) DO NOTHING",
+                params![project.as_str(), now],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::KeepMaster { on: false, .. } => {
+            tx.execute(
+                "DELETE FROM team_kept_masters WHERE project=?1",
+                [project.as_str()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::Pause { .. } => {
             tx.execute(
                 "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
@@ -1079,6 +1112,7 @@ pub struct PlanStep {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    pub keep_master: bool,
     pub paused: bool,
     pub min_agents: u8,
     pub max_agents: u8,
@@ -1167,6 +1201,19 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         )
         .optional()
         .map(|value| value.unwrap_or(false))
+        .map_err(error)
+}
+
+/// Tells whether the owner keeps the project's master running while CrazyAgent is closed.
+/// Takes a connection and the project.
+/// Returns false until the owner turns it on.
+pub fn keep_master(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_kept_masters WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
         .map_err(error)
 }
 
@@ -1260,6 +1307,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        keep_master: keep_master(connection, project)?,
         paused: paused(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
