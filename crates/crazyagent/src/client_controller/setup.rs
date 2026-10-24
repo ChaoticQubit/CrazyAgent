@@ -1,7 +1,14 @@
 use super::*;
+use crate::github::GitHubStatus;
 use crate::setup::SetupStatus;
 
 impl OwnerController {
+    fn github_client(&self) -> Result<&OwnerClient, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
     /// Reads what setup shows: each tool CrazyAgent needs, each default-pack entry
     /// and whether a setup run is going on.
     /// Takes nothing. Returns the status.
@@ -63,16 +70,25 @@ impl OwnerController {
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.projects_home().await?;
-        self.begin_mutation(OwnerMutation::MoveProjectsHome { path }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::MoveProjectsHome {
+                path,
+                move_projects: true,
+            },
+            generation,
+        )?;
         self.send_pending().await
     }
 
-    /// Signs CrazyAgent out of GitHub and deletes the token it kept.
-    /// Takes the client generation.
-    /// Returns the actual owner response; a rejection carries a plain code.
-    pub async fn github_sign_out(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
-        self.github_status().await?;
-        self.begin_mutation(OwnerMutation::GitHubSignOut, generation)?;
-        self.send_pending().await
+    /// Reads the GitHub account the setup page shows through the engine's GitHub
+    /// channel. Takes nothing. Returns the status; no token leaves the engine.
+    pub async fn github_account(&self) -> Result<GitHubStatus, EngineError> {
+        self.github_client()?.github_status().await
+    }
+
+    /// Signs CrazyAgent out of GitHub; the engine deletes the token it kept.
+    /// Takes nothing. Returns the signed-out status.
+    pub async fn github_sign_out(&self) -> Result<GitHubStatus, EngineError> {
+        self.github_client()?.github_sign_out().await
     }
 }
