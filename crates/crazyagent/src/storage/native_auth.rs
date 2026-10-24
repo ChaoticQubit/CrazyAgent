@@ -39,6 +39,23 @@ struct NativeAuthPhysical {
 }
 
 impl NativeAuthPhysical {
+    /// Refuses to pin a native profile identity file without Unix owner and inode checks.
+    /// Takes the database and fact, both unused.
+    /// Returns `native_profile_custody_unavailable`.
+    #[cfg(not(unix))]
+    fn capture(_db: &Connection, _fact: &NativeAuthFact) -> Result<Self, EngineError> {
+        Err(error("native_profile_custody_unavailable"))
+    }
+
+    /// Refuses to confirm a native profile identity file without Unix owner and inode checks.
+    /// Takes the pinned file, unused.
+    /// Returns `native_profile_custody_unavailable`.
+    #[cfg(not(unix))]
+    fn verify(&self) -> Result<(), EngineError> {
+        Err(error("native_profile_custody_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn capture(db: &Connection, fact: &NativeAuthFact) -> Result<Self, EngineError> {
         let database = Path::new(
             db.path()
@@ -73,6 +90,7 @@ impl NativeAuthPhysical {
         Ok(physical)
     }
 
+    #[cfg(unix)]
     fn verify(&self) -> Result<(), EngineError> {
         let metadata = self.file.metadata().map_err(error)?;
         let named = std::fs::symlink_metadata(&self.path).map_err(error)?;

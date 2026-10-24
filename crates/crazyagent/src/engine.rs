@@ -1,21 +1,29 @@
 use crate::config::{EffectiveConfig, validate_settings};
+#[cfg(unix)]
+use crate::platform::unix_socket::UnixListener;
+use crate::platform::unix_socket::UnixStream;
 use crate::protocol::*;
 use crate::storage::{Job, Storage};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(unix)]
+mod native_auth_host;
+#[cfg(not(unix))]
+#[path = "engine/native_auth_host_unavailable.rs"]
 mod native_auth_host;
 pub mod owner;
 
+#[cfg(unix)]
 pub use native_auth_host::{
     run_native_auth_custodian, run_native_auth_custodian_with_claude,
     run_native_auth_custodian_with_codex,
@@ -116,6 +124,16 @@ impl Client {
         Ok((self.socket, self.timeout))
     }
 
+    /// Refuses an engine request where the owner-only Unix socket does not exist.
+    /// Takes the request, which is still validated so bad input reports its own error.
+    /// Returns `engine_socket_unavailable` until the Windows named-pipe transport exists.
+    #[cfg(not(unix))]
+    pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
+        request.validate().map_err(|e| EngineError(e.to_string()))?;
+        Err(EngineError("engine_socket_unavailable".into()))
+    }
+
+    #[cfg(unix)]
     pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         if let Some(binding) = &self.binding {
@@ -142,6 +160,27 @@ impl Client {
     }
 }
 
+/// The engine's request listener; none can exist where the Unix socket transport does not.
+/// `bind` reports `engine_socket_unavailable` until the Windows named-pipe transport exists.
+#[cfg(not(unix))]
+pub enum Server {}
+
+#[cfg(not(unix))]
+impl Server {
+    pub fn bind(
+        _socket: &Path,
+        _engine: std::sync::Arc<Engine>,
+        _config: &EffectiveConfig,
+    ) -> Result<Self, EngineError> {
+        Err(EngineError("engine_socket_unavailable".into()))
+    }
+
+    pub async fn run(self, _stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        match self {}
+    }
+}
+
+#[cfg(unix)]
 pub struct Server {
     listener: UnixListener,
     engine: std::sync::Arc<Engine>,
@@ -154,6 +193,7 @@ pub struct Server {
     directory_device: u64,
 }
 
+#[cfg(unix)]
 impl Server {
     pub fn bind(
         socket: &Path,
@@ -268,6 +308,7 @@ impl Server {
     }
 }
 
+#[cfg(unix)]
 fn remove_server_socket(
     socket: &Path,
     device: u64,
@@ -299,6 +340,7 @@ fn io_error(error: impl std::fmt::Display) -> EngineError {
     EngineError(error.to_string())
 }
 
+#[cfg(unix)]
 fn verify_directory(path: &Path) -> Result<(), EngineError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
     if !metadata.is_dir()
@@ -314,6 +356,7 @@ fn verify_directory(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn verify_endpoint(path: &Path) -> Result<(), EngineError> {
     verify_directory(
         path.parent()
@@ -331,6 +374,14 @@ fn verify_endpoint(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Checks the peer of a stream where Unix domain sockets do not exist.
+/// Takes the stream, which cannot exist here. Unreachable by construction.
+#[cfg(not(unix))]
+fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
+    match *stream {}
+}
+
+#[cfg(unix)]
 fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
     #[cfg(target_os = "macos")]
     let uid = nix::unistd::getpeereid(stream)
@@ -360,6 +411,7 @@ async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
     Ok(frame)
 }
 
+#[cfg(unix)]
 async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, timeout: Duration) {
     let exchange = async {
         verify_peer(&stream)?;

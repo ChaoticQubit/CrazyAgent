@@ -6,6 +6,7 @@ use super::launch::{
 use crate::launch_context::Installed;
 use std::ffi::OsStr;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -514,6 +515,7 @@ pub fn claude_project_folder(cwd: &Path) -> Option<String> {
 /// Writes a keyed account's key into `<home>/.crazyagent-key`, readable only by this user,
 /// replacing an earlier one, so the key reaches the harness without argv or environment.
 /// Inputs: the account home, already checked by the launch, and the key. Output: the path.
+#[cfg(unix)]
 pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     super::launch::validate_home(home)?;
     let path = home.join(KEY_FILE);
@@ -542,10 +544,26 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     Ok(path)
 }
 
+/// Refuses to write an account key file where no owner-only 0600 file can be made.
+/// Takes the account home and key, both unused. Returns `launch_key_file_unavailable`.
+#[cfg(not(unix))]
+pub fn write_key(_home: &Path, _key: &Secret) -> Result<PathBuf, LaunchError> {
+    Err(failure("launch_key_file_unavailable"))
+}
+
+/// Refuses to answer Claude Code's first-run questions where its config file cannot be
+/// made owner-only. Takes the config home and project folder, both unused.
+/// Returns `launch_claude_config_unavailable`.
+#[cfg(not(unix))]
+pub fn prepare_claude_home(_home: &Path, _project: &Path) -> Result<(), LaunchError> {
+    Err(failure("launch_claude_config_unavailable"))
+}
+
 /// Answers Claude Code's first-run questions in an agent's own config home before its app
 /// starts: onboarding is marked done and the project folder trusted, keeping every other
 /// setting, such as a sign-in. Inputs: the config home and the project folder.
 /// Output: Ok, or a plain code when the existing file is unsafe or not a JSON object.
+#[cfg(unix)]
 pub fn prepare_claude_home(home: &Path, project: &Path) -> Result<(), LaunchError> {
     super::launch::validate_home(home)?;
     let project = text(project)?;

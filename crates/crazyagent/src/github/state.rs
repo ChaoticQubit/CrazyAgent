@@ -2,7 +2,9 @@ use super::{CLIENT_ID, GitHubMethod};
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -25,6 +27,14 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
+/// Refuses GitHub config and sign-in files where their Unix owner and mode cannot be
+/// checked. Takes the path, unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+fn read_private(_path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
+    Err(failure("github_state_unavailable"))
+}
+
+#[cfg(unix)]
 fn read_private(path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
     let unsafe_file = || failure("github_config_unsafe");
     let file = match std::fs::OpenOptions::new()
@@ -105,6 +115,7 @@ pub(super) fn forget(root: &Path) -> Result<(), EngineError> {
 
 /// Saves the sign-in as a private 0600 file, replaced in one rename.
 /// Inputs: the engine root and what to remember.
+#[cfg(unix)]
 pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
     let unavailable = || failure("github_state_unavailable");
     let bytes = serde_json::to_vec(saved).map_err(|_| unavailable())?;
@@ -129,4 +140,11 @@ pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
         return Err(unavailable());
     }
     Ok(())
+}
+
+/// Refuses to save the sign-in where no owner-only 0600 no-follow file can be made.
+/// Takes the engine root and sign-in, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn save(_root: &Path, _saved: &Saved) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
 }

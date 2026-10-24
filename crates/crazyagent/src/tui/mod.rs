@@ -79,6 +79,42 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Registers the requests that end the TUI: SIGTERM, SIGINT and SIGHUP.
+/// Must run inside the Tokio runtime. Returns a future that completes on the first one,
+/// or the registration error.
+#[cfg(unix)]
+fn stop_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate()).map_err(|e| TuiError(e.to_string()))?;
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(|e| TuiError(e.to_string()))?;
+    let mut hangup = signal(SignalKind::hangup()).map_err(|e| TuiError(e.to_string()))?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+            _ = hangup.recv() => {},
+        }
+    })
+}
+
+/// Registers the requests that end the TUI: Ctrl-C, Ctrl-Break and console close.
+/// Must run inside the Tokio runtime. Returns a future that completes on the first one,
+/// or the registration error.
+#[cfg(windows)]
+fn stop_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
+    let mut interrupt = ctrl_c().map_err(|e| TuiError(e.to_string()))?;
+    let mut brk = ctrl_break().map_err(|e| TuiError(e.to_string()))?;
+    let mut close = ctrl_close().map_err(|e| TuiError(e.to_string()))?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = brk.recv() => {},
+            _ = close.recv() => {},
+        }
+    })
+}
+
 pub fn run_tui(client: Client) -> Result<(), TuiError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(TuiError("TUI requires terminal stdin and stdout".into()));
@@ -88,22 +124,16 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
         .build()
         .map_err(|e| TuiError(e.to_string()))?;
     let _enter = signals.enter();
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| TuiError(e.to_string()))?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .map_err(|e| TuiError(e.to_string()))?;
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|e| TuiError(e.to_string()))?;
+    let requested = stop_requested()?;
     drop(_enter);
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let signal_thread = std::thread::spawn(move || {
         signals.block_on(async {
+            let mut requested = std::pin::pin!(requested);
             loop {
                 tokio::select! {
-                    _ = terminate.recv() => { stop.store(true, Ordering::Relaxed); break; }
-                    _ = interrupt.recv() => { stop.store(true, Ordering::Relaxed); break; }
-                    _ = hangup.recv() => { stop.store(true, Ordering::Relaxed); break; }
+                    _ = &mut requested => { stop.store(true, Ordering::Relaxed); break; }
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
                         if stop.load(Ordering::Relaxed) { break; }
                     }

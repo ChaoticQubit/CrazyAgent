@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -505,6 +506,7 @@ impl Agents {
     /// Opens the register for one engine and recovers what was running before.
     /// Input: the engine root holding `engine.db`, an absolute 0700 directory.
     /// Output: the register, or a plain code when the root or database is unusable.
+    #[cfg(unix)]
     pub fn open(root: &Path) -> Result<Self, LaunchError> {
         let metadata = std::fs::symlink_metadata(root).map_err(|_| failure("agent_root_unsafe"))?;
         if !root.is_absolute()
@@ -541,6 +543,14 @@ impl Agents {
         };
         agents.recover()?;
         Ok(agents)
+    }
+
+    /// Refuses the agent register where the Unix owner and 0700 checks on its root and
+    /// agent folders do not exist. Takes the engine root, unused.
+    /// Returns `agent_root_unavailable`.
+    #[cfg(not(unix))]
+    pub fn open(_root: &Path) -> Result<Self, LaunchError> {
+        Err(failure("agent_root_unavailable"))
     }
 
     fn db(&self) -> Result<MutexGuard<'_, Connection>, LaunchError> {
@@ -609,6 +619,12 @@ impl Agents {
         Ok(())
     }
 
+    #[cfg(not(unix))]
+    fn probe(&self, _id: &str) -> Option<File> {
+        None
+    }
+
+    #[cfg(unix)]
     fn probe(&self, id: &str) -> Option<File> {
         let path = self.folder(id).join(launch::DURABLE_OUTPUT);
         let file = rustix::fs::open(
@@ -777,8 +793,10 @@ impl Agents {
         if folder.exists() {
             std::fs::remove_dir_all(&folder).map_err(|_| failure("agent_state_unavailable"))?;
         }
-        std::fs::DirBuilder::new()
-            .mode(0o700)
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder
             .create(&folder)
             .map_err(|_| failure("agent_state_unavailable"))?;
         let request = spec.request(key)?;
@@ -1234,6 +1252,12 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
     }
 }
 
+/// Signals nothing where no agent process group can exist, since `Agents::open` refuses
+/// on this platform. Takes the group and its holder probe, both unused.
+#[cfg(not(unix))]
+fn kill_group(_group: u32, _probe: &File) {}
+
+#[cfg(unix)]
 fn kill_group(group: u32, probe: &File) {
     let Some(pid) = i32::try_from(group)
         .ok()

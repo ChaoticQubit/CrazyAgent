@@ -3,6 +3,79 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+pub(crate) mod unix_socket;
+
+#[cfg(unix)]
+pub(crate) use std::os::unix::fs::FileExt;
+
+/// Positional whole-buffer file reads and writes on Windows, matching the Unix `FileExt`
+/// names. Built on the standard `seek_read` and `seek_write`, which also move the file
+/// cursor; callers read and write whole small files at fixed offsets, so that is harmless.
+#[cfg(windows)]
+pub(crate) trait FileExt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl FileExt for std::fs::File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt as _;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(read) => {
+                    let rest = buf;
+                    buf = &mut rest[read..];
+                    offset += read as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt as _;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(written) => {
+                    buf = &buf[written..];
+                    offset += written as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The Windows open flag that opens a reparse point itself rather than its target, the
+/// equivalent of Unix `O_NOFOLLOW` on the last path component: a link then opens as a
+/// link, whose metadata is not a regular file.
+#[cfg(windows)]
+pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// Reports whether the engine's effective user owns the file the metadata describes.
+/// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
+/// Unix owner to compare, so an ownership check refuses rather than passes.
+#[cfg(unix)]
+pub(crate) fn owned_by_effective_user(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.uid() == rustix::process::geteuid().as_raw()
+}
+
+/// Reports that no file is known to be owned by the engine's effective user, since the
+/// platform has no Unix owner to compare. Takes the metadata, unused. Returns false, so
+/// an ownership check refuses rather than passes.
+#[cfg(not(unix))]
+pub(crate) fn owned_by_effective_user(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// The most text one clipboard copy takes, so a copy never holds a large buffer.
 pub const CLIPBOARD_BYTES_MAX: usize = 64 * 1024;
 
@@ -283,5 +356,14 @@ mod tests {
                     .ends_with("clip.exe")
             );
         }
+    }
+
+    #[test]
+    fn ownership_matches_the_engine_user_only_on_unix() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("owned");
+        std::fs::write(&file, b"x").unwrap();
+        let metadata = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!(owned_by_effective_user(&metadata), cfg!(unix));
     }
 }

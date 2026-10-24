@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 const README_NAMES: [&str; 4] = ["README.md", "README", "README.txt", "readme.md"];
@@ -132,11 +135,7 @@ struct Reply {
 /// Reads up to `max` bytes of the regular file at `path` as text, never
 /// through a link in its last component. Returns `None` for anything else.
 fn read_text(path: &Path, max: u64) -> Option<String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)
-        .ok()?;
+    let file = open_text(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -145,6 +144,50 @@ fn read_text(path: &Path, max: u64) -> Option<String> {
     assert!(bytes.len() as u64 <= max);
     let text = String::from_utf8_lossy(&bytes).trim().to_owned();
     (!text.is_empty()).then_some(text)
+}
+
+/// Opens `path` for reading without following a link in its last component or
+/// blocking on a FIFO. Takes the path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path)
+}
+
+/// Opens `path` for reading as the reparse point itself, never a link's target.
+/// Takes the path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Creates a fresh world-readable partial file without following a link at `path`.
+/// Takes the path. Returns the new file or the I/O error, also when it exists.
+#[cfg(unix)]
+fn create_partial(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+/// Creates a fresh partial file as the reparse point itself, never a link's target; it
+/// takes the folder's inherited permissions. Takes the path. Returns the new file or the
+/// I/O error, also when it exists.
+#[cfg(windows)]
+fn create_partial(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 /// Whether `path` is a real directory, not a link to one.
@@ -603,12 +646,7 @@ fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<(
     }
     let partial = directory.join(format!(".{name}.partial"));
     let _ = std::fs::remove_file(&partial);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(&partial)?;
+    let mut file = create_partial(&partial)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(&partial, directory.join(name))

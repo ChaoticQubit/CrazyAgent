@@ -3,6 +3,7 @@ use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 use super::runner::{
     ResearchHarness, ResearchLimits, ResearchRun, ResearchRunner, RunError, kind_label,
 };
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -163,6 +164,7 @@ where
 /// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
 /// pool assignment read live from the engine's settings files and, with a
 /// terminal host, every agent in its own pane.
+#[cfg(unix)]
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -214,4 +216,19 @@ pub fn start_for_engine(
         move |id: &str, harness: &str| resolver.resolve(id, harness),
         ENGINE_TICK,
     ))
+}
+
+/// Refuses engine research where its 0700 state folders and private database cannot be
+/// made or checked. Takes the runtime, settings files, harness paths and terminal host,
+/// all unused. Returns `research_runtime_unavailable`.
+#[cfg(not(unix))]
+pub fn start_for_engine(
+    _runtime: &Path,
+    _global: &Path,
+    _project: &Path,
+    _codex: &Path,
+    _claude: Option<&Path>,
+    _terminal: Option<Arc<dyn crate::terminal::Host>>,
+) -> Result<ResearchService, String> {
+    Err("research_runtime_unavailable".into())
 }

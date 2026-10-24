@@ -1,7 +1,9 @@
 use super::{TOOL_NAME_BYTES_MAX, TOOLS_MAX};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
@@ -18,6 +20,7 @@ type Line = Result<Vec<u8>, &'static str>;
 /// Starts a command MCP server, runs `initialize` and `tools/list`, then stops its whole
 /// process group. Inputs: the absolute command, its arguments, secret environment values
 /// and the time bound. Output: the tool names, or a plain rejection code.
+#[cfg(unix)]
 pub fn check_stdio(
     command: &str,
     args: &[String],
@@ -69,6 +72,20 @@ pub fn check_stdio(
     result
 }
 
+/// Refuses to start a command MCP server where its whole process group, which holds the
+/// secret environment values, cannot be stopped. Takes the command, arguments, secrets
+/// and time bound, all unused. Returns `server_check_unavailable`.
+#[cfg(not(unix))]
+pub fn check_stdio(
+    _command: &str,
+    _args: &[String],
+    _secrets: &[(String, Vec<u8>)],
+    _limit: Duration,
+) -> Result<Vec<String>, &'static str> {
+    Err("server_check_unavailable")
+}
+
+#[cfg(unix)]
 fn stop(pid: u32) {
     if let Some(pid) = i32::try_from(pid)
         .ok()

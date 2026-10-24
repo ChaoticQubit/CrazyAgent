@@ -12,6 +12,7 @@ pub mod credentials;
 pub mod engine;
 pub mod github;
 pub mod harnesses;
+#[cfg(unix)]
 pub mod isolation;
 pub mod launch_context;
 pub mod master_session;

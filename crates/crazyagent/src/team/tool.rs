@@ -1,4 +1,5 @@
 use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation};
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -144,12 +145,55 @@ fn call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
     })
 }
 
-fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
-    let mut file = File::from(rustix::fs::open(
+/// Opens the drop file to read and append, creating it 0600, never through a link.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_drop(drop: &Path) -> std::io::Result<File> {
+    Ok(File::from(rustix::fs::open(
         drop,
         OFlags::RDWR | OFlags::CREATE | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
-    )?);
+    )?))
+}
+
+/// Opens the drop file to read and append, creating it with the private folder's
+/// inherited permissions, as the reparse point itself and never a link's target.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_drop(drop: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(drop)
+}
+
+/// Opens the drop file to read without following a link or blocking on a FIFO.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_recorded(drop: &Path) -> std::io::Result<File> {
+    Ok(File::from(rustix::fs::open(
+        drop,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?))
+}
+
+/// Opens the drop file to read as the reparse point itself, never a link's target.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_recorded(drop: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(drop)
+}
+
+fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
+    let mut file = open_drop(drop)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(std::io::Error::other("the drop file is not a regular file"));
@@ -172,12 +216,7 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
 /// Takes the drop file in the master's private temporary folder; a link or other non-file is never read.
 /// Returns at most eight valid proposals in call order, none when there is no record.
 pub fn take(drop: &Path) -> Vec<Delegation> {
-    let opened = rustix::fs::open(
-        drop,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from);
+    let opened = open_recorded(drop);
     clear(drop);
     let Ok(file) = opened else {
         return Vec::new();

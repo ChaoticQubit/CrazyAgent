@@ -33,9 +33,26 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The device and inode that name the engine database file.
+/// Takes its metadata. Returns the pair, or `master_configured_database_unavailable` where
+/// the platform has no stable file identity in the standard library.
+#[cfg(unix)]
+fn database_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), EngineError> {
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// The device and inode that name the engine database file.
+/// Takes its metadata. Returns `master_configured_database_unavailable`, because the
+/// standard library has no stable file identity here.
+#[cfg(not(unix))]
+fn database_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), EngineError> {
+    Err(error("master_configured_database_unavailable"))
+}
 
 pub(crate) enum MasterRuntimeCommand {
     #[cfg(test)]
@@ -1035,7 +1052,7 @@ fn validate_registration(
         return Err(error("master_configured_receipt_conflict"));
     }
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
-    if record.database_identity != (metadata.dev(), metadata.ino()) {
+    if record.database_identity != database_identity(&metadata)? {
         return Err(error("master_configured_database_changed"));
     }
     let config = crate::config::resolve_config(&record.global_source, &record.project_source)
@@ -2066,7 +2083,7 @@ fn publish_rcli_profile(
         global_source,
         project_source,
         database_path,
-        database_identity: (database_metadata.dev(), database_metadata.ino()),
+        database_identity: database_identity(&database_metadata)?,
     };
     validate_registration(tx, &session, &record)?;
     let inserted = tx
