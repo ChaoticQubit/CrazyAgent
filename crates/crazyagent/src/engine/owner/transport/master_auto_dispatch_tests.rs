@@ -206,8 +206,7 @@ impl AutoDispatchCase {
         else {
             panic!("actual configured master session missing");
         };
-        let session = *session;
-        session
+        *session
     }
 
     async fn submit_request(&self, session: &MasterSessionView, id: &str) -> OwnerRequest {
