@@ -345,7 +345,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         Path::new(&args[3]),
                         executable,
                         claude.as_deref(),
-                        None,
+                        agent_terminal(&service),
                     )
                     .map(Some),
                 })
@@ -380,7 +380,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         executables,
                         std::env::current_exe().ok().as_deref(),
                         agents,
-                        None,
+                        agent_terminal(&service),
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {
@@ -426,6 +426,22 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         let _ = signal.await;
         result
     })
+}
+
+/// Opens the engine's terminal host for team and research agents when it can run now.
+/// Takes the engine service. Returns the host, or none after saying why on stderr; agents
+/// then run headless until the engine restarts with tmux available.
+fn agent_terminal(
+    service: &crazyagent::engine::bootstrap::EngineService,
+) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
+    let host = service.owner_runtime()?.terminal().ok()?;
+    match host.alive() {
+        Ok(_) => Some(host),
+        Err(problem) => {
+            eprintln!("agent terminals unavailable ({problem}); agents run headless");
+            None
+        }
+    }
 }
 
 fn execute(args: Vec<OsString>) -> Result<(), (u8, String)> {
