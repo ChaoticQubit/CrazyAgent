@@ -5,7 +5,8 @@ use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 use crate::research::accounts::SettingsResolver;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchLimits, ResearchRunner, RunError,
+    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
+    RunError,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
@@ -22,6 +23,12 @@ const DATABASE_WAIT: Duration = Duration::from_secs(5);
 const ENGINE_TICK: Duration = Duration::from_secs(2);
 const RUN_NAME_BYTES_MAX: usize = 96;
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
+const MAPPING_HARNESSES: [ResearchHarness; 2] =
+    [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
+
+/// The plain reason a mapping step fails with when neither Codex nor Claude
+/// Code is installed, so no agent can map the project.
+pub const CODEX_MISSING: &str = "codex not installed";
 const GRAPH_TIMED_OUT: &str = "Graph build ran out of time";
 const GRAPH_NOT_STARTED: &str = "Graph build could not start";
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
@@ -85,7 +92,7 @@ struct Claimed {
 /// without a restart.
 struct Work {
     runner: Arc<ResearchRunner>,
-    accounts: Box<dyn Fn(&CredentialRef) -> Option<ResearchAccount> + Send>,
+    accounts: Box<dyn Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send>,
     graphify: Box<dyn Fn() -> Option<PathBuf> + Send>,
     limits: OnboardingLimits,
     tick: Duration,
@@ -102,9 +109,10 @@ pub struct OnboardingService {
 }
 
 impl OnboardingService {
-    /// Starts the loop. `accounts` maps a pool to the account its mapping
-    /// agent runs on, `graphify` finds the graphify executable, both asked
-    /// again for every step; `tick` is the idle wait between claims.
+    /// Starts the loop. `accounts` maps a pool and the harnesses the runner
+    /// has, Codex first, to the account its mapping agent runs on; `graphify`
+    /// finds the graphify executable; both are asked again for every step.
+    /// `tick` is the idle wait between claims.
     pub fn start<A, G>(
         runner: Arc<ResearchRunner>,
         accounts: A,
@@ -113,7 +121,7 @@ impl OnboardingService {
         tick: Duration,
     ) -> Self
     where
-        A: Fn(&CredentialRef) -> Option<ResearchAccount> + Send + 'static,
+        A: Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
         assert!(!tick.is_zero());
@@ -379,6 +387,7 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
 /// Maps the project: collects the bounded evidence, saves the draft the
 /// manifests alone give, then asks a tools-off agent on the pool for an
 /// overview and the remaining fields and merges its answer into the gaps.
+/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with.
 /// Returns the step's ending and the draft to keep.
 fn mapping_step(
     work: &Work,
@@ -396,7 +405,16 @@ fn mapping_step(
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
-    let Some(account) = (work.accounts)(&claimed.pool) else {
+    let harnesses: Vec<ResearchHarness> = MAPPING_HARNESSES
+        .into_iter()
+        .filter(|harness| work.runner.can_run(*harness))
+        .collect();
+    if harnesses.is_empty() {
+        return (Step::failed(CODEX_MISSING), base);
+    }
+    let Some(account) = (work.accounts)(&claimed.pool, &harnesses)
+        .filter(|account| harnesses.contains(&account.harness()))
+    else {
         return (Step::failed(NO_ACCOUNT), base);
     };
     let name = run_name(claimed);
@@ -441,15 +459,17 @@ pub fn installed_graphify() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Starts onboarding for a running engine: steps claimed from the engine
-/// database's `onboarding` table, agent state in `<runtime>/onboarding`, the
-/// mapping account picked live from the settings files and graphify found
-/// on every graph step.
+/// Starts onboarding for a running writable engine: steps claimed from the
+/// engine database's `onboarding` table, agent state in
+/// `<runtime>/onboarding`, the mapping account picked live from the settings
+/// files among the installed harnesses and graphify found on every graph
+/// step. Codex and Claude Code are both optional: without either, graphs
+/// still build and only mapping fails with [`CODEX_MISSING`].
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
-    codex: &Path,
+    codex: Option<&Path>,
     claude: Option<&Path>,
 ) -> Result<OnboardingService, String> {
     let runtime = runtime
@@ -477,8 +497,11 @@ pub fn start_for_engine(
     if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("engine database must be a private file".into());
     }
-    let mut runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
-        .map_err(|error| error.to_string())?;
+    let mut runner = match codex {
+        Some(codex) => ResearchRunner::new(&database, &state, codex, ResearchLimits::default()),
+        None => ResearchRunner::without_codex(&database, &state, ResearchLimits::default()),
+    }
+    .map_err(|error| error.to_string())?;
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)
@@ -487,7 +510,9 @@ pub fn start_for_engine(
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(OnboardingService::start(
         Arc::new(runner),
-        move |pool: &CredentialRef| resolver.pool_pick(pool),
+        move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
+            resolver.pool_pick(pool, harnesses)
+        },
         installed_graphify,
         OnboardingLimits::default(),
         ENGINE_TICK,
