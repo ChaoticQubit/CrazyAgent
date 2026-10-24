@@ -1,5 +1,6 @@
 use super::*;
 use crate::plugins::{ServerView, SkillView};
+use crate::setup::PackState;
 use std::os::unix::fs::PermissionsExt;
 
 fn database() -> (tempfile::TempDir, Connection) {
@@ -62,31 +63,53 @@ fn servers(connection: &mut Connection, root: &Path) -> Vec<ServerView> {
     views
 }
 
-fn installed_packs(connection: &mut Connection, root: &Path) -> Vec<InstalledPack> {
-    let ResultValue::Installed(packs) = execute(connection, root, Command::Installed).unwrap()
-    else {
-        panic!("installed list required");
-    };
-    packs
-}
-
 fn install(
     connection: &mut Connection,
     root: &Path,
+    id: &str,
     source: &str,
     folders: Vec<PathBuf>,
     server: Option<(String, ServerSpec)>,
-) -> Result<ResultValue, EngineError> {
+) -> Result<(), EngineError> {
     execute(
         connection,
         root,
         Command::Install {
-            id: "superpowers".into(),
+            id: id.into(),
             source: source.into(),
             skills: folders,
             server,
         },
     )
+}
+
+fn owner(connection: &mut Connection, root: &Path, action: SetupAction) -> Outcome {
+    let tx = connection.transaction().unwrap();
+    let outcome = apply_owner(&tx, &root.join("engine.db"), &action).unwrap();
+    tx.commit().unwrap();
+    outcome
+}
+
+fn status_of(connection: &mut Connection, root: &Path) -> SetupStatus {
+    let tx = connection.transaction().unwrap();
+    status(&tx, &root.join("engine.db")).unwrap()
+}
+
+fn pack_state(status: &SetupStatus, id: &str) -> PackState {
+    status
+        .pack
+        .iter()
+        .find(|entry| entry.id == id)
+        .unwrap()
+        .state
+        .clone()
+}
+
+fn rejected_with(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Rejected { code } => code,
+        _ => panic!("refusal required"),
+    }
 }
 
 #[test]
@@ -98,6 +121,7 @@ fn installing_an_entry_adds_its_skills_and_an_approved_server_at_once() {
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
         folders,
         Some(("context-mode".into(), spec())),
@@ -112,13 +136,10 @@ fn installing_an_entry_adds_its_skills_and_an_approved_server_at_once() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "context-mode");
     assert_eq!(listed[0].status_label, "Approved");
-    assert_eq!(
-        installed_packs(&mut connection, root),
-        vec![InstalledPack {
-            id: "superpowers".into(),
-            enabled: true
-        }]
-    );
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::On);
+    assert_eq!(pack_state(&status, "caveman"), PackState::Available);
+    assert!(!status.running);
 }
 
 #[test]
@@ -129,38 +150,41 @@ fn switching_an_entry_off_and_on_switches_every_item_it_added() {
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
         vec![skill(work.path(), "alpha")],
         Some(("context-mode".into(), spec())),
     )
     .unwrap();
 
-    let off = Command::Set {
+    let off = SetupAction::Set {
         id: "superpowers".into(),
-        enabled: false,
+        on: false,
     };
-    execute(&mut connection, root, off).unwrap();
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert!(!skills(&mut connection, root)[0].enabled);
     assert_eq!(servers(&mut connection, root)[0].status_label, "Off");
-    assert!(!installed_packs(&mut connection, root)[0].enabled);
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
 
-    let on = Command::Set {
+    let on = SetupAction::Set {
         id: "superpowers".into(),
-        enabled: true,
+        on: true,
     };
-    execute(&mut connection, root, on).unwrap();
+    assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert!(skills(&mut connection, root)[0].enabled);
     assert_eq!(servers(&mut connection, root)[0].status_label, "Approved");
 }
 
 #[test]
-fn removing_an_entry_removes_its_items_and_their_stored_folders() {
+fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
     let (dir, mut connection) = database();
     let root = dir.path();
     let work = tempfile::tempdir().unwrap();
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
         vec![skill(work.path(), "alpha")],
         Some(("context-mode".into(), spec())),
@@ -169,21 +193,127 @@ fn removing_an_entry_removes_its_items_and_their_stored_folders() {
     let stored = PathBuf::from(&skills(&mut connection, root)[0].folder);
     assert!(stored.join("SKILL.md").is_file());
 
-    let remove = Command::Remove {
+    let remove = SetupAction::Remove {
         id: "superpowers".into(),
     };
-    execute(&mut connection, root, remove).unwrap();
+    assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
     assert!(skills(&mut connection, root).is_empty());
     assert!(servers(&mut connection, root).is_empty());
-    assert!(installed_packs(&mut connection, root).is_empty());
     assert!(!stored.exists());
-    let again = Command::Remove {
+    let store = stored.parent().unwrap().to_path_buf();
+    assert_eq!(std::fs::read_dir(&store).unwrap().count(), 1);
+
+    execute(&mut connection, root, Command::Sweep).unwrap();
+    assert_eq!(std::fs::read_dir(&store).unwrap().count(), 0);
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Available);
+    let again = SetupAction::Remove {
         id: "superpowers".into(),
     };
     assert_eq!(
-        execute(&mut connection, root, again).err().unwrap().0,
+        rejected_with(owner(&mut connection, root, again)),
         "pack_not_installed"
     );
+}
+
+#[test]
+fn a_removal_that_did_not_commit_is_put_back_by_the_sweep() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    let stored = PathBuf::from(&skills(&mut connection, root)[0].folder);
+
+    {
+        let tx = connection.transaction().unwrap();
+        let remove = SetupAction::Remove {
+            id: "superpowers".into(),
+        };
+        assert_eq!(
+            apply_owner(&tx, &root.join("engine.db"), &remove).unwrap(),
+            Outcome::Applied
+        );
+        assert!(!stored.exists());
+    }
+
+    assert_eq!(skills(&mut connection, root).len(), 1);
+    execute(&mut connection, root, Command::Sweep).unwrap();
+    assert!(stored.join("SKILL.md").is_file());
+}
+
+#[test]
+fn required_unknown_and_uninstalled_entries_are_refused_without_changes() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let cases = [
+        (
+            SetupAction::Remove {
+                id: "graphify".into(),
+            },
+            "pack_required",
+        ),
+        (
+            SetupAction::Set {
+                id: "graphify".into(),
+                on: false,
+            },
+            "pack_required",
+        ),
+        (
+            SetupAction::Set {
+                id: "superpowers".into(),
+                on: false,
+            },
+            "pack_not_installed",
+        ),
+        (
+            SetupAction::Run {
+                pack: vec!["no-such-entry".into()],
+            },
+            "pack_unknown",
+        ),
+        (
+            SetupAction::Run {
+                pack: vec!["caveman".into(), "caveman".into()],
+            },
+            "pack_unknown",
+        ),
+        (
+            SetupAction::Remove {
+                id: "bad id!".into(),
+            },
+            "pack_unknown",
+        ),
+    ];
+    for (action, code) in cases {
+        assert_eq!(rejected_with(owner(&mut connection, root, action)), code);
+    }
+    let run = SetupAction::Run {
+        pack: vec!["caveman".into()],
+    };
+    assert_eq!(owner(&mut connection, root, run), Outcome::Applied);
+}
+
+#[test]
+fn a_setup_run_already_going_refuses_another() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    progress::with(root, |state| state.running = true);
+    let run = SetupAction::Run { pack: vec![] };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, run)),
+        "setup_busy"
+    );
+    assert!(status_of(&mut connection, root).running);
+    progress::with(root, |state| state.running = false);
 }
 
 #[test]
@@ -205,16 +335,18 @@ fn an_entry_whose_skill_name_is_taken_installs_nothing() {
     let refused = install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
         vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
         Some(("context-mode".into(), spec())),
     );
-    assert_eq!(refused.err().unwrap().0, "pack_name_taken");
+    assert_eq!(refused.unwrap_err().0, "pack_name_taken");
     let listed = skills(&mut connection, root);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "beta");
     assert!(servers(&mut connection, root).is_empty());
-    assert!(installed_packs(&mut connection, root).is_empty());
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Available);
     let store: Vec<String> = std::fs::read_dir(root.join("plugins/skills/global"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -223,39 +355,51 @@ fn an_entry_whose_skill_name_is_taken_installs_nothing() {
 }
 
 #[test]
-fn a_new_pin_replaces_the_items_and_the_same_pin_changes_nothing() {
+fn a_new_pin_with_the_same_skill_names_replaces_the_old_copy() {
     let (dir, mut connection) = database();
     let root = dir.path();
-    let work = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
-        vec![skill(work.path(), "alpha")],
+        vec![skill(first.path(), "alpha")],
         None,
     )
     .unwrap();
-    let first = skills(&mut connection, root);
+    let before = skills(&mut connection, root);
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@1",
-        vec![skill(work.path(), "alpha")],
+        vec![skill(first.path(), "alpha")],
         None,
     )
     .unwrap();
-    assert_eq!(skills(&mut connection, root), first);
+    assert_eq!(skills(&mut connection, root), before);
 
+    let newer = skill(second.path(), "alpha");
+    std::fs::write(newer.join("NOTES.md"), "second pin").unwrap();
     install(
         &mut connection,
         root,
+        "superpowers",
         "https://example.invalid/pack@2",
-        vec![skill(work.path(), "beta")],
+        vec![newer],
         None,
     )
     .unwrap();
-    let listed = skills(&mut connection, root);
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].name, "beta");
-    assert!(!PathBuf::from(&first[0].folder).exists());
+    let after = skills(&mut connection, root);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "alpha");
+    assert_ne!(after[0].id, before[0].id);
+    assert!(PathBuf::from(&after[0].folder).join("NOTES.md").is_file());
+    let store: Vec<String> = std::fs::read_dir(root.join("plugins/skills/global"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(store, vec!["alpha"]);
 }

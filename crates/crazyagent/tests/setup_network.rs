@@ -32,7 +32,7 @@ fn network_installs_pinned_uv_and_graphify_into_the_app_data_folder() {
 async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
     use crazyagent::client_controller::OwnerController;
     use crazyagent::engine::bootstrap::EngineService;
-    use crazyagent::engine::owner::OwnerClientKind;
+    use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
     use crazyagent::setup::PackState;
     use std::time::{Duration, Instant};
 
@@ -49,7 +49,7 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
     .unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let service = EngineService::start_with_settings_sources(
+    let mut service = EngineService::start_with_settings_sources(
         root.path(),
         "e.sock",
         &global,
@@ -58,12 +58,19 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
     )
     .await
     .unwrap();
-    let owner = OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
-        .await
-        .unwrap();
+    let mut owner =
+        OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
+            .await
+            .unwrap();
 
-    let started = owner.run_setup(vec!["caveman".into()]).await.unwrap();
-    assert!(started.running);
+    let result = |response: OwnerResponse| match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            operation.result
+        }
+        other => panic!("actual owner receipt required: {other:?}"),
+    };
+    let started = owner.run_setup(vec!["caveman".into()], 1).await.unwrap();
+    assert_eq!(result(started), OwnerResult::Applied);
     let deadline = Instant::now() + Duration::from_secs(1800);
     let status = loop {
         let status = owner.setup_status().await.unwrap();
@@ -88,16 +95,35 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
     assert!(skills.iter().any(|skill| skill.name == "caveman"));
     assert!(root.path().join("setup/pack").is_dir());
 
-    let off = owner.set_pack_entry("caveman".into(), false).await.unwrap();
-    let caveman = off.pack.iter().find(|entry| entry.id == "caveman").unwrap();
+    let off = owner
+        .set_pack_entry("caveman".into(), false, 1)
+        .await
+        .unwrap();
+    assert_eq!(result(off), OwnerResult::Applied);
+    let status = owner.setup_status().await.unwrap();
+    let caveman = status
+        .pack
+        .iter()
+        .find(|entry| entry.id == "caveman")
+        .unwrap();
     assert_eq!(caveman.state, PackState::Off);
-    let removed = owner.remove_pack_entry("caveman".into()).await.unwrap();
-    let caveman = removed
+    let removed = owner.remove_pack_entry("caveman".into(), 1).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let status = owner.setup_status().await.unwrap();
+    let caveman = status
         .pack
         .iter()
         .find(|entry| entry.id == "caveman")
         .unwrap();
     assert_eq!(caveman.state, PackState::Available);
+    assert!(
+        !owner
+            .plugin_skills(None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|skill| skill.name == "caveman")
+    );
     drop(owner);
     service.shutdown().await.unwrap();
 }

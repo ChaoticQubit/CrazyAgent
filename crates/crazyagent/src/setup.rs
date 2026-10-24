@@ -9,6 +9,7 @@ pub mod macos;
 pub mod pack;
 #[cfg(unix)]
 pub(crate) mod process;
+pub mod progress;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod run;
 #[cfg(target_os = "windows")]
@@ -135,7 +136,7 @@ pub enum Pin {
 
 /// Where one dependency stands on the setup screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
     Missing,
     Found { version: Version },
@@ -156,7 +157,7 @@ pub struct DependencyStatus {
 /// Where one default-pack entry stands: not installed yet, being installed, installed
 /// and on, installed and switched off, or failed with a plain reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackState {
     Available,
     Installing,
@@ -307,4 +308,47 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
 #[cfg(target_os = "macos")]
 pub fn platform_pin(dep: Dependency) -> Pin {
     macos::pin(dep)
+}
+
+/// One owner change to the default pack, as the owner mutations carry it: start setup
+/// with the ticked entries, switch an installed entry, or remove one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SetupAction {
+    Run { pack: Vec<String> },
+    Set { id: String, on: bool },
+    Remove { id: String },
+}
+
+const PACK_ID_BYTES_MAX: usize = 64;
+
+fn valid_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= PACK_ID_BYTES_MAX
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+impl SetupAction {
+    /// Checks the shape of the entry ids before anything runs: at most the manifest's
+    /// entry count, each 1 to 64 letters, digits, `-`, `_` or `.`, no id twice.
+    /// Output: `pack_unknown` for anything else.
+    pub fn validate(&self) -> Result<(), InstallError> {
+        let valid = match self {
+            Self::Run { pack } => {
+                pack.len() <= pack::ENTRIES_MAX
+                    && pack.iter().all(|id| valid_pack_id(id))
+                    && pack
+                        .iter()
+                        .enumerate()
+                        .all(|(index, id)| !pack[..index].contains(id))
+            }
+            Self::Set { id, .. } | Self::Remove { id } => valid_pack_id(id),
+        };
+        if !valid {
+            return Err(InstallError("pack_unknown"));
+        }
+        Ok(())
+    }
 }

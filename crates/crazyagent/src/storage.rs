@@ -136,10 +136,7 @@ pub(crate) enum Job {
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
     ),
-    Setup(
-        setup::Command,
-        oneshot::Sender<Result<setup::ResultValue, EngineError>>,
-    ),
+    Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
 }
@@ -967,6 +964,7 @@ fn apply(
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
             | Command::OwnerMemory { .. }
+            | Command::OwnerSetup { .. }
     ) {
         return Err(error("owner_authentication_required"));
     }
@@ -1141,6 +1139,7 @@ fn execute(
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
+        Command::OwnerSetup { action } => setup::apply_owner(tx, path, action),
         Command::ProjectSetup { action } => {
             crate::project_setup::execute(tx, config, path, action, revision)
         }
@@ -2042,6 +2041,9 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::SetupStatus => OwnerData::SetupStatus {
+            status: setup::status(&tx, path)?,
+        },
         OwnerRead::Memories {
             scope,
             search,

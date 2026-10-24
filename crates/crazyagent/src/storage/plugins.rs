@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS plugin_switches (
     PRIMARY KEY(project, item)
 );";
 const PAGE_BYTES_MAX: usize = 48 * 1024;
-const STORE: &str = "plugins";
+pub(crate) const STORE: &str = "plugins";
 pub(crate) const SECRETS: &str = "secrets";
 
 pub(crate) enum Command {

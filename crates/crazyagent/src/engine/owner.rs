@@ -155,6 +155,16 @@ pub enum OwnerMutation {
     RemoveProject {
         project_id: ProjectId,
     },
+    RunSetup {
+        pack: Vec<String>,
+    },
+    SetPackEntry {
+        id: String,
+        on: bool,
+    },
+    RemovePackEntry {
+        id: String,
+    },
     SetProjectsHome {
         path: String,
     },
@@ -311,6 +321,18 @@ impl OwnerMutation {
                 action: crate::project_setup::SetupAction::Remove {
                     project_id: project_id.clone(),
                 },
+            },
+            Self::RunSetup { pack } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Run { pack: pack.clone() },
+            },
+            Self::SetPackEntry { id, on } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Set {
+                    id: id.clone(),
+                    on: *on,
+                },
+            },
+            Self::RemovePackEntry { id } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Remove { id: id.clone() },
             },
             Self::SetProjectsHome { path } => {
                 let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
@@ -527,6 +549,7 @@ pub enum OwnerRead {
     },
     OwnerProfile,
     ProjectsHome,
+    SetupStatus,
     FoundProjects,
     FolderSize {
         path: String,
@@ -610,6 +633,7 @@ impl OwnerRead {
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
+            | Self::SetupStatus
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -964,6 +988,9 @@ pub enum OwnerData {
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    SetupStatus {
+        status: crate::setup::SetupStatus,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

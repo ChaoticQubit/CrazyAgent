@@ -2,7 +2,7 @@
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::engine::owner::OwnerClientKind;
+use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::setup::pack::{PackGroup, default_pack};
 use crazyagent::setup::{Dependency, DependencyState, PackState};
 use std::fs;
@@ -16,6 +16,7 @@ struct Case {
     root: tempfile::TempDir,
     service: Option<EngineService>,
     _stop: watch::Sender<bool>,
+    _stopped: watch::Receiver<bool>,
 }
 
 impl Case {
@@ -42,6 +43,7 @@ impl Case {
             root,
             service: Some(service),
             _stop: stop,
+            _stopped: stopped,
         }
     }
 
@@ -60,10 +62,23 @@ impl Case {
     }
 }
 
+fn result(response: OwnerResponse) -> OwnerResult {
+    match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            operation.result
+        }
+        other => panic!("actual owner receipt required: {other:?}"),
+    }
+}
+
+fn rejected(code: &str) -> OwnerResult {
+    OwnerResult::Rejected { code: code.into() }
+}
+
 #[tokio::test]
 async fn setup_status_lists_the_dependencies_and_the_shipped_pack() {
     let case = Case::new().await;
-    let owner = case.controller().await;
+    let mut owner = case.controller().await;
 
     let status = owner.setup_status().await.unwrap();
     assert!(!status.running);
@@ -106,28 +121,47 @@ async fn setup_status_lists_the_dependencies_and_the_shipped_pack() {
 #[tokio::test]
 async fn required_unknown_and_uninstalled_entries_are_refused_plainly() {
     let case = Case::new().await;
-    let owner = case.controller().await;
+    let mut owner = case.controller().await;
 
-    let code = |result: Result<_, crazyagent::engine::EngineError>| result.err().unwrap().0;
     assert_eq!(
-        code(owner.remove_pack_entry("graphify".into()).await),
-        "pack_required"
+        result(owner.remove_pack_entry("graphify".into(), 1).await.unwrap()),
+        rejected("pack_required")
     );
     assert_eq!(
-        code(owner.set_pack_entry("graphify".into(), false).await),
-        "pack_required"
+        result(
+            owner
+                .set_pack_entry("graphify".into(), false, 1)
+                .await
+                .unwrap()
+        ),
+        rejected("pack_required")
     );
     assert_eq!(
-        code(owner.set_pack_entry("superpowers".into(), false).await),
-        "pack_not_installed"
+        result(
+            owner
+                .set_pack_entry("superpowers".into(), false, 1)
+                .await
+                .unwrap()
+        ),
+        rejected("pack_not_installed")
     );
     assert_eq!(
-        code(owner.run_setup(vec!["no-such-entry".into()]).await),
-        "pack_unknown"
+        result(
+            owner
+                .run_setup(vec!["no-such-entry".into()], 1)
+                .await
+                .unwrap()
+        ),
+        rejected("pack_unknown")
     );
     assert_eq!(
-        code(owner.set_pack_entry("bad id!".into(), true).await),
-        "pack_unknown"
+        result(
+            owner
+                .set_pack_entry("bad id!".into(), true, 1)
+                .await
+                .unwrap()
+        ),
+        rejected("pack_unknown")
     );
     assert!(!owner.setup_status().await.unwrap().running);
 

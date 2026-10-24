@@ -1702,9 +1702,6 @@ async fn serve_authenticated_owner(
         if selector.get("plugins").is_some() {
             return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
-        if selector.get("setup").is_some() {
-            return setup::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
-        }
         if selector.get("agents").is_some() {
             return agents::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
@@ -1787,6 +1784,7 @@ async fn serve_authenticated_owner(
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
         let result = engine.dispatch_owner(a, request, None).await;
+        let result = setup::after_owner(&engine, &authority, &submitted, result).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),
