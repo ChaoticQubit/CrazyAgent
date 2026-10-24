@@ -371,8 +371,9 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
                 "You are working on the project \"{}\".\n",
                 clip(&setup.name, NAME_BYTES_MAX)
             ));
-            if setup.folder.len() <= FOLDER_BYTES_MAX {
-                header.push_str(&format!("Project folder: {}\n", setup.folder));
+            let folder = setup.project_folder().display().to_string();
+            if folder.len() <= FOLDER_BYTES_MAX {
+                header.push_str(&format!("Project folder: {folder}\n"));
             }
             if let Ok(chunk) = crate::project_setup::read_context(setup, "context/brief.md", 0)
                 && let Some(text) = chunk.text

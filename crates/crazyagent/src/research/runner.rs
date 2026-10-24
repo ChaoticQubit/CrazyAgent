@@ -1310,15 +1310,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Makes the project folder a git repository with one empty start commit and
-/// worktrees/ and context/ excluded, once per process at a time.
-/// Takes the project folder and a private temporary home for git.
+/// Makes a project folder the engine created a git repository with one empty start commit,
+/// once per process at a time. A folder with any `.git` entry is the owner's repository and
+/// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
+/// gets a repository from the engine. Takes the project folder and a private home for git.
+/// Returns Ok once the folder is a repository, or a plain refusal for an owner's folder.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
     let _setup = REPOSITORY_SETUP
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if root.join(".git").is_dir() {
+    if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
+    }
+    let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
+    if owners {
+        return Err(RunError::Invalid(
+            "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
+        ));
     }
     let git = |arguments: &[&str]| -> Result<bool, RunError> {
         let mut command = Command::new(GIT);
@@ -2049,5 +2058,48 @@ mod tests {
             model: "m".into(),
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
+    }
+
+    #[test]
+    fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let home = base.join("git-home");
+        fs::create_dir(&home).unwrap();
+        let refused = |folder: &Path| match ensure_repository(folder, &home) {
+            Err(RunError::Invalid(reason)) => reason.contains("not a git repository"),
+            _ => false,
+        };
+
+        let owners = base.join("owners");
+        fs::create_dir_all(owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::write(owners.join("notes.txt"), "the owner's file\n").unwrap();
+        assert!(refused(&owners), "an owner's folder gets no repository");
+        assert!(!owners.join(".git").exists());
+        let state = owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        assert!(refused(&state), "nor does its .crazyagent folder");
+        assert!(!state.join(".git").exists());
+
+        let linked = base.join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(
+            linked.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/linked\n",
+        )
+        .unwrap();
+        ensure_repository(&linked, &home).unwrap();
+        assert!(
+            fs::symlink_metadata(linked.join(".git")).unwrap().is_file(),
+            "a linked worktree stays as the owner made it"
+        );
+
+        let created = base.join("created");
+        fs::create_dir(&created).unwrap();
+        ensure_repository(&created, &home).unwrap();
+        assert!(
+            created.join(".git").is_dir(),
+            "a folder the engine made gets its repository"
+        );
+        ensure_repository(&created, &home).unwrap();
     }
 }

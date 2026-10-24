@@ -286,7 +286,12 @@ fn folder(screen: &ProjectScreen) -> String {
     screen
         .setup
         .as_ref()
-        .map(|setup| display_path(&setup.folder, screen.home.as_deref()))
+        .map(|setup| {
+            display_path(
+                &setup.project_folder().display().to_string(),
+                screen.home.as_deref(),
+            )
+        })
         .unwrap_or_default()
 }
 
