@@ -747,6 +747,7 @@ dependencies = [
 name = "crazyagent"
 version = "0.1.0"
 dependencies = [
+ "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
  "keyring-core",
@@ -784,6 +785,14 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "crazyagent-win-sandbox"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
