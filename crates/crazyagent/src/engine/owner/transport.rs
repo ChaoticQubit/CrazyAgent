@@ -1770,7 +1770,11 @@ async fn serve_authenticated_owner(
             let _barrier = engine.owner_egress.write().await;
             authority.admitted_runner(&auth)?;
             let frame = encode_frame(&reply).map_err(|_| failure("runner_response_bounds"))?;
-            return stream.write_all(&frame).await.map_err(io_error);
+            return stream
+                .write_all(&frame)
+                .await
+                .map_err(io_error)
+                .map(|()| None);
         }
         let a = authority.authenticate(&auth)?;
         let frame = read_frame(&mut stream).await?;
@@ -1785,13 +1789,18 @@ async fn serve_authenticated_owner(
                 &a,
                 &frame[4..],
             )
-            .await;
+            .await
+            .map(|()| None);
         }
         if selector.get("accounts").is_some() {
-            return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+                .await
+                .map(|()| None);
         }
         if selector.get("github").is_some() {
-            return github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+                .await
+                .map(|()| None);
         }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(
@@ -1802,7 +1811,8 @@ async fn serve_authenticated_owner(
                 &a,
                 &frame[4..],
             )
-            .await;
+            .await
+            .map(|()| None);
         }
         if selector.get("harness_catalog").is_some() {
             return harness_catalog::serve(
@@ -1813,32 +1823,29 @@ async fn serve_authenticated_owner(
                 &a,
                 &frame[4..],
             )
-            .await;
+            .await
+            .map(|()| None);
         }
         if selector.get("plugins").is_some() {
-            return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+                .await
+                .map(|()| None);
         }
         if selector.get("agents").is_some() {
-            return agents::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+            return agents::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+                .await
+                .map(|()| None);
         }
         if selector.get("native_auth").is_some() {
             return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
-                .await;
+                .await
+                .map(|()| None);
         }
         let request: OwnerRequest =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;
         if projects_home::handles(&request) {
-            return projects_home::serve(
-                &mut stream,
-                &engine,
-                &authority,
-                &auth,
-                &a,
-                request,
-                deadline,
-            )
-            .await;
+            return Ok(Some((a, request)));
         }
         let id = request.request_id.clone();
         let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
@@ -1907,7 +1914,9 @@ async fn serve_authenticated_owner(
             {
                 operation.current_revision = current.revision;
             }
-            return write_owner_reply(&mut stream, result, id, mutation).await;
+            return write_owner_reply(&mut stream, result, id, mutation)
+                .await
+                .map(|()| None);
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
@@ -1927,9 +1936,22 @@ async fn serve_authenticated_owner(
                 eprintln!("master_dispatch_not_started cause={}", error.0);
             }
         }
-        write_owner_reply(&mut stream, result, id, mutation).await
+        write_owner_reply(&mut stream, result, id, mutation)
+            .await
+            .map(|()| None)
     };
-    let _ = tokio::time::timeout_at(deadline, exchange).await;
+    if let Ok(Ok(Some((a, request)))) = tokio::time::timeout_at(deadline, exchange).await {
+        let _ = projects_home::serve(
+            &mut stream,
+            &engine,
+            &authority,
+            &auth,
+            &a,
+            request,
+            deadline,
+        )
+        .await;
+    }
     let _ = stream.shutdown().await;
 }
 

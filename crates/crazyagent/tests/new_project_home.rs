@@ -192,13 +192,17 @@ struct Engine {
 
 impl Engine {
     async fn start() -> Self {
+        Self::with_settings("timeout_ms = 5000\n").await
+    }
+
+    async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-new-")
             .tempdir_in("/private/tmp")
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        fs::write(&global, "timeout_ms = 5000\n").unwrap();
+        fs::write(&global, settings).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -413,6 +417,143 @@ async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
         rejected("home_trash_outside")
     );
     assert!(home.is_dir());
+
+    engine.stop().await;
+}
+
+fn slow_git(root: &Path, sections: usize, broken: bool) {
+    let projects = root.join("projects");
+    let git_home = projects.join(".git-home");
+    for folder in [&projects, &git_home] {
+        match fs::create_dir(folder) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("{e}"),
+        }
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = String::with_capacity(sections * 16);
+    for section in 0..sections {
+        config.push_str("[s");
+        config.push_str(&(section % 50).to_string());
+        config.push_str("]\n\tk = v\n");
+    }
+    if broken {
+        config.push_str("[init]\n\tdefaultBranch = bad..name\n");
+    }
+    fs::write(git_home.join(".gitconfig"), config).unwrap();
+}
+
+fn staging_left(home: &Path) -> Vec<String> {
+    names(home)
+        .into_iter()
+        .filter(|name| name.starts_with(".crazyagent-new-"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
+    let engine = Engine::with_settings("").await;
+    let place = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let owner_deadline = Duration::from_millis(1000);
+    let slow = ProjectId::new("slow").unwrap();
+    let quiet = || ProjectSetup {
+        research: vec![],
+        ..setup()
+    };
+
+    slow_git(engine.root.path(), 1_200_000, true);
+    let started = std::time::Instant::now();
+    let response = owner
+        .setup_project(slow.clone(), spec("Slow Start"), quiet(), next())
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() > owner_deadline,
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(result(response), rejected("home_new_project_failed"));
+    assert!(plain_problem("home_new_project_failed").is_some());
+    assert_eq!(names(&home), Vec::<String>::new());
+    assert!(owner.project_setup(slow.clone()).await.unwrap().is_none());
+
+    slow_git(engine.root.path(), 1_200_000, false);
+    let started = std::time::Instant::now();
+    let response = owner
+        .setup_project(slow.clone(), spec("Slow Start"), quiet(), next())
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() > owner_deadline,
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folder = home.join("slow-start");
+    assert_eq!(names(&home), ["slow-start"]);
+    assert_eq!(git(&folder, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert!(
+        folder
+            .join(CRAZYAGENT_DIRECTORY)
+            .join("context")
+            .join("brief.md")
+            .is_file()
+    );
+    let found = owner.found_projects().await.unwrap();
+    let entry = found
+        .iter()
+        .find(|entry| entry.name == "slow-start")
+        .unwrap();
+    assert_eq!(entry.state, FoundState::Ready);
+    assert_eq!(entry.project_id.as_ref(), Some(&slow));
+    let stored = owner.project_setup(slow.clone()).await.unwrap().unwrap();
+    assert_eq!(Path::new(&stored.folder), folder);
+
+    slow_git(engine.root.path(), 300_000, false);
+    let mut other = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let first = ProjectId::new("twin-one").unwrap();
+    let second = ProjectId::new("twin-two").unwrap();
+    let (one, two) = tokio::join!(
+        owner.setup_project(first.clone(), spec("Twin"), quiet(), next()),
+        other.setup_project(second.clone(), spec("Twin"), quiet(), 1),
+    );
+    let mut outcomes = [result(one.unwrap()), result(two.unwrap())];
+    outcomes.sort_by_key(|outcome| format!("{outcome:?}"));
+    assert_eq!(
+        outcomes,
+        [OwnerResult::Applied, rejected("home_destination_exists")]
+    );
+    assert_eq!(names(&home), ["slow-start", "twin"]);
+    assert_eq!(staging_left(&home), Vec::<String>::new());
+    let found = owner.found_projects().await.unwrap();
+    let twin = found.iter().find(|entry| entry.name == "twin").unwrap();
+    assert!([Some(&first), Some(&second)].contains(&twin.project_id.as_ref()));
 
     engine.stop().await;
 }

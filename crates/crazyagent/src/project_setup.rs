@@ -1550,13 +1550,13 @@ fn write_brief(context: &Directory, stored: &StoredSetup) -> Result<(), &'static
 }
 
 /// Refuses to build a new project's folder where its private 0700 git home cannot
-/// be made. Takes the database path, staging folder and setup, all
+/// be made. Takes the database path, staging folder and documents, all
 /// unused. Returns `project_folder_unavailable`.
 #[cfg(not(unix))]
 fn stage_in_home(
     _database: &Path,
     _staging: &Path,
-    _setup: &ProjectSetup,
+    _documents: &[String],
 ) -> Result<Vec<StoredDocument>, &'static str> {
     Err("project_folder_unavailable")
 }
@@ -1565,12 +1565,12 @@ fn stage_in_home(
 /// home: a git repository with one empty start commit, the `.crazyagent/`
 /// layout with its git exclude lines, and the owner's documents.
 /// Takes the database path (for git's private home), the staging folder and
-/// the setup. Returns the copied documents, or a plain code with nothing kept.
+/// the document paths. Returns the copied documents, or a plain code.
 #[cfg(unix)]
 fn stage_in_home(
     database: &Path,
     staging: &Path,
-    setup: &ProjectSetup,
+    documents: &[String],
 ) -> Result<Vec<StoredDocument>, &'static str> {
     const FAILED: &str = "home_new_project_failed";
     let failed = |_: EngineError| FAILED;
@@ -1599,29 +1599,25 @@ fn stage_in_home(
     }
     assert!(state.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY));
     copy_documents(
-        &setup.documents,
+        documents,
         &context.join("documents"),
         PROJECT_DOCUMENT_BYTES_MAX,
     )
 }
 
 /// Executes a host-only project setup action inside the owner transaction.
-/// Takes the transaction, configuration, database path, action and revision.
-/// Returns Applied, or a plain rejection before any durable row is written.
+/// Takes the transaction, configuration, action and revision. Returns Applied,
+/// or a plain rejection before any durable row is written; Create is refused
+/// here because New Project builds its folder in the owner transport.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
-    database: &Path,
     action: &SetupAction,
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
     match action {
-        SetupAction::Create {
-            project_id,
-            spec,
-            setup,
-        } => create(tx, config, database, project_id, spec, setup),
+        SetupAction::Create { .. } => Ok(rejected("project_setup_requires_transport")),
         SetupAction::AddDocuments {
             project_id,
             documents,
@@ -2062,20 +2058,27 @@ fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, Engin
     Ok(Outcome::Applied)
 }
 
-fn create(
+/// The team a New Project gets and the folder it lands in, after the checks
+/// that run once before its folder is built and again before it is recorded.
+struct Checked {
+    team: TeamPlan,
+    home: PathBuf,
+    folder: PathBuf,
+}
+
+fn check_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
-    database: &Path,
     project_id: &ProjectId,
     spec: &ProjectSpec,
     setup: &ProjectSetup,
-) -> Result<Outcome, EngineError> {
+) -> Result<Result<Checked, String>, EngineError> {
     if setup
         .pool
         .as_ref()
         .is_some_and(|pool| !pool_exists(config, pool))
     {
-        return Ok(rejected("pool_missing"));
+        return Ok(Err("pool_missing".into()));
     }
     let exists: bool = tx
         .query_row(
@@ -2085,7 +2088,7 @@ fn create(
         )
         .map_err(error)?;
     if exists {
-        return Ok(rejected("project_exists"));
+        return Ok(Err("project_exists".into()));
     }
     let team = match setup.team.clone() {
         Some(team) => team,
@@ -2096,50 +2099,152 @@ fn create(
     };
     team.validate()?;
     let Some(home) = crate::projects_home::load(tx)? else {
-        return Ok(rejected("projects_home_unset"));
+        return Ok(Err("projects_home_unset".into()));
     };
     let Some(name) = crate::projects_home::slug(&spec.name)
         .or_else(|| crate::projects_home::slug(project_id.as_str()))
     else {
-        return Ok(rejected("home_folder_name_invalid"));
+        return Ok(Err("home_folder_name_invalid".into()));
     };
-    let folder = match crate::projects_home::destination(&home, &name) {
-        Ok(folder) => folder,
-        Err(e) => return Ok(rejected(&e.0)),
-    };
-    let staging = home.join(format!(".crazyagent-new-{}", project_id.as_str()));
-    if std::fs::symlink_metadata(&staging).is_ok() {
-        std::fs::remove_dir_all(&staging).map_err(error)?;
+    Ok(match crate::projects_home::destination(&home, &name) {
+        Ok(folder) => Ok(Checked { team, home, folder }),
+        Err(e) => Err(e.0),
+    })
+}
+
+/// A checked plan to build one New Project's folder off the storage actor.
+/// Built only by `plan_new`; `run` does the git and copy work.
+#[derive(Debug)]
+pub(crate) struct NewProjectPlan {
+    database: PathBuf,
+    staging: PathBuf,
+    folder: PathBuf,
+    documents: Vec<String>,
+}
+
+/// A New Project folder built in its hidden staging folder in the projects
+/// home, waiting to be recorded and moved into place.
+#[derive(Debug)]
+pub(crate) struct Staged {
+    staging: PathBuf,
+    folder: PathBuf,
+    documents: Vec<StoredDocument>,
+}
+
+impl Staged {
+    /// The hidden staging folder that holds the built project until it is recorded.
+    pub(crate) fn staging(&self) -> &Path {
+        &self.staging
     }
-    let documents = match stage_in_home(database, &staging, setup) {
-        Ok(documents) => documents,
-        Err(code) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Ok(rejected(code));
-        }
+}
+
+/// Plans a New Project before the owner transport builds its folder.
+/// Takes the transaction, configuration, database path and the Create action.
+/// Returns the plan with a fresh staging folder name, or the refusal code the
+/// owner sees; nothing on disk changes.
+pub(crate) fn plan_new(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    database: &Path,
+    action: &SetupAction,
+) -> Result<Result<NewProjectPlan, String>, EngineError> {
+    action.validate()?;
+    let SetupAction::Create {
+        project_id,
+        spec,
+        setup,
+    } = action
+    else {
+        return Err(failure("setup_plan_invalid"));
     };
-    let result = record(
-        tx, config, project_id, spec, setup, team, documents, &folder,
-    )
-    .and_then(|outcome| {
-        if outcome == Outcome::Applied {
-            let stored =
-                load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
-            let state = crate::projects_home::state_folder(&staging);
-            assert_ne!(state, staging);
-            let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;
-            write_brief(&context, &stored).map_err(failure)?;
-            if std::fs::symlink_metadata(&folder).is_ok() {
-                return Err(failure("home_destination_exists"));
+    let checked = match check_new(tx, config, project_id, spec, setup)? {
+        Ok(checked) => checked,
+        Err(code) => return Ok(Err(code)),
+    };
+    let staging = checked.home.join(format!(
+        ".crazyagent-new-{}",
+        crate::engine::owner::random_id()?
+    ));
+    assert_eq!(staging.parent(), checked.folder.parent());
+    Ok(Ok(NewProjectPlan {
+        database: database.to_path_buf(),
+        staging,
+        folder: checked.folder,
+        documents: setup.documents.clone(),
+    }))
+}
+
+impl NewProjectPlan {
+    /// Builds the project folder in its staging folder: a git repository with
+    /// one empty start commit, the `.crazyagent/` layout and the documents.
+    /// Output: the staged folder, or a plain code with the staging folder removed.
+    pub(crate) fn run(self) -> Result<Staged, String> {
+        match stage_in_home(&self.database, &self.staging, &self.documents) {
+            Ok(documents) => Ok(Staged {
+                staging: self.staging,
+                folder: self.folder,
+                documents,
+            }),
+            Err(code) => {
+                let _ = std::fs::remove_dir_all(&self.staging);
+                Err(code.into())
             }
-            std::fs::rename(&staging, &folder).map_err(error)?;
         }
-        Ok(outcome)
-    });
-    if !matches!(result, Ok(Outcome::Applied)) {
-        let _ = std::fs::remove_dir_all(&staging);
     }
-    result
+}
+
+/// Records a New Project whose folder the owner transport built.
+/// Takes the transaction, configuration, the Create action and the staged
+/// result. Returns Applied once the rows are written, the brief is in place
+/// and the folder is moved into the home, else the refusal; the checks run
+/// again because other changes may have landed while the folder was built.
+pub(crate) fn record_new(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    action: &SetupAction,
+    staged: &Result<Staged, String>,
+) -> Result<Outcome, EngineError> {
+    let SetupAction::Create {
+        project_id,
+        spec,
+        setup,
+    } = action
+    else {
+        return Err(failure("setup_record_invalid"));
+    };
+    let staged = match staged {
+        Ok(staged) => staged,
+        Err(code) => return Ok(rejected(code)),
+    };
+    let checked = match check_new(tx, config, project_id, spec, setup)? {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(&code)),
+    };
+    if checked.folder != staged.folder {
+        return Ok(rejected("home_new_project_failed"));
+    }
+    let outcome = record(
+        tx,
+        config,
+        project_id,
+        spec,
+        setup,
+        checked.team,
+        staged.documents.clone(),
+        &staged.folder,
+    )?;
+    if outcome == Outcome::Applied {
+        let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
+        let state = crate::projects_home::state_folder(&staged.staging);
+        assert_ne!(state, staged.staging);
+        let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;
+        write_brief(&context, &stored).map_err(failure)?;
+        if std::fs::symlink_metadata(&staged.folder).is_ok() {
+            return Err(failure("home_destination_exists"));
+        }
+        std::fs::rename(&staged.staging, &staged.folder).map_err(error)?;
+    }
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
