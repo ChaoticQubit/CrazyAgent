@@ -371,9 +371,15 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
                 "You are working on the project \"{}\".\n",
                 clip(&setup.name, NAME_BYTES_MAX)
             ));
-            let folder = setup.project_folder().display().to_string();
-            if folder.len() <= FOLDER_BYTES_MAX {
-                header.push_str(&format!("Project folder: {folder}\n"));
+            let project_folder = setup.project_folder();
+            let state = setup.state_folder();
+            for (label, folder) in [
+                ("Project folder", &project_folder),
+                ("Context folder", &state),
+            ] {
+                if folder.as_os_str().len() <= FOLDER_BYTES_MAX {
+                    header.push_str(&format!("{label}: {}\n", folder.display()));
+                }
             }
             if let Ok(chunk) = crate::project_setup::read_context(setup, "context/brief.md", 0)
                 && let Some(text) = chunk.text
@@ -388,7 +394,7 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
             if let Ok(context) = crate::project_setup::list_context(setup)
                 && !context.items.is_empty()
             {
-                index.push_str("\n## Context files\n\nThese files are inside the project folder. Open them when they help with your task.\n\n");
+                index.push_str("\n## Context files\n\nThese paths are relative to the context folder. Open them when they help with your task.\n\n");
                 let mut left = 0;
                 for item in context.items.iter().take(INDEX_ITEMS_MAX) {
                     let kind = match item.kind {
