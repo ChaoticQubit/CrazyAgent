@@ -501,12 +501,13 @@ impl ProjectSandbox {
     }
 
     /// Paths inside the project folder no agent may write although the folder is writable:
-    /// the `context/` folder, the git hooks, and the git config with its lock file. Every
-    /// platform boundary keeps these read-only.
-    pub fn protected_paths(&self) -> [PathBuf; 4] {
+    /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
+    /// and the git config with its lock file. Every platform boundary keeps these read-only.
+    pub fn protected_paths(&self) -> [PathBuf; 5] {
         let git = self.project_root.join(".git");
         [
             self.project_root.join("context"),
+            self.project_root.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -574,7 +575,7 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
         ));
         text.push_str(
             "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",

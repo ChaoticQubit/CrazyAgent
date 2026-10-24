@@ -142,7 +142,8 @@ fn the_settings_resolver_reads_live_pool_assignment_and_the_project_folder() {
     std::fs::write(&global, catalog("")).unwrap();
     let resolver = SettingsResolver::new(&global, &project, &projects, &runtime.database).unwrap();
     let (folder, pick) = resolver.resolve("project-a", "codex").unwrap();
-    assert_eq!(folder, projects.join("project-a"));
+    assert_eq!(folder, runtime.folder("project-a"));
+    assert!(folder.starts_with(&runtime.home));
     assert_eq!(pick, AccountPick::NeedsPool);
     std::fs::write(&global, catalog("\"project-a\"")).unwrap();
     assert_eq!(

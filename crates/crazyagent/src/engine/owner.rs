@@ -176,6 +176,9 @@ pub enum OwnerMutation {
         source: String,
         mode: crate::projects_home::AddMode,
     },
+    DeleteProjectFolder {
+        path: String,
+    },
     StartOnboarding {
         path: String,
         pool: CredentialRef,
@@ -351,6 +354,11 @@ impl OwnerMutation {
                     path: path.clone(),
                     move_projects: *move_projects,
                 };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::DeleteProjectFolder { path } => {
+                let action = crate::projects_home::HomeAction::Trash { path: path.clone() };
                 action.validate()?;
                 Command::ProjectsHome { action }
             }

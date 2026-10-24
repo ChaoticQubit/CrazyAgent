@@ -29,22 +29,42 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(parent).map_err(error)
 }
 
+/// Lists the set-up projects for the projects home: each project's own
+/// folder and whether its onboarding is still under way, read from the
+/// onboarding table. An onboarded project is Ready once both its graph and
+/// mapping steps are done; a project made with New Project has no
+/// onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
+    let done = crate::onboarding::Step::Done.columns().0;
     let mut statement = tx
-        .prepare("SELECT body FROM project_setups ORDER BY project LIMIT ?1")
+        .prepare(
+            "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
+             LEFT JOIN onboarding o ON o.project=s.project
+             ORDER BY s.project LIMIT ?1",
+        )
         .map_err(error)?;
-    let bodies = statement
-        .query_map([REGISTERED_MAX as i64], |row| row.get::<_, String>(0))
+    let rows = statement
+        .query_map([REGISTERED_MAX as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
         .map_err(error)?;
     let mut projects = Vec::new();
-    for body in bodies {
+    for row in rows {
+        let (body, graph, mapping) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
-            serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+            serde_json::from_str(&body).map_err(error)?;
+        let onboarding = graph
+            .zip(mapping)
+            .is_some_and(|(graph, mapping)| graph != done || mapping != done);
         projects.push(Registered {
+            folder: stored.project_folder(),
             project_id: stored.project_id,
             name: stored.name,
-            folder: PathBuf::from(stored.folder),
-            onboarding: false,
+            onboarding,
         });
     }
     assert!(projects.len() <= REGISTERED_MAX);
@@ -151,7 +171,8 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
 }
 
 /// Points every set-up project whose folder sat in the old home at the same
-/// folder name in the new home, after the transport moved them.
+/// folder name in the new home, after the transport moved them, keeping an
+/// onboarded project's recorded `.crazyagent/` folder and onboarding folder.
 fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), EngineError> {
     let rows: Vec<(String, String)> = {
         let mut statement = tx
@@ -165,7 +186,7 @@ fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), E
     for (project, body) in rows {
         let mut stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
-        let folder = PathBuf::from(&stored.folder);
+        let folder = stored.project_folder();
         let Some(name) = folder.file_name() else {
             continue;
         };
@@ -173,13 +194,25 @@ fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), E
             continue;
         }
         let moved = to.join(name);
-        stored.folder = moved
-            .to_str()
-            .ok_or_else(|| error("projects_home_path_invalid"))?
-            .to_owned();
+        let recorded = if Path::new(&stored.folder) == folder {
+            moved.clone()
+        } else {
+            moved.join(home::CRAZYAGENT_DIRECTORY)
+        };
+        let text = |path: &Path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| error("projects_home_path_invalid"))
+        };
+        stored.folder = text(&recorded)?;
         tx.execute(
             "UPDATE project_setups SET body=?1 WHERE project=?2",
             params![serde_json::to_string(&stored).map_err(error)?, project],
+        )
+        .map_err(error)?;
+        tx.execute(
+            "UPDATE onboarding SET repo=?1 WHERE project=?2",
+            params![text(&moved)?, project],
         )
         .map_err(error)?;
     }
@@ -208,6 +241,19 @@ pub(super) fn execute(
             ..
         } => rejected("home_move_requires_transport"),
         HomeAction::Added { .. } => rejected("home_add_requires_transport"),
+        HomeAction::Trash { path: picked } => {
+            let Some(saved) = home::load(tx)? else {
+                return rejected("projects_home_unset");
+            };
+            let folder = match home::plan_trash(&saved, picked, &registered(tx)?) {
+                Ok(folder) => folder,
+                Err(e) => return rejected(&e.0),
+            };
+            match home::trash(&folder) {
+                Ok(()) => Ok(Outcome::Applied),
+                Err(e) => rejected(&e.0),
+            }
+        }
     }
 }
 

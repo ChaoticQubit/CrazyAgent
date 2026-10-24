@@ -129,6 +129,17 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
     let mut owner = OwnerController::attach(&base, OwnerClientKind::Tui, Duration::from_secs(5))
         .await
         .unwrap();
+    let home_root = tempfile::Builder::new()
+        .prefix("ca-lctx-live-home-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let home = home_root.path().canonicalize().unwrap();
+    applied(
+        owner
+            .set_projects_home(home.to_str().unwrap().into(), 1)
+            .await
+            .unwrap(),
+    );
     let project = ProjectId::new("live").unwrap();
     applied(
         owner
@@ -147,7 +158,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
                     team: None,
                     documents: vec![],
                 },
-                1,
+                2,
             )
             .await
             .unwrap(),

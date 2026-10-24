@@ -1229,7 +1229,7 @@ impl TeamRuntime {
     }
 
     fn framing(&self, stored: &StoredSetup, team_tool: bool) -> String {
-        let brief = std::fs::read_to_string(Path::new(&stored.folder).join("context/brief.md"))
+        let brief = std::fs::read_to_string(stored.state_folder().join("context/brief.md"))
             .map(|brief| bound_text(&brief, BRIEF_BYTES_MAX))
             .unwrap_or_default();
         let team = stored
@@ -1787,7 +1787,9 @@ impl TeamRuntime {
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
         sandbox.install(&profile).map_err(|e| plain(&e))?;
         ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
-        let worktree = root.join("worktrees").join(format!("agent-{id}"));
+        let worktree = crate::projects_home::state_folder(&root)
+            .join("worktrees")
+            .join(format!("agent-{id}"));
         add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
         let working_dir = worktree.canonicalize().map_err(|e| plain(&e))?;
         if working_dir != worktree {

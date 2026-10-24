@@ -17,8 +17,9 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 
 const ENGINE_STOP_WAIT: Duration = Duration::from_secs(30);
 
-/// Creates `project-cafe` through the owner client of the running engine
-/// binary, retrying the attach until the owner endpoint answers.
+/// Creates `project-cafe` in the runtime's projects home through the owner
+/// client of the running engine binary, retrying the attach until the owner
+/// endpoint answers.
 fn create_cafe(runtime: &Path) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -39,6 +40,7 @@ fn create_cafe(runtime: &Path) {
             };
             research_support::setup_projects(
                 &mut owner,
+                &home(runtime),
                 &[(
                     "project-cafe",
                     "A website for a corner cafe with a menu and table booking.",
@@ -157,6 +159,13 @@ impl Drop for Engine {
 /// A fresh private runtime folder `r-sbx-<pid>-<name>` under the checkout's
 /// `.local-state`, holding `catalog` as the global settings, so each test of
 /// this binary gets its own engine folder and a failed run keeps its evidence.
+/// The projects home beside a test runtime folder, outside the engine's data.
+fn home(runtime: &Path) -> PathBuf {
+    let mut name = runtime.file_name().unwrap().to_os_string();
+    name.push("-home");
+    runtime.with_file_name(name)
+}
+
 fn runtime(name: &str, catalog: &str) -> PathBuf {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../.local-state")
@@ -168,10 +177,12 @@ fn runtime(name: &str, catalog: &str) -> PathBuf {
         base.display()
     );
     let runtime = base.join(format!("r-sbx-{}-{name}", std::process::id()));
-    if runtime.exists() {
-        fs::remove_dir_all(&runtime).unwrap();
+    for folder in [runtime.clone(), home(&runtime)] {
+        if folder.exists() {
+            fs::remove_dir_all(&folder).unwrap();
+        }
+        fs::create_dir(&folder).unwrap();
     }
-    fs::create_dir(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     for (name, text) in [("global.toml", catalog), ("project.toml", "")] {
         fs::write(runtime.join(name), text).unwrap();
@@ -189,8 +200,9 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     assert!(projects.is_dir());
     assert!(research.is_dir());
     create_cafe(&runtime);
-    let project = projects.join("project-cafe");
-    assert!(project.join("context").join("brief.md").is_file());
+    let project = home(&runtime).join("project-cafe");
+    let state = project.join(".crazyagent");
+    assert!(state.join("context").join("brief.md").is_file());
     let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
     database.busy_timeout(Duration::from_secs(5)).unwrap();
     let queue = |project: &str, kind: &str, harness: &str, tools: bool| -> i64 {
@@ -245,7 +257,7 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     assert!(!stderr.contains("panicked"), "{stderr}");
     let report = |kind: &str| {
         fs::read_to_string(
-            project
+            state
                 .join("context")
                 .join("research")
                 .join(format!("{kind}.md")),
@@ -272,8 +284,9 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
         jobs.get(codex_job).unwrap().unwrap().report_path.as_deref(),
         Some("context/research/front_end_design.md")
     );
-    assert!(project.join("worktrees").is_dir());
+    assert!(state.join("worktrees").is_dir());
     fs::remove_dir_all(&runtime).unwrap();
+    fs::remove_dir_all(home(&runtime)).unwrap();
 }
 
 #[test]
@@ -307,4 +320,5 @@ fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     assert!(!agents.is_empty());
     assert_eq!(processes_with(&marker), Vec::<u32>::new());
     fs::remove_dir_all(&runtime).unwrap();
+    fs::remove_dir_all(home(&runtime)).unwrap();
 }

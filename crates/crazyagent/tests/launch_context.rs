@@ -30,6 +30,7 @@ const OTHER_NOTE: &str = "Only for the other project.";
 
 struct Case {
     root: tempfile::TempDir,
+    home: tempfile::TempDir,
     service: Option<EngineService>,
     _stop: watch::Sender<bool>,
 }
@@ -54,11 +55,25 @@ impl Case {
         )
         .await
         .unwrap();
-        Self {
+        let home = tempfile::Builder::new()
+            .prefix("ca-lctx-home-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let case = Self {
             root,
+            home,
             service: Some(service),
             _stop: stop,
-        }
+        };
+        let mut owner = case.owner().await;
+        let picked = case.home.path().canonicalize().unwrap();
+        applied(
+            owner
+                .set_projects_home(picked.to_str().unwrap().into(), 1)
+                .await
+                .unwrap(),
+        );
+        case
     }
 
     async fn owner(&self) -> OwnerController {
@@ -239,13 +254,19 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
             .await
             .unwrap(),
     );
-    let folder = PathBuf::from(
-        owner
-            .project_setup(project.clone())
-            .await
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .state_folder();
+    assert_eq!(
+        folder,
+        case.home
+            .path()
+            .canonicalize()
             .unwrap()
-            .unwrap()
-            .folder,
+            .join("meal-planner/.crazyagent")
     );
 
     owner
@@ -397,6 +418,11 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(instructions.contains("Meal planner"));
     assert!(instructions.contains("Plans weekly meals for busy families."));
     assert!(instructions.contains("context/brief.md"));
+    assert!(instructions.contains(&format!(
+        "Context folder: {}
+",
+        folder.display()
+    )));
     assert!(instructions.contains("context/research/market_research.md"));
     assert!(
         instructions.contains(KEPT_MEMORY),

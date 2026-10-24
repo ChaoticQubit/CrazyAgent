@@ -13,6 +13,7 @@ use std::time::Duration;
 
 struct Engine {
     root: tempfile::TempDir,
+    home: tempfile::TempDir,
     service: Option<EngineService>,
     stop: tokio::sync::watch::Sender<bool>,
 }
@@ -27,13 +28,25 @@ impl Engine {
         let global = root.path().join("global.toml");
         std::fs::write(&global, "timeout_ms = 1000\n").unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("ca-mem-home-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
         let (stop, _) = tokio::sync::watch::channel(false);
         let mut engine = Self {
             root,
+            home,
             service: None,
             stop,
         };
         engine.boot().await;
+        let mut owner = engine.owner().await;
+        let picked = std::fs::canonicalize(engine.home.path()).unwrap();
+        let response = owner
+            .set_projects_home(picked.to_str().unwrap().into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(result(response), OwnerResult::Applied);
         engine
     }
 
@@ -82,11 +95,14 @@ impl Engine {
         db
     }
 
+    /// The `.crazyagent` folder holding the context of the project that
+    /// `create_project` made for `project` in the projects home.
     fn folder(&self, project: &str) -> PathBuf {
-        std::fs::canonicalize(self.root.path())
+        let name = crate::projects_home::slug(&format!("Project {project}")).unwrap();
+        std::fs::canonicalize(self.home.path())
             .unwrap()
-            .join("projects")
-            .join(project)
+            .join(name)
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
     }
 
     async fn stop(mut self) {

@@ -27,6 +27,7 @@ fn local_model() -> std::sync::MutexGuard<'static, ()> {
 struct Case {
     _runtime: EngineRuntime,
     project: PathBuf,
+    crazyagent: PathBuf,
     state: PathBuf,
     database: PathBuf,
 }
@@ -36,6 +37,7 @@ fn case(about: &str) -> Case {
         EngineRuntime::with_projects(&[("project-a", about), ("project-b", "A second project.")]);
     let project = runtime.folder("project-a");
     Case {
+        crazyagent: runtime.crazyagent("project-a"),
         project,
         state: runtime.state.clone(),
         database: runtime.database.clone(),
@@ -100,9 +102,9 @@ fn files_containing(root: &Path, needle: &str) -> usize {
 }
 
 /// Asserts no agent worktree was added to the project: project setup creates
-/// the `worktrees` folder empty and only a started agent adds one to it.
+/// the `.crazyagent/worktrees` folder empty and only a started agent adds one.
 fn assert_no_agent_worktree(case: &Case) {
-    let worktrees = case.project.join("worktrees");
+    let worktrees = case.crazyagent.join("worktrees");
     assert!(worktrees.is_dir(), "{} is missing", worktrees.display());
     let added: Vec<_> = fs::read_dir(&worktrees)
         .unwrap()
@@ -147,7 +149,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
         Some("context/research/market_research.md")
     );
     let report = fs::read_to_string(
-        case.project
+        case.crazyagent
             .join("context")
             .join("research")
             .join("market_research.md"),
@@ -158,7 +160,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     assert!(report.contains("## Links and references"), "{report}");
     assert!(report.len() > 200, "{report}");
     let worktree = case
-        .project
+        .crazyagent
         .join("worktrees")
         .join(format!("research-market_research-{id}-1"));
     assert!(worktree.join(".git").is_file());
@@ -167,6 +169,10 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     assert!(profile.starts_with("(version 1)\n(deny default)\n"));
     assert!(profile.contains(&format!("(subpath \"{}\")", case.project.display())));
     assert!(profile.contains(&format!("(subpath \"{}/context\")", case.project.display())));
+    assert!(profile.contains(&format!(
+        "(subpath \"{}/context\")",
+        case.crazyagent.display()
+    )));
     assert!(
         files_containing(&case.state.join("agents"), &marker) > 0,
         "the prompt sent to the agent must carry the project brief"
@@ -244,7 +250,7 @@ fn research_that_runs_out_of_time_is_stopped_and_retried_then_failed() {
     assert!(!process_group_alive(second.process_group.unwrap()));
     assert!(
         !case
-            .project
+            .crazyagent
             .join("context")
             .join("research")
             .join("competitor_research.md")
@@ -388,7 +394,7 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     assert!(!profile.contains("(allow network*)"));
     assert!(profile.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
     let report = fs::read_to_string(
-        case.project
+        case.crazyagent
             .join("context")
             .join("research")
             .join("design_research.md"),
@@ -436,7 +442,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
     );
     assert_eq!(run.status, ResearchStatus::Done);
     let report = fs::read_to_string(
-        case.project
+        case.crazyagent
             .join("context")
             .join("research")
             .join("competitor_research.md"),
@@ -446,7 +452,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
     assert!(report.contains("Researched by Claude Code"), "{report}");
     assert!(report.contains("## Links and references"), "{report}");
     assert!(
-        case.project
+        case.crazyagent
             .join("worktrees")
             .join(format!("research-competitor_research-{id}-1"))
             .join(".git")
@@ -563,7 +569,7 @@ fn a_job_interrupted_by_an_engine_stop_runs_again_after_a_restart() {
     assert_eq!(job.attempts, 1);
     assert_eq!(job.error.as_deref(), Some("Agent ran out of time"));
     assert!(!process_group_alive(rerun.process_group.unwrap()));
-    let worktrees = fs::read_dir(case.project.join("worktrees"))
+    let worktrees = fs::read_dir(case.crazyagent.join("worktrees"))
         .unwrap()
         .count();
     assert_eq!(worktrees, 2);

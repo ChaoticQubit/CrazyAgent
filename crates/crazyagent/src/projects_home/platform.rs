@@ -104,3 +104,21 @@ pub(super) fn open_append(path: &Path) -> std::io::Result<fs::File> {
     }
     Ok(file)
 }
+
+/// Moves a file or folder to the macOS Trash through NSFileManager, which
+/// needs no Finder automation permission. Input: the path. Output: Ok once
+/// it is in the Trash.
+#[cfg(target_os = "macos")]
+pub(super) fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
+    use trash::macos::{DeleteMethod, TrashContextExtMacos};
+    let mut context = trash::TrashContext::default();
+    context.set_delete_method(DeleteMethod::NsFileManager);
+    context.delete(path)
+}
+
+/// Moves a file or folder to the desktop trash (freedesktop trash on Linux,
+/// the Recycle Bin on Windows). Written, not tested.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
+    trash::delete(path)
+}
