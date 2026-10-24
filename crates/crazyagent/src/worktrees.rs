@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command as Process, Stdio};
@@ -86,6 +87,14 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Refuses a worktree file identity where the Unix owner, mode, device and inode do not
+/// exist. Takes the path and kind, both unused. Returns `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn identity(_path: &Path, _directory: bool) -> Result<Identity, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn identity(path: &Path, directory: bool) -> Result<Identity, EngineError> {
     let metadata = std::fs::symlink_metadata(path).map_err(error)?;
     if metadata.uid() != rustix::process::getuid().as_raw()
@@ -120,6 +129,14 @@ fn canonical(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Refuses a bounded worktree file read where no no-follow open is used here.
+/// Takes the path and limit, both unused. Returns `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn bounded_read(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = OpenOptions::new()
         .read(true)
@@ -561,6 +578,14 @@ fn prepare(
     })
 }
 
+/// Refuses the private worktree root where no 0700 directory can be made or checked.
+/// Takes the runtime folder, unused. Returns `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn private_worktree_root(_runtime: &Path) -> Result<PathBuf, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn private_worktree_root(runtime: &Path) -> Result<PathBuf, EngineError> {
     canonical(runtime)?;
     let root = runtime.join("worktrees");
@@ -681,6 +706,14 @@ pub(crate) fn provision(
     result
 }
 
+/// Refuses to materialize a worktree where no directory-relative no-follow writes exist.
+/// Takes the lease record, unchanged. Returns `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn materialize(_record: &mut LeaseRecord) -> Result<(), EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     verify(&record.admission)?;
     let repository = Path::new(&record.lease.repository);
@@ -791,6 +824,7 @@ fn tree_entries(
     Ok(entries)
 }
 
+#[cfg(unix)]
 fn write_blob_at(
     root: &std::fs::File,
     path: &Path,

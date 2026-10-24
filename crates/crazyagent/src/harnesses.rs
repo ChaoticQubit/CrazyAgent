@@ -190,18 +190,22 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
-/// Reports whether a path is a regular file Windows can run; Windows has no execute bit,
-/// so any regular file counts and the launch decides by extension. Takes the path.
-/// Returns true for a regular file.
-#[cfg(not(unix))]
 fn executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
 }
 
+/// Reports whether file metadata grants any execute permission.
+/// Takes the metadata. Returns true when any of the three execute bits is set.
 #[cfg(unix)]
-fn executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+fn runnable(metadata: &std::fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Reports that a file may be run where the platform has no execute bit; the launch
+/// decides by extension. Takes the metadata, unused. Returns true.
+#[cfg(not(unix))]
+fn runnable(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// Builds the catalog rows for every known harness, in owner priority order.

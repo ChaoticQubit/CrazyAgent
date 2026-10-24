@@ -4,14 +4,17 @@ use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+#[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -430,10 +433,7 @@ pub(super) fn harness_id(request: &LaunchRequest) -> &'static str {
 pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
-    if !request.executable.is_absolute()
-        || !executable.is_file()
-        || executable.permissions().mode() & 0o111 == 0
-    {
+    if !request.executable.is_absolute() || !executable.is_file() || !super::runnable(&executable) {
         return Err(failure("launch_executable_unavailable"));
     }
     if !request.working_dir.is_absolute() || !request.working_dir.is_dir() {
@@ -485,6 +485,7 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
 /// Checks that an account home is safe to launch in: an absolute 0700 directory owned by
 /// this user that is neither the owner's HOME nor their real `~/.codex` or `~/.claude`.
 /// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(unix)]
 pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let metadata =
         std::fs::symlink_metadata(home).map_err(|_| failure("launch_account_home_unavailable"))?;
@@ -507,6 +508,13 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
         }
     }
     Ok(())
+}
+
+/// Refuses an account home where its Unix owner and 0700 mode cannot be checked.
+/// Takes the home, unused. Returns `launch_account_home_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
+    Err(failure("launch_account_home_unavailable"))
 }
 
 enum Line {
@@ -907,10 +915,7 @@ impl Session {
                 child = command
                     .spawn()
                     .map_err(|_| failure("launch_spawn_failed"))?;
-                stdin = child
-                    .stdin
-                    .take()
-                    .map(|pipe| File::from(OwnedFd::from(pipe)));
+                stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
                     .stdout
                     .take()
@@ -1065,6 +1070,24 @@ impl Session {
         }
     }
 
+    /// Stops the harness where no process group exists: closes its input, waits up to the
+    /// stop grace for it to exit, then kills the direct child and reaps it. Takes the
+    /// session. Returns its exit code, or none when already stopped or it has none.
+    #[cfg(not(unix))]
+    fn stop_group(&mut self) -> Option<i32> {
+        if self.stopped {
+            return None;
+        }
+        self.stopped = true;
+        self.stdin = None;
+        let code = self.reap(self.limits.stop_grace);
+        let _ = self.child.kill();
+        let status = self.child.wait().ok();
+        assert!(self.stdin.is_none());
+        code.or_else(|| status.and_then(|status| status.code()))
+    }
+
+    #[cfg(unix)]
     fn stop_group(&mut self) -> Option<i32> {
         if self.stopped {
             return None;
@@ -1097,6 +1120,14 @@ struct DurableIo {
 }
 
 impl DurableIo {
+    /// Refuses durable harness input and output where no owner-only FIFO and inherited
+    /// lock exist. Takes the state folder, unused. Returns `launch_state_unavailable`.
+    #[cfg(not(unix))]
+    fn create(_state: &Path) -> Result<Self, LaunchError> {
+        Err(failure("launch_state_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn create(state: &Path) -> Result<Self, LaunchError> {
         validate_home(state).map_err(|_| failure("launch_state_unsafe"))?;
         let input = state.join(DURABLE_INPUT);
@@ -1156,6 +1187,7 @@ impl DurableIo {
 /// Reports whether any process still holds the lock a durable harness took on its output
 /// log, which it and its whole process group inherit. Input: a read-only open of the log.
 /// Output: true while a holder lives; the probe's own lock is released before returning.
+#[cfg(unix)]
 pub fn holder_alive(probe: &File) -> bool {
     match rustix::fs::flock(probe, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => {
@@ -1164,6 +1196,34 @@ pub fn holder_alive(probe: &File) -> bool {
         }
         Err(error) => error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN,
     }
+}
+
+/// Reports whether any handle still holds an exclusive lock on a durable harness output
+/// log, through the standard file lock. Input: a read-only open of the log.
+/// Output: true while a holder lives; the probe's own lock is released before returning.
+#[cfg(not(unix))]
+pub fn holder_alive(probe: &File) -> bool {
+    match probe.try_lock() {
+        Ok(()) => {
+            let _ = probe.unlock();
+            false
+        }
+        Err(error) => matches!(error, std::fs::TryLockError::WouldBlock),
+    }
+}
+
+/// Turns a child's stdin pipe into the file the session writes prompts to.
+/// Takes the pipe. Returns a file owning the same descriptor.
+#[cfg(unix)]
+fn stdin_file(pipe: std::process::ChildStdin) -> File {
+    File::from(OwnedFd::from(pipe))
+}
+
+/// Turns a child's stdin pipe into the file the session writes prompts to.
+/// Takes the pipe. Returns a file owning the same handle.
+#[cfg(windows)]
+fn stdin_file(pipe: std::process::ChildStdin) -> File {
+    File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
 fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {

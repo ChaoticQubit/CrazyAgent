@@ -5,10 +5,12 @@ use crate::plugins::{
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction};
+#[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -554,6 +556,14 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
         .map_err(|_| failure("launch_context_unavailable"))
 }
 
+/// Refuses launch context files where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn lock(_home: &Path) -> Result<File, LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
+#[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
     let file = File::from(
         rustix::fs::open(
@@ -586,6 +596,14 @@ fn remove(path: &Path) {
     }
 }
 
+/// Refuses launch context files where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn directory(_path: &Path, _private: bool) -> Result<(), LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
+#[cfg(unix)]
 fn directory(path: &Path, private: bool) -> Result<(), LaunchError> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -602,6 +620,14 @@ fn directory(path: &Path, private: bool) -> Result<(), LaunchError> {
     Ok(())
 }
 
+/// Refuses launch context files where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn create(_path: &Path) -> Result<File, LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
+#[cfg(unix)]
 fn create(path: &Path) -> Result<File, LaunchError> {
     Ok(File::from(
         rustix::fs::open(
@@ -613,6 +639,14 @@ fn create(path: &Path) -> Result<File, LaunchError> {
     ))
 }
 
+/// Refuses launch context files where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn write_private(_path: &Path, _bytes: &[u8]) -> Result<(), LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
+#[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
     let mut file = create(path)?;
     file.write_all(bytes)
@@ -665,6 +699,14 @@ fn copy_tree(
     Ok(())
 }
 
+/// Refuses launch context files where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn copy_file(_source: &Path, _target: &Path, _budget: &mut Budget) -> Result<(), LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
+#[cfg(unix)]
 fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), LaunchError> {
     let from = File::from(
         rustix::fs::open(

@@ -126,6 +126,22 @@ impl TranscriptReader {
     }
 }
 
+/// Opens a transcript only when the path itself is a regular file, never a link's target:
+/// the open takes the reparse point rather than following it. Takes the path.
+/// Returns the file, or none for a link, a directory or an open failure.
+#[cfg(windows)]
+fn open_plain(path: &Path) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+#[cfg(unix)]
 fn open_plain(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
