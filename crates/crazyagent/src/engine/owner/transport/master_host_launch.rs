@@ -1,14 +1,18 @@
+#[cfg(unix)]
+use super::Identity;
 use super::master_runtime::MasterHostLaunch;
-use super::{EngineError, Identity, OwnerRuntimeHandle, Root, failure};
+use super::{EngineError, OwnerRuntimeHandle, Root, failure};
 use crate::config::ModelEndpoint;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::io_error;
-use crate::engine::owner::{is_hex_id, random_id};
+use crate::engine::owner::is_hex_id;
+#[cfg(unix)]
+use crate::engine::owner::random_id;
 use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
-use crate::sandbox::{
-    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
-};
+use crate::sandbox::InstalledSandbox;
+#[cfg(unix)]
+use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 #[cfg(unix)]
@@ -21,13 +25,21 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
+#[cfg(unix)]
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
+#[cfg(unix)]
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
+#[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
+#[cfg(unix)]
 const MASTER_PROFILE: &str = "sandbox.sb";
+#[cfg(unix)]
 const HTTPS_PORT: u16 = 443;
+#[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const MASTER_CONFIG: [&str; 14] = [
     "model_provider=\"openai\"",
@@ -449,7 +461,7 @@ fn verify_master_capture(runtime: &Root, name: &str, capture: &File) -> Result<(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::Root;
     use super::*;

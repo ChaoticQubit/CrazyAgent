@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
+#[cfg(unix)]
 const KEYS: &str = "account-keys";
 const SECRET_MAX: usize = 8192;
 const LIST_PROBE: Duration = Duration::from_millis(400);
@@ -412,6 +413,7 @@ fn unknown() -> EngineError {
     failure("accounts_outcome_unknown")
 }
 
+#[cfg(unix)]
 fn key_name(credential: &CredentialRef) -> Result<&str, EngineError> {
     let name = credential.as_str();
     if name.starts_with('.') {

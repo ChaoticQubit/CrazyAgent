@@ -29,6 +29,7 @@ pub(super) struct MasterDispatch {
 }
 
 impl MasterDispatch {
+    #[cfg(unix)]
     pub(super) fn new() -> Self {
         let dispatcher = Self {
             entries: Vec::new(),

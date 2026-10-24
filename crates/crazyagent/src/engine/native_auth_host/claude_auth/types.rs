@@ -1,9 +1,9 @@
 use crate::adapters::claude::{AuthMethod, AuthStatus};
 use crate::engine::EngineError;
+#[cfg(unix)]
+use crate::engine::owner::AccountSecret;
 use crate::engine::owner::native_auth::presentation::ClaudeStatus;
-use crate::engine::owner::{
-    AccountSecret, NativeAuthAction, NativeAuthFact, NativeAuthMethod, NativeAuthPhase,
-};
+use crate::engine::owner::{NativeAuthAction, NativeAuthFact, NativeAuthMethod, NativeAuthPhase};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -100,6 +100,7 @@ impl fmt::Debug for ClaudeAuthObservation {
 }
 
 impl ClaudeAuthObservation {
+    #[cfg(unix)]
     pub(crate) fn status(status: &AuthStatus, exit: i32) -> Self {
         Self::Status {
             status: ClaudeStatus::from_native(status),
@@ -203,6 +204,7 @@ impl ClaudeAuthObservation {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn completion_bytes(secret: AccountSecret) -> Result<Vec<u8>, EngineError> {
     let mut bytes = secret.into_bytes();
     let valid = bytes.len() <= 8192

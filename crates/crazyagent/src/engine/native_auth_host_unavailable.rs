@@ -40,9 +40,13 @@ pub(in crate::engine) async fn dispatch(
 }
 
 pub(super) mod custody {
+    #[cfg(unix)]
     use crate::engine::EngineError;
+    #[cfg(unix)]
     use crate::engine::bootstrap::NativeProfileUsePurpose;
+    #[cfg(unix)]
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
+    #[cfg(unix)]
     use crate::protocol::RequestId;
     use std::io;
     use std::process::{Child, ExitStatus};
@@ -54,9 +58,12 @@ pub(super) mod custody {
 
     /// A sealed native sign-in custody session, which cannot exist without native profile
     /// custody. Every method below is unreachable by construction.
+    #[cfg(unix)]
     pub(in crate::engine) enum Retirement {}
 
+    #[cfg(unix)]
     impl Retirement {
+        #[cfg(unix)]
         pub(in crate::engine) fn revalidate(
             &self,
             _host: &HostStamp,

@@ -1,17 +1,22 @@
+#[cfg(unix)]
+use super::Server;
+use super::owner::OwnerRuntimeHandle;
+#[cfg(unix)]
+use super::owner::OwnerServer;
 use super::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerOperation, OwnerRead, OwnerReply, OwnerRequest,
     OwnerResponse,
 };
-use super::owner::{OwnerRuntimeHandle, OwnerServer};
 #[cfg(unix)]
 use super::verify_peer;
-use super::{Engine, EngineError, Server, io_error};
+use super::{Engine, EngineError, io_error};
 use crate::config::EffectiveConfig;
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId, SessionId};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
@@ -28,11 +33,12 @@ mod native_profiles;
 #[cfg(not(unix))]
 #[path = "bootstrap/native_profiles_unavailable.rs"]
 mod native_profiles;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
 
 const LOCATOR: &str = "owner-current";
+#[cfg(unix)]
 const LOCATOR_MAX: usize = 2048;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +120,7 @@ fn hex(value: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[cfg(unix)]
 fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
     if bytes.is_empty() || bytes.len() > LOCATOR_MAX {
         return Err(fail("owner_locator_bounds"));
@@ -236,8 +243,11 @@ impl Anchor {
 }
 
 struct PinnedLocator {
+    #[cfg(unix)]
     file: File,
+    #[cfg(unix)]
     identity: Identity,
+    #[cfg(unix)]
     bytes: Vec<u8>,
     value: Locator,
 }
@@ -382,6 +392,7 @@ pub(super) struct NativeBinding {
 }
 
 impl NativeBinding {
+    #[cfg(unix)]
     pub(in crate::engine) fn capture_native_profile_custody(
         &self,
     ) -> Result<NativeProfileCustody, EngineError> {
@@ -483,6 +494,7 @@ pub struct EngineService {
     anchor: Anchor,
     engine: Arc<Engine>,
     owner_runtime: Option<OwnerRuntimeHandle>,
+    #[cfg(unix)]
     timeout: Duration,
     generation: Option<(String, Identity)>,
     temporary: Option<Identity>,
@@ -687,6 +699,7 @@ impl EngineService {
             anchor,
             engine,
             owner_runtime: None,
+            #[cfg(unix)]
             timeout: Duration::from_millis(config.settings.timeout_ms),
             generation: None,
             temporary: None,
@@ -812,14 +825,6 @@ impl EngineService {
         Ok(())
     }
 
-    /// Refuses to create an owner generation without directory-relative Unix mkdir.
-    /// Takes the service.
-    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-    #[cfg(not(unix))]
-    fn create_generation(&mut self) -> Result<(), EngineError> {
-        Err(fail("owner_anchor_unavailable"))
-    }
-
     #[cfg(unix)]
     fn create_generation(&mut self) -> Result<(), EngineError> {
         for _ in 0..8 {
@@ -847,18 +852,6 @@ impl EngineService {
             }
         }
         Err(fail("owner_generation_collision_limit"))
-    }
-
-    /// Refuses to retire a stale engine socket where Unix domain sockets are not used.
-    /// Takes the socket name and previous locator, both unused.
-    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-    #[cfg(not(unix))]
-    async fn retire_socket(
-        &self,
-        _ordinary: &str,
-        _previous: Option<&PinnedLocator>,
-    ) -> Result<(), EngineError> {
-        Err(fail("owner_anchor_unavailable"))
     }
 
     #[cfg(unix)]
@@ -891,18 +884,6 @@ impl EngineService {
             rustix::fs::AtFlags::empty(),
         )
         .map_err(io_error)
-    }
-
-    /// Refuses to publish the owner locator without directory-relative Unix renames.
-    /// Takes the locator and the previous one, both unused.
-    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-    #[cfg(not(unix))]
-    fn publish(
-        &mut self,
-        _value: Locator,
-        _previous: Option<&PinnedLocator>,
-    ) -> Result<(), EngineError> {
-        Err(fail("owner_anchor_unavailable"))
     }
 
     #[cfg(unix)]
@@ -1110,7 +1091,7 @@ impl Drop for EngineService {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

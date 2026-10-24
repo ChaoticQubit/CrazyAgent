@@ -6,9 +6,6 @@ use sha2::{Digest, Sha256};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-pub(crate) const MAX_PROFILES: usize = 1024;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConfiguredRcliProfileMetadata {
     pub(crate) profile_ref: CredentialRef,

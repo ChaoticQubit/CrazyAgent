@@ -1,15 +1,18 @@
 use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
+#[cfg(unix)]
+use crate::terminal::HostError;
 use crate::terminal::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, TerminalFrame, TerminalRequest,
-    TerminalStream,
+    AgentId, CHUNK_BYTES_MAX, Host, INPUT_BYTES_MAX, TerminalFrame, TerminalRequest, TerminalStream,
 };
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
+#[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 
 /// An owner's live view of one agent terminal: its size at attach, then output and controls.
@@ -92,6 +95,7 @@ impl OwnerClient {
     /// Takes the terminal name; fails with the engine's plain code, such as
     /// `terminal_agent_unknown` or `terminal_unavailable`.
     /// Returns the session with the size, the screen then live output, and the controls.
+    #[cfg(unix)]
     pub async fn terminal_attach(&self, agent: AgentId) -> Result<TerminalSession, EngineError> {
         let unavailable = || failure("terminal_owner_unavailable");
         let (stream, cols, rows) = tokio::time::timeout(self.timeout, async {
@@ -198,6 +202,7 @@ async fn write(
         .map_err(io_error)
 }
 
+#[cfg(unix)]
 async fn act(
     host: &Arc<dyn Host>,
     agent: &AgentId,
@@ -257,6 +262,7 @@ async fn open(
 /// Records the lines the owner typed into a team sub-agent's terminal for the master's next
 /// turn. Takes the engine database, the team agent id and the lines. A failure loses only
 /// the note; the keys already reached the terminal.
+#[cfg(unix)]
 async fn heard(database: PathBuf, agent: i64, lines: Vec<String>) {
     let _ = tokio::task::spawn_blocking(move || {
         let connection = rusqlite::Connection::open_with_flags(
@@ -279,6 +285,31 @@ async fn heard(database: PathBuf, agent: i64, lines: Vec<String>) {
     .await;
 }
 
+#[cfg(not(unix))]
+impl OwnerClient {
+    /// Refuses a terminal view where the owner socket is a Unix domain socket the platform
+    /// does not have. Takes the terminal name, unused. Returns `terminal_owner_unavailable`.
+    pub async fn terminal_attach(&self, _agent: AgentId) -> Result<TerminalSession, EngineError> {
+        Err(failure("terminal_owner_unavailable"))
+    }
+}
+
+/// Never runs where no Unix domain socket can exist: its stream has no value, so there is
+/// no viewer to serve. Takes the same inputs as the Unix version, all unused.
+#[cfg(not(unix))]
+async fn watch(
+    stream: UnixStream,
+    _packet: &[u8; 37],
+    _admission: Admission,
+    _viewer: TerminalStream,
+    _host: Arc<dyn Host>,
+    _engine: &Engine,
+    _authority: &Authority,
+) {
+    match stream {}
+}
+
+#[cfg(unix)]
 async fn watch(
     stream: UnixStream,
     packet: &[u8; 37],

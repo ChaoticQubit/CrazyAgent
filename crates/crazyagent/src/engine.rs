@@ -1,4 +1,6 @@
-use crate::config::{EffectiveConfig, validate_settings};
+use crate::config::EffectiveConfig;
+#[cfg(unix)]
+use crate::config::validate_settings;
 #[cfg(unix)]
 use crate::platform::unix_socket::UnixListener;
 use crate::platform::unix_socket::UnixStream;
@@ -10,7 +12,9 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
@@ -688,7 +692,7 @@ impl Engine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
