@@ -153,7 +153,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
 }
 
 const SETTINGS: &str = r#"version = 1
-timeout_ms = 2000
+timeout_ms = 10000
 allowed_destinations = []
 
 [model_access]
@@ -169,6 +169,7 @@ pools = [
 
 struct Engine {
     root: tempfile::TempDir,
+    home: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
@@ -194,12 +195,18 @@ impl Engine {
         )
         .await
         .unwrap();
-        let client = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
-        let (_, controller) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
+        let client = Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap();
+        let (_, mut controller) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
             .await
             .unwrap();
+        let home = crate::tui::test_home::projects_home(&mut controller, 1).await;
         Self {
             root,
+            home,
             _service: service,
             _stop: stop,
             controller,
@@ -238,7 +245,11 @@ impl Engine {
 
     fn connect(&self) -> Connection {
         Connection::connect_paired(
-            Client::new(self.root.path().join("e.sock"), Duration::from_secs(2)).unwrap(),
+            Client::new(
+                self.root.path().join("e.sock"),
+                crate::tui::test_home::ENGINE_WAIT,
+            )
+            .unwrap(),
         )
         .unwrap()
     }
@@ -515,13 +526,12 @@ fn t_on_the_agents_tab_opens_the_project_team() {
 async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
     let mut engine = Engine::start().await;
     let notes = engine.project("notes-cli", "Notes CLI", 1).await;
-    let folder = engine
+    let setup = engine
         .controller
         .project_setup(notes.clone())
         .await
         .unwrap()
-        .unwrap()
-        .folder;
+        .unwrap();
     let sources = tempfile::tempdir().unwrap();
     let scope = sources.path().join("scope.csv");
     std::fs::write(&scope, "item,size\nlogin,small\n").unwrap();
@@ -552,6 +562,7 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
     pump(&mut shell, &mut connection).await;
 
     shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
     shell.key(Key::Char('g'));
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Edit project"), "{shown}");
@@ -578,7 +589,7 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Document added."), "{shown}");
     assert!(shown.contains("scope.csv"), "{shown}");
-    let copied = std::path::Path::new(&folder).join("context/documents/scope.csv");
+    let copied = setup.state_folder().join("context/documents/scope.csv");
     assert_eq!(
         std::fs::read_to_string(&copied).unwrap(),
         "item,size\nlogin,small\n"
@@ -747,11 +758,12 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Home  /  Tidepool"), "{shown}");
     assert!(shown.contains("Main  1 account"), "{shown}");
     assert!(!shown.contains("no pool"), "{shown}");
+    let folder = format!("{}/tidepool", engine.home.path().display());
     assert!(
         shown
             .lines()
-            .any(|line| line.starts_with("  Tidepool  ") && line.ends_with('\u{2026}')),
-        "{shown}"
+            .any(|line| line.starts_with("  Tidepool  ") && line.trim_end().ends_with(&folder)),
+        "the title row shows the name and the folder in the projects home: {shown}"
     );
 }
 

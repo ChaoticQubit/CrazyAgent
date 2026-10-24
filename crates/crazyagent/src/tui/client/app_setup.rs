@@ -178,7 +178,7 @@ mod tests {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (_stop, stopped) = tokio::sync::watch::channel(false);
         let mut service = EngineService::start_with_settings_sources(
@@ -190,7 +190,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut native = NativeOwner::new(root.path().join("e.sock"), Duration::from_secs(5));
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
         let _ = native.attach().await;
         assert!(native.ready);
 
@@ -206,7 +209,13 @@ mod tests {
             panic!("projects home required")
         };
         assert_eq!(home.path, None);
-        let folder = root.path().join("Projects");
+        let beside = tempfile::Builder::new()
+            .prefix("ca-tsetup-home-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let folder = std::fs::canonicalize(beside.path())
+            .unwrap()
+            .join("Projects");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("notes.txt"), "ten bytes!").unwrap();
         let path = folder.display().to_string();

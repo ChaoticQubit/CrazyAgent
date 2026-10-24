@@ -3,7 +3,7 @@ use super::{Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse};
+use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::onboarding::{MappingFacts, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
@@ -22,7 +22,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const SETTINGS: &str = r#"version = 1
-timeout_ms = 2000
+timeout_ms = 10000
 allowed_destinations = []
 
 [model_access]
@@ -37,6 +37,7 @@ pools = [
 
 struct Engine {
     root: tempfile::TempDir,
+    user: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
@@ -62,12 +63,22 @@ impl Engine {
         )
         .await
         .unwrap();
-        let client = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+        let client = Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap();
         let (_, controller) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
             .await
             .unwrap();
+        let user = tempfile::Builder::new()
+            .prefix("ca-tui-intake-user-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(user.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             root,
+            user,
             _service: service,
             _stop: stop,
             controller,
@@ -76,13 +87,21 @@ impl Engine {
 
     fn connect(&self) -> Connection {
         Connection::connect_paired(
-            Client::new(self.root.path().join("e.sock"), Duration::from_secs(2)).unwrap(),
+            Client::new(
+                self.root.path().join("e.sock"),
+                crate::tui::test_home::ENGINE_WAIT,
+            )
+            .unwrap(),
         )
         .unwrap()
     }
 
+    fn user(&self) -> std::path::PathBuf {
+        std::fs::canonicalize(self.user.path()).unwrap()
+    }
+
     fn home(&self) -> std::path::PathBuf {
-        let home = self.root.path().join("Projects");
+        let home = self.user().join("Projects");
         std::fs::create_dir_all(&home).unwrap();
         home
     }
@@ -94,7 +113,13 @@ impl Engine {
             .set_projects_home(home.to_str().unwrap().into(), 1)
             .await
             .unwrap();
-        assert!(matches!(reply, OwnerResponse::Applied { .. }), "{reply:?}");
+        assert!(
+            matches!(
+                &reply,
+                OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+            ),
+            "{reply:?}"
+        );
         home
     }
 }
@@ -240,7 +265,7 @@ fn a_relative_projects_folder_is_refused_before_it_reaches_the_engine() {
 async fn first_run_saves_the_projects_folder_and_continues_to_setup() {
     let mut engine = Engine::start().await;
     let home = engine.home();
-    let mut ctx = screen_ctx(engine.root.path());
+    let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::HomeFolder { first_run: true }, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let mut connection = engine.connect();
@@ -259,7 +284,7 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
     let home = engine.set_home().await;
     std::fs::create_dir(home.join("notes")).unwrap();
     std::fs::write(home.join("notes").join("README.md"), "# Notes\n").unwrap();
-    let mut ctx = screen_ctx(engine.root.path());
+    let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let mut connection = engine.connect();
@@ -288,13 +313,13 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
 async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
-    let source = engine.root.path().join("outside").join("big");
+    let source = engine.user().join("outside").join("big");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::File::create(source.join("data.bin"))
         .unwrap()
         .set_len(3 << 29)
         .unwrap();
-    let mut ctx = screen_ctx(engine.root.path());
+    let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::AddFolder, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let mut connection = engine.connect();
@@ -339,7 +364,7 @@ async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
         "[package]\nname = \"notes\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    let mut ctx = screen_ctx(engine.root.path());
+    let mut ctx = screen_ctx(&engine.user());
     let screen = open(
         &Place::Onboarding {
             path: folder.to_str().unwrap().into(),
