@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const KEY: &str = "sk-stand-in-5521";
-const STAND_IN: &str =
-    "#!/bin/sh\n/bin/stty raw -echo\nprintf 'stand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+const STAND_IN: &str = "#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+const SLOW_STAND_IN: &str = "#!/bin/sh\nprintf 'stand-in starting\\n'\n/bin/sleep 3\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 
 struct Server {
     tmux: PathBuf,
@@ -135,4 +135,61 @@ fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_w
     assert!(!key_file.exists());
     let config = std::fs::read_to_string(home.join(".claude.json")).unwrap();
     assert!(config.contains("hasCompletedOnboarding"));
+}
+
+#[test]
+fn the_first_prompt_waits_until_the_app_reads_keys_itself() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-pane-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    private(&root_path);
+    let tmux = installed(&root_path).expect("tmux must be installed on this machine");
+    let folder = root_path.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let home = root_path.join("home");
+    let work = root_path.join("work");
+    let bin = root_path.join("bin");
+    for path in [&home, &work, &bin] {
+        private(path);
+    }
+    let executable = bin.join("claude");
+    std::fs::write(&executable, SLOW_STAND_IN).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = root_path.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work,
+        account: AccountBinding::ApiKey {
+            home: home.clone(),
+            key: Secret::new(KEY.into()).unwrap(),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        limits: LaunchLimits::default(),
+    };
+    let agent = AgentId::new("stand-in-2").unwrap();
+    let mut session = TerminalSession::start(host.clone(), agent, request, None).unwrap();
+    let started = Instant::now();
+    session.send("first prompt").unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the prompt goes in once the app reads keys, not after the whole ready wait"
+    );
+    let pasted = b"\x1b[200~first prompt\x1b[201~\r";
+    let seen = typed_until(&home.join("typed"), pasted);
+    assert!(
+        seen.ends_with(pasted),
+        "a prompt typed before the app reads keys loses its Enter: {seen:?}"
+    );
+    assert_eq!(session.stop(), None);
 }

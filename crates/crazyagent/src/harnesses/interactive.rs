@@ -15,6 +15,7 @@ pub const KEY_FILE: &str = ".crazyagent-key";
 pub const CLAUDE_PROJECT_NAME_MAX: usize = 200;
 #[cfg(unix)]
 const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
+const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
 const KEY_SCRIPT: &str = "CRAZYAGENT_API_KEY=\"$(/bin/cat -- \"$1\")\" || exit 1; export CRAZYAGENT_API_KEY; shift; exec \"$@\"";
 const KEY_SCRIPT_NAME: &str = "crazyagent-key";
@@ -405,6 +406,7 @@ fn claude_environment(request: &LaunchRequest, home: &str) -> Vec<(String, Strin
             "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(),
             home.to_owned(),
         ),
+        ("CLAUDE_CODE_TMPDIR".to_owned(), home.to_owned()),
         ("DISABLE_TELEMETRY".to_owned(), "1".to_owned()),
         (
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
@@ -562,7 +564,8 @@ pub fn prepare_claude_home(_home: &Path, _project: &Path) -> Result<(), LaunchEr
 }
 
 /// Answers Claude Code's first-run questions in an agent's own config home before its app
-/// starts: onboarding is marked done and the project folder trusted, keeping every other
+/// starts: onboarding is marked done, the project folder trusted and the local placeholder
+/// key approved (Claude Code records a key by its last 20 characters), keeping every other
 /// setting, such as a sign-in. Inputs: the config home and the project folder.
 /// Output: Ok, or a plain code when the existing file is unsafe or not a JSON object.
 #[cfg(unix)]
@@ -600,6 +603,23 @@ pub fn prepare_claude_home(home: &Path, project: &Path) -> Result<(), LaunchErro
         .as_object_mut()
         .ok_or_else(|| failure("launch_claude_config_invalid"))?;
     entry.insert("hasTrustDialogAccepted".into(), true.into());
+    assert!(LOCAL_PLACEHOLDER_KEY.len() <= CLAUDE_KEY_TAIL_CHARS);
+    let responses = object
+        .entry("customApiKeyResponses")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| failure("launch_claude_config_invalid"))?;
+    for (list, approved) in [("approved", true), ("rejected", false)] {
+        let keys = responses
+            .entry(list)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| failure("launch_claude_config_invalid"))?;
+        keys.retain(|key| key != LOCAL_PLACEHOLDER_KEY);
+        if approved {
+            keys.push(LOCAL_PLACEHOLDER_KEY.into());
+        }
+    }
     let encoded =
         serde_json::to_vec_pretty(&config).map_err(|_| failure("launch_claude_config_invalid"))?;
     let staged = home.join(".claude.json.crazyagent");

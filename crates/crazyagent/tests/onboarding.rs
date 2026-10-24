@@ -837,7 +837,7 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
+async fn an_onboarded_folder_in_the_home_shows_as_onboarding_until_both_steps_are_done() {
     let mut bench = Bench::start(|_| {}).await;
     let home = bench.repo.parent().unwrap().to_str().unwrap().to_owned();
     bench.generation += 1;
@@ -878,12 +878,14 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
         OnboardingLimits::default(),
         Duration::from_millis(50),
     );
-    bench.settle(&project, Duration::from_secs(60)).await;
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
     stop_service(service).await;
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
     let settled = bench.owner.found_projects().await.unwrap();
     assert_eq!(
         listed(&settled),
-        vec![(FoundState::Ready, Some(project), true)]
+        vec![(FoundState::Onboarding, Some(project), true)],
+        "a failed step keeps the project setting up; Ready needs both steps done"
     );
     bench.stop().await;
 }

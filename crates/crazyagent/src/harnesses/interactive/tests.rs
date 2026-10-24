@@ -414,7 +414,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
             ("LANG".to_owned(), LOCALE.to_owned()),
             ("LC_ALL".to_owned(), LOCALE.to_owned()),
             ("CLAUDE_CONFIG_DIR".to_owned(), home.clone()),
-            ("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(), home),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(), home.clone()),
+            ("CLAUDE_CODE_TMPDIR".to_owned(), home),
             ("DISABLE_TELEMETRY".to_owned(), "1".to_owned()),
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
@@ -608,6 +609,10 @@ fn a_claude_home_skips_first_run_questions_and_keeps_its_sign_in() {
         config["projects"][project.to_str().unwrap()]["hasTrustDialogAccepted"],
         true
     );
+    assert_eq!(
+        config["customApiKeyResponses"]["approved"],
+        serde_json::json!([LOCAL_PLACEHOLDER_KEY])
+    );
     let mode = std::fs::metadata(case.home().join(".claude.json"))
         .unwrap()
         .permissions()
@@ -616,7 +621,7 @@ fn a_claude_home_skips_first_run_questions_and_keeps_its_sign_in() {
 
     std::fs::write(
         case.home().join(".claude.json"),
-        "{\"oauthAccount\":{\"emailAddress\":\"owner@example.test\"},\"projects\":{\"/other\":{\"allowedTools\":[\"Read\"]}}}",
+        "{\"oauthAccount\":{\"emailAddress\":\"owner@example.test\"},\"projects\":{\"/other\":{\"allowedTools\":[\"Read\"]}},\"customApiKeyResponses\":{\"approved\":[\"owner-approved-tail\"],\"rejected\":[\"crazyagent-local\",\"owner-rejected-tail\"]}}",
     )
     .unwrap();
     prepare_claude_home(&case.home(), &project).unwrap();
@@ -624,6 +629,13 @@ fn a_claude_home_skips_first_run_questions_and_keeps_its_sign_in() {
         serde_json::from_slice(&std::fs::read(case.home().join(".claude.json")).unwrap()).unwrap();
     assert_eq!(config["oauthAccount"]["emailAddress"], "owner@example.test");
     assert_eq!(config["projects"]["/other"]["allowedTools"][0], "Read");
+    assert_eq!(
+        config["customApiKeyResponses"],
+        serde_json::json!({
+            "approved": ["owner-approved-tail", LOCAL_PLACEHOLDER_KEY],
+            "rejected": ["owner-rejected-tail"]
+        })
+    );
     assert_eq!(
         config["projects"][project.to_str().unwrap()]["hasTrustDialogAccepted"],
         true
