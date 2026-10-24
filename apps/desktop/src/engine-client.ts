@@ -1,4 +1,4 @@
-import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
+import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
@@ -856,6 +856,87 @@ export interface PackEntry {
 export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
+}
+
+/** What one node of a project's team graph stands for: the master, one harness with its
+ * agent count, or one agent. */
+export type GraphNodeKind = "master" | "harness_group" | "agent";
+export type GraphEdgeState = "sent" | "running" | "done" | "failed";
+
+/** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
+ * links an agent to its harness group and a group to the master; `terminal` is the name the
+ * terminal commands take, for the master and agents that have one. */
+export interface GraphNode {
+  id: string;
+  kind: GraphNodeKind;
+  parent: string | null;
+  label: string;
+  harness: string;
+  status: TeamAgentStatus | null;
+  status_label: string | null;
+  account: string | null;
+  agents: number | null;
+  terminal: string | null;
+}
+
+/** One task edge from the master to the agent running it, or to its harness group before
+ * that. `reply` is the result or the plain problem once the task ended. */
+export interface GraphEdge {
+  from: string;
+  to: string;
+  task_id: number;
+  source: "master" | "owner";
+  text: string;
+  state: GraphEdgeState;
+  reply: string | null;
+}
+
+/** One project's team as a graph: the master, harness groups, agents and task edges. */
+export interface TeamGraph {
+  project_id: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/** A control message on an attached terminal channel: the terminal's size once attached,
+ * then a close with a plain reason, or a rejection with a plain code when it never attached. */
+export type TerminalFrame =
+  | { kind: "attached"; agent_id: string; cols: number; rows: number }
+  | { kind: "closed"; reason: string }
+  | { kind: "rejected"; code: string };
+
+/** One message on an attached terminal channel: raw screen or output bytes, in order (the
+ * current screen first), or a control frame. */
+export type TerminalMessage = ArrayBuffer | TerminalFrame;
+
+/** Reads one project's team graph. Input: the project id. Output: nodes and task edges. */
+export function teamGraph(id: string): Promise<TeamGraph> {
+  return invoke<TeamGraph>("desktop_team_graph", { id });
+}
+
+/** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
+ * and then live output until the terminal closes or the view detaches. Inputs: the terminal
+ * name and the channel. Output: resolves once the engine accepted the attach. */
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<void> {
+  return invoke<void>("desktop_terminal_attach", { agent, output });
+}
+
+/** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
+ * and 1 to 4096 bytes. Output: resolves once the bridge queued them in order. */
+export function terminalInput(agent: string, bytes: number[]): Promise<void> {
+  return invoke<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
+ * name, columns and rows, each from 2 to 1000. Output: resolves once queued. */
+export function terminalResize(agent: string, cols: number, rows: number): Promise<void> {
+  return invoke<void>("desktop_terminal_resize", { agent, cols, rows });
+}
+
+/** Closes this window's view of an agent terminal; the agent keeps running. Input: the
+ * terminal name. Output: resolves once the view is gone. */
+export function terminalDetach(agent: string): Promise<void> {
+  return invoke<void>("desktop_terminal_detach", { agent });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

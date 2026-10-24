@@ -30,6 +30,7 @@ pub mod picker;
 mod plugins;
 pub mod project_setup;
 mod team;
+pub mod terminal;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};

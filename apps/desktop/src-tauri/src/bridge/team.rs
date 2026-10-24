@@ -3,7 +3,7 @@ use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::{TeamAction, TeamStatus};
 
-fn read_failure(code: &str) -> BridgeError {
+pub(super) fn read_failure(code: &str) -> BridgeError {
     failure(match code {
         "project_setup_missing" => "project_setup_missing",
         "project_missing" => "project_missing",
