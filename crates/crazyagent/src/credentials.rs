@@ -1,6 +1,12 @@
 use crate::protocol::CredentialRef;
 use std::fmt;
 
+#[cfg(target_os = "macos")]
+#[path = "credential_store/macos.rs"]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Keychain;
+
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 63;
 
