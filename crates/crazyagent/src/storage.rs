@@ -140,6 +140,17 @@ pub(crate) enum Job {
         Result<(), String>,
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
+    SetupPlan(
+        Admission,
+        Box<OwnerRequest>,
+        oneshot::Sender<Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError>>,
+    ),
+    SetupRecord(
+        Admission,
+        Box<OwnerRequest>,
+        Result<crate::project_setup::Staged, String>,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
+    ),
     OwnerApply(
         Admission,
         OwnerRequest,
@@ -479,12 +490,26 @@ impl Storage {
                                 }
                             );
                             let result = settings::ensure_clear(&connection).and_then(|()| {
-                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(&effect))
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Home(&effect)))
                             });
                             if moved_home && result.is_ok() {
                                 drop(home_watch.take());
                                 home_watch = projects_home::watch_saved(&connection);
                             }
+                            let _ = reply.send(result);
+                        }
+                        Job::SetupPlan(admission, request, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                setup_plan(&mut connection, &config, &path, &admission, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::SetupRecord(admission, request, staged, reply) => {
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::NewProject(&staged)))
+                            });
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -1246,7 +1271,7 @@ fn execute(
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
         Command::OwnerSetup { action } => setup::apply_owner(tx, path, action),
         Command::ProjectSetup { action } => {
-            crate::project_setup::execute(tx, config, path, action, revision)
+            crate::project_setup::execute(tx, config, action, revision)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
         Command::Team { action } => crate::team::execute(
@@ -1850,18 +1875,54 @@ fn owner_apply(
     owner_apply_with(db, config, path, a, request, None)
 }
 
+/// The disk work the owner transport finished, off the storage actor, before
+/// an owner mutation is recorded: a folder moved or copied into the projects
+/// home, or a New Project folder built in its staging folder.
+#[derive(Clone, Copy)]
+enum Effect<'a> {
+    Home(&'a Result<(), String>),
+    NewProject(&'a Result<crate::project_setup::Staged, String>),
+}
+
+/// Plans a New Project before the owner transport builds its folder.
+/// Input: the connection, config, database path, owner admission and the
+/// SetupProject request. Output: the checked plan, or the refusal code the
+/// owner sees (`stale_revision` when the engine moved on); nothing on disk
+/// changes. An engine failure is an error, not a refusal.
+fn setup_plan(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+) -> Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError> {
+    let OwnerOperation::Apply { mutation } = &request.operation else {
+        return Err(error("owner_mutation_required"));
+    };
+    let Command::ProjectSetup { action } = mutation.command()? else {
+        return Err(error("setup_plan_invalid"));
+    };
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if owner_revision(&tx)? != request.expected_revision.value() {
+        return Ok(Err("stale_revision".into()));
+    }
+    crate::project_setup::plan_new(&tx, config, path, &action)
+}
+
 /// Applies one owner mutation, optionally with a disk effect already done.
-/// Input: as `owner_apply`, plus the owner transport's result of moving or
-/// copying a folder for AddExistingFolder. Output: the recorded receipt; an
-/// add is checked on disk and recorded even when the revision moved meanwhile,
-/// because its revision was checked before the effect.
+/// Input: as `owner_apply`, plus the owner transport's finished disk work for
+/// AddExistingFolder, MoveProjectsHome or New Project. Output: the recorded
+/// receipt; such a mutation is checked again and recorded even when the
+/// revision moved meanwhile, because its revision was checked before the
+/// effect.
 fn owner_apply_with(
     db: &mut Connection,
     config: &EffectiveConfig,
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
-    effect: Option<&Result<(), String>>,
+    effect: Option<Effect<'_>>,
 ) -> Result<OwnerApplied, EngineError> {
     request.validate()?;
     let OwnerOperation::Apply { mutation } = &request.operation else {
@@ -1890,14 +1951,16 @@ fn owner_apply_with(
             current_revision: Cursor::new(revision),
         });
     }
-    let outcome = if let Some(effect) = effect {
-        projects_home::record(&tx, path, &command, effect)?
-    } else if request.expected_revision.value() != revision {
-        Outcome::Rejected {
-            code: "stale_revision".into(),
+    let outcome = match (effect, &command) {
+        (Some(Effect::Home(effect)), _) => projects_home::record(&tx, path, &command, effect)?,
+        (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
+            crate::project_setup::record_new(&tx, config, action, staged)?
         }
-    } else {
-        execute(&tx, config, path, &command, revision)?
+        (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
+        (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {
+            code: "stale_revision".into(),
+        },
+        (None, _) => execute(&tx, config, path, &command, revision)?,
     };
     let (result, changed) = match outcome {
         Outcome::Applied => {
