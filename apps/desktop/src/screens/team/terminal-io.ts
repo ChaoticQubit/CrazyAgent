@@ -77,6 +77,26 @@ export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped:
   };
 }
 
+export const PROMPT_CHARS_MAX = 8000;
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+
+/** Turns a prompt from the composer into the keys an interactive agent app reads: control
+ * characters other than tab and newline are dropped, lines end in carriage returns, a
+ * multi-line prompt is wrapped as a bracketed paste when the app asked for one, and Enter
+ * follows. Inputs: the text and whether the app turned bracketed paste on. Output: the bytes,
+ * empty for a blank prompt. */
+export function promptBytes(text: string, bracketed: boolean): Uint8Array {
+  const clean = text.slice(0, PROMPT_CHARS_MAX)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "")
+    .replace(/\s+$/u, "");
+  if (!clean.trim()) return new Uint8Array();
+  const body = clean.replace(/\n/g, "\r");
+  const wrapped = bracketed && clean.includes("\n") ? `${PASTE_START}${body}${PASTE_END}` : body;
+  return encodeTyped(`${wrapped}\r`);
+}
+
 /** What one terminal channel message means for the view. */
 export type TerminalEvent =
   | { kind: "output"; bytes: Uint8Array }

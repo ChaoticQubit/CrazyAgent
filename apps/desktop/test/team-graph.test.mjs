@@ -262,3 +262,41 @@ test("the graph view waits for its first read before drawing", () => {
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /aria-label="Team graph"/);
 });
+
+test("a prompt from the composer reaches the agent as its text and Enter", () => {
+  const text = (bytes) => new TextDecoder().decode(bytes);
+  assert.equal(text(io.promptBytes("run the tests", false)), "run the tests\r");
+  assert.equal(text(io.promptBytes("run the tests  \n\n", true)), "run the tests\r");
+  assert.equal(text(io.promptBytes("first\nsecond", false)), "first\rsecond\r");
+  assert.equal(text(io.promptBytes("first\r\nsecond", true)), "\x1b[200~first\rsecond\x1b[201~\r");
+  assert.equal(text(io.promptBytes("one line", true)), "one line\r");
+  assert.equal(text(io.promptBytes("a\x1b[201~b\x07\tc", true)), "a[201~b\tc\r");
+  assert.equal(io.promptBytes("   \n ", true).length, 0);
+  assert.equal(text(io.promptBytes("é", false)), "é\r");
+  assert.equal(io.promptBytes("x".repeat(io.PROMPT_CHARS_MAX + 50), false).length, io.PROMPT_CHARS_MAX + 1);
+});
+
+test("the composer names who reads the prompt and says a sub-agent's master is told", () => {
+  const panel = (target) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: target, onClose() {} }));
+  const sub = panel(team.nodes[0]);
+  assert.match(sub, /<label for="tg-prompt-team-2" class="pj-sr">Prompt codex-2<\/label>/);
+  assert.match(sub, /placeholder="Tell codex-2 what to do\. Its master is told what you send\."/);
+  assert.match(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/);
+  assert.match(sub, /Opens once the terminal is live\./);
+  assert.match(sub, /<button type="submit" class="btn primary small" disabled=""/);
+  const master = panel(team.nodes[2]);
+  assert.match(master, /Prompt the master/);
+  assert.doesNotMatch(master, /Its master is told/);
+  assert.doesNotMatch(panel(node("team-5", "agent")), /tg-composer/);
+});
+
+test("the Agents tab shows the team graph above the team panel", async () => {
+  const agents = await import("../src/screens/project/agents.tsx");
+  const tab = {
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: { kind: "ok", value: { project_id: "p-1", jobs: [] } }, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: undefined, at: 0 }, reloadTeam: () => {},
+  };
+  const html = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tab }));
+  assert.match(html, /<section class="tg" aria-busy="true" aria-label="Team graph">/);
+});

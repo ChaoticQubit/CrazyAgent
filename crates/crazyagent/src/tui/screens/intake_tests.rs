@@ -5,7 +5,7 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::github::{GitHubMethod, GitHubStatus};
-use crate::onboarding::{MappingFacts, Onboarding, Step};
+use crate::onboarding::{MappingFacts, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
@@ -267,7 +267,6 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "notes"), "{rows:#?}");
     assert!(shows(&rows, "Not set up"), "{rows:#?}");
-    assert!(shows(&rows, "a Add project"), "{rows:#?}");
 
     shell.key(Key::Char('a'));
     assert_eq!(shell.place(), Some(Place::AddProject));
@@ -383,7 +382,7 @@ fn waiting_review() -> (Shell, ProjectId) {
     );
     let mut shell = Shell::with(ctx, screen);
     while shell.ctx.next_request().is_some() {}
-    let draft = Onboarding {
+    let draft = OnboardingView {
         project_id: project.clone(),
         graph: Step::Done,
         mapping: Step::Failed {
@@ -406,6 +405,7 @@ fn waiting_review() -> (Shell, ProjectId) {
             entry_points: vec!["src/main.rs".into()],
         },
         missing: vec!["about".into(), "platforms".into()],
+        overview: None,
     };
     shell.arrive(intake(
         IntakeQuery::Onboarding {

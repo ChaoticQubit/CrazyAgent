@@ -2,7 +2,7 @@ use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
-use crate::onboarding::{Onboarding, Step};
+use crate::onboarding::{OnboardingView, Step};
 use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
@@ -60,7 +60,7 @@ impl Focus {
 /// The review form filled from the onboarding draft. The owner fixes the
 /// fields the engine marked missing and confirms it as the project's setup.
 struct Review {
-    onboarding: Box<Onboarding>,
+    onboarding: Box<OnboardingView>,
     name: TextField,
     about: TextField,
     stack: TextField,
@@ -71,7 +71,7 @@ struct Review {
 }
 
 impl Review {
-    fn new(onboarding: Box<Onboarding>) -> Self {
+    fn new(onboarding: Box<OnboardingView>) -> Self {
         let mut name = TextField::new("Name", NAME_BYTES_MAX);
         name.set(&onboarding.name);
         let mut about = TextField::new("About", ABOUT_CHARS_MAX);
@@ -152,7 +152,7 @@ impl Review {
 enum Phase {
     Pool { selected: usize },
     Starting,
-    Running(Load<Box<Onboarding>>),
+    Running(Load<Box<OnboardingView>>),
     Review(Box<Review>),
     Confirming(Box<Review>),
 }
@@ -222,7 +222,7 @@ impl OnboardingPage {
         }
     }
 
-    fn settled(onboarding: &Onboarding) -> bool {
+    fn settled(onboarding: &OnboardingView) -> bool {
         let done = |step: &Step| matches!(step, Step::Done | Step::Failed { .. });
         done(&onboarding.graph) && done(&onboarding.mapping)
     }

@@ -5,7 +5,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, inputQueue, terminalEvent, terminalSize } from "./terminal-io";
+import { PROMPT_CHARS_MAX, encodeBinary, encodeTyped, endCopy, inputQueue, promptBytes, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -26,6 +26,35 @@ export function typingNote(node: GraphNode): string {
     : "Typing goes straight to this agent. The master gets a note of what you type.";
 }
 
+/** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
+export function promptCopy(node: GraphNode): { label: string; placeholder: string } {
+  return node.kind === "master"
+    ? { label: "Prompt the master", placeholder: "Tell the master what to do next" }
+    : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
+}
+
+function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
+  const [text, setText] = useState("");
+  const id = `tg-prompt-${node.id}`;
+  const copy = promptCopy(node);
+  const blank = !text.trim();
+  const send = () => {
+    if (!live || blank) return;
+    if (onSend(text)) setText("");
+  };
+  return <form className="tg-composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
+    <label htmlFor={id} className="pj-sr">{displayText(copy.label)}</label>
+    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} maxLength={PROMPT_CHARS_MAX} disabled={!live}
+      placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
+      onChange={(event) => setText(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); send(); } }} />
+    <div className="tg-composer-foot">
+      <span className="tg-terminal-note" id={`${id}-help`}>{live ? "Sends the text, then Enter. Cmd+Enter to send." : "Opens once the terminal is live."}</span>
+      <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || blank}>Send</Button>
+    </div>
+  </form>;
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel. Closing it detaches
  * the view; the agent keeps running. Inputs: the graph node, a harness name lookup and the
@@ -36,6 +65,7 @@ export function TerminalPanel({ node, harness, onClose }: {
   onClose: () => void;
 }) {
   const screen = useRef<HTMLDivElement>(null);
+  const prompt = useRef<((text: string) => boolean) | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [round, setRound] = useState(0);
   const name = node.terminal;
@@ -89,6 +119,14 @@ export function TerminalPanel({ node, harness, onClose }: {
       };
       const type = inputQueue(async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => end(STOPPED_TYPING));
       const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
+      prompt.current = (text) => {
+        if (!live) return false;
+        const bytes = promptBytes(text, terminal.modes.bracketedPasteMode);
+        if (!bytes.length) return false;
+        type(bytes);
+        terminal.focus();
+        return true;
+      };
       const binary = terminal.onBinary((data) => { if (live) type(encodeBinary(data)); });
       const resized = terminal.onResize(() => {
         window.clearTimeout(timer);
@@ -117,6 +155,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         }
       });
       release = () => {
+        prompt.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
         typed.dispose();
@@ -157,5 +196,6 @@ export function TerminalPanel({ node, harness, onClose }: {
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} />
     {view.kind === "live" && <p className="tg-terminal-note">{typingNote(node)}</p>}
+    {name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
   </section>;
 }

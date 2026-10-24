@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  addMemory, deleteMemory, dismissSuggestion, memorySuggestions, saveSuggestion, savedMemories,
-  type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
+  addMemory, deleteMemory, dismissSuggestion, memoryEdit, memorySuggestions, saveEditedSuggestion, saveSuggestion, savedMemories,
+  MEMORY_TEXT_BYTES_MAX, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, SearchField, Select, Skeleton, TextArea } from "../../ui";
@@ -45,10 +45,39 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
   </Panel>;
 }
 
-/** Settings, Memory as a pure view: research suggestions to save or dismiss (one click is the
- * owner's approval), saved memory for the chosen scope with search, older pages and delete,
- * and a form to add a memory. Inputs: the reads, filters, last failure and the actions. */
-export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onSave, onDismiss, onDelete, onMore, onRetry }: {
+/** One research suggestion rewritten in the owner's words before it is saved, like the TUI's
+ * edit key. Inputs: the suggestion, whether a save is running, and the save and cancel
+ * actions. Output: the inline editor, starting from the suggested text. */
+export function SuggestionEditor({ suggestion, pending, onSave, onCancel }: {
+  suggestion: Suggestion;
+  pending: boolean;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(suggestion.text);
+  const [error, setError] = useState<string>();
+  const id = `memory-edit-${suggestion.project_id}-${suggestion.id}`;
+  const save = () => {
+    const edit = memoryEdit(text);
+    setError(edit.kind === "invalid" ? edit.reason : undefined);
+    if (edit.kind === "ok") onSave(edit.text);
+  };
+  return <form className="stack-small grow" onSubmit={(event) => { event.preventDefault(); save(); }}
+    onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } }}>
+    <TextArea id={id} label={`Edit before saving (from ${suggestion.project_name})`} value={text} onValue={setText} rows={3}
+      maxLength={MEMORY_TEXT_BYTES_MAX} counterAt={MEMORY_TEXT_BYTES_MAX - 400} error={error} />
+    <span className="row">
+      <Button type="submit" variant="primary" size="small" icon="brain" pending={pending} pendingLabel="Saving...">Save edited</Button>
+      <Button size="small" onClick={onCancel}>Cancel</Button>
+    </span>
+  </form>;
+}
+
+/** Settings, Memory as a pure view: research suggestions to save, edit then save, or dismiss
+ * (one click is the owner's approval), saved memory for the chosen scope with search, older
+ * pages and delete, and a form to add a memory. Inputs: the reads, filters, last failure and
+ * the actions. */
+export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry }: {
   saved: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
   scope: string;
@@ -60,11 +89,13 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onScope: (scope: string) => void;
   onAdd: (text: string) => Promise<boolean>;
   onSave: (suggestion: Suggestion) => void;
+  onSaveEdited: (suggestion: Suggestion, text: string) => void;
   onDismiss: (suggestion: Suggestion) => void;
   onDelete: (memory: SavedMemory) => void;
   onMore: () => void;
   onRetry: () => void;
 }) {
+  const [editing, setEditing] = useState<string | null>(null);
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
   const filters = <span className="row">
@@ -91,13 +122,21 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
     <p className="secondary">Facts agents keep across projects. Nothing is saved here without your click.</p>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
     {suggested.kind === "ok" && suggested.value.length > 0 && <Panel title="Suggested" padded={false}><div className="rows">
-      {suggested.value.map((suggestion) => <div className="item-row" key={`${suggestion.project_id}/${suggestion.id}`}>
-        <div className="stack-small"><span>{suggestion.text}</span><span className="muted small">From {suggestion.project_name}</span></div>
-        <span className="row">
-          <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
-          <Button size="small" onClick={() => onDismiss(suggestion)}>Dismiss</Button>
-        </span>
-      </div>)}
+      {suggested.value.map((suggestion) => {
+        const key = `${suggestion.project_id}/${suggestion.id}`;
+        if (editing === key) return <div className="item-row" key={key}>
+          <SuggestionEditor suggestion={suggestion} pending={busy === suggestion.id} onCancel={() => setEditing(null)}
+            onSave={(text) => onSaveEdited(suggestion, text)} />
+        </div>;
+        return <div className="item-row" key={key}>
+          <div className="stack-small"><span>{suggestion.text}</span><span className="muted small">From {suggestion.project_name}</span></div>
+          <span className="row">
+            <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
+            <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
+            <Button size="small" onClick={() => onDismiss(suggestion)}>Dismiss</Button>
+          </span>
+        </div>;
+      })}
     </div></Panel>}
     <Panel title="Saved" actions={filters} padded={false}>{list}</Panel>
     <AddMemoryForm where={where} onAdd={onAdd} />
@@ -153,6 +192,7 @@ export function MemorySettings() {
         return true;
       }}
       onSave={(suggestion) => void act(suggestion.id, () => saveSuggestion(suggestion), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}
+      onSaveEdited={(suggestion, text) => void act(suggestion.id, () => saveEditedSuggestion(suggestion, text), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}
       onDismiss={(suggestion) => void act(suggestion.id, () => dismissSuggestion(suggestion), "Suggestion dismissed.", reloadSuggested)} />
     <ConfirmDialog open={Boolean(deleting)} title="Delete this memory?" confirmLabel="Delete" onCancel={() => setDeleting(undefined)}
       onConfirm={() => { const memory = deleting; setDeleting(undefined); if (memory) void act(memory.id, () => deleteMemory(memory.id), "Memory deleted.", reloadSaved); }}>

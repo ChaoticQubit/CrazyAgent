@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
+use crate::projects_home::FoundState;
 use std::os::unix::fs::PermissionsExt;
 
 fn private_root(prefix: &str) -> tempfile::TempDir {
@@ -24,31 +25,19 @@ fn a_token_job_answers_as_a_status_read_and_never_shows_the_token() {
 }
 
 #[test]
-fn a_started_onboarding_is_found_by_its_folder() {
-    let project = ProjectId::new("project-notes").unwrap();
-    let found = vec![
-        FoundProject {
-            name: "notes".into(),
-            path: "/Users/owner/Projects/notes".into(),
-            git: true,
-            known: false,
-            state: FoundState::Found,
-            project_id: None,
-        },
-        FoundProject {
-            name: "notes".into(),
-            path: "/Users/owner/Projects/notes".into(),
-            git: true,
-            known: true,
-            state: FoundState::Onboarding,
-            project_id: Some(project.clone()),
-        },
-    ];
-    assert_eq!(started(&found, "/Users/owner/Projects/notes"), Ok(project));
+fn a_started_onboarding_is_named_like_the_engine_names_it() {
     assert_eq!(
-        started(&found, "/Users/owner/Projects/other"),
-        Err("onboarding_missing".into())
+        started("/Users/owner/Projects/My Notes_v2"),
+        Ok(ProjectId::new("my-notes-v2").unwrap())
     );
+    assert_eq!(
+        started("/Users/owner/Projects/My Notes_v2"),
+        crate::onboarding::project_id_for(std::path::Path::new(
+            "/Users/owner/Projects/My Notes_v2"
+        ))
+        .map_err(|error| error.0)
+    );
+    assert_eq!(started("/"), Err("onboarding_path_invalid".into()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
