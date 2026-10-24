@@ -36,3 +36,31 @@ test("a receipt is applied only when the engine recorded it without rejection", 
   assert.deepEqual(api.receiptState({ ...base, outcome: "uncertain", pending: true, rejection: null }), { kind: "unconfirmed" });
   assert.deepEqual(api.receiptState({ ...base, outcome: "unavailable", pending: false, rejection: null }), { kind: "rejected", code: "unavailable" });
 });
+
+test("New Project reconciles once only when the engine answered OutcomeUnknown or the reply was lost", () => {
+  const base = { kind: "setup_project", generation: "4", project_id: "p", baseline_id: null, model_access: null, project_spec: null, operation_id: "o" };
+  assert.equal(api.needsReconcile({ ...base, outcome: "unknown", pending: true, rejection: null }), true);
+  assert.equal(api.needsReconcile({ ...base, outcome: "uncertain", pending: true, rejection: null }), true);
+  assert.equal(api.needsReconcile({ ...base, outcome: "applied", pending: false, rejection: null }), false);
+  assert.equal(api.needsReconcile({ ...base, outcome: "rejected", pending: false, rejection: "project_setup_bounds" }), false);
+  assert.equal(api.needsReconcile({ ...base, outcome: "not_recorded_at_barrier", pending: true, rejection: null }), false);
+  assert.equal(api.needsReconcile({ ...base, outcome: "unknown", pending: false, rejection: null }), false);
+});
+
+test("a reconciled New Project counts as created only when the reconcile settled the same kept intent", () => {
+  const base = { kind: "setup_project", generation: "4", project_id: "p", baseline_id: null, model_access: null, project_spec: null, operation_id: "o" };
+  const sent = { ...base, outcome: "unknown", pending: true, rejection: null };
+  const found = { ...base, outcome: "applied", pending: false, rejection: null };
+  const settled = (value) => api.receiptState(api.settledReceipt(sent, { kind: "ok", value }));
+  assert.deepEqual(api.settledReceipt(sent, { kind: "ok", value: found }), found);
+  assert.deepEqual(settled(found), { kind: "applied" });
+  assert.deepEqual(settled({ ...base, outcome: "unknown", pending: true, rejection: null }), { kind: "unconfirmed" });
+  assert.deepEqual(settled({ ...base, outcome: "not_recorded_at_barrier", pending: true, rejection: null }), { kind: "unconfirmed" });
+  assert.deepEqual(settled({ ...base, outcome: "rejected", pending: false, rejection: "project_name_taken" }), { kind: "rejected", code: "project_name_taken" });
+  assert.deepEqual(settled({ ...found, operation_id: "other" }), { kind: "unconfirmed" });
+  assert.deepEqual(settled({ ...found, project_id: "other" }), { kind: "unconfirmed" });
+  assert.deepEqual(settled({ ...found, kind: "create_project" }), { kind: "unconfirmed" });
+  assert.equal(api.settledReceipt(sent, { kind: "error", code: "no_pending_intent", message: "x" }), sent);
+  assert.equal(api.settledReceipt(sent, { kind: "error", code: "engine_unreachable", message: "x" }), sent);
+  assert.equal(api.settledReceipt(sent, { kind: "not_ready" }), sent);
+});

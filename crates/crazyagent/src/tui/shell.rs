@@ -1,3 +1,4 @@
+use super::client::app_setup::AppSetupEvent;
 use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
@@ -6,6 +7,7 @@ use super::frame::{
     too_small,
 };
 use super::keys::{Global, Key, global};
+use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
@@ -519,6 +521,17 @@ impl Shell {
                         .filter(|entry| entry.status == HarnessStatus::Ready)
                         .count();
                     self.ctx.store.harnesses = Load::Ready((ready, entries.len()));
+                }
+                if let Some(SettingsEvent::AppSetup(AppSetupEvent::Status(result))) =
+                    settings_event(&arrival)
+                {
+                    let store = &mut self.ctx.store;
+                    match result {
+                        Ok(status) => store.setup = Load::Ready(status.clone()),
+                        Err(_) if store.setup.ready().is_some() => {}
+                        Err(code) if not_ready(code) => store.setup = Load::NotReady,
+                        Err(code) => store.setup = Load::Failed(code.clone()),
+                    }
                 }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
@@ -1081,7 +1094,9 @@ mod tests {
             ))))
         };
 
-        let mut shell = at(Place::Home, ctx());
+        let mut known = ctx();
+        known.store.setup = Load::Ready(crate::tui::screens::home::tests::tools(&[]));
+        let mut shell = at(Place::Home, known);
         assert!(drain(&mut shell).contains(&"Settings".to_owned()));
         shell.arrive(reply(Err("controller_pending_intent".into())));
         assert_eq!(shell.ctx.store.harnesses, Load::NotReady);

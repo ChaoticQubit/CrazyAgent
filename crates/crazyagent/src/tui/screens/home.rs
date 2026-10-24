@@ -5,6 +5,8 @@ use super::settings_accounts::send;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::pools::{MemberStatus, PoolSummary};
 use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
+use crate::setup::{DependencyState, SetupStatus};
+use crate::tui::client::app_setup::AppSetupJob;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
@@ -23,6 +25,7 @@ const CARD_ROWS: usize = 4;
 const PANEL_WIDE: usize = 38;
 const PANEL_NARROW: usize = 30;
 const FILTER_CHARS_MAX: usize = 100;
+const TOOLS_TEXT_CHARS: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
@@ -41,19 +44,22 @@ enum Entry {
 }
 
 /// Setup progress shown in the "Get set up" panel.
-/// Input: engine pools. Output: which items are done; the panel hides when an
-/// account is ready and a pool exists.
+/// Input: engine pools and whether the tools are found. Output: which items are
+/// done; the panel hides when an account is ready, a pool exists and the tools
+/// are found.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Setup {
     pub account_ready: bool,
     pub pool_exists: bool,
+    pub tools_ready: bool,
     pub ready_in_first_pool: usize,
 }
 
 impl Setup {
-    /// Reads setup progress from the pool list.
-    /// Input: the pools. Output: whether a ready account and a pool exist.
-    pub fn of(pools: &[PoolSummary]) -> Self {
+    /// Reads setup progress from the pool list and the tools check.
+    /// Input: the pools and whether every tool is found. Output: whether a ready
+    /// account, a pool and the tools exist.
+    pub fn of(pools: &[PoolSummary], tools_ready: bool) -> Self {
         let ready = |pool: &PoolSummary| {
             pool.members
                 .iter()
@@ -65,6 +71,7 @@ impl Setup {
         Self {
             account_ready: pools.iter().any(|pool| ready(pool) > 0),
             pool_exists: !pools.is_empty(),
+            tools_ready,
             ready_in_first_pool: pools
                 .iter()
                 .map(ready)
@@ -76,8 +83,33 @@ impl Setup {
     /// True when nothing is left to set up.
     /// Input: none. Output: whether the panel hides.
     pub fn done(&self) -> bool {
-        self.account_ready && self.pool_exists
+        self.account_ready && self.pool_exists && self.tools_ready
     }
+}
+
+/// True while the engine still checks a tool's version in the background.
+/// Input: the setup status. Output: whether any tool reads Checking.
+fn checking(status: &SetupStatus) -> bool {
+    status
+        .dependencies
+        .iter()
+        .any(|tool| tool.state == DependencyState::Checking)
+}
+
+/// Names the tools the setup check did not find, in its order.
+/// Input: the setup status. Output: the labels of tools neither found nor installed.
+fn missing_tools(status: &SetupStatus) -> Vec<String> {
+    status
+        .dependencies
+        .iter()
+        .filter(|tool| {
+            !matches!(
+                tool.state,
+                DependencyState::Found { .. } | DependencyState::Installed { .. }
+            )
+        })
+        .map(|tool| tool.label.clone())
+        .collect()
 }
 
 /// Home: the project list and, until setup is done, the "Get set up" panel.
@@ -143,7 +175,15 @@ impl Home {
     }
 
     fn setup(ctx: &Ctx) -> Option<Setup> {
-        ctx.store.pools.ready().map(|pools| Setup::of(pools))
+        let tools_ready = ctx
+            .store
+            .setup
+            .ready()
+            .is_some_and(|status| missing_tools(status).is_empty());
+        ctx.store
+            .pools
+            .ready()
+            .map(|pools| Setup::of(pools, tools_ready))
     }
 
     fn panel_visible(ctx: &Ctx) -> bool {
@@ -195,8 +235,23 @@ impl Home {
         draft.into_iter().chain(folders).chain(projects).collect()
     }
 
-    fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 3] {
+    fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 4] {
         let setup = Self::setup(ctx).unwrap_or_default();
+        let missing = ctx
+            .store
+            .setup
+            .ready()
+            .filter(|status| !checking(status))
+            .map(missing_tools)
+            .unwrap_or_default();
+        let tools = if missing.is_empty() {
+            vec!["Agents need tmux, uv and".into(), "Graphify.".into()]
+        } else {
+            wrap(
+                &format!("Missing: {}.", missing.join(", ")),
+                TOOLS_TEXT_CHARS,
+            )
+        };
         let harness = match &ctx.store.harnesses {
             Load::Ready((ready, all)) => vec![
                 format!("{ready} of {all} harnesses ready"),
@@ -229,6 +284,12 @@ impl Home {
                 "Check your harnesses",
                 harness,
                 Place::Settings(SettingsSection::Harnesses),
+            ),
+            (
+                setup.tools_ready,
+                "Install tools",
+                tools,
+                Place::Setup { first_run: false },
             ),
         ]
     }
@@ -641,6 +702,48 @@ impl Home {
         lines
     }
 
+    /// True once the tools check has a final answer: every tool checked, or the
+    /// read failed or is not in this build.
+    /// Input: the context. Output: whether the tools item is settled.
+    fn checked(ctx: &Ctx) -> bool {
+        match &ctx.store.setup {
+            Load::Ready(status) => !checking(status),
+            Load::Failed(_) | Load::NotReady => true,
+            Load::Idle | Load::Loading => false,
+        }
+    }
+
+    /// Says "Setup done." when the last item gets done, and focuses the panel
+    /// on the first answer when something is left.
+    /// Input: the context, once pools and the tools check have answered.
+    /// Output: none.
+    fn notice(&mut self, ctx: &mut Ctx) {
+        if !Self::checked(ctx) {
+            return;
+        }
+        let (Some(setup), Some(pools)) = (Self::setup(ctx), ctx.store.pools.ready()) else {
+            return;
+        };
+        let pool = pools
+            .iter()
+            .find(|pool| !pool.members.is_empty())
+            .map_or_else(String::new, |pool| pool.name.clone());
+        if self.was_done == Some(false) && setup.done() {
+            let count = setup.ready_in_first_pool;
+            ctx.say(Message::success(
+                "Setup done.",
+                &format!(
+                    "{count} account{} ready in pool {pool}.",
+                    if count == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        if self.was_done.is_none() && !setup.done() {
+            self.panel = Panel::Setup;
+        }
+        self.was_done = Some(setup.done());
+    }
+
     fn open_selected(&self, ctx: &Ctx) -> Flow {
         if self.panel == Panel::Setup && Self::panel_visible(ctx) {
             return Flow::Open(Self::items(ctx)[self.setup_selected].3.clone());
@@ -797,7 +900,7 @@ impl Screen for Home {
             }
             Key::Up | Key::Down if self.panel == Panel::Setup => {
                 self.setup_selected = if matches!(key, Key::Down) {
-                    (self.setup_selected + 1).min(2)
+                    (self.setup_selected + 1).min(Self::items(ctx).len() - 1)
                 } else {
                     self.setup_selected.saturating_sub(1)
                 };
@@ -858,26 +961,8 @@ impl Screen for Home {
             return Flow::Handled;
         }
         match arrival {
-            Arrival::Pools(Ok(pools)) => {
-                let setup = Setup::of(pools);
-                if self.was_done == Some(false) && setup.done() {
-                    let pool = pools
-                        .iter()
-                        .find(|pool| !pool.members.is_empty())
-                        .map_or_else(String::new, |pool| pool.name.clone());
-                    let count = setup.ready_in_first_pool;
-                    ctx.say(Message::success(
-                        "Setup done.",
-                        &format!(
-                            "{count} account{} ready in pool {pool}.",
-                            if count == 1 { "" } else { "s" }
-                        ),
-                    ));
-                }
-                if self.was_done.is_none() && !setup.done() {
-                    self.panel = Panel::Setup;
-                }
-                self.was_done = Some(setup.done());
+            Arrival::Pools(Ok(_)) | Arrival::Owner(_) => {
+                self.notice(ctx);
                 Flow::Handled
             }
             Arrival::Projects(Ok(_)) => {
@@ -899,6 +984,9 @@ impl Screen for Home {
         ask(ctx, IntakeQuery::Found);
         if ctx.store.harnesses.ready().is_none() {
             send(ctx, SettingsJob::Harnesses);
+        }
+        if !Self::checked(ctx) || matches!(ctx.store.setup, Load::Failed(_)) {
+            send(ctx, SettingsJob::AppSetup(AppSetupJob::Status));
         }
     }
 
@@ -955,10 +1043,16 @@ impl Screen for Home {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::tui) mod tests {
     use super::*;
     use crate::pools::{MemberKind, PoolMember};
     use crate::protocol::CredentialRef;
+    use crate::setup::{Dependency, DependencyStatus, Version};
+    use crate::tui::client::OwnerEvent;
+    use crate::tui::client::app_setup::AppSetupEvent;
+    use crate::tui::client::settings::SettingsEvent;
+    use crate::tui::screens::settings_accounts::tests::{ctx, render};
+    use crate::tui::shell::Shell;
 
     fn pool(name: &str, statuses: &[MemberStatus]) -> PoolSummary {
         PoolSummary {
@@ -981,14 +1075,55 @@ mod tests {
         }
     }
 
+    /// A setup check where every tool is found except the `missing` ones.
+    /// Input: the tools to report missing. Output: the status, with no pack entries.
+    pub(in crate::tui) fn tools(missing: &[Dependency]) -> SetupStatus {
+        SetupStatus {
+            dependencies: Dependency::ALL
+                .iter()
+                .map(|name| DependencyStatus {
+                    name: *name,
+                    label: name.label().into(),
+                    state: if missing.contains(name) {
+                        DependencyState::Missing
+                    } else {
+                        DependencyState::Found {
+                            version: Version::parse("1.0.0").unwrap(),
+                        }
+                    },
+                })
+                .collect(),
+            pack: Vec::new(),
+            running: false,
+        }
+    }
+
+    fn status(status: SetupStatus) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+            SettingsEvent::AppSetup(AppSetupEvent::Status(Ok(status))),
+        ))))
+    }
+
+    fn status_reads(shell: &mut Shell) -> usize {
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter(|request| {
+                matches!(
+                    request,
+                    Request::Settings(job)
+                        if matches!(job.as_ref(), SettingsJob::AppSetup(AppSetupJob::Status))
+                )
+            })
+            .count()
+    }
+
     #[test]
-    fn setup_is_done_with_a_ready_account_in_a_pool() {
-        assert!(!Setup::of(&[]).done());
-        let empty = Setup::of(&[pool("Main", &[])]);
+    fn setup_is_done_with_a_ready_account_in_a_pool_and_tools_found() {
+        assert!(!Setup::of(&[], true).done());
+        let empty = Setup::of(&[pool("Main", &[])], true);
         assert!(empty.pool_exists && !empty.account_ready && !empty.done());
-        let waiting = Setup::of(&[pool("Main", &[MemberStatus::NotSignedIn])]);
+        let waiting = Setup::of(&[pool("Main", &[MemberStatus::NotSignedIn])], true);
         assert!(!waiting.done());
-        let ready = Setup::of(&[
+        let pools = [
             pool("Empty", &[]),
             pool(
                 "Main",
@@ -998,8 +1133,124 @@ mod tests {
                     MemberStatus::NotSignedIn,
                 ],
             ),
-        ]);
+        ];
+        let ready = Setup::of(&pools, true);
         assert!(ready.done());
         assert_eq!(ready.ready_in_first_pool, 2);
+        assert!(!Setup::of(&pools, false).done());
+    }
+
+    #[test]
+    fn found_and_installed_tools_count_and_every_other_state_is_missing() {
+        let mut status = tools(&[]);
+        assert_eq!(missing_tools(&status), Vec::<String>::new());
+        status.dependencies[0].state = DependencyState::Installed {
+            version: Version::parse("3.5.0").unwrap(),
+        };
+        status.dependencies[1].state = DependencyState::Installing;
+        status.dependencies[2].state = DependencyState::Failed {
+            reason: "setup_uv_missing".into(),
+        };
+        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+        status.dependencies[1].state = DependencyState::Checking;
+        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+    }
+
+    #[test]
+    fn get_set_up_stays_until_tools_are_found_and_opens_setup() {
+        let mut ctx = ctx(80, 24);
+        ctx.store.projects = Load::Ready(Vec::new());
+        ctx.store.pools = Load::Ready(vec![pool("Main", &[MemberStatus::SetUp])]);
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        assert_eq!(status_reads(&mut shell), 1, "Home asks for the setup check");
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.iter().any(|row| row.contains("Get set up")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] Install tools")),
+            "checking counts as not done: {rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Agents need tmux, uv and")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("Failed") && !row.contains("setup_")),
+            "{rows:#?}"
+        );
+
+        let mut still = tools(&[]);
+        still.dependencies[0].state = DependencyState::Checking;
+        shell.arrive(status(still));
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] Install tools")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("Missing")),
+            "a tool still being checked is not called missing: {rows:#?}"
+        );
+        shell.refresh();
+        assert_eq!(
+            status_reads(&mut shell),
+            1,
+            "Home reads the check again until it finishes"
+        );
+
+        shell.arrive(status(tools(&[Dependency::Uv, Dependency::Graphify])));
+        assert!(matches!(shell.ctx.store.setup, Load::Ready(_)));
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] Install tools")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Missing: uv, Graphify.")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[x] Add an account")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= 80),
+            "{rows:#?}"
+        );
+        shell.refresh();
+        assert_eq!(
+            status_reads(&mut shell),
+            0,
+            "a known check is not read again"
+        );
+
+        for _ in 0..3 {
+            shell.key(Key::Down);
+        }
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.last().unwrap().contains("Enter Install tools"),
+            "{rows:#?}"
+        );
+        shell.key(Key::Enter);
+        assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+
+        shell.arrive(status(tools(&[])));
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("Setup done.".into())
+        );
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.iter().all(|row| !row.contains("Get set up")),
+            "the panel hides once accounts, a pool and tools are done: {rows:#?}"
+        );
     }
 }

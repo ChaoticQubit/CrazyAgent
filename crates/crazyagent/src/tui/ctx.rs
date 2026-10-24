@@ -5,6 +5,7 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::setup::SetupStatus;
 use crate::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
@@ -57,6 +58,7 @@ pub struct Store {
     pub accounts: Load<Vec<AccountRow>>,
     pub harnesses: Load<(usize, usize)>,
     pub memory: Load<usize>,
+    pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
 }
 
@@ -70,6 +72,7 @@ impl Default for Store {
             accounts: Load::NotReady,
             harnesses: Load::NotReady,
             memory: Load::NotReady,
+            setup: Load::Idle,
             projects_seen: None,
         }
     }
