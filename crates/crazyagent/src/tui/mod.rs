@@ -13,6 +13,11 @@ mod run;
 mod screens;
 mod seam;
 mod shell;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the Team screen draws agent terminals with it")
+)]
+mod terminal_pane;
 mod text;
 mod theme;
 mod widgets;

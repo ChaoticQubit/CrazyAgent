@@ -2,7 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// One key press after normalization, the only key type screens see.
 /// Input: built from a crossterm event by `Key::from_event`, or from a paste.
-/// Output: plain variants; Ctrl letters are lowercase, Shift-arrows are named.
+/// Output: plain variants; Ctrl letters are lowercase, Ctrl-] is `Ctrl(']')`,
+/// Shift-arrows are named.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Key {
     Char(char),
@@ -69,7 +70,8 @@ pub enum Global {
 impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
-    /// does not use (function keys, Alt and Super chords).
+    /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]
+    /// as byte 0x1d, which crossterm reports as Ctrl-5.
     pub fn from_event(event: KeyEvent) -> Option<Self> {
         if event.kind == KeyEventKind::Release {
             return None;
@@ -83,6 +85,7 @@ impl Key {
                 KeyCode::Char(letter) if letter.is_ascii_alphabetic() => {
                     Some(Self::Ctrl(letter.to_ascii_lowercase()))
                 }
+                KeyCode::Char(']' | '5') => Some(Self::Ctrl(']')),
                 _ => None,
             };
         }
@@ -169,6 +172,14 @@ mod tests {
         assert_eq!(press(KeyCode::F(2), KeyModifiers::NONE), None);
         assert_eq!(press(KeyCode::Char('x'), KeyModifiers::ALT), None);
         assert_eq!(press(KeyCode::Char('1'), KeyModifiers::CONTROL), None);
+        assert_eq!(
+            press(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            Some(Key::Ctrl(']'))
+        );
+        assert_eq!(
+            press(KeyCode::Char('5'), KeyModifiers::CONTROL),
+            Some(Key::Ctrl(']'))
+        );
         let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert_eq!(Key::from_event(release), None);
