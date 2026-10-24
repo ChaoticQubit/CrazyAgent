@@ -2,17 +2,19 @@
 pub mod bundled;
 #[cfg(unix)]
 pub mod fetch;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod pack;
 #[cfg(unix)]
+pub mod pinned;
+#[cfg(unix)]
 pub(crate) mod process;
 pub mod progress;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod run;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,69 @@ use serde::{Deserialize, Serialize};
 pub use pack::{PackGroup, PackKind};
 
 const VERSION_BYTES_MAX: usize = 32;
+
+/// The uv release setup installs on every system.
+pub const UV_VERSION: &str = "0.13.5";
+/// uv's package id in the winget community source, which Windows installs uv from.
+pub const UV_WINGET_ID: &str = "astral-sh.uv";
+/// The Python package that provides the `graphify` program.
+pub const GRAPHIFY_PACKAGE: &str = "graphifyy";
+/// The Graphify release setup installs on every system.
+pub const GRAPHIFY_VERSION: &str = "0.9.9";
+const GRAPHIFY_PYTHON: &str = "3.12";
+const UV_RELEASES: [(&str, &str); 4] = [
+    (
+        "aarch64-apple-darwin",
+        "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73",
+    ),
+    (
+        "x86_64-apple-darwin",
+        "b0f52b0e3945b4107d89024ea38e625683011fbfc05a0d98f9fa2d6dcee28c66",
+    ),
+    (
+        "aarch64-unknown-linux-gnu",
+        "4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403",
+    ),
+    (
+        "x86_64-unknown-linux-gnu",
+        "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f",
+    ),
+];
+const WINGET_TARGETS: [&str; 2] = ["aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"];
+
+/// The target triple this engine was built for, such as `aarch64-apple-darwin`, or
+/// `unknown` on a system no uv release or winget pin names.
+pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    "aarch64-apple-darwin"
+} else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+    "x86_64-apple-darwin"
+} else if cfg!(all(
+    target_os = "linux",
+    target_env = "gnu",
+    target_arch = "aarch64"
+)) {
+    "aarch64-unknown-linux-gnu"
+} else if cfg!(all(
+    target_os = "linux",
+    target_env = "gnu",
+    target_arch = "x86_64"
+)) {
+    "x86_64-unknown-linux-gnu"
+} else if cfg!(all(
+    target_os = "windows",
+    target_env = "msvc",
+    target_arch = "aarch64"
+)) {
+    "aarch64-pc-windows-msvc"
+} else if cfg!(all(
+    target_os = "windows",
+    target_env = "msvc",
+    target_arch = "x86_64"
+)) {
+    "x86_64-pc-windows-msvc"
+} else {
+    "unknown"
+};
 
 /// A system tool the app needs: tmux runs agent terminals, uv installs Graphify and
 /// Graphify builds each project's code graph. Setup finds each one or installs it.
@@ -115,7 +180,8 @@ impl From<Version> for String {
 /// Exactly what setup installs for one dependency. `Release` downloads one archive,
 /// checks its SHA-256 and takes one program out of it; `UvTool` runs `uv tool install`
 /// for one pinned package version; `Homebrew` installs one formula, whose bottles
-/// Homebrew verifies itself.
+/// Homebrew verifies itself; `Winget` installs one package version, whose installer
+/// winget checks against its manifest's SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     Release {
@@ -131,6 +197,10 @@ pub enum Pin {
     },
     Homebrew {
         formula: String,
+    },
+    Winget {
+        id: String,
+        version: Version,
     },
 }
 
@@ -213,7 +283,7 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 23] = [
+const REASONS: [(&str, &str); 24] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -291,6 +361,10 @@ const REASONS: [(&str, &str); 23] = [
         PLATFORM_UNSUPPORTED,
         "Setup can't install this on this system yet. Install it yourself, then check again.",
     ),
+    (
+        "setup_local_app_data_missing",
+        "Windows did not say where your local app data folder is, so setup can't install here.",
+    ),
 ];
 
 /// Turns a setup code into the plain sentence the setup screen shows. Input: a code such
@@ -303,47 +377,100 @@ pub fn plain_reason(code: &str) -> &'static str {
         .unwrap_or("Something went wrong during setup.")
 }
 
-/// The installer for this platform, installing into `<engine root>/setup`.
+/// The installer for this Mac, installing into `<engine root>/setup`.
 /// Input: the engine root. Output: the installer.
 #[cfg(target_os = "macos")]
 pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     Box::new(macos::MacInstaller::new(engine_root))
 }
 
-/// The installer on a system setup has none for yet: every lookup and install reports
-/// [`PLATFORM_UNSUPPORTED`], so the setup screen says so plainly instead of guessing.
-/// Input: the engine root, unused. Output: the installer.
-#[cfg(not(target_os = "macos"))]
-pub fn platform_installer(_engine_root: &std::path::Path) -> Box<dyn Installer> {
-    Box::new(UnsupportedInstaller)
+/// The installer for this Linux system: uv and Graphify through the shared pinned
+/// installer into `<engine root>/setup`, tmux from Homebrew or, as root, apt or dnf.
+/// Input: the engine root. Output: the installer.
+#[cfg(target_os = "linux")]
+pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
+    let shared = pinned::PinnedInstaller::with_paths(
+        engine_root,
+        pinned::system_folders(&linux::SYSTEM_PATH),
+    );
+    Box::new(linux::LinuxInstaller::new(Box::new(shared)))
 }
 
-#[cfg(not(target_os = "macos"))]
-struct UnsupportedInstaller;
+/// The installer for this Windows system: Graphify and its Python in
+/// `<engine root>/setup`, uv from winget under the owner's `%LOCALAPPDATA%`. When that
+/// variable is unset or relative, every step reports why instead of guessing a folder.
+/// Input: the engine root. Output: the installer.
+#[cfg(target_os = "windows")]
+pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    match windows::WindowsInstaller::new(&engine_root.join("setup"), local_app_data.as_deref()) {
+        Ok(installer) => Box::new(installer),
+        Err(code) => Box::new(RefusingInstaller(code)),
+    }
+}
 
-#[cfg(not(target_os = "macos"))]
-impl Installer for UnsupportedInstaller {
+/// The installer on a system setup has none for: every lookup and install reports
+/// [`PLATFORM_UNSUPPORTED`], so the setup screen says so plainly instead of guessing.
+/// Input: the engine root, unused. Output: the installer.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn platform_installer(_engine_root: &std::path::Path) -> Box<dyn Installer> {
+    Box::new(RefusingInstaller(InstallError(PLATFORM_UNSUPPORTED)))
+}
+
+/// An installer that only refuses: every lookup and install reports its one plain code,
+/// either that setup has no installer for this system or why this system's could not start.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+struct RefusingInstaller(InstallError);
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+impl Installer for RefusingInstaller {
     fn find(&self, _dep: Dependency) -> Result<Option<Version>, InstallError> {
-        Err(InstallError(PLATFORM_UNSUPPORTED))
+        Err(self.0)
     }
 
     fn install(&self, _dep: Dependency, _pin: &Pin) -> Result<Version, InstallError> {
-        Err(InstallError(PLATFORM_UNSUPPORTED))
+        Err(self.0)
     }
 }
 
-/// The pinned install of one dependency on this platform. Input: the dependency.
-/// Output: its pin, or `None` on a system setup has no installer for yet.
-#[cfg(target_os = "macos")]
-pub fn platform_pin(dep: Dependency) -> Option<Pin> {
-    Some(macos::pin(dep))
+/// The pinned install of one dependency for one target triple: uv from its release
+/// archive with the published SHA-256 where one is pinned, or from winget on Windows;
+/// Graphify through `uv tool install`; tmux by its formula name. Inputs: the target and
+/// the dependency. Output: the pin, or `None` when that target has no uv pin.
+pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
+    match dep {
+        Dependency::Uv => {
+            if let Some((_, sha256)) = UV_RELEASES.iter().find(|(known, _)| *known == target) {
+                let name = format!("uv-{target}");
+                return Some(Pin::Release {
+                    version: Version(UV_VERSION.to_owned()),
+                    url: format!(
+                        "https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}.tar.gz"
+                    ),
+                    sha256: (*sha256).to_owned(),
+                    member: format!("{name}/uv"),
+                });
+            }
+            WINGET_TARGETS.contains(&target).then(|| Pin::Winget {
+                id: UV_WINGET_ID.to_owned(),
+                version: Version(UV_VERSION.to_owned()),
+            })
+        }
+        Dependency::Graphify => Some(Pin::UvTool {
+            package: GRAPHIFY_PACKAGE.to_owned(),
+            version: Version(GRAPHIFY_VERSION.to_owned()),
+            python: GRAPHIFY_PYTHON.to_owned(),
+        }),
+        Dependency::Tmux => Some(Pin::Homebrew {
+            formula: "tmux".to_owned(),
+        }),
+    }
 }
 
-/// The pinned install of one dependency on a system setup has no installer for yet.
-/// Input: the dependency, unused. Output: `None`.
-#[cfg(not(target_os = "macos"))]
-pub fn platform_pin(_dep: Dependency) -> Option<Pin> {
-    None
+/// The pinned install of one dependency on this system. Input: the dependency.
+/// Output: its pin, or `None` when this system's target has no uv pin.
+pub fn platform_pin(dep: Dependency) -> Option<Pin> {
+    pin_for(TARGET, dep)
 }
 
 /// One owner change to the default pack, as the owner mutations carry it: start setup
@@ -386,5 +513,116 @@ impl SetupAction {
             return Err(InstallError("pack_unknown"));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use process::is_sha256;
+
+    const LINUX: [&str; 2] = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"];
+
+    #[test]
+    fn every_uv_release_pin_names_its_target_and_a_distinct_checksum() {
+        for (target, sha256) in UV_RELEASES {
+            let Some(Pin::Release {
+                version,
+                url,
+                sha256: pinned,
+                member,
+            }) = pin_for(target, Dependency::Uv)
+            else {
+                panic!("{target} has no uv release pin");
+            };
+            assert_eq!(version.as_str(), UV_VERSION);
+            assert_eq!(
+                url,
+                format!(
+                    "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-{target}.tar.gz"
+                )
+            );
+            assert_eq!(member, format!("uv-{target}/uv"));
+            assert_eq!(pinned, sha256);
+            assert!(is_sha256(&pinned), "{target}");
+            let twins = UV_RELEASES.iter().filter(|(_, other)| *other == sha256);
+            assert_eq!(twins.count(), 1, "{target}");
+        }
+        for target in LINUX {
+            assert!(
+                matches!(pin_for(target, Dependency::Uv), Some(Pin::Release { .. })),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_keeps_its_exact_uv_checksums() {
+        for (target, sha256) in [
+            (
+                "aarch64-apple-darwin",
+                "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73",
+            ),
+            (
+                "x86_64-apple-darwin",
+                "b0f52b0e3945b4107d89024ea38e625683011fbfc05a0d98f9fa2d6dcee28c66",
+            ),
+        ] {
+            let Some(Pin::Release { sha256: pinned, .. }) = pin_for(target, Dependency::Uv) else {
+                panic!("{target} has no uv release pin");
+            };
+            assert_eq!(pinned, sha256);
+        }
+        assert_eq!(
+            platform_pin(Dependency::Uv),
+            pin_for(TARGET, Dependency::Uv)
+        );
+        if cfg!(target_os = "macos") {
+            assert!(TARGET.ends_with("-apple-darwin"), "{TARGET}");
+        }
+    }
+
+    #[test]
+    fn windows_takes_uv_from_winget_and_an_unknown_target_has_no_uv_pin() {
+        for target in WINGET_TARGETS {
+            assert_eq!(
+                pin_for(target, Dependency::Uv),
+                Some(Pin::Winget {
+                    id: "astral-sh.uv".into(),
+                    version: Version::parse(UV_VERSION).unwrap(),
+                }),
+                "{target}"
+            );
+        }
+        for target in [
+            "unknown",
+            "riscv64gc-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+        ] {
+            assert_eq!(pin_for(target, Dependency::Uv), None, "{target}");
+        }
+        let everywhere = UV_RELEASES
+            .iter()
+            .map(|(target, _)| *target)
+            .chain(WINGET_TARGETS)
+            .chain(["unknown"]);
+        for target in everywhere {
+            assert_eq!(
+                pin_for(target, Dependency::Graphify),
+                Some(Pin::UvTool {
+                    package: "graphifyy".into(),
+                    version: Version::parse("0.9.9").unwrap(),
+                    python: "3.12".into(),
+                }),
+                "{target}"
+            );
+            assert_eq!(
+                pin_for(target, Dependency::Tmux),
+                Some(Pin::Homebrew {
+                    formula: "tmux".into(),
+                }),
+                "{target}"
+            );
+        }
     }
 }

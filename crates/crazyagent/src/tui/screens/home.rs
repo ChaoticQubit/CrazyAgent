@@ -977,6 +977,7 @@ mod tests {
                 })
                 .collect(),
             project_count: 0,
+            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
         }
     }
 

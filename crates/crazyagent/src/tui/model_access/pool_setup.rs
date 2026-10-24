@@ -101,14 +101,8 @@ impl Setup {
                     "Provider quota policy: {} | p switches",
                     provider_quota_policy_name(pool.provider_quota_policy)
                 ));
-                lines.push(
-                    "Strict blocks unknown provider quota; numeric quota is currently unavailable."
-                        .into(),
-                );
-                lines.push(
-                    "Bounded attempt still requires fresh readiness and execution admission."
-                        .into(),
-                );
+                lines.push(STRICT_QUOTA.into());
+                lines.push(BOUNDED_QUOTA.into());
             }
             for (index, record) in self.page.iter().enumerate() {
                 lines.push(format!(

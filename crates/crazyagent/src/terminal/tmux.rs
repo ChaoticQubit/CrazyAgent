@@ -794,6 +794,14 @@ impl Host for Tmux {
         self.live_control()?.run(&line).map(drop)
     }
 
+    fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
+        let lines = self.live_control()?.run(&format!(
+            "display-message -p -t {} '#{{bracket_paste_flag}}'",
+            target(agent)
+        ))?;
+        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+    }
+
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         let size = SIZE_MIN..=SIZE_MAX;
         if !size.contains(&cols) || !size.contains(&rows) {

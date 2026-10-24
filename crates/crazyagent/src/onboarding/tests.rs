@@ -197,3 +197,39 @@ fn a_linked_draft_is_ignored() {
     .unwrap();
     assert!(draft::reused(&layout).is_none());
 }
+
+#[test]
+fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let base = Drafted::new("demo".into(), &pool());
+    let json_only = "```json\n{\"about\": \"Greets people.\", \"tech_stack\": [\"Rust\"]}\n```\n";
+    let (step, kept) = service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    assert_eq!(
+        step,
+        Step::Failed {
+            reason: service::MAPPING_NO_OVERVIEW.into()
+        }
+    );
+    assert_eq!(kept.draft.about, "Greets people.");
+    assert_eq!(kept.draft.tech_stack, ["Rust"]);
+    assert!(draft::overview(&layout).is_none());
+    assert_eq!(draft::reused(&layout), Some(kept));
+
+    let prose = "## Structure\n\nOne binary that greets people.\n\n```json\n{}\n```\n";
+    let (step, _) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+    assert_eq!(step, Step::Done);
+    assert!(
+        draft::overview(&layout)
+            .unwrap()
+            .contains("One binary that greets people.")
+    );
+
+    let (step, _) = service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    assert_eq!(
+        step,
+        Step::Done,
+        "an overview kept from before still counts"
+    );
+}

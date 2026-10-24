@@ -177,6 +177,14 @@ pub trait Host: Send + Sync {
     /// Returns once the host accepted them.
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError>;
 
+    /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
+    /// turn on bracketed paste once their own input is live, and keys typed before that
+    /// go through the terminal's line editing, which turns Enter into a newline.
+    /// Takes the name. Returns true once it is on, and always for a host that cannot tell.
+    fn input_live(&self, _agent: &AgentId) -> Result<bool, HostError> {
+        Ok(true)
+    }
+
     /// Sets an agent terminal's size for its app and every viewer.
     /// Takes the name, columns and rows, each from `SIZE_MIN` to `SIZE_MAX`.
     /// Returns once the host applied it.

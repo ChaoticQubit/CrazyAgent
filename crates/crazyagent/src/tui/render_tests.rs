@@ -172,6 +172,7 @@ fn pool(name: &str, ready: usize, waiting: usize, projects: usize) -> PoolSummar
             .chain((0..waiting).map(|index| member(ready + index, MemberStatus::NotSignedIn)))
             .collect(),
         project_count: projects,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
     }
 }
 
@@ -719,10 +720,18 @@ fn same_bar(rows: &[String], column: usize) -> Vec<String> {
         .collect()
 }
 
-fn check_without_thumb(name: &str, actual: &[String], width: u16) {
+fn check_without_thumb(name: &str, actual: &[String], width: u16, added: &[(usize, &str)]) {
     save(name, actual);
     let column = width as usize - 3;
-    let expected = same_bar(&fixture(name, &[]), column);
+    let mut design = fixture(name, &[]);
+    for (row, text) in added {
+        assert!(
+            design[*row].trim().is_empty(),
+            "{name}: row {row} is blank in the design"
+        );
+        design[*row] = format!("{text:<0$}", width as usize);
+    }
+    let expected = same_bar(&design, column);
     let actual = same_bar(actual, column);
     let wrong: Vec<String> = expected
         .iter()
@@ -760,9 +769,11 @@ fn pool_editor(width: u16, height: u16) -> Shell {
     shell
 }
 
+const POLICY_LINE: &str = "  Provider quota policy: bounded_attempt | p switches";
+
 #[test]
 fn pool_editor_frames_match_the_design() {
-    for (width, height) in [(120, 36), (80, 24)] {
+    for (width, height, policy) in [(120, 36, 8), (80, 24, 7)] {
         let mut shell = pool_editor(width, height);
         pick(&mut shell, &[0, 1, 5, 6, 9, 12, 13]);
         shell.key(Key::Home);
@@ -772,12 +783,18 @@ fn pool_editor_frames_match_the_design() {
             &format!("pool-editor-{width}"),
             &render(&mut shell, width, height),
             width,
+            &[(policy, POLICY_LINE)],
         );
     }
 
     let mut shell = pool_editor(80, 24);
     pick(&mut shell, &(0..16).collect::<Vec<_>>());
-    check_without_thumb("pool-editor-full-80", &render(&mut shell, 80, 24), 80);
+    check_without_thumb(
+        "pool-editor-full-80",
+        &render(&mut shell, 80, 24),
+        80,
+        &[(7, POLICY_LINE)],
+    );
 }
 
 fn styled(

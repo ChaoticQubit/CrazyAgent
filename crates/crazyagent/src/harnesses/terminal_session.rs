@@ -190,7 +190,8 @@ impl TerminalSession {
     }
 
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
-    /// waits, at most `READY_WAIT`, until the app has drawn its screen and gone quiet.
+    /// waits, at most `READY_WAIT`, until the app has drawn its screen, gone quiet and
+    /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
     /// Input: prompt text. Output: Ok, `launch_busy` while a turn runs, or a refusal code.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
         self.require_live()?;
@@ -296,7 +297,10 @@ impl TerminalSession {
                     }
                 }
             }
-            if drawn && quiet.elapsed() >= READY_QUIET {
+            if drawn
+                && quiet.elapsed() >= READY_QUIET
+                && self.host.input_live(&self.agent).map_err(host_failure)?
+            {
                 break;
             }
         }

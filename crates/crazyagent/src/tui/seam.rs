@@ -1,5 +1,6 @@
 use super::client::{ConversationJob, CreationJob, OwnerEvent, SetupQuery};
 use super::master_session;
+use crate::config::ProviderQuotaPolicy;
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
@@ -18,11 +19,13 @@ pub enum PoolChange {
     Create {
         name: String,
         members: Vec<CredentialRef>,
+        quota: ProviderQuotaPolicy,
     },
     Update {
         id: CredentialRef,
         name: String,
         members: Vec<CredentialRef>,
+        quota: ProviderQuotaPolicy,
     },
     Remove {
         id: CredentialRef,

@@ -301,7 +301,11 @@ fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     );
     assert_ne!(catalog, CATALOG);
     let runtime = runtime("p", &catalog);
-    let marker = runtime.join("research").join("agents").join("job-");
+    let marker = home(&runtime)
+        .join("project-cafe")
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("research-market_research-");
     let mut agents = Vec::new();
     let unwound = catch_unwind(AssertUnwindSafe(|| {
         let _engine = Engine::start(&runtime);

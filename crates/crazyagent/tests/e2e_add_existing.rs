@@ -4,6 +4,7 @@ mod e2e_support;
 
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::onboarding::Step;
+use crazyagent::onboarding::service::CODEX_MISSING;
 use crazyagent::projects_home::{AddMode, FoundState};
 use crazyagent::protocol::CredentialRef;
 use e2e_support::{Engine, Owner, git, named, rejected, repository, result, scratch};
@@ -15,6 +16,8 @@ const GRAPH_TIME: Duration = Duration::from_secs(180);
 const GRAPH_PREREQUISITE: &str =
     "UNAVAILABLE: graphify could not build the project graph; run Setup to install uv and graphify";
 const README: &str = "# Tide gauge\n\nReads buoy sensors.\n";
+const POOL: &str = "e2e-local-pool";
+const CATALOG: &str = "version = 1\ntimeout_ms = 5000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"e2e-local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"tide-gauge\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 async fn add(owner: &mut Owner, source: &Path, mode: AddMode) -> OwnerResult {
     let generation = owner.next();
@@ -27,13 +30,19 @@ async fn add(owner: &mut Owner, source: &Path, mode: AddMode) -> OwnerResult {
     )
 }
 
+fn settled(step: &Step) -> bool {
+    matches!(step, Step::Done | Step::Failed { .. })
+}
+
 fn log(folder: &Path) -> String {
     String::from_utf8(git(folder, &["log", "--format=%s"]).stdout).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its_steps() {
-    let mut engine = Engine::start("ca-e2e-add-");
+    let mut engine = Engine::new("ca-e2e-add-");
+    fs::write(engine.path().join("global.toml"), CATALOG).unwrap();
+    engine.launch();
     let disk = scratch("ca-e2e-src-");
     let home = disk.path().join("Projects");
     let sources = disk.path().join("sources");
@@ -99,22 +108,18 @@ async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its
         assert_eq!(entry.path, home.join(name).to_str().unwrap());
     }
 
-    let unconfigured = CredentialRef::new("e2e-unconfigured-pool").unwrap();
+    let pool = CredentialRef::new(POOL).unwrap();
     let generation = owner.next();
     let started = result(
         owner
             .controller
-            .start_onboarding(
-                moved_home.to_str().unwrap().into(),
-                unconfigured,
-                generation,
-            )
+            .start_onboarding(moved_home.to_str().unwrap().into(), pool, generation)
             .await
             .unwrap(),
     );
     assert!(
         !matches!(started, OwnerResult::Rejected { .. }),
-        "onboarding starts before any pool can run the mapping agent: {started:?}"
+        "onboarding starts on the pool the owner picked: {started:?}"
     );
     let found = owner
         .found_until("the onboarded folder is registered as a project", |found| {
@@ -136,13 +141,12 @@ async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its
     let start = Instant::now();
     let view = loop {
         let view = owner.controller.onboarding(project.clone()).await.unwrap();
-        if matches!(view.graph, Step::Done | Step::Failed { .. }) {
+        if settled(&view.graph) && settled(&view.mapping) {
             break view;
         }
         assert!(
             start.elapsed() < GRAPH_TIME,
-            "the graph step never finished: {:?}",
-            view.graph
+            "onboarding never settled: {view:?}"
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
@@ -150,19 +154,18 @@ async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its
         panic!("{GRAPH_PREREQUISITE}: {reason}");
     }
     assert!(!view.name.is_empty());
-    match &view.mapping {
-        Step::Waiting => {}
-        Step::Failed { reason } => assert!(
-            reason.to_lowercase().contains("pool"),
-            "the mapping step names the missing pool in plain words: {reason}"
-        ),
-        other => panic!("no pool can run the mapping agent, so mapping cannot report {other:?}"),
-    }
+    assert_eq!(
+        view.mapping,
+        Step::Failed {
+            reason: CODEX_MISSING.into()
+        },
+        "an engine started without Codex or Claude Code names the missing harness in plain words"
+    );
     tokio::time::sleep(Duration::from_secs(2)).await;
     let later = owner.controller.onboarding(project).await.unwrap();
     assert_eq!(
         later.mapping, view.mapping,
-        "without a pool the mapping step stays put and never reports a made-up result"
+        "without a harness the mapping step stays put and never reports a made-up result"
     );
     assert_eq!(
         log(&moved_home),
