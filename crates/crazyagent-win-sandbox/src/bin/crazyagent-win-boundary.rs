@@ -16,6 +16,15 @@ fn refuse(reason: impl Display) -> ExitCode {
     ExitCode::from(REFUSED_EXIT)
 }
 
+#[cfg(windows)]
+fn launch(request: &Request) -> ExitCode {
+    match crazyagent_win_sandbox::run(request) {
+        Ok(code) => std::process::exit(code as i32),
+        Err(error) => refuse(error),
+    }
+}
+
+#[cfg(not(windows))]
 fn launch(_request: &Request) -> ExitCode {
-    refuse("this helper cannot start agents yet")
+    refuse("this helper runs only on Windows")
 }

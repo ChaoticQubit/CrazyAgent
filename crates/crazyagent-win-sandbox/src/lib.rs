@@ -6,3 +6,8 @@ pub mod plan;
 pub mod profile;
 pub mod quote;
 pub mod request;
+#[cfg(windows)]
+mod win;
+
+#[cfg(windows)]
+pub use win::{BoundaryError, run};
