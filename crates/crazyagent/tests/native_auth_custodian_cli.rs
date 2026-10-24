@@ -4,11 +4,17 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const CHILD_BOUND: Duration = Duration::from_secs(15);
 const OUTPUT_BOUND: usize = 4096;
+
+/// Lets one test at a time spawn a child. On macOS the standard library makes a child's
+/// pipes before it marks them close-on-exec, so a child that a parallel test spawns in that
+/// gap keeps another test's stdin open and the custodian never sees its EOF.
+static SPAWN: Mutex<()> = Mutex::new(());
 
 struct OwnedChild(Child);
 
@@ -34,6 +40,13 @@ struct Observation {
     stderr: String,
 }
 
+/// Spawns the configured command while no other test in this binary spawns.
+/// Input: the command. Output: the child, killed and reaped when dropped.
+fn spawn(command: &mut Command) -> OwnedChild {
+    let _serial = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+    OwnedChild(command.spawn().unwrap())
+}
+
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-custodian-cli-")
@@ -54,8 +67,8 @@ fn bounded_stream<R: Read>(stream: R) -> Vec<u8> {
 
 fn observe(root: &Path, arguments: &[OsString], input: &[u8], close_input: bool) -> Observation {
     assert!(input.len() <= 33);
-    let mut child = OwnedChild(
-        std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+    let mut child = spawn(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(arguments)
             .env_clear()
             .env("HOME", root)
@@ -64,9 +77,7 @@ fn observe(root: &Path, arguments: &[OsString], input: &[u8], close_input: bool)
             .env("LANG", "en_US.UTF-8")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let stdout = child.0.stdout.take().unwrap();
     let stderr = child.0.stderr.take().unwrap();
@@ -178,8 +189,8 @@ fn native_auth_custodian_cli_rejects_regular_stdin_without_changing_its_flags() 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let input = std::fs::File::open(path).unwrap();
     let original_flags = rustix::fs::fcntl_getfl(&input).unwrap();
-    let mut child = OwnedChild(
-        std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+    let mut child = spawn(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(arguments(root.path()))
             .env_clear()
             .env("HOME", root.path())
@@ -187,9 +198,7 @@ fn native_auth_custodian_cli_rejects_regular_stdin_without_changing_its_flags() 
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::from(input.try_clone().unwrap()))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::piped()),
     );
     let stdout = child.0.stdout.take().unwrap();
     let stderr = child.0.stderr.take().unwrap();
