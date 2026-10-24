@@ -45,7 +45,7 @@ const HISTORY_MESSAGES_MAX: i64 = 12;
 const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
 const TEAM_HOST: &str = "team";
-const KEPT_MASTER_NOTE: &str = "Kept running while CrazyAgent was closed";
+const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
 /// Bounds every team agent obeys.
@@ -729,18 +729,14 @@ impl TeamRuntime {
         !self.workers.is_empty()
     }
 
-    /// Stops every agent process group and returns running tasks to the queue. The master
-    /// of a project the owner keeps it for is left running in its pane for the next engine
-    /// to take over. Waits a bounded time for each agent thread.
-    /// Returns the panes left running, which closing the terminal host must keep.
+    /// Ends the engine's hold on every agent as the engine stops and returns running tasks
+    /// to the queue. An agent in a pane a later engine can take over keeps running there with
+    /// its turn stopped, so agent sessions outlive the engine; every other agent process group
+    /// stops. Waits a bounded time for each agent thread. Returns the panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
-            let keep = worker.role == AgentRole::Master
-                && !worker.stopping
-                && self.has_pane_record(*id)?
-                && super::keep_master(&self.connection, &worker.project)?;
-            if keep {
+            if !worker.stopping && self.has_pane_record(*id)? {
                 kept.insert(*id);
             }
         }
@@ -774,7 +770,7 @@ impl TeamRuntime {
                 [id],
             )
             .map_err(error)?;
-            let note = kept.contains(&id).then_some(KEPT_MASTER_NOTE);
+            let note = kept.contains(&id).then_some(LEFT_RUNNING_NOTE);
             tx.execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?3, stopped_ms=?2 WHERE id=?1 AND status IN ('starting','idle','working')",
                 params![id, now, note],
@@ -2565,7 +2561,7 @@ fn turn(
 /// Background loop that keeps every project's team moving.
 pub struct TeamService {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<Vec<AgentId>>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl TeamService {
@@ -2590,34 +2586,31 @@ impl TeamService {
                     last = problem;
                     std::thread::sleep(tick);
                 }
-                runtime.shutdown().unwrap_or_else(|problem| {
+                if let Err(problem) = runtime.shutdown() {
                     eprintln!("team runtime shutdown: {}", bound_text(&problem.0, 300));
-                    Vec::new()
-                })
+                }
             })
             .ok();
         Self { stop, thread }
     }
 
-    /// Stops the loop, every agent process group and waits for the loop thread.
-    /// Returns the master panes left running for the next engine, which closing the
-    /// terminal host must keep.
-    pub fn stop(mut self) -> Vec<AgentId> {
-        self.halt()
+    /// Stops the loop and waits for its thread. Agents in panes keep running for the next
+    /// engine; every other agent process group stops.
+    pub fn stop(mut self) {
+        self.halt();
     }
 
-    fn halt(&mut self) -> Vec<AgentId> {
+    fn halt(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.thread
-            .take()
-            .and_then(|thread| thread.join().ok())
-            .unwrap_or_default()
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 impl Drop for TeamService {
     fn drop(&mut self) {
-        let _ = self.halt();
+        self.halt();
     }
 }
 

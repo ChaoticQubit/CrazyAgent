@@ -59,7 +59,6 @@ fn status() -> TeamStatus {
     TeamStatus {
         project_id: ProjectId::new("tidepool").unwrap(),
         keep_warm: false,
-        keep_master: false,
         paused: false,
         min_agents: 1,
         max_agents: 4,

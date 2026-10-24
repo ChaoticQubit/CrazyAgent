@@ -4,8 +4,7 @@ use crate::config::{
 };
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
-use crate::protocol::Outcome;
-use crate::team::{TeamAction, execute, status};
+use crate::team::status;
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use std::process::{Command, Stdio};
@@ -205,19 +204,6 @@ impl Fixture {
             .any(|message| message.state == MessageState::Note && message.text == text)
     }
 
-    fn keep_master(&mut self, on: bool) {
-        let tx = self.connection.transaction().unwrap();
-        let action = TeamAction::KeepMaster {
-            project_id: self.setup.project_id.clone(),
-            on,
-        };
-        assert_eq!(
-            execute(&tx, &self.access, &action).unwrap(),
-            Outcome::Applied
-        );
-        tx.commit().unwrap();
-    }
-
     fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !done(self) {
@@ -248,7 +234,7 @@ fn names(ids: &[i64]) -> Vec<AgentId> {
 
 #[test]
 fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
-    let mut fixture = Fixture::new(1);
+    let fixture = Fixture::new(1);
     let host = fixture.host();
     let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
     let dropped = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
@@ -294,17 +280,15 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     });
     assert_eq!(host.alive().unwrap(), names(&[master]));
 
-    fixture.keep_master(true);
-    assert!(fixture.status().keep_master);
     assert_eq!(team.shutdown().unwrap(), names(&[master]));
     assert_eq!(
         host.alive().unwrap(),
         names(&[master]),
-        "the kept master runs on"
+        "the agent's session outlives the engine"
     );
     assert_eq!(
         fixture.agent_status(master),
-        (AgentStatus::Stopped, Some(KEPT_MASTER_NOTE.into()))
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
     );
     assert!(fixture.recorded(master));
 
@@ -312,11 +296,10 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     fixture.until(&mut again, "the next engine takes the master over", |f| {
         f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master)
     });
-    fixture.keep_master(false);
-    assert!(again.shutdown().unwrap().is_empty());
-    assert!(host.alive().unwrap().is_empty(), "nothing is kept now");
-    assert!(!fixture.recorded(master));
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    assert_eq!(host.alive().unwrap(), names(&[master]));
     host.close(&[]).unwrap();
+    assert!(host.alive().unwrap().is_empty());
 }
 
 #[test]
@@ -367,8 +350,20 @@ fn a_project_never_runs_more_than_fifteen_agent_terminals() {
         "no agent was recorded"
     );
 
-    assert!(team.shutdown().unwrap().is_empty());
-    assert!(host.alive().unwrap().is_empty());
+    fixture.until(&mut team, "every adopted agent has its pane record", |f| {
+        ids[..PANES_PER_PROJECT_MAX]
+            .iter()
+            .all(|id| f.recorded(*id))
+    });
+    let mut left = team.shutdown().unwrap();
+    assert_eq!(
+        left.len(),
+        PANES_PER_PROJECT_MAX,
+        "every adopted agent keeps running"
+    );
+    left.sort();
+    assert_eq!(host.alive().unwrap(), left);
+    host.close(&[]).unwrap();
 }
 
 #[test]
