@@ -726,3 +726,7 @@ impl Host for Tmux {
         windows(&control)
     }
 }
+
+#[cfg(test)]
+#[path = "tmux/tests.rs"]
+mod tests;

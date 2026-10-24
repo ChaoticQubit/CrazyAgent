@@ -194,3 +194,7 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
         edges,
     }
 }
+
+#[cfg(test)]
+#[path = "graph/tests.rs"]
+mod tests;

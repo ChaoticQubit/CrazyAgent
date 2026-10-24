@@ -213,3 +213,7 @@ pub enum TerminalFrame {
         code: String,
     },
 }
+
+#[cfg(test)]
+#[path = "terminal/tests.rs"]
+mod tests;
