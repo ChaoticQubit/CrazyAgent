@@ -29,6 +29,7 @@ mod owner_setup;
 pub mod picker;
 mod plugins;
 pub mod project_setup;
+mod setup;
 mod team;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;

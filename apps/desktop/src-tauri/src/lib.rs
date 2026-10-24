@@ -29,6 +29,7 @@ use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::setup::SetupStatus;
 use crazyagent::team::TeamStatus;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -1050,6 +1051,46 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_setup_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.setup_status().await
+}
+
+#[tauri::command]
+async fn desktop_run_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    pack: Vec<String>,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.run_setup(pack).await
+}
+
+#[tauri::command]
+async fn desktop_set_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_pack_entry(id, on).await
+}
+
+#[tauri::command]
+async fn desktop_remove_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_pack_entry(id).await
+}
+
+#[tauri::command]
 async fn desktop_agents(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1338,6 +1379,10 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_setup_status,
+            desktop_run_setup,
+            desktop_set_pack_entry,
+            desktop_remove_pack_entry,
             desktop_agents,
             desktop_stop_agent,
             desktop_interrupt_agent,
