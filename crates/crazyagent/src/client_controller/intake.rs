@@ -1,7 +1,7 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
-use crate::onboarding::Onboarding;
+use crate::onboarding::OnboardingView;
 use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId};
 
@@ -83,7 +83,10 @@ impl OwnerController {
     /// Reads one onboarding: the graph and mapping steps, the drafted setup and what is still missing.
     /// Takes the project id the folder was registered as.
     /// Returns the onboarding; the owner confirms its draft with `update_project_setup`.
-    pub async fn onboarding(&mut self, project_id: ProjectId) -> Result<Onboarding, EngineError> {
+    pub async fn onboarding(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<OnboardingView, EngineError> {
         match self.read(OwnerRead::Onboarding { project_id }).await?.data {
             OwnerData::Onboarding { onboarding } => Ok(*onboarding),
             _ => Err(EngineError("controller_read_response".into())),
