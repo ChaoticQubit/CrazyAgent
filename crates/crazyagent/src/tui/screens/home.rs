@@ -1,6 +1,8 @@
 use super::new_project_page::kept_draft;
+use super::settings_accounts::send;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::pools::{MemberStatus, PoolSummary};
+use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
@@ -715,6 +717,9 @@ impl Screen for Home {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
+        if ctx.store.harnesses.ready().is_none() {
+            send(ctx, SettingsJob::Harnesses);
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
