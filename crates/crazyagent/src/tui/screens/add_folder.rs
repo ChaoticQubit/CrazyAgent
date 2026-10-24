@@ -145,10 +145,13 @@ impl AddFolder {
         match self.mode {
             AddMode::Move => "Move into projects folder",
             AddMode::Copy => {
-                let size = self.source(ctx).ok().and_then(|source| match self.sized(&source) {
-                    Some(Load::Ready(bytes)) => Some(*bytes),
-                    _ => None,
-                });
+                let size = self
+                    .source(ctx)
+                    .ok()
+                    .and_then(|source| match self.sized(&source) {
+                        Some(Load::Ready(bytes)) => Some(*bytes),
+                        _ => None,
+                    });
                 match size {
                     Some(bytes) if bytes > COPY_WARN_BYTES => "Copy anyway",
                     Some(_) => "Copy into projects folder",
@@ -246,7 +249,7 @@ impl Screen for AddFolder {
             }
             (IntakeQuery::FolderSize { path }, result) => {
                 if let Some((sized, size)) = &mut self.size
-                    && sized == path
+                    && sized.as_str() == path.as_str()
                 {
                     *size = match result {
                         Ok(IntakeView::FolderSize(bytes)) => Load::Ready(*bytes),
@@ -282,7 +285,9 @@ impl Screen for AddFolder {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
-        let limit = (area.width as usize).saturating_sub(4).clamp(6, FIELD_WIDTH);
+        let limit = (area.width as usize)
+            .saturating_sub(4)
+            .clamp(6, FIELD_WIDTH);
         let mut lines = vec![
             styled("Existing folder", Role::Heading, theme),
             Line::default(),
@@ -371,8 +376,7 @@ impl Screen for AddFolder {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.sent.is_some()
-            || matches!(&self.size, Some((_, Load::Loading)))
+        self.sent.is_some() || matches!(&self.size, Some((_, Load::Loading)))
     }
 
     fn draft(&self) -> bool {

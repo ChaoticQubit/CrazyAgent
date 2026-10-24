@@ -22,7 +22,7 @@ pub(in crate::tui) fn ask(ctx: &mut Ctx, query: IntakeQuery) {
 pub(in crate::tui) fn event(arrival: &Arrival) -> Option<&IntakeEvent> {
     match arrival {
         Arrival::Owner(owner) => match owner.as_ref() {
-            OwnerEvent::Intake(event) => Some(event),
+            OwnerEvent::Intake(event) => Some(event.as_ref()),
             _ => None,
         },
         _ => None,
@@ -42,23 +42,42 @@ pub(in crate::tui) fn not_ready(code: &str) -> bool {
 pub(in crate::tui) fn copy(code: &str) -> &'static str {
     match code {
         "projects_home_unset" => "Pick your projects folder first.",
-        "projects_home_invalid" | "projects_home_path_invalid" => {
-            "CrazyAgent can't use this folder. Pick a folder you can write to."
+        "projects_home_path_invalid" | "home_source_invalid" | "folder_size_path_invalid" => {
+            "Type a full folder path, such as ~/Projects."
         }
-        "projects_home_unwritable" => {
-            "CrazyAgent can't write to this folder. Pick a folder you can write to."
+        "projects_home_missing" => "That folder does not exist. Create it first or pick another.",
+        "projects_home_not_folder" | "home_source_not_folder" => {
+            "Pick a folder, not a file or a link."
         }
-        "folder_missing" => "That folder isn't there anymore. Pick it again.",
-        "folder_not_a_directory" => "Pick a folder, not a file.",
-        "folder_inside_home" => "This folder is already in your projects folder. It shows on Home.",
-        "folder_contains_home" => {
-            "This folder holds your projects folder. Pick one project's folder."
+        "projects_home_unsafe" => {
+            "Pick a separate folder for projects, not your home folder or a system folder."
         }
-        "folder_name_taken" => {
+        "projects_home_unreadable" => "CrazyAgent can't read this folder. Pick another.",
+        "home_source_missing" => "That folder isn't there anymore. Pick it again.",
+        "home_source_in_home" => {
+            "This folder is already in your projects folder. It shows on Home."
+        }
+        "home_source_unsafe" | "folder_size_unsafe" => {
+            "This folder holds your home folder or app data, so it can't be added."
+        }
+        "home_source_hidden" | "home_source_name" => "Rename the folder to a plain name first.",
+        "home_destination_exists" => {
             "Your projects folder already has a folder with this name. Rename one of them first."
         }
-        "folder_move_failed" => "Couldn't move the folder. Nothing changed. Try again.",
-        "folder_copy_failed" => "Couldn't copy the folder. The original is untouched. Try again.",
+        "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
+        "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_copy_failed" | "home_move_failed" => {
+            "The folder could not be added. Nothing was removed. Try again."
+        }
+        "home_copy_unverified" | "home_add_unverified" => {
+            "The copy did not match the original, so the original was kept."
+        }
+        "home_move_source_left" => {
+            "The folder was copied in, but the original could not be removed. Remove it yourself."
+        }
+        "folder_size_unreadable" => "Some files in this folder can't be read.",
+        "folder_size_timeout" | "folder_size_too_large" => "This folder is very large.",
+        "owner_home_unknown" => "Your home folder could not be found.",
         "onboarding_running" => "This project is already being set up.",
         "onboarding_missing" => "This project isn't being set up anymore. Start again.",
         "onboarding_path_invalid" => "CrazyAgent can't set up this folder.",

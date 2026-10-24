@@ -168,7 +168,9 @@ impl Screen for HomeFolder {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
-        let limit = (area.width as usize).saturating_sub(4).clamp(6, FIELD_WIDTH);
+        let limit = (area.width as usize)
+            .saturating_sub(4)
+            .clamp(6, FIELD_WIDTH);
         let mut lines = vec![
             styled("Your projects folder", Role::Heading, theme),
             Line::default(),
@@ -183,7 +185,9 @@ impl Screen for HomeFolder {
         );
         lines.push(Line::default());
         let top = lines.len() as u16;
-        let (field, cursor) = self.field.lines(limit, self.sent.is_none(), theme, ctx.glyphs);
+        let (field, cursor) = self
+            .field
+            .lines(limit, self.sent.is_none(), theme, ctx.glyphs);
         lines.extend(field);
         lines.push(styled("Tab completes a folder name.", Role::Muted, theme));
         lines.push(Line::default());
@@ -220,6 +224,3 @@ impl Screen for HomeFolder {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;

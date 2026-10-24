@@ -468,13 +468,9 @@ impl Home {
             }
             Line::from(spans)
         };
-        let unpicked = self.unpicked().then(|| {
-            styled(
-                "Pick your projects folder with f.",
-                Role::Warning,
-                theme,
-            )
-        });
+        let unpicked = self
+            .unpicked()
+            .then(|| styled("Pick your projects folder with f.", Role::Warning, theme));
         match &ctx.store.projects {
             Load::Ready(projects)
                 if projects.is_empty() && kept_draft().is_none() && self.folders().is_empty() =>
@@ -692,7 +688,7 @@ impl Screen for Home {
                 hint(&arrows, "Move"),
                 hint("Tab", "Switch panel"),
                 hint("n", "New project"),
-            hint("a", "Add project"),
+                hint("a", "Add project"),
                 hint("s", "Settings"),
                 hint("Ctrl-K", "Go to"),
                 hint("Ctrl-Q", "Quit"),

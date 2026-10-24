@@ -37,18 +37,14 @@ pub(in crate::tui) enum IntakeQuery {
         project: ProjectId,
     },
     GitHubStatus,
-    GitHubSignIn {
-        generation: u64,
-    },
-    GitHubUseCli {
-        generation: u64,
-    },
+    GitHubSignIn,
+    GitHubUseCli,
+    GitHubSignOut,
     GitHubRepos {
         page: u32,
     },
     CloneRepo {
         full_name: String,
-        generation: u64,
     },
 }
 
@@ -150,9 +146,8 @@ impl NativeOwner {
         let query = match job {
             IntakeJob::Query(query) => query,
             IntakeJob::GitHubToken(token) => {
-                controller.github_token(token).await.map_err(&mut problem)?;
                 return controller
-                    .github_status()
+                    .github_token(token)
                     .await
                     .map(IntakeView::GitHub)
                     .map_err(problem);
@@ -204,42 +199,20 @@ impl NativeOwner {
             IntakeQuery::GitHubStatus => {
                 IntakeView::GitHub(controller.github_status().await.map_err(problem)?)
             }
-            IntakeQuery::GitHubSignIn { generation } => {
-                match applied(
-                    controller
-                        .github_sign_in(generation)
-                        .await
-                        .map_err(problem)?,
-                )? {
-                    OwnerResult::GitHubDeviceCode { code } => IntakeView::DeviceCode(code),
-                    _ => return Err("github_sign_in_outcome_unknown".into()),
-                }
+            IntakeQuery::GitHubSignIn => {
+                IntakeView::DeviceCode(controller.github_sign_in().await.map_err(problem)?)
             }
-            IntakeQuery::GitHubUseCli { generation } => {
-                applied(
-                    controller
-                        .github_use_cli(generation)
-                        .await
-                        .map_err(&mut problem)?,
-                )?;
-                IntakeView::GitHub(controller.github_status().await.map_err(problem)?)
+            IntakeQuery::GitHubUseCli => {
+                IntakeView::GitHub(controller.github_use_cli().await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubSignOut => {
+                IntakeView::GitHub(controller.github_sign_out().await.map_err(problem)?)
             }
             IntakeQuery::GitHubRepos { page } => {
                 IntakeView::Repos(controller.github_repos(page).await.map_err(problem)?)
             }
-            IntakeQuery::CloneRepo {
-                full_name,
-                generation,
-            } => {
-                match applied(
-                    controller
-                        .clone_repo(full_name, generation)
-                        .await
-                        .map_err(problem)?,
-                )? {
-                    OwnerResult::Cloned { receipt } => IntakeView::Cloned(receipt),
-                    _ => return Err("clone_outcome_unknown".into()),
-                }
+            IntakeQuery::CloneRepo { full_name } => {
+                IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
         })
     }

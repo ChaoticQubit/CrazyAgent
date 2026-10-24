@@ -320,9 +320,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
-        Place::HomeFolder { first_run } => {
-            Box::new(home_folder::HomeFolder::new(*first_run, ctx))
-        }
+        Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
