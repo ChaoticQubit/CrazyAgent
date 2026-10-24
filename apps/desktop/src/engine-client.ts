@@ -737,11 +737,11 @@ export interface FoundProject {
   known: boolean;
   state: FoundProjectState;
   project_id?: string | null;
-  github?: string | null;
 }
 
 export interface FolderSize {
   bytes: number;
+  github?: string | null;
 }
 
 export type AddFolderMode = "move" | "copy";
@@ -773,6 +773,8 @@ export interface GitHubStatus {
   signed_in: boolean;
   login: string | null;
   method: GitHubMethod;
+  waiting: boolean;
+  problem: string | null;
 }
 
 export interface GitHubRepo {
@@ -780,6 +782,49 @@ export interface GitHubRepo {
   private: boolean;
   default_branch: string;
   size_kb: number;
+}
+
+export interface GitHubRepoPage {
+  repos: GitHubRepo[];
+  next: number | null;
+}
+
+export interface CloneReceipt {
+  full_name: string;
+  path: string;
+}
+
+/** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
+ * address; the engine waits for approval in the background, so poll githubStatus. */
+export function githubSignIn(): Promise<GitHubDeviceCode> {
+  return invoke<GitHubDeviceCode>("desktop_github_sign_in");
+}
+
+/** Saves a pasted GitHub token. It goes to the engine once and is never kept by the page.
+ * Output: the status after the engine checked the token with GitHub. */
+export function githubToken(token: string): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_token", { token });
+}
+
+/** Reuses the token of a signed-in GitHub CLI on this Mac. Output: the new status. */
+export function githubUseCli(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_use_cli");
+}
+
+/** Reads whether CrazyAgent is signed in to GitHub, as whom, how, and any plain problem.
+ * Output: the status. */
+export function githubStatus(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_status");
+}
+
+/** Lists one page (from 1) of the repositories the signed-in owner can clone. */
+export function githubRepos(page = 1): Promise<GitHubRepoPage> {
+  return invoke<GitHubRepoPage>("desktop_github_repos", { page });
+}
+
+/** Clones one repository, as "owner/name", into the projects home. Output: where it landed. */
+export function cloneRepo(fullName: string): Promise<CloneReceipt> {
+  return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify";

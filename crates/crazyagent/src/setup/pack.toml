@@ -1,0 +1,190 @@
+version = 1
+
+[[entries]]
+id = "graphify"
+kind = "skill"
+group = "always"
+license = "MIT"
+on_by_default = true
+install = "uv tool install graphifyy==0.9.9, then install the graphify skill the package ships"
+source = { kind = "git", repo = "https://github.com/safishamsi/graphify", commit = "53efaf89b68190d367feb73f9ef5dba15899377c" }
+
+[[entries]]
+id = "superpowers"
+kind = "skill"
+group = "workflow"
+license = "MIT"
+on_by_default = true
+install = "copy every folder under skills at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/obra/superpowers", commit = "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b", path = "skills" }
+
+[[entries]]
+id = "software-practices"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy every bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/marketplaces/software-practices/plugins/software-practices/skills" }
+
+[[entries]]
+id = "ponytail"
+kind = "skill"
+group = "workflow"
+license = "MIT"
+on_by_default = true
+install = "copy the skill folder at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/DietrichGebert/ponytail", commit = "16352ac229eb08a9598dcae48fe9f2b342567d86", path = "skills/ponytail" }
+
+[[entries]]
+id = "tiger-style"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/tiger-style" }
+
+[[entries]]
+id = "grill-me"
+kind = "skill"
+group = "workflow"
+license = "MIT"
+on_by_default = true
+install = "copy the skill folder at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/mattpocock/skills", commit = "24fe0ef7737efae15c87225755e9f6f5965e4888", path = "skills/productivity/grill-me" }
+
+[[entries]]
+id = "linear-method"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/linear-method" }
+
+[[entries]]
+id = "to-releases"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/to-releases" }
+
+[[entries]]
+id = "to-features"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/to-features" }
+
+[[entries]]
+id = "to-linear-projects"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/to-linear-projects" }
+
+[[entries]]
+id = "security-audit"
+kind = "skill"
+group = "workflow"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/security-audit" }
+
+[[entries]]
+id = "taste-skill"
+kind = "skill"
+group = "design"
+license = "MIT"
+on_by_default = true
+install = "copy the design-taste-frontend skill folder at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/Leonxlnx/taste-skill", commit = "6010f91a9935f1c167dfc500fb1a475681892e6b", path = "skills/taste-skill" }
+
+[[entries]]
+id = "html-explainer"
+kind = "skill"
+group = "design"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/skills/html-explainer" }
+
+[[entries]]
+id = "deep-docs"
+kind = "skill"
+group = "design"
+license = "LicenseRef-Owner-Authored"
+on_by_default = true
+install = "copy every bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "agents/marketplaces/deep-docs/plugins/deep-docs/skills" }
+
+[[entries]]
+id = "caveman"
+kind = "skill"
+group = "reply_style"
+license = "Apache-2.0"
+on_by_default = true
+install = "copy the skill folder at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/JuliusBrussee/caveman", commit = "d262ab3882952a59312ff3537cd86d894523c5ab", path = "skills/caveman" }
+
+[[entries]]
+id = "i-have-adhd"
+kind = "skill"
+group = "reply_style"
+license = "MIT"
+on_by_default = true
+install = "copy the skill folder at the pinned commit into each agent's skills folder"
+source = { kind = "git", repo = "https://github.com/ayghri/i-have-adhd", commit = "1ecea1993b7fce257ffbd686c070948b5e07eda6", path = "skills/i-have-adhd" }
+
+[[entries]]
+id = "context-mode"
+kind = "mcp_server"
+group = "context"
+license = "Elastic-2.0"
+on_by_default = true
+install = "run npx -y context-mode@1.0.169 as a stdio MCP server, matching the pinned v1.0.169 commit"
+source = { kind = "git", repo = "https://github.com/mksglu/context-mode", commit = "589d8214d56740a28b5f7bf63167743d586b0b40" }
+
+[[entries]]
+id = "headroom"
+kind = "mcp_server"
+group = "context"
+license = "Apache-2.0"
+on_by_default = true
+install = "uv tool install headroom-ai==0.41.0, then run headroom mcp serve as a stdio MCP server"
+source = { kind = "git", repo = "https://github.com/headroomlabs-ai/headroom", commit = "76133cff59b71284399bf760c5578dc373c97231" }
+
+[[entries]]
+id = "serena"
+kind = "mcp_server"
+group = "optional"
+license = "GPL-3.0-or-later"
+on_by_default = false
+install = "run uvx --from git+https://github.com/oraios/serena@5e4f5cd173c7ff3eed37ee3f1de6c266b937c5dc serena start-mcp-server --project-from-cwd as a stdio MCP server"
+source = { kind = "git", repo = "https://github.com/oraios/serena", commit = "5e4f5cd173c7ff3eed37ee3f1de6c266b937c5dc" }
+
+[[entries]]
+id = "coderabbit"
+kind = "skill"
+group = "optional"
+license = "MIT"
+on_by_default = false
+install = "copy every folder under skills at the pinned commit into each agent's skills folder; needs a CodeRabbit account"
+source = { kind = "git", repo = "https://github.com/coderabbitai/skills", commit = "a8777050c0d9034d5de6beff3dfac9b43acb9854", path = "skills" }
+
+[[entries]]
+id = "linear"
+kind = "mcp_server"
+group = "optional"
+license = "Apache-2.0"
+on_by_default = false
+install = "add https://mcp.linear.app/mcp as an HTTP MCP server; needs a Linear account sign-in"
+source = { kind = "git", repo = "https://github.com/anthropics/claude-plugins-official", commit = "58267944f92187b7d6a1c822165c96c81c864806", path = "external_plugins/linear" }
