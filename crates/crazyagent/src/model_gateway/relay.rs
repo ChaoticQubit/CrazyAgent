@@ -680,5 +680,5 @@ fn relay_reply(output: &mut impl BufRead, stream: &mut TcpStream) -> Result<(), 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

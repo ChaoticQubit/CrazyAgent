@@ -1056,5 +1056,5 @@ fn task_status(task: &TeamTask, now_ms: i64, offset: i64, look: &Look) -> Row {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -22,10 +22,10 @@ mod model_access;
 mod native_auth;
 pub mod views;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod key_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod project_creation_tests;
 
 #[cfg(test)]

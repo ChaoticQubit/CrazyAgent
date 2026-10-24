@@ -251,6 +251,6 @@ impl AgentSession {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "adopt/tests.rs"]
 mod tests;

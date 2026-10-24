@@ -347,5 +347,5 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

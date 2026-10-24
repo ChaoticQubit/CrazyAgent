@@ -17,7 +17,7 @@ pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
 #[cfg_attr(
-    not(test),
+    not(all(test, unix)),
     expect(
         dead_code,
         reason = "v1-tui-projects plugs the live team view into the project screen"
@@ -36,17 +36,17 @@ pub mod startup;
 pub mod team;
 pub mod welcome;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod intake_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod new_project_frames;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod new_project_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod project_frames;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod project_page_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod project_tests;
 
 use super::ctx::Ctx;

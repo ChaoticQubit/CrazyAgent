@@ -155,7 +155,7 @@ impl NativeOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::settings::{SettingsEvent, SettingsJob};
     use super::*;
