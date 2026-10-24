@@ -208,6 +208,19 @@ pub(super) fn execute(
             ..
         } => rejected("home_move_requires_transport"),
         HomeAction::Added { .. } => rejected("home_add_requires_transport"),
+        HomeAction::Trash { path: picked } => {
+            let Some(saved) = home::load(tx)? else {
+                return rejected("projects_home_unset");
+            };
+            let folder = match home::plan_trash(&saved, picked, &registered(tx)?) {
+                Ok(folder) => folder,
+                Err(e) => return rejected(&e.0),
+            };
+            match home::trash(&folder) {
+                Ok(()) => Ok(Outcome::Applied),
+                Err(e) => rejected(&e.0),
+            }
+        }
     }
 }
 
