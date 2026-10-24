@@ -1,4 +1,6 @@
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::{
+    InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -349,4 +351,65 @@ fn wrap_puts_an_existing_harness_command_under_the_sandbox_and_keeps_only_safe_e
     let mut relative = std::process::Command::new("sh");
     relative.current_dir(&case.project);
     assert!(sandbox.wrap(&profile, &relative).is_err());
+}
+
+#[test]
+fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(8080)]);
+    let read_root = case.root.join("harness");
+    fs::create_dir_all(&read_root).unwrap();
+    let sandbox = sandbox(&case, network.clone())
+        .allow_read(&read_root)
+        .unwrap();
+    assert_eq!(sandbox.read_roots(), [read_root.clone()].as_slice());
+    assert_eq!(sandbox.network(), &network);
+    let git = case.project.join(".git");
+    assert_eq!(
+        sandbox.protected_paths(),
+        [
+            case.project.join("context"),
+            git.join("hooks"),
+            git.join("config"),
+            git.join("config.lock"),
+        ]
+    );
+    let text = sandbox.profile();
+    for path in sandbox.protected_paths() {
+        assert!(
+            text.contains(&format!("\"{}\")", path.display())),
+            "{}",
+            path.display()
+        );
+    }
+    let installed = InstalledSandbox::install(sandbox, &case.profiles.join("seam.sb")).unwrap();
+    let seam: &dyn Sandbox = &installed;
+    let mut harness = std::process::Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg("echo seam")
+        .current_dir(&case.project);
+    let mut wrapped = seam.wrap(&harness).unwrap();
+    let direct = installed.wrap(&harness).unwrap();
+    assert_eq!(wrapped.get_program(), direct.get_program());
+    assert!(wrapped.get_args().eq(direct.get_args()));
+    let output = wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"seam\n");
+    let mut outside = std::process::Command::new("/bin/sh");
+    outside.current_dir(&case.outside);
+    assert!(seam.wrap(&outside).is_err());
+    assert_eq!(
+        SandboxError::Unavailable("bubblewrap is missing".into()).to_string(),
+        "sandbox unavailable: bubblewrap is missing"
+    );
 }
