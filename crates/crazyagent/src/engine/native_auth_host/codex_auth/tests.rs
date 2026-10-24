@@ -154,7 +154,22 @@ fn native_auth_codex_retirement_requires_a_spawned_child() {
 #[test]
 fn native_auth_codex_retirement_accepts_a_reaped_child_and_absent_group() {
     let mut case = Case::new();
-    case.retain("/usr/bin/true", &[]);
+    let mut child = Command::new("/bin/cat")
+        .env_clear()
+        .current_dir(&case.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let input = child.stdin.take().unwrap();
+    if let Err((error, mut child)) = case.session.as_mut().unwrap().retain_child(child) {
+        drop(input);
+        let _ = child.wait();
+        panic!("retained child rejected: {error}");
+    }
+    drop(input);
     let child = case.session.as_mut().unwrap().child_mut().unwrap();
     assert!(child.wait().unwrap().success());
     let direct = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
