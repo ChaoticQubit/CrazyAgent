@@ -6,8 +6,11 @@ use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::project_setup::ProjectSetup;
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
+use std::io::Read;
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -174,4 +177,41 @@ pub fn managed_project(variable: &str, harness: &str) -> (PathBuf, String) {
         "BLOCKED: CRAZYAGENT_MANAGED_RUNTIME has no engine.db"
     );
     (runtime, project)
+}
+
+/// A real local model endpoint that accepts up to 64 connections, reads each
+/// request once and never answers, so an agent pointed at it keeps running
+/// until it is stopped. Returns the port and the serving thread.
+pub fn hanging_endpoint() -> (u16, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().take(64) {
+            let Ok(mut stream) = stream else { break };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            held.push(stream);
+        }
+    });
+    (port, handle)
+}
+
+/// The ids of the live processes whose command line contains `marker`, such
+/// as a research agent whose `-o` report path sits in `<state>/agents/`.
+pub fn processes_with(marker: &Path) -> Vec<u32> {
+    let output = Command::new("/usr/bin/pgrep")
+        .env_clear()
+        .arg("-f")
+        .arg(marker)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().parse().unwrap())
+        .collect()
 }

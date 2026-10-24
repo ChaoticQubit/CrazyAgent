@@ -5,9 +5,10 @@ use crazyagent::research::accounts::AccountPick;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use crazyagent::research::service::{ResearchService, progress};
-use research_support::{EngineRuntime, codex};
+use research_support::{EngineRuntime, codex, hanging_endpoint, processes_with};
 use std::collections::BTreeMap;
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,6 +121,61 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     )
     .unwrap();
     assert!(report.starts_with("# Market research\n"));
+}
+
+#[test]
+fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
+    const MID_RUN: &str = "the test fails while the service's research agent runs";
+    let runtime = EngineRuntime::with_projects(&[("project-c", "A site for a bike repair shop.")]);
+    let project = runtime.folder("project-c");
+    let jobs = ResearchJobs::open(&runtime.database).unwrap();
+    let id = jobs
+        .enqueue("project-c", "market_research", "codex", false)
+        .unwrap();
+    let (port, _endpoint) = hanging_endpoint();
+    let runner = Arc::new(
+        ResearchRunner::new(
+            &runtime.database,
+            &runtime.state,
+            &codex(),
+            ResearchLimits::default(),
+        )
+        .unwrap(),
+    );
+    let marker = runtime.state.join("agents").join("job-");
+    let resolver = {
+        let project = project.clone();
+        move |id: &str, _harness: &str| {
+            (id == "project-c").then(|| {
+                (
+                    project.clone(),
+                    AccountPick::Account {
+                        connection: CredentialRef::new("hanging-connection").unwrap(),
+                        account: Box::new(ResearchAccount::Endpoint {
+                            base_url: format!("http://127.0.0.1:{port}/v1"),
+                            model: "hanging-model".into(),
+                        }),
+                    },
+                )
+            })
+        }
+    };
+    let mut agents = Vec::new();
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let _service = ResearchService::start(runner, resolver, Duration::from_millis(100));
+        wait_for(Duration::from_secs(60), || {
+            agents = processes_with(&marker);
+            !agents.is_empty()
+        });
+        panic_any(MID_RUN);
+    }));
+    let payload = unwound.expect_err("the test must panic mid-run");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&MID_RUN));
+    assert!(!agents.is_empty());
+    assert_eq!(processes_with(&marker), Vec::<u32>::new());
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Queued);
+    assert_eq!(job.attempts, 0);
 }
 
 #[test]
