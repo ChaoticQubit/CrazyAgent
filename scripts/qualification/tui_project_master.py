@@ -29,7 +29,7 @@ FIELDS = (
     "slots", "cpu_millis", "memory_mib", "processes", "output_bytes",
     "wall_time_ms", "spend_microunits",
 )
-DEFAULTS = (1, 1000, 512, 4, 1048576, 60000, 0)
+DEFAULTS = (1, 1000, 512, 4, 1048576, 120000, 0)
 CAPACITY = (2, 2000, 1024, 8, 2097152, 120000, 10)
 ALLOWANCE = (2, 900, 384, 3, 524288, 45000, 1)
 F2 = b"\x1bOQ"
@@ -39,7 +39,7 @@ F4 = b"\x1bOS"
 CATALOG = """
 version = 1
 timeout_ms = 2000
-allowed_destinations = ["sandbox-profile"]
+allowed_destinations = ["sandbox-profile", "codex-connection", "claude-connection"]
 [routing]
 approved_accounts = ["api-account", "codex-account", "claude-account"]
 global_capacity = { slots=2, cpu_millis=2000, memory_mib=1024, processes=8, output_bytes=2097152, wall_time_ms=120000, spend_microunits=10 }
@@ -194,10 +194,21 @@ def replace_number(master, child, field, value):
     tui_flow.expect(master, "%s: %d" % (field, value), child)
 
 
+def gone(master, child, text, limit=6):
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if text not in conversation.screen(master):
+            return
+        assert child.poll() is None, "TUI exited while waiting for %r to close" % text
+        conversation.drain(master)
+    raise AssertionError("still shown %r; screen=%r" % (text, conversation.screen(master)))
+
+
 def close_setup(master, child, draft):
     assert draft
     assert child.poll() is None
     os.write(master, b"\x1b")
+    gone(master, child, "Backend: ")
     conversation.draft_contains(master, child, draft)
 
 
@@ -226,6 +237,7 @@ def seed(binary, root):
             os.write(master, BRIEF.encode() + b"\r")
             conversation.committed(master, child, database, "p", "brief", 1, BRIEF)
             os.write(master, b"\x1b")
+            gone(master, child, "Brief edit")
             os.write(master, DRAFT.encode())
             conversation.draft_contains(master, child, DRAFT)
             before = counts(database)
@@ -336,6 +348,7 @@ def brief_cancel_close(database, session, turn, child, master):
     os.write(master, b"\r")
     conversation.committed(master, child, database, "p", "brief", 2, REPLACEMENT)
     os.write(master, b"\x1b")
+    gone(master, child, "Brief edit")
     conversation.draft_contains(master, child, NEWER)
     assert turns(database) == [turn], turns(database)
     os.write(master, b"\x15")
@@ -364,15 +377,15 @@ def brief_cancel_close(database, session, turn, child, master):
 
 def native_metadata(database, child, master):
     previous_label = "RCLI"
-    for count, label, backend, account in (
-        (2, "Native Codex", "codex", "codex-account"),
-        (3, "Native Claude", "claude", "claude-account"),
+    for count, label, backend, account, target in (
+        (2, "Native Codex", "codex", "codex-account", "codex-connection"),
+        (3, "Native Claude", "claude", "claude-account", "claude-connection"),
     ):
         setup(master, child, previous_label)
         os.write(master, b"\x1b[B")
         tui_flow.expect(master, "Backend: " + label, child)
         tui_flow.expect(master, "Account: " + account, child)
-        tui_flow.expect(master, "Execution sandbox: sandbox-profile", child)
+        tui_flow.expect(master, "Execution sandbox: " + target, child)
         close_setup(master, child, NEWER)
         setup(master, child, label)
         for field, value in zip(FIELDS, ALLOWANCE):
@@ -380,7 +393,8 @@ def native_metadata(database, child, master):
         os.write(master, b"\r")
         session = wait_session(database, child, master, count, backend, "configured")
         assert session["selection"]["route"]["account_ref"] == account
-        assert session["selection"]["target_profile_ref"] == "sandbox-profile"
+        assert session["selection"]["target_profile_ref"] == target
+        assert session["selection"]["route"]["required_target"] == target
         assert session["current_turn"] is None and len(turns(database)) == 1
         truthful(master)
         os.write(master, F4)

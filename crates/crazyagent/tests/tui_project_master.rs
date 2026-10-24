@@ -382,14 +382,15 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
         assert_eq!(sessions.len(), 3);
         let resources = ResourceBudget { slots: 2, cpu_millis: 900, memory_mib: 384, processes: 3,
             output_bytes: 524288, wall_time_ms: 45000, spend_microunits: 1 };
-        for ((session, backend), account) in sessions.iter().zip([MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude])
-            .zip(["api-account", "codex-account", "claude-account"]) {
+        for (((session, backend), account), target) in sessions.iter().zip([MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude])
+            .zip(["api-account", "codex-account", "claude-account"])
+            .zip(["sandbox-profile", "codex-connection", "claude-connection"]) {
             assert_eq!(session.project_id.as_str(), "p");
             assert_eq!(session.phase, MasterSessionPhase::Closed);
             assert_eq!(session.selection.backend, backend);
             assert_eq!(session.selection.pool_ref.as_str(), "master-pool");
             assert_eq!(session.selection.route.account_ref.as_str(), account);
-            assert_eq!(session.selection.target_profile_ref.as_str(), "sandbox-profile");
+            assert_eq!(session.selection.target_profile_ref.as_str(), target);
             assert_eq!(session.selection.route.required_target.as_ref().unwrap(), &session.selection.target_profile_ref);
             assert_eq!(session.selection.route.resources, resources);
             assert!(!session.selection.route.budget_ref.as_str().is_empty());
