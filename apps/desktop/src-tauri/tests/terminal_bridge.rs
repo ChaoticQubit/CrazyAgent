@@ -7,7 +7,7 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, agent, channel_message, plain_code, request_valid,
+    Terminals, agent, channel_message, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -204,7 +204,6 @@ async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempote
     let terminals = Terminals::default();
     let team = AgentId::team(4).unwrap();
     terminals.room(&team).unwrap();
-    assert!(VIEWERS_MAX >= 1);
     let typed = terminals
         .send(
             &team,
