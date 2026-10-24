@@ -122,7 +122,7 @@ fn the_shipped_pack_pins_public_sources_to_full_commits() {
                 );
             }
             PackSource::Bundled { path } => {
-                assert!(path.starts_with("agents/"), "{}", entry.id);
+                assert!(path.starts_with("skills/"), "{}", entry.id);
                 assert!(!path.contains(".."), "{}", entry.id);
             }
         }
@@ -214,7 +214,7 @@ fn broken_pins_licenses_and_ids_are_refused_with_their_code() {
         ),
         (
             broken(
-                "path = \"agents/skills/tiger-style\"",
+                "path = \"skills/tiger-style\"",
                 "path = \"/Users/someone/tiger-style\"",
             ),
             "pack_entry_path_invalid",

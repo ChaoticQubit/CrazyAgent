@@ -320,7 +320,9 @@ fn source_key(source: &PackSource) -> String {
         PackSource::Git { repo, commit, path } => {
             format!("{repo}@{commit}/{}", path.as_deref().unwrap_or_default())
         }
-        PackSource::Bundled { path } => format!("bundled/{path}"),
+        PackSource::Bundled { path } => {
+            format!("bundled/{path}@{}", crate::setup::bundled::digest(path))
+        }
     }
 }
 
@@ -332,14 +334,6 @@ fn source_label(source: &PackSource) -> String {
             .to_owned(),
         PackSource::Bundled { .. } => "Bundled with CrazyAgent".to_owned(),
     }
-}
-
-fn bundled_root() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
-    let folder = executable.parent()?;
-    [folder.join("bundled"), folder.join("../Resources/bundled")]
-        .into_iter()
-        .find(|candidate| std::fs::symlink_metadata(candidate).is_ok_and(|m| m.is_dir()))
 }
 
 fn prepare(
@@ -430,7 +424,11 @@ async fn run_setup(engine: &Arc<Engine>, root: &Path, entries: Vec<PackManifestE
     for dep in Dependency::ALL {
         install_dependency(installer.clone(), root, dep).await;
     }
-    let bundled = bundled_root();
+    let setup = root.join("setup");
+    let bundled = tokio::task::spawn_blocking(move || crate::setup::bundled::extract(&setup).ok())
+        .await
+        .ok()
+        .flatten();
     for entry in entries {
         install_entry(engine, installer.clone(), root, bundled.clone(), entry).await;
     }
