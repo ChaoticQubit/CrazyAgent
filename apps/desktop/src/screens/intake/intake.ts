@@ -210,6 +210,7 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
     case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
     case "installing": return { word: "Installing", tone: "info", line: null };
+    case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     default: return { word: "Not installed", tone: "warn", line: "Setup installs it." };
   }
@@ -283,6 +284,12 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
 
 /** Tells whether setup is still working. Input: the status. Output: true while it runs or
  * anything is installing. */
+/** Tells whether the engine is still checking any tool's version, so setup reads again.
+ * Input: the status. Output: true while a tool shows Checking. */
+export function toolsChecking(status: SetupStatus): boolean {
+  return status.dependencies.some((item) => item.state.state === "checking");
+}
+
 export function setupBusy(status: SetupStatus): boolean {
   return status.running || status.dependencies.some((item) => item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
 }

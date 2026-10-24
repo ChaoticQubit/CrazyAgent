@@ -5,7 +5,7 @@ import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, packGroups, packStateView, packTicks, setupBusy, setupProgress } from "./intake";
+import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, packGroups, packStateView, packTicks, setupBusy, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -98,6 +98,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
   const status: Loaded<SetupStatus> = fresh ? { kind: "ok", value: fresh } : loaded;
   const value = status.kind === "ok" ? status.value : null;
   const running = value !== null && setupBusy(value);
+  const checking = value !== null && toolsChecking(value);
 
   useEffect(() => {
     if (loaded.kind === "ok") setFresh(loaded.value);
@@ -108,10 +109,10 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
   }, [value, ticks]);
 
   useEffect(() => {
-    if (!running) return;
+    if (!running && !checking) return;
     const timer = window.setTimeout(reload, SETUP_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [running, value]);
+  }, [running, checking, value]);
 
   const run = async () => {
     if (busy || ticks === null) return;

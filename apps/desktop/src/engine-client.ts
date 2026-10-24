@@ -842,6 +842,7 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
 export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
+  | { state: "checking" }
   | { state: "missing" }
   | { state: "found"; version: string }
   | { state: "installing" }

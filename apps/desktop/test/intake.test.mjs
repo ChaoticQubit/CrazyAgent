@@ -169,6 +169,8 @@ test("setup lists each tool's state in plain words", () => {
   assert.deepEqual(intake.dependencyView(dep("graphify", { state: "installing" })),
     { title: "graphify", about: "Builds a code graph of each project.", word: "Installing", tone: "info", line: null });
   assert.deepEqual(intake.dependencyView(dep("graphify", { state: "failed", reason: "Checksum didn't match." })).line, "Checksum didn't match.");
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "checking" })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Checking", tone: "info", line: null });
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "missing" })).line, "Setup installs it.");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "uv (Python tools)")).title, "uv (Python tools)");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
@@ -192,6 +194,9 @@ test("the pack starts with the on-by-default entries ticked and names every tick
   assert.equal(intake.setupBusy({ dependencies: [], pack: [entry("serena", "mcp_server", "optional", false, { state: "installing" })], running: false }), true);
   assert.equal(intake.setupBusy({ dependencies: [], pack, running: true }), true);
   assert.equal(intake.setupBusy({ dependencies: [], pack, running: false }), false);
+  assert.equal(intake.setupBusy({ dependencies: [dep("uv", { state: "checking" })], pack, running: false }), false);
+  assert.equal(intake.toolsChecking({ dependencies: [dep("uv", { state: "checking" })], pack, running: false }), true);
+  assert.equal(intake.toolsChecking({ dependencies: [dep("uv", { state: "missing" })], pack, running: false }), false);
 });
 
 test("pack states read in plain words and only on or off entries count as installed", () => {
@@ -360,7 +365,7 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" })], pack, running: false };
   const base = { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
   const markup = html(ToolsSetupView, base);
-  assert.match(markup, /tmux[\s\S]*Found[\s\S]*Version 3\.5a on this Mac\./);
+  assert.match(markup, /tmux[\s\S]*Version 3\.5a on this Mac\.[\s\S]*Found/);
   assert.match(markup, /graphify[\s\S]*Not installed/);
   assert.match(markup, /<legend>Always on<\/legend>[\s\S]*graphify[\s\S]*always on/);
   assert.match(markup, /<legend>Workflow skills<\/legend>[\s\S]*superpowers/);

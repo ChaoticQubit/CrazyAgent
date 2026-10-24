@@ -24,8 +24,8 @@ test("every DEC-078 intake, GitHub and setup name has a client function", () => 
     ["setPackEntry", "desktop_set_pack_entry"], ["removePackEntry", "desktop_remove_pack_entry"],
   ]) assert.match(client, new RegExp(`export function ${name}\\([^)]*\\)[^{]*\\{\\s*return invoke<[A-Za-z\\[\\]]+>\\("${command}"`), name);
   assert.match(client, /invoke<CloneReceipt>\("desktop_clone_repo", \{ fullName \}\)/);
-  assert.match(client, /invoke<SetupStatus>\("desktop_run_setup", \{ pack \}\)/);
-  assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on \}\)/);
+  assert.match(client, /invoke<SetupStatus>\("desktop_run_setup", \{ pack, generation \}\)/);
+  assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on, generation \}\)/);
 });
 
 test("without the native bridge an intake read reports the engine as unreachable, never sample data", async () => {
@@ -64,6 +64,7 @@ test("setup takes at most 64 pack entries and its failures read as plain sentenc
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");
   assert.equal(api.intakeCopy("pack_required"), "This entry is always on and can't be removed.");
   assert.equal(api.intakeCopy("setup_busy"), "Setup is already running. Wait for it to finish.");
+  assert.equal(api.intakeCopy("owner_outcome_unknown_reconcile_same_identity"), "CrazyAgent didn't answer in time. Try again.");
 });
 
 test("every refusal code the native bridge can return has a plain sentence", () => {
