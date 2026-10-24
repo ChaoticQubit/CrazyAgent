@@ -99,6 +99,7 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         "sandbox_mode=\"read-only\"",
         "approval_policy=\"never\"",
         "features.shell_tool=false",
+        "features.goals=false",
         "web_search=\"disabled\"",
         "mcp_servers={}",
     ] {
