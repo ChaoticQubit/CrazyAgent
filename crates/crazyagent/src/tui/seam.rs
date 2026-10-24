@@ -187,6 +187,7 @@ pub enum Request {
     TerminalInput { agent: String, bytes: Vec<u8> },
     TerminalResize { agent: String, cols: u16, rows: u16 },
     TerminalDetach { agent: String },
+    Intake(Box<super::client::intake::IntakeJob>),
     Reconnect,
 }
 
@@ -210,6 +211,7 @@ impl std::fmt::Debug for Request {
             Self::TerminalInput { .. } => "TerminalInput",
             Self::TerminalResize { .. } => "TerminalResize",
             Self::TerminalDetach { .. } => "TerminalDetach",
+            Self::Intake(_) => "Intake",
             Self::Reconnect => "Reconnect",
         })
     }

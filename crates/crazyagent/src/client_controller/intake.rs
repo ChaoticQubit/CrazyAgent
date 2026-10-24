@@ -1,7 +1,7 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::github::{GitHubRepo, GitHubStatus};
-use crate::onboarding::OnboardingView;
+use crate::github::{GitHubRepoPage, GitHubStatus};
+use crate::onboarding::Onboarding;
 use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId};
 
@@ -81,12 +81,9 @@ impl OwnerController {
     }
 
     /// Reads one onboarding: the graph and mapping steps, the drafted setup and what is still missing.
-    /// Takes the project id the start returned.
-    /// Returns the onboarding view; the owner confirms it with `update_project_setup`.
-    pub async fn onboarding(
-        &mut self,
-        project_id: ProjectId,
-    ) -> Result<OnboardingView, EngineError> {
+    /// Takes the project id the folder was registered as.
+    /// Returns the onboarding; the owner confirms its draft with `update_project_setup`.
+    pub async fn onboarding(&mut self, project_id: ProjectId) -> Result<Onboarding, EngineError> {
         match self.read(OwnerRead::Onboarding { project_id }).await?.data {
             OwnerData::Onboarding { onboarding } => Ok(*onboarding),
             _ => Err(EngineError("controller_read_response".into())),
@@ -136,14 +133,14 @@ impl OwnerController {
     }
 
     /// Lists one page of the signed-in owner's GitHub repositories.
-    /// Takes the page number, starting at 1.
-    /// Returns the repositories on that page; an empty page ends the list.
-    pub async fn github_repos(&mut self, page: u32) -> Result<Vec<GitHubRepo>, EngineError> {
-        if page == 0 {
+    /// Takes the page number, from 1 to `github::REPO_PAGE_MAX`.
+    /// Returns the page with the next page number, none after the last page.
+    pub async fn github_repos(&mut self, page: u32) -> Result<GitHubRepoPage, EngineError> {
+        if page == 0 || page > crate::github::REPO_PAGE_MAX {
             return Err(EngineError("github_page_invalid".into()));
         }
         match self.read(OwnerRead::GitHubRepos { page }).await?.data {
-            OwnerData::GitHubRepos { repos } => Ok(repos),
+            OwnerData::GitHubRepos { page } => Ok(page),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }

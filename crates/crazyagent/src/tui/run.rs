@@ -287,6 +287,7 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::TerminalInput { .. }
         | Request::TerminalResize { .. }
         | Request::TerminalDetach { .. } => Ok(()),
+        Request::Intake(job) => connection.intake(*job),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

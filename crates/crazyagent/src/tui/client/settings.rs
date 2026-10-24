@@ -682,7 +682,7 @@ fn fresh_id() -> Result<RequestId, String> {
     RequestId::new(id).map_err(|_| "native_auth_request_id_invalid".to_owned())
 }
 
-fn connection_lost(code: &str) -> bool {
+pub(super) fn connection_lost(code: &str) -> bool {
     code == "controller_disconnected" || code.contains("transport")
 }
 
