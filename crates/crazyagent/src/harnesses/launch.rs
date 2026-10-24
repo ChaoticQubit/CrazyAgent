@@ -264,6 +264,9 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .sandbox_profile
         .as_ref()
         .ok_or_else(|| failure("launch_sandbox_required"))?;
+    if !cfg!(target_os = "macos") {
+        return Err(failure("launch_sandbox_unavailable"));
+    }
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-f")

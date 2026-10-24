@@ -138,23 +138,8 @@ pub(in crate::tui) fn open_path(path: &str) -> Result<(), String> {
     if !target.is_absolute() || !target.exists() {
         return Err("That file or folder is not there any more.".into());
     }
-    let opener = if cfg!(target_os = "macos") {
-        "/usr/bin/open"
-    } else {
-        "xdg-open"
-    };
-    let status = std::process::Command::new(opener)
-        .arg(target)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|_| "Could not open it on this computer.".to_owned())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Could not open it on this computer.".into())
-    }
+    crate::platform::open(target.as_os_str())
+        .map_err(|_| "Could not open it on this computer.".to_owned())
 }
 
 /// One project as a shell screen.
