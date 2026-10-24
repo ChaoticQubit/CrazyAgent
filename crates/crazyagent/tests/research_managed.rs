@@ -2,10 +2,12 @@
 
 mod research_support;
 
+use crazyagent::project_setup::load_setup;
+use crazyagent::protocol::ProjectId;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use research_support::managed_project;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const RUN_LIMIT: Duration = Duration::from_secs(1200);
@@ -38,15 +40,25 @@ fn engine_research(runtime: &Path, project: &str, kind: &str, harness: &str) -> 
         job.report_path.as_deref(),
         Some(format!("context/research/{kind}.md").as_str())
     );
-    fs::read_to_string(
-        runtime
-            .join("projects")
-            .join(project)
-            .join("context")
-            .join("research")
-            .join(format!("{kind}.md")),
-    )
-    .unwrap()
+    let report = state_folder(runtime, project)
+        .join("context")
+        .join("research")
+        .join(format!("{kind}.md"));
+    fs::read_to_string(&report).unwrap_or_else(|error| panic!("{}: {error}", report.display()))
+}
+
+/// The folder holding `project`'s CrazyAgent files in the running engine, found the way
+/// the engine's research finds the project: the folder its setup recorded, such as one in
+/// the projects home, else `<runtime>/projects/<project>`. Returns that folder's state folder.
+fn state_folder(runtime: &Path, project: &str) -> PathBuf {
+    let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tx = database.unchecked_transaction().unwrap();
+    let folder = load_setup(&tx, &ProjectId::new(project).unwrap())
+        .unwrap()
+        .map(|stored| stored.project_folder())
+        .unwrap_or_else(|| runtime.join("projects").join(project));
+    crazyagent::projects_home::state_folder(&folder)
 }
 
 #[test]
