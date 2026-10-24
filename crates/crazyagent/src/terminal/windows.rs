@@ -1,6 +1,7 @@
+use super::buffer::{Feed, buffer};
 use super::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneRef, SIZE_MAX, SIZE_MIN,
-    STREAM_CHUNKS_MAX, TerminalStream, VIEWERS_MAX, failure,
+    TerminalStream, VIEWERS_MAX, failure,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -11,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tokio::sync::mpsc;
 
 const START_COLS: u16 = 80;
 const START_ROWS: u16 = 24;
 const SCROLLBACK_ROWS: usize = 0;
+const _: () = assert!(SCROLLBACK_ROWS <= super::SCROLLBACK_LINES as usize);
 const ARGV_MAX: usize = 256;
 const ENV_MAX: usize = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -52,7 +53,7 @@ struct View {
     parser: vt100::Parser,
     cols: u16,
     rows: u16,
-    viewers: Vec<mpsc::Sender<Vec<u8>>>,
+    viewers: Vec<Feed>,
 }
 
 impl Pane {
@@ -179,9 +180,9 @@ impl Host for ConptyHost {
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
         let mut panes = lock(&self.panes);
         let pane = live(&mut panes, agent)?;
-        let (sender, chunks) = mpsc::channel(STREAM_CHUNKS_MAX);
+        let (sender, chunks) = buffer();
         let mut view = lock(&pane.view);
-        view.viewers.retain(|viewer| !viewer.is_closed());
+        view.viewers.retain(Feed::open);
         if view.viewers.len() >= VIEWERS_MAX {
             return Err(failure("terminal_viewers_full"));
         }
@@ -283,8 +284,7 @@ fn pump(mut reader: Box<dyn Read + Send>, view: &Mutex<View>) {
         let chunk = &buffer[..read];
         let mut view = lock(view);
         view.parser.process(chunk);
-        view.viewers
-            .retain(|viewer| viewer.try_send(chunk.to_vec()).is_ok());
+        view.viewers.retain(|viewer| viewer.push(chunk));
     }
     lock(view).viewers.clear();
 }

@@ -1,6 +1,7 @@
+use super::buffer::{Feed, buffer};
 use super::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneRef, SIZE_MAX, SIZE_MIN,
-    STREAM_CHUNKS_MAX, TerminalStream, VIEWERS_MAX, failure,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
+    TerminalStream, VIEWERS_MAX, end_except, failure,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
@@ -60,7 +61,7 @@ struct State {
 struct Viewer {
     pane: Vec<u8>,
     window: Vec<u8>,
-    chunks: tokio::sync::mpsc::Sender<Vec<u8>>,
+    feed: Feed,
 }
 
 enum Pending {
@@ -104,6 +105,21 @@ impl Tmux {
     /// Returns `<folder>/tmux.sock`.
     pub fn socket(&self) -> PathBuf {
         self.folder.join(SOCKET)
+    }
+
+    fn running(&self) -> bool {
+        std::fs::symlink_metadata(self.socket())
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+    }
+
+    fn live_control(&self) -> Result<Arc<Control>, HostError> {
+        if self.executable.is_none() {
+            return Err(failure("terminal_unavailable"));
+        }
+        if !self.running() {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        self.control()
     }
 
     fn control(&self) -> Result<Arc<Control>, HostError> {
@@ -195,6 +211,8 @@ impl Tmux {
             format!("set-option -g default-terminal {TERMINAL_TYPE}"),
             "set-option -gw allow-rename off".into(),
             "set-option -gw automatic-rename off".into(),
+            "set-option -gw remain-on-exit off".into(),
+            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
         ] {
             control
                 .run(&option)
@@ -481,16 +499,12 @@ fn viewer(
         rows,
         cursor,
     } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
-    state.viewers.retain(|viewer| !viewer.chunks.is_closed());
+    state.viewers.retain(|viewer| viewer.feed.open());
     if state.viewers.len() >= VIEWERS_MAX {
         return Err(failure("terminal_viewers_full"));
     }
-    let (chunks, receiver) = tokio::sync::mpsc::channel(STREAM_CHUNKS_MAX);
-    state.viewers.push(Viewer {
-        pane,
-        window,
-        chunks,
-    });
+    let (feed, receiver) = buffer();
+    state.viewers.push(Viewer { pane, window, feed });
     assert!(state.viewers.len() <= VIEWERS_MAX);
     Ok(TerminalStream {
         agent,
@@ -549,11 +563,9 @@ fn finish(state: &mut State, answer: Answer) {
 fn deliver(state: &mut State, pane: &[u8], bytes: &[u8]) {
     state.viewers.retain(|viewer| {
         if viewer.pane != pane {
-            return !viewer.chunks.is_closed();
+            return viewer.feed.open();
         }
-        bytes
-            .chunks(CHUNK_BYTES_MAX)
-            .all(|chunk| viewer.chunks.try_send(chunk.to_vec()).is_ok())
+        viewer.feed.push(bytes)
     });
 }
 
@@ -671,7 +683,7 @@ impl Host for Tmux {
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
-        let control = self.control()?;
+        let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
             "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane -p -e -t {target}"
@@ -699,7 +711,7 @@ impl Host for Tmux {
         for byte in bytes {
             let _ = write!(line, " {byte:02x}");
         }
-        self.control()?.run(&line).map(drop)
+        self.live_control()?.run(&line).map(drop)
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
@@ -707,7 +719,7 @@ impl Host for Tmux {
         if !size.contains(&cols) || !size.contains(&rows) {
             return Err(failure("terminal_size_bounds"));
         }
-        self.control()?
+        self.live_control()?
             .run(&format!(
                 "resize-window -t {} -x {cols} -y {rows}",
                 target(agent)
@@ -716,14 +728,38 @@ impl Host for Tmux {
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        self.control()?
+        self.live_control()?
             .run(&format!("kill-window -t {}", target(agent)))
             .map(drop)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        if self.executable.is_none() {
+            return Err(failure("terminal_unavailable"));
+        }
+        if !self.running() {
+            return Ok(Vec::new());
+        }
         let control = self.control()?;
         windows(&control)
+    }
+
+    fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        if self.executable.is_none() || !self.running() {
+            return Ok(());
+        }
+        end_except(self, keep)?;
+        if !keep.is_empty() {
+            return Ok(());
+        }
+        let control = self.control()?;
+        let (reply, _answer) = sync_channel(1);
+        let _ = control.send("kill-server", Pending::Reply(reply));
+        control.close();
+        if let Ok(mut slot) = self.control.lock() {
+            *slot = None;
+        }
+        Ok(())
     }
 }
 
