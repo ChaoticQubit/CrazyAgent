@@ -2191,7 +2191,6 @@ fn adopt_account_profile(
     Ok(())
 }
 
-#[cfg(test)]
 struct RcliRegistration<'a> {
     host: &'a HostStamp,
     project_id: &'a ProjectId,
@@ -2199,7 +2198,6 @@ struct RcliRegistration<'a> {
     configured_home: &'a Path,
 }
 
-#[cfg(test)]
 fn register_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2272,9 +2270,13 @@ fn register_generated_rcli_profile(
     if !home.join(".backboard/config.json").is_file() {
         return Ok(());
     }
-    register_rcli_profile(
-        db, config, sources, custody, host, project_id, session_id, &home,
-    )?;
+    let registration = RcliRegistration {
+        host,
+        project_id,
+        session_id,
+        configured_home: &home,
+    };
+    register_rcli_profile(db, config, sources, custody, registration)?;
     assert!(db.is_autocommit());
     Ok(())
 }
