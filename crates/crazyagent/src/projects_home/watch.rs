@@ -86,6 +86,13 @@ impl HomeWatch {
         self.lock().readable
     }
 
+    /// Rescans the home now, so a read right after a folder was made, added or
+    /// removed shows it before the OS event arrives. Output: none; waiters wake
+    /// when the list changed.
+    pub fn refresh(&self) {
+        self.shared.rescan();
+    }
+
     /// The current top-level folder names, sorted, with the change count.
     /// Output: the generation, raised on every change, and at most
     /// `FOLDERS_MAX` names.
