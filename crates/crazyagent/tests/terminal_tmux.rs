@@ -396,6 +396,43 @@ fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
 }
 
 #[test]
+fn the_screen_on_attach_keeps_the_spaces_the_program_wrote() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let host = Tmux::open(Some(tmux), &folder);
+    let agent = AgentId::team(6).unwrap();
+    host.spawn(
+        &agent,
+        &shell(
+            root.path(),
+            vec![("PS1".into(), "spaced$ ".into())],
+            &["/bin/sh"],
+        ),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let screen = loop {
+        let stream = host.attach(&agent).unwrap();
+        if contains(&stream.screen, b"spaced$") {
+            break stream.screen;
+        }
+        assert!(Instant::now() < deadline, "the shell never drew its prompt");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        contains(&screen, b"spaced$ \r\n"),
+        "the prompt keeps its trailing space and no unused cell follows it: {}",
+        String::from_utf8_lossy(&screen)
+    );
+    host.kill(&agent).unwrap();
+}
+
+#[test]
 fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     let root = root();
     let tmux = tmux(root.path());

@@ -35,7 +35,7 @@ pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
-const CODEX_TOOLS_OFF: [&str; 12] = [
+const CODEX_TOOLS_OFF: [&str; 13] = [
     "sandbox_mode=\"read-only\"",
     "approval_policy=\"never\"",
     "features.shell_tool=false",
@@ -46,14 +46,16 @@ const CODEX_TOOLS_OFF: [&str; 12] = [
     "features.code_mode=false",
     "features.apps=false",
     "features.plugins=false",
+    "features.goals=false",
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
-const CODEX_TOOLS_ON: [&str; 5] = [
+const CODEX_TOOLS_ON: [&str; 6] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
     "features.apps=false",
     "features.plugins=false",
+    "features.goals=false",
     "mcp_servers={}",
 ];
 

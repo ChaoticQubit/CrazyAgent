@@ -123,7 +123,6 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
-        keep_master: false,
         paused: false,
         min_agents: 1,
         max_agents: 4,

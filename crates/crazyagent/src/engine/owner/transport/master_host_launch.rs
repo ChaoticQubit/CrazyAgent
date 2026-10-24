@@ -29,7 +29,7 @@ const MASTER_TMP: &str = "tmp";
 const MASTER_PROFILE: &str = "sandbox.sb";
 const HTTPS_PORT: u16 = 443;
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-const MASTER_CONFIG: [&str; 14] = [
+const MASTER_CONFIG: [&str; 15] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"read-only\"",
@@ -42,6 +42,7 @@ const MASTER_CONFIG: [&str; 14] = [
     "features.code_mode=false",
     "features.apps=false",
     "features.plugins=false",
+    "features.goals=false",
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
@@ -124,7 +125,7 @@ impl OwnerRuntimeHandle {
 }
 
 /// Confirms the master launch keeps the subscription harness contained under DEC-076:
-/// read-only sandbox, approvals never granted, and no shell, patch, web or MCP tools.
+/// read-only sandbox, approvals never granted, and no shell, patch, web, goal or MCP tools.
 /// Input: none, the policy is the fixed launch configuration. Output: Ok when every
 /// containment setting is present, otherwise the unsupported-backend refusal.
 fn require_master_tool_policy() -> Result<(), EngineError> {
@@ -134,6 +135,7 @@ fn require_master_tool_policy() -> Result<(), EngineError> {
         "features.shell_tool=false",
         "features.apply_patch_freeform=false",
         "features.unified_exec=false",
+        "features.goals=false",
         "web_search=\"disabled\"",
         "mcp_servers={}",
     ];
