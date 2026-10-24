@@ -712,15 +712,23 @@ fn pick(shell: &mut Shell, indexes: &[usize]) {
     }
 }
 
+fn pool_editor(width: u16, height: u16) -> Shell {
+    let mut ctx = ready(width, height);
+    ctx.store.accounts = Load::Ready(accounts());
+    ctx.store.pools = Load::Ready(pools());
+    ctx.store.harnesses = Load::Ready((2, 9));
+    ctx.store.memory = Load::Ready(41);
+    let mut shell = shell_at(ctx, Place::NewPool);
+    render(&mut shell, width, height);
+    keys(&mut shell, "Build team");
+    shell.key(Key::Tab);
+    shell
+}
+
 #[test]
 fn pool_editor_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {
-        let mut ctx = ready(width, height);
-        ctx.store.accounts = Load::Ready(accounts());
-        ctx.store.pools = Load::Ready(pools());
-        let mut shell = shell_at(ctx, Place::NewPool);
-        keys(&mut shell, "Build team");
-        shell.key(Key::Tab);
+        let mut shell = pool_editor(width, height);
         pick(&mut shell, &[0, 1, 5, 6, 9, 12, 13]);
         shell.key(Key::Home);
         shell.key(Key::Down);
@@ -732,12 +740,7 @@ fn pool_editor_frames_match_the_design() {
         );
     }
 
-    let mut ctx = ready(80, 24);
-    ctx.store.accounts = Load::Ready(accounts());
-    ctx.store.pools = Load::Ready(pools());
-    let mut shell = shell_at(ctx, Place::NewPool);
-    keys(&mut shell, "Build team");
-    shell.key(Key::Tab);
+    let mut shell = pool_editor(80, 24);
     pick(&mut shell, &(0..16).collect::<Vec<_>>());
     check_without_thumb("pool-editor-full-80", &render(&mut shell, 80, 24), 80);
 }
