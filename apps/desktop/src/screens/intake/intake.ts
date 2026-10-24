@@ -141,7 +141,7 @@ export function repoMeta(repo: GitHubRepo): string {
 /** Badge word, tone and failure line for one onboarding step.
  * Input: the step. Output: the fixed status word, its tone and the reason when it failed. */
 export function stepView(step: OnboardingStep): { word: string; tone: Tone; line: string | null } {
-  switch (step.state) {
+  switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
@@ -175,17 +175,17 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
 /** Tells whether the graph and mapping steps have stopped changing.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
-  const done = (step: OnboardingStep) => step.state === "done" || step.state === "failed";
-  return done(view.mapping) || (view.graph.state === "failed" && view.mapping.state === "waiting");
+  const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
+  return done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
 }
 
 /** Says whether the owner can confirm yet and what to do.
  * Input: the onboarding view. Output: ready and one sentence. */
 export function confirmReady(view: OnboardingView): { ready: boolean; line: string } {
-  if (view.mapping.state === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
-  if (view.mapping.state === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
-  if (view.graph.state === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
-  if (view.graph.state !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
+  if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
+  if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
+  if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
+  if (view.graph.kind !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 
