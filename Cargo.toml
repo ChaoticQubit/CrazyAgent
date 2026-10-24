@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/crazyagent", "apps/desktop/src-tauri"]
+members = ["crates/crazyagent", "crates/crazyagent-win-sandbox", "apps/desktop/src-tauri"]
 default-members = ["crates/crazyagent"]
 resolver = "3"
 

@@ -38,6 +38,7 @@ landlock = "=0.4.2"
 zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
 portable-pty = "=0.9.0"
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 
