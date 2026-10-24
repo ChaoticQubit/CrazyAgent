@@ -42,9 +42,19 @@ fn private(path: &Path) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
-/// Builds a spec that runs the fixture child installed in `root` for project "controls".
+/// Builds a spec that runs the fixture child installed in `root` for project "controls",
+/// under its own sandbox profile that lets it write only outside `/Users`.
 /// Inputs: the root, a short unique name and the first task. Output: the spec.
 pub(crate) fn spec(root: &Path, name: &str, prompt: Option<&str>) -> AgentSpec {
+    let profile = root.join(format!("{name}.sb"));
+    std::fs::write(
+        &profile,
+        format!(
+            "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"{}\"))\n",
+            root.display()
+        ),
+    )
+    .unwrap();
     AgentSpec {
         project: ProjectId::new("controls").unwrap(),
         role: AgentRole::SubAgent,
@@ -59,7 +69,7 @@ pub(crate) fn spec(root: &Path, name: &str, prompt: Option<&str>) -> AgentSpec {
         },
         model: None,
         tools: false,
-        sandbox_profile: None,
+        sandbox_profile: Some(profile),
         run_time_secs: 300,
         context: false,
         prompt: prompt.map(str::to_owned),
@@ -143,6 +153,21 @@ fn stopping_one_agent_ends_its_whole_process_group_and_leaves_the_others_running
     until("the second group to be gone", || {
         !alive(second_pid) && !alive(second_grandchild)
     });
+}
+
+#[test]
+fn a_launch_without_its_sandbox_profile_is_refused_before_it_is_listed() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = case.agents();
+    let mut bare = spec(&root, "bare", Some("echo bare"));
+    bare.sandbox_profile = None;
+    assert_eq!(
+        agents.launch(bare, None).unwrap_err().0,
+        "launch_sandbox_required"
+    );
+    assert!(agents.list(None, 0, LIST_MAX).unwrap().is_empty());
+    assert!(!root.join("work").join("bare").join("pids.json").exists());
 }
 
 #[test]

@@ -204,6 +204,9 @@ impl AgentSpec {
         if !(1..=RUN_TIME_SECS_MAX).contains(&self.run_time_secs) {
             return Err(failure("agent_run_time_invalid"));
         }
+        if self.sandbox_profile.is_none() {
+            return Err(failure("launch_sandbox_required"));
+        }
         let keyed = matches!(self.account, AgentAccount::Endpoint { keyed: true, .. });
         if keyed != key.is_some()
             || matches!(
