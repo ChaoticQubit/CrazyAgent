@@ -26,6 +26,7 @@ pub mod rcli_host;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod setup;
 pub mod storage;
 pub mod team;
 pub mod tui;
