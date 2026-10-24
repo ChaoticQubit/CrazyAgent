@@ -22,7 +22,6 @@ const MASTER_READ_ATTEMPTS: u32 = 4;
 
 mod account_profile;
 pub(super) mod accounts;
-pub(super) mod agents;
 pub(super) mod app_setup;
 mod claude_code;
 pub(super) mod intake;
@@ -42,8 +41,6 @@ enum WorkerMode {
 }
 
 enum Job {
-    Accounts(Box<accounts::AccountsRequest>),
-    Agents(Box<agents::AgentsRequest>),
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect,
@@ -158,8 +155,6 @@ pub(super) enum OwnerProgress {
 }
 
 pub(super) enum OwnerEvent {
-    Accounts(Box<accounts::AccountsEvent>),
-    Agents(Box<agents::AgentsEvent>),
     Master(Box<master_session::Event>),
     Creation(Box<CreationEvent>),
     ModelAccess(Box<model_access::Event>),
@@ -320,36 +315,6 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Job::Accounts(request) => {
-                            let native = native
-                                .as_mut()
-                                .expect("accounts require paired configuration");
-                            let event = runtime.block_on(native.accounts(*request));
-                            if owner_replies
-                                .send(OwnerReply {
-                                    finished: true,
-                                    event: OwnerEvent::Accounts(Box::new(event)),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Job::Agents(request) => {
-                            let native = native
-                                .as_mut()
-                                .expect("agents require paired configuration");
-                            let event = runtime.block_on(native.agents(*request));
-                            if owner_replies
-                                .send(OwnerReply {
-                                    finished: true,
-                                    event: OwnerEvent::Agents(Box::new(event)),
                                 })
                                 .is_err()
                             {

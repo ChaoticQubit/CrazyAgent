@@ -1,5 +1,4 @@
 use super::theme::Role;
-use crate::project_setup::ResearchKind;
 
 /// The meaning a status glyph carries, shared by every status word.
 /// Input: a status word through `Status::of`. Output: the glyph kind and role.
@@ -131,7 +130,6 @@ pub struct Glyphs {
     status: [&'static str; 9],
     sections: [&'static str; 6],
     providers: [&'static str; 8],
-    research: [&'static str; 5],
     pub hline: &'static str,
     pub vline: &'static str,
     pub tee: &'static str,
@@ -157,7 +155,6 @@ pub static UNICODE: Glyphs = Glyphs {
     status: ["✓", "✗", "!", "▸", "◌", "⊘", "◧", "?", "✧"],
     sections: ["@", "⊞", "❯", "✦", "⁂", "◉"],
     providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "•"],
-    research: ["◔", "≷", "◬", "▭", "≣"],
     hline: "─",
     vline: "│",
     tee: "├",
@@ -183,7 +180,6 @@ pub static ASCII: Glyphs = Glyphs {
     status: ["+", "x", "!", ">", "o", "-", "~", "?", "*"],
     sections: ["@", "#", "$", "&", "*", "o"],
     providers: ["O", "O", "C", "A", "R", "U", "L", "*"],
-    research: ["$", "v", "^", "[", "="],
     hline: "-",
     vline: "|",
     tee: "+",
@@ -254,20 +250,6 @@ impl Glyphs {
             _ => 7,
         };
         self.providers[index]
-    }
-
-    /// The glyph for one research kind.
-    #[cfg_attr(not(test), expect(dead_code, reason = "drawn by the project screens"))]
-    /// Input: the kind. Output: its one-cell glyph.
-    pub fn research(&self, kind: ResearchKind) -> &'static str {
-        let index = match kind {
-            ResearchKind::MarketResearch => 0,
-            ResearchKind::CompetitorResearch => 1,
-            ResearchKind::DesignResearch => 2,
-            ResearchKind::FrontEndDesign => 3,
-            ResearchKind::TechStackResearch => 4,
-        };
-        self.research[index]
     }
 
     /// The spinner frame for one tick.
@@ -381,7 +363,6 @@ mod tests {
                 .iter()
                 .chain(set.sections.iter())
                 .chain(set.providers.iter())
-                .chain(set.research.iter())
                 .chain(set.spinner.iter())
                 .chain(shapes.iter());
             for glyph in all {
@@ -393,7 +374,6 @@ mod tests {
         assert_eq!(ASCII.provider("Anthropic API"), "A");
         assert_eq!(ASCII.provider("Somewhere new"), "*");
         assert_eq!(ASCII.section(Section::Pools), "#");
-        assert_eq!(UNICODE.research(ResearchKind::CompetitorResearch), "≷");
         assert_eq!(UNICODE.spin(4), "⠼");
         assert_eq!(ASCII.spin(5), "/");
     }

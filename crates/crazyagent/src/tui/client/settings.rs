@@ -349,9 +349,7 @@ impl NativeOwner {
 
     async fn settings_event(&mut self, job: SettingsJob, lost: &mut bool) -> SettingsEvent {
         match job {
-            SettingsJob::Accounts(request) => {
-                SettingsEvent::Accounts(self.accounts(request).await.result)
-            }
+            SettingsJob::Accounts(request) => SettingsEvent::Accounts(self.accounts(request).await),
             SettingsJob::AllAccounts => {
                 SettingsEvent::AllAccounts(self.all_accounts(ACCOUNTS_PAGE, lost).await)
             }
@@ -663,7 +661,6 @@ impl NativeOwner {
             let read = match self
                 .accounts(AccountsRequest::List { after, limit: page })
                 .await
-                .result
             {
                 Ok(AccountsReply::Page(read)) => read,
                 Ok(_) => return Err("account_reply_unexpected".into()),

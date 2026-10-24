@@ -1,7 +1,7 @@
 use super::new_project::*;
 use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
-use super::new_project_view::{Look, Row, Screen, spread, wizard_screen};
+use super::new_project_view::{Look, Row, Screen, research_glyph, spread, wizard_screen};
 use crate::project_setup::ResearchKind;
 use crate::tui::frame::header;
 use crate::tui::glyphs::{ASCII, UNICODE};
@@ -371,4 +371,26 @@ fn rows_pad_and_cut_to_any_width_including_zero() {
     assert_eq!(row.width(), 76);
     assert!(row.text().ends_with('\u{2026}'), "{}", row.text());
     assert_eq!(spread(0, name, folder), Row::default());
+}
+
+#[test]
+fn research_glyphs_keep_one_cell_and_an_ascii_fallback() {
+    let mut look = Look::plain();
+    let unicode: Vec<&str> = ResearchKind::ALL
+        .iter()
+        .map(|kind| look.glyph(research_glyph(*kind)))
+        .collect();
+    look.ascii = true;
+    let ascii: Vec<&str> = ResearchKind::ALL
+        .iter()
+        .map(|kind| look.glyph(research_glyph(*kind)))
+        .collect();
+    assert_eq!(
+        unicode,
+        ["\u{25d4}", "\u{2277}", "\u{25ec}", "\u{25ad}", "\u{2263}"]
+    );
+    assert_eq!(ascii, ["$", "v", "^", "[", "="]);
+    for glyph in unicode.iter().chain(ascii.iter()) {
+        assert_eq!(ratatui::text::Span::raw(*glyph).width(), 1, "{glyph:?}");
+    }
 }
