@@ -3,8 +3,8 @@
 use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, ProjectSandbox, SandboxNetwork, agent_command, agent_env_refused,
-    agent_variable_allowed,
+    AGENT_GIT_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError, SandboxNetwork,
+    agent_command, agent_env_refused, agent_variable_allowed,
 };
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -94,6 +94,13 @@ fn default_keychain() -> PathBuf {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     PathBuf::from(text.trim().trim_matches('"'))
+}
+
+fn walled(result: Result<ProjectSandbox, SandboxError>) {
+    match result {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, SECRET_ROOT_REFUSED),
+        other => panic!("expected the secret wall refusal, got {other:?}"),
+    }
 }
 
 fn holds(bytes: &[u8], needle: &str) -> bool {
@@ -208,7 +215,7 @@ fn sandboxed_agent_cannot_read_an_engine_keychain_item_through_security() {
 }
 
 #[test]
-fn guarded_engine_runtime_secrets_stay_unreadable_even_under_a_read_root() {
+fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them() {
     let case = case();
     let secret_text = format!("gho_test{}", random_hex(18));
     for name in ["github.json", "github.toml", "engine.db", "engine.db-wal"] {
@@ -219,24 +226,20 @@ fn guarded_engine_runtime_secrets_stay_unreadable_even_under_a_read_root() {
         &secret_text,
     )
     .unwrap();
-    fs::write(case.runtime.join("plain.txt"), "plain\n").unwrap();
-    let sandbox = sandbox(&case)
-        .allow_read(&case.runtime)
-        .unwrap()
-        .guard_engine(&case.runtime)
-        .unwrap();
+    walled(
+        sandbox(&case)
+            .allow_read(&case.runtime)
+            .unwrap()
+            .guard_engine(&case.runtime),
+    );
+    walled(
+        sandbox(&case)
+            .guard_engine(&case.runtime)
+            .unwrap()
+            .allow_read(&case.runtime),
+    );
+    let sandbox = sandbox(&case).guard_engine(&case.runtime).unwrap();
     let profile = case.profiles.join("runtime.sb");
-    let readable = shell(
-        &sandbox,
-        &profile,
-        &format!("cat {}", quoted(&case.runtime.join("plain.txt"))),
-    );
-    assert!(
-        readable.status.success(),
-        "{}",
-        String::from_utf8_lossy(&readable.stderr)
-    );
-    assert_eq!(readable.stdout, b"plain\n");
     for secret in [
         case.runtime.join("github.json"),
         case.runtime.join("github.toml"),
@@ -287,11 +290,14 @@ fn guard_refuses_agent_roots_inside_engine_secrets() {
 }
 
 #[test]
-fn owner_library_read_root_still_hides_the_keychains() {
+fn owner_library_is_refused_as_a_read_root_and_its_keychains_stay_hidden() {
     let home = owner_home();
     let library = home.join("Library");
     let case = case();
-    let sandbox = sandbox(&case).allow_read(&library).unwrap();
+    walled(sandbox(&case).allow_read(&library));
+    let sandbox = sandbox(&case)
+        .allow_read(&library.join("Preferences"))
+        .unwrap();
     let profile = case.profiles.join("library.sb");
     let output = shell(
         &sandbox,

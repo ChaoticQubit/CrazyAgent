@@ -435,6 +435,12 @@ impl Grants {
         }) {
             return Err(invalid("a writable root sits inside a protected path"));
         }
+        let secrets = sandbox.secret_paths();
+        assert!(read.iter().chain(&write).all(|grant| {
+            secrets
+                .iter()
+                .all(|secret| !grant.starts_with(secret) && !secret.starts_with(grant))
+        }));
         Ok(Self { read, write })
     }
 }
