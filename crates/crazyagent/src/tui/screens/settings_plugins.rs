@@ -22,6 +22,14 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
+const COMMAND_HINT: &str = if cfg!(target_os = "windows") {
+    "Use the full path of the command, such as C:\\Users\\you\\.local\\bin\\uvx.exe."
+} else if cfg!(target_os = "linux") {
+    "Use the full path of the command, such as /usr/local/bin/uvx."
+} else {
+    "Use the full path of the command, such as /opt/homebrew/bin/uvx."
+};
+
 const NAME_WIDTH: usize = 22;
 const SKILL_STATE_WIDTH: usize = 5;
 const SERVER_STATE_WIDTH: usize = 22;
@@ -94,9 +102,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         "skill_limit" | "server_limit" | "server_secret_limit" => {
             "You reached the limit. Remove one first."
         }
-        "server_command_invalid" => {
-            "Use the full path of the command, such as /opt/homebrew/bin/uvx."
-        }
+        "server_command_invalid" => COMMAND_HINT,
         "server_args_invalid" => "An argument is too long or has control characters.",
         "server_url_invalid" => "Use an https address. Plain http works only for this Mac.",
         "server_name_invalid" => {
@@ -135,8 +141,8 @@ pub fn command_spec(line: &str) -> Result<ServerSpec, &'static str> {
     let command = words
         .next()
         .ok_or("Type the command that starts the server.")?;
-    if !command.starts_with('/') {
-        return Err("Use the full path of the command, such as /opt/homebrew/bin/uvx.");
+    if !std::path::Path::new(&command).is_absolute() {
+        return Err(COMMAND_HINT);
     }
     let spec = ServerSpec::Stdio {
         command,

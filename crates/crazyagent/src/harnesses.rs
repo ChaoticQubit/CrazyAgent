@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 
 const SEARCH_DIRECTORIES_MAX: usize = 128;
 const PATH_BYTES_MAX: usize = 1024;
-const SYSTEM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+const SYSTEM_DIRECTORIES: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+];
 const HOME_DIRECTORIES: [&str; 6] = [
     ".local/bin",
     ".npm-global/bin",
