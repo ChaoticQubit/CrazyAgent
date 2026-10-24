@@ -1,3 +1,4 @@
+pub mod app_setup;
 pub mod home;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
@@ -163,6 +164,9 @@ pub enum Place {
         name: String,
         tab: ProjectTab,
     },
+    Setup {
+        first_run: bool,
+    },
 }
 
 /// What the shell does after a screen handled a key or an arrival.
@@ -296,6 +300,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         }
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
+        Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Project { id, name, tab } => Box::new(project_page::ProjectPage::new(
             id.clone(),
             name.clone(),
