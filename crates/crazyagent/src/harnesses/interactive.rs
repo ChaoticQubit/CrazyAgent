@@ -241,7 +241,7 @@ pub fn command(
                 );
             }
             argv.push(executable);
-            argv.extend(codex(request, installed.is_some()));
+            argv.extend(codex(request, installed.is_some(), &cwd)?);
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
                 ("TMPDIR".to_owned(), home),
@@ -313,16 +313,18 @@ fn plain_key_file(path: &Path) -> Result<String, LaunchError> {
     Ok(file)
 }
 
-fn codex(request: &LaunchRequest, context: bool) -> Vec<String> {
+fn codex(request: &LaunchRequest, context: bool, cwd: &Path) -> Result<Vec<String>, LaunchError> {
+    let folder = serde_json::to_string(&text(cwd)?)
+        .map_err(|_| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context)
-        .into_iter()
-        .chain(["check_for_update_on_startup=false".to_owned()])
-    {
+    for setting in codex_configuration(request, context).into_iter().chain([
+        "check_for_update_on_startup=false".to_owned(),
+        format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
+    ]) {
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
-    arguments
+    Ok(arguments)
 }
 
 fn claude(

@@ -247,6 +247,13 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
     ] {
         argv.extend(strings(&["-c", setting]));
     }
+    argv.extend(strings(&[
+        "-c",
+        &format!(
+            "projects={{\"{}\"={{trust_level=\"trusted\"}}}}",
+            built.cwd.display()
+        ),
+    ]));
     assert_eq!(built.argv, argv);
     assert!(!built.argv.iter().any(|argument| argument == "app-server"));
     let home = case.home().to_str().unwrap().to_owned();

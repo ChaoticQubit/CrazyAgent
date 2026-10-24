@@ -1,5 +1,6 @@
 pub mod interactive;
 pub mod launch;
+pub mod terminal_session;
 pub mod transcript;
 
 use serde::{Deserialize, Serialize};
