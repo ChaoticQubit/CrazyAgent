@@ -267,7 +267,16 @@ fn a_socket_path_too_long_for_the_system_is_refused() {
     let tmux = tmux(root.path());
     let deep = root.path().join("d".repeat(SOCKET_PATH_BYTES_MAX));
     let host = Tmux::open(Some(tmux), &deep);
-    assert_eq!(host.alive().unwrap_err().0, "terminal_socket_path_long");
+    let agent = AgentId::team(1).unwrap();
+    let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
+    assert_eq!(
+        host.spawn(&agent, &command).unwrap_err().0,
+        "terminal_socket_path_long"
+    );
+    assert!(
+        host.alive().unwrap().is_empty(),
+        "no server runs, so no agent does"
+    );
 }
 
 #[test]
@@ -278,7 +287,12 @@ fn a_shared_terminal_folder_is_refused() {
     std::fs::create_dir(&folder).unwrap();
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
     let host = Tmux::open(Some(tmux), &folder);
-    assert_eq!(host.alive().unwrap_err().0, "terminal_folder_unsafe");
+    let agent = AgentId::team(1).unwrap();
+    let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
+    assert_eq!(
+        host.spawn(&agent, &command).unwrap_err().0,
+        "terminal_folder_unsafe"
+    );
 }
 
 fn option(tmux: &Path, socket: &Path, name: &str) -> String {
@@ -412,9 +426,15 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     );
 
     let unused = root.path().join("unused");
-    Tmux::open(Some(tmux), &unused).close(&[]).unwrap();
+    let idle = Tmux::open(Some(tmux), &unused);
+    assert!(idle.alive().unwrap().is_empty());
+    assert_eq!(
+        idle.attach(&master).unwrap_err().0,
+        "terminal_agent_unknown"
+    );
+    idle.close(&[]).unwrap();
     assert!(
         !unused.exists(),
-        "closing a host that never started starts nothing"
+        "listing or closing a host that never started starts nothing"
     );
 }

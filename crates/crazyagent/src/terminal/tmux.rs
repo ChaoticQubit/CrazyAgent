@@ -107,6 +107,21 @@ impl Tmux {
         self.folder.join(SOCKET)
     }
 
+    fn running(&self) -> bool {
+        std::fs::symlink_metadata(self.socket())
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+    }
+
+    fn live_control(&self) -> Result<Arc<Control>, HostError> {
+        if self.executable.is_none() {
+            return Err(failure("terminal_unavailable"));
+        }
+        if !self.running() {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        self.control()
+    }
+
     fn control(&self) -> Result<Arc<Control>, HostError> {
         let mut slot = self
             .control
@@ -668,7 +683,7 @@ impl Host for Tmux {
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
-        let control = self.control()?;
+        let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
             "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane -p -e -t {target}"
@@ -696,7 +711,7 @@ impl Host for Tmux {
         for byte in bytes {
             let _ = write!(line, " {byte:02x}");
         }
-        self.control()?.run(&line).map(drop)
+        self.live_control()?.run(&line).map(drop)
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
@@ -704,7 +719,7 @@ impl Host for Tmux {
         if !size.contains(&cols) || !size.contains(&rows) {
             return Err(failure("terminal_size_bounds"));
         }
-        self.control()?
+        self.live_control()?
             .run(&format!(
                 "resize-window -t {} -x {cols} -y {rows}",
                 target(agent)
@@ -713,20 +728,24 @@ impl Host for Tmux {
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        self.control()?
+        self.live_control()?
             .run(&format!("kill-window -t {}", target(agent)))
             .map(drop)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        if self.executable.is_none() {
+            return Err(failure("terminal_unavailable"));
+        }
+        if !self.running() {
+            return Ok(Vec::new());
+        }
         let control = self.control()?;
         windows(&control)
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
-        let running = std::fs::symlink_metadata(self.socket())
-            .is_ok_and(|metadata| metadata.file_type().is_socket());
-        if self.executable.is_none() || !running {
+        if self.executable.is_none() || !self.running() {
             return Ok(());
         }
         end_except(self, keep)?;
