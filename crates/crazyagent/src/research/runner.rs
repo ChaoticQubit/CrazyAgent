@@ -217,7 +217,7 @@ impl From<io::Error> for RunError {
 pub struct ResearchRunner {
     database: PathBuf,
     state: PathBuf,
-    codex: PathBuf,
+    codex: Option<PathBuf>,
     claude: Option<PathBuf>,
     limits: ResearchLimits,
     claimer: String,
@@ -245,16 +245,38 @@ impl ResearchRunner {
         codex: &Path,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
-            return Err(RunError::Invalid(
-                "state directory must be canonical".into(),
-            ));
-        }
         if !codex.is_absolute() || !codex.is_file() {
             return Err(RunError::Invalid(
                 "codex executable must be absolute".into(),
             ));
         }
+        Self::build(database, state, Some(codex), limits)
+    }
+
+    /// A runner with no Codex executable, for an engine where Codex is not
+    /// installed: it runs Claude Code once [`Self::with_claude`] adds it, and
+    /// refuses every Codex run with a plain error. Takes the same database,
+    /// state directory and limits as [`Self::new`]. Returns the runner.
+    pub fn without_codex(
+        database: &Path,
+        state: &Path,
+        limits: ResearchLimits,
+    ) -> Result<Self, RunError> {
+        Self::build(database, state, None, limits)
+    }
+
+    fn build(
+        database: &Path,
+        state: &Path,
+        codex: Option<&Path>,
+        limits: ResearchLimits,
+    ) -> Result<Self, RunError> {
+        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+            return Err(RunError::Invalid(
+                "state directory must be canonical".into(),
+            ));
+        }
+        assert!(codex.is_none_or(Path::is_absolute));
         if limits.wall_time.is_zero()
             || limits.output_bytes_max == 0
             || limits.report_bytes_max == 0
@@ -279,7 +301,7 @@ impl ResearchRunner {
         Ok(Self {
             database: database.to_path_buf(),
             state: state.to_path_buf(),
-            codex: codex.to_path_buf(),
+            codex: codex.map(Path::to_path_buf),
             claude: None,
             limits,
             claimer: format!("runner-{}-{nanos}", std::process::id()),
@@ -321,6 +343,14 @@ impl ResearchRunner {
         }
         self.claude = Some(claude.to_path_buf());
         Ok(self)
+    }
+
+    /// Whether this runner has the executable `harness` needs.
+    pub fn can_run(&self, harness: ResearchHarness) -> bool {
+        match harness {
+            ResearchHarness::Codex => self.codex.is_some(),
+            ResearchHarness::ClaudeCode => self.claude.is_some(),
+        }
     }
 
     /// The job store this runner claims from.
@@ -552,7 +582,10 @@ impl ResearchRunner {
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
         let executable = match harness {
-            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
             ResearchHarness::ClaudeCode => self
                 .claude
                 .as_deref()
@@ -928,7 +961,10 @@ impl ResearchRunner {
         private_directory(&tmp)?;
         let harness = run.account.harness();
         let executable = match harness {
-            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
             ResearchHarness::ClaudeCode => self
                 .claude
                 .as_deref()
