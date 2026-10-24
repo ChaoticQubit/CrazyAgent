@@ -20,19 +20,20 @@ const GROUP_LABELS = { language: "Languages", framework: "Frameworks", database:
 
 const toggle = <T,>(list: T[], value: T) => list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 
-/** The Basics controls shared by New Project and Project Settings, General: name, description,
- * tech stack chips with custom entries, and target platforms with an Other text.
- * Inputs: an id prefix, the draft, its change handler, the engine catalog, the field errors and
- * whether to show the name error yet. Output: the fields. */
-export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErrors, autoFocus = false }: {
+/** The Basics controls shared by New Project, Project Settings, General and the setup review:
+ * name, description, tech stack chips with custom entries, and target platforms with an Other text.
+ * Inputs: an id prefix, the draft, its change handler, the engine catalog, the field errors, whether
+ * to show the name error yet, and the fields to mark Missing. Output: the fields. */
+export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErrors, autoFocus = false, missing = [] }: {
   prefix: string; draft: ProjectDraft; onChange: (draft: ProjectDraft) => void; catalog: Result<ProjectCatalog> | undefined;
-  errors: ReturnType<typeof basicsErrors>; showErrors: boolean; autoFocus?: boolean;
+  errors: ReturnType<typeof basicsErrors>; showErrors: boolean; autoFocus?: boolean; missing?: string[];
 }) {
   const [stackQuery, setStackQuery] = useState("");
   const [stackError, setStackError] = useState("");
   const catalogValue = catalog?.kind === "ok" ? catalog.value : null;
   const stackOptions = (catalogValue?.tech_stack ?? []).filter((option) => !stackQuery.trim() || option.label.toLowerCase().includes(stackQuery.trim().toLowerCase()));
   const platforms = catalogValue?.platforms ?? PLATFORMS;
+  const mark = (field: string) => missing.includes(field) && <span className="pj-missing"> Missing</span>;
   const addCustom = () => {
     const result = addStack(draft.stack, stackQuery);
     setStackError(result.error ?? "");
@@ -41,19 +42,19 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
 
   return <>
     <div className="pj-field">
-      <label htmlFor={`${prefix}-name`}>Project name</label>
+      <label htmlFor={`${prefix}-name`}>Project name{mark("name")}</label>
       <input className="pj-input" id={`${prefix}-name`} value={draft.name} maxLength={200} autoFocus={autoFocus} aria-invalid={Boolean(showErrors && errors.name) || undefined}
         aria-describedby={showErrors && errors.name ? `${prefix}-name-error` : undefined} onChange={(event) => onChange({ ...draft, name: event.target.value })} />
       {showErrors && errors.name && <p className="pj-error" id={`${prefix}-name-error`} role="alert">{errors.name}</p>}
     </div>
     <div className="pj-field">
-      <label htmlFor={`${prefix}-about`}>What is it about?</label>
+      <label htmlFor={`${prefix}-about`}>What is it about?{mark("about")}</label>
       <textarea className="pj-input" id={`${prefix}-about`} rows={5} value={draft.about} aria-describedby={`${prefix}-about-help`} onChange={(event) => onChange({ ...draft, about: event.target.value })} />
       <p className="pj-help" id={`${prefix}-about-help`}>Who it's for and what it should do. Agents use this for research.{draft.about.length > 3600 ? ` ${draft.about.length} of 4000.` : ""}</p>
       {errors.about && <p className="pj-error" role="alert">{errors.about}</p>}
     </div>
     <fieldset className="pj-field">
-      <legend>Tech stack</legend>
+      <legend>Tech stack{mark("tech_stack")}</legend>
       {draft.stack.length > 0 && <div className="pj-chips" aria-label="Picked tech stack">{draft.stack.map((item) => <span className="pj-chip" key={item}>{displayText(item)}
         <button type="button" aria-label={`Remove ${item}`} onClick={() => onChange({ ...draft, stack: removeStack(draft.stack, item) })}>{"×"}</button></span>)}</div>}
       <div className="pj-row">
@@ -76,7 +77,7 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
         : <p className="pj-help">The tech stack list isn't available. Add your own entries.</p>}
     </fieldset>
     <fieldset className="pj-field">
-      <legend>Target platforms</legend>
+      <legend>Target platforms{mark("platforms")}</legend>
       <div className="pj-chips">{platforms.map((platform) => <label className={`pj-chip-toggle ${draft.platforms.includes(platform.kind) ? "on" : ""}`} key={platform.kind}>
         <input type="checkbox" className="pj-sr" checked={draft.platforms.includes(platform.kind)} onChange={() => onChange({ ...draft, platforms: toggle(draft.platforms, platform.kind) })} />{platform.label}</label>)}</div>
       {draft.platforms.includes("other") && <div className="pj-field">

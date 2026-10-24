@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
 pub mod tmux;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
