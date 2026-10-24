@@ -154,6 +154,17 @@ pub enum OwnerMutation {
     RemoveProject {
         project_id: ProjectId,
     },
+    SetProjectsHome {
+        path: String,
+    },
+    AddExistingFolder {
+        source: String,
+        mode: crate::projects_home::AddMode,
+    },
+    StartOnboarding {
+        path: String,
+        pool: CredentialRef,
+    },
     CancelResearch {
         project_id: ProjectId,
         job: i64,
@@ -300,6 +311,27 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                 },
             },
+            Self::SetProjectsHome { path } => {
+                let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::AddExistingFolder { source, mode } => {
+                let action = crate::projects_home::HomeAction::Added {
+                    source: source.clone(),
+                    mode: *mode,
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::StartOnboarding { path, pool } => {
+                let action = crate::onboarding::OnboardingAction::Start {
+                    path: path.clone(),
+                    pool: pool.clone(),
+                };
+                action.validate()?;
+                Command::Onboarding { action }
+            }
             Self::CancelResearch { project_id, job } => {
                 let action = crate::project_setup::SetupAction::CancelResearch {
                     project_id: project_id.clone(),
@@ -490,6 +522,14 @@ pub enum OwnerRead {
         job: i64,
     },
     OwnerProfile,
+    ProjectsHome,
+    FoundProjects,
+    FolderSize {
+        path: String,
+    },
+    Onboarding {
+        project_id: ProjectId,
+    },
     Memories {
         scope: crate::memory::library::MemoryScope,
         search: Option<String>,
@@ -564,6 +604,9 @@ impl OwnerRead {
             | Self::TeamStatus { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
+            | Self::ProjectsHome
+            | Self::FoundProjects
+            | Self::Onboarding { .. }
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
             | Self::PoolSummaries { .. } => return Ok(None),
@@ -581,6 +624,10 @@ impl OwnerRead {
                 if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
                     return Err(failure("context_path_invalid"));
                 }
+                return Ok(None);
+            }
+            Self::FolderSize { path } => {
+                crate::projects_home::path_text(path, "folder_size_path_invalid")?;
                 return Ok(None);
             }
             Self::ResearchLog { job, .. } => {
@@ -909,6 +956,18 @@ pub enum OwnerData {
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    ProjectsHome {
+        home: crate::projects_home::ProjectsHome,
+    },
+    FoundProjects {
+        projects: Vec<crate::projects_home::FoundProject>,
+    },
+    FolderSize {
+        bytes: u64,
+    },
+    Onboarding {
+        onboarding: Box<crate::onboarding::Onboarding>,
     },
     Memories {
         page: crate::memory::library::MemoryPage,
