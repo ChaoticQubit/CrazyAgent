@@ -132,10 +132,9 @@ impl TranscriptReader {
 #[cfg(windows)]
 fn open_plain(path: &Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .ok()?;
     file.metadata().ok()?.is_file().then_some(file)

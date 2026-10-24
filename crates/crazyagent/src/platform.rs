@@ -53,6 +53,12 @@ impl FileExt for std::fs::File {
     }
 }
 
+/// The Windows open flag that opens a reparse point itself rather than its target, the
+/// equivalent of Unix `O_NOFOLLOW` on the last path component: a link then opens as a
+/// link, whose metadata is not a regular file.
+#[cfg(windows)]
+pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 /// Reports whether the engine's effective user owns the file the metadata describes.
 /// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
 /// Unix owner to compare, so an ownership check refuses rather than passes.

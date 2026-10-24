@@ -2,6 +2,7 @@ use crate::research::runner::{AgentProcess, RunError, drain, private_directory};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use std::fs::OpenOptions;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,6 +31,7 @@ pub(crate) enum GraphEnding {
 
 /// The folders graphify needs to read to start: its own tool folder and, for
 /// a uv tool install, the Python installation its `pyvenv.cfg` names.
+#[cfg(unix)]
 fn read_roots(graphify: &Path) -> Vec<PathBuf> {
     let Some(bin) = graphify.parent() else {
         return Vec::new();
@@ -66,6 +68,7 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
 /// executable, the project folder, the engine state folder, a unique run
 /// name, the time limit and `stop`, polled while it runs. Returns how it
 /// ended; its process group is stopped on every path.
+#[cfg(unix)]
 pub(crate) fn update(
     graphify: &Path,
     repo: &Path,
@@ -170,4 +173,20 @@ pub(crate) fn update(
     };
     running.stop();
     Ok(ending)
+}
+
+/// Reports a failed graph build where graphify cannot run in its own stoppable process
+/// group under the sandbox. Takes the build inputs, all unused. Returns a failed ending.
+#[cfg(not(unix))]
+pub(crate) fn update(
+    _graphify: &Path,
+    _repo: &Path,
+    _state: &Path,
+    _name: &str,
+    _limit: Duration,
+    _stop: &dyn Fn() -> bool,
+) -> Result<GraphEnding, RunError> {
+    Ok(GraphEnding::Failed(
+        "Graph build is unavailable on this platform",
+    ))
 }

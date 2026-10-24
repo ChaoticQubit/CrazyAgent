@@ -1,6 +1,8 @@
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use std::fs;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -95,6 +97,7 @@ struct Tally {
 /// Inputs: the source folder and a destination path that must not exist yet.
 /// Output: the skill's name, description and size, or a plain rejection code after
 /// removing any partial copy.
+#[cfg(unix)]
 pub fn copy(source: &Path, destination: &Path) -> Result<SkillMeta, &'static str> {
     if !source.is_absolute() || source.as_os_str().len() > SOURCE_BYTES_MAX {
         return Err("skill_folder_not_found");
@@ -135,6 +138,14 @@ pub fn copy(source: &Path, destination: &Path) -> Result<SkillMeta, &'static str
     result
 }
 
+/// Refuses to copy a skill folder where its owner-only 0700 and 0600 copies cannot be
+/// made. Takes the source and destination, both unused. Returns `skill_store_unavailable`.
+#[cfg(not(unix))]
+pub fn copy(_source: &Path, _destination: &Path) -> Result<SkillMeta, &'static str> {
+    Err("skill_store_unavailable")
+}
+
+#[cfg(unix)]
 fn copy_tree(
     root: &Path,
     from: &Path,
@@ -178,6 +189,7 @@ fn copy_tree(
     Ok(())
 }
 
+#[cfg(unix)]
 fn copy_file(from: &Path, to: &Path, tally: &mut Tally) -> Result<(), &'static str> {
     let input = fs::File::from(
         rustix::fs::open(

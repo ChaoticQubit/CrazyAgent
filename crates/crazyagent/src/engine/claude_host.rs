@@ -7,6 +7,7 @@ use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
@@ -16,7 +17,43 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
+#[cfg(unix)]
 mod process;
+
+#[cfg(not(unix))]
+mod process {
+    use super::{ClaudeHostLimits, Status, Turn};
+    use crate::adapters::claude::ClaudeProtocol;
+    use crate::adapters::events::ObservedEvent;
+    use crate::engine::bootstrap::NativeProfileUse;
+    use crate::sandbox::InstalledSandbox;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::Receiver;
+    use tokio::sync::{mpsc, watch};
+
+    pub(super) struct Channels {
+        pub(super) input: Receiver<Turn>,
+        pub(super) output: mpsc::Sender<ObservedEvent>,
+        pub(super) report: watch::Sender<Status>,
+        pub(super) stop: Arc<AtomicBool>,
+    }
+
+    /// Never runs: a master turn needs a native profile lease, which cannot exist where
+    /// native profile custody is unavailable. Takes the turn's command, boundary, lease,
+    /// protocol, limits and channels. Returns nothing.
+    pub(super) fn run(
+        _command: Command,
+        _sandbox: InstalledSandbox,
+        profile: NativeProfileUse,
+        _protocol: ClaudeProtocol,
+        _limits: ClaudeHostLimits,
+        _channels: Channels,
+    ) {
+        match profile {}
+    }
+}
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
@@ -70,6 +107,7 @@ impl ClaudeHostLimits {
 /// Input: the registered executable, the leased project directory, the private profile
 /// home, the model and, when given, the engine's 0600 startup instruction file.
 /// Output: the command, or a plain refusal for an unsafe path, model or file.
+#[cfg(unix)]
 pub(in crate::engine) fn launch_command(
     executable: &Path,
     project_root: &Path,
@@ -155,6 +193,20 @@ pub(in crate::engine) fn launch_command(
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
     Ok(command)
+}
+
+/// Refuses the Claude Code master command where the profile home's Unix owner and mode
+/// cannot be checked. Takes the executable, project, home, model and instruction file,
+/// all unused. Returns `claude_host_unavailable`.
+#[cfg(not(unix))]
+pub(in crate::engine) fn launch_command(
+    _executable: &Path,
+    _project_root: &Path,
+    _profile_home: &Path,
+    _model: &str,
+    _instructions: Option<&Path>,
+) -> Result<Command, EngineError> {
+    Err(failure("claude_host_unavailable"))
 }
 
 #[derive(Clone, Copy, Debug)]
