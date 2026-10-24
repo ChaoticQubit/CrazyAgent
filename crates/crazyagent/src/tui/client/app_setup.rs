@@ -28,9 +28,7 @@ pub(in crate::tui) enum AppSetupJob {
         path: String,
     },
     GitHub,
-    GitHubSignOut {
-        generation: u64,
-    },
+    GitHubSignOut,
 }
 
 /// One change to an installed default-pack entry.
@@ -65,7 +63,7 @@ impl AppSetupJob {
             Self::SetHome { .. } => "SetHome",
             Self::FolderSize { .. } => "FolderSize",
             Self::GitHub => "GitHub",
-            Self::GitHubSignOut { .. } => "GitHubSignOut",
+            Self::GitHubSignOut => "GitHubSignOut",
         }
     }
 }
@@ -82,7 +80,7 @@ impl AppSetupEvent {
             AppSetupJob::SetHome { .. } => Self::HomeSet(Err(problem)),
             AppSetupJob::FolderSize { path } => Self::FolderSize(path.clone(), Err(problem)),
             AppSetupJob::GitHub => Self::GitHub(Err(problem)),
-            AppSetupJob::GitHubSignOut { .. } => Self::GitHubSignedOut(Err(problem)),
+            AppSetupJob::GitHubSignOut => Self::GitHubSignedOut(Err(problem)),
         }
     }
 }
@@ -148,11 +146,13 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
-            AppSetupJob::GitHubSignOut { generation } => AppSetupEvent::GitHubSignedOut(applied(
-                controller.github_sign_out(generation).await,
-                "github_outcome_unknown",
-                lost,
-            )),
+            AppSetupJob::GitHubSignOut => AppSetupEvent::GitHubSignedOut(
+                controller
+                    .github_sign_out()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| problem(&error, lost)),
+            ),
         }
     }
 }

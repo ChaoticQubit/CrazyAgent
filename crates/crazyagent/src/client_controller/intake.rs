@@ -121,6 +121,13 @@ impl OwnerController {
         self.github()?.github_use_cli().await
     }
 
+    /// Signs CrazyAgent out of GitHub and deletes the token it kept.
+    /// Takes nothing.
+    /// Returns the signed-out status.
+    pub async fn github_sign_out(&mut self) -> Result<GitHubStatus, EngineError> {
+        self.github()?.github_sign_out().await
+    }
+
     /// Lists one page of the signed-in owner's GitHub repositories, most recently pushed first.
     /// Takes the page number, from 1 to `github::REPO_PAGE_MAX`.
     /// Returns the page with the next page number, none after the last page.

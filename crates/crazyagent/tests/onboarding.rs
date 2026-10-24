@@ -4,7 +4,7 @@ use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::service::{OnboardingLimits, OnboardingService};
-use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
+use crazyagent::onboarding::{Onboarding, Step, project_id_for};
 use crazyagent::project_setup::Platform;
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
@@ -182,12 +182,12 @@ impl Bench {
         project
     }
 
-    async fn view(&mut self, project: &ProjectId) -> OnboardingView {
+    async fn view(&mut self, project: &ProjectId) -> Onboarding {
         self.owner.onboarding(project.clone()).await.unwrap()
     }
 
     /// Reads the onboarding until both steps finished or `limit` passed.
-    async fn settle(&mut self, project: &ProjectId, limit: Duration) -> OnboardingView {
+    async fn settle(&mut self, project: &ProjectId, limit: Duration) -> Onboarding {
         let deadline = Instant::now() + limit;
         loop {
             let view = self.view(project).await;

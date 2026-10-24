@@ -531,9 +531,7 @@ impl AppSetup {
             },
             Ask::SignOut => match key {
                 Key::Char('y') => {
-                    let job = AppSetupJob::GitHubSignOut {
-                        generation: ctx.next_generation(),
-                    };
+                    let job = AppSetupJob::GitHubSignOut;
                     self.change(job, Sent::Done("Signed out of GitHub.".into()), ctx);
                 }
                 Key::Char('n') | Key::Esc => {}

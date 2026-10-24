@@ -47,7 +47,7 @@ pub struct MappingFacts {
 /// mapping agent's `.crazyagent/overview.md` once it exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OnboardingView {
+pub struct Onboarding {
     pub project_id: ProjectId,
     pub graph: Step,
     pub mapping: Step,
@@ -382,7 +382,7 @@ fn restart(
 pub(crate) fn status(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
-) -> Result<Option<OnboardingView>, EngineError> {
+) -> Result<Option<Onboarding>, EngineError> {
     let row = tx
         .query_row(
             "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo
@@ -406,7 +406,7 @@ pub(crate) fn status(
     };
     let drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
     let missing = drafted.missing();
-    Ok(Some(OnboardingView {
+    Ok(Some(Onboarding {
         project_id: project_id.clone(),
         graph: Step::from_columns(&graph, graph_reason)?,
         mapping: Step::from_columns(&mapping, mapping_reason)?,

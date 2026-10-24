@@ -467,7 +467,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     shell.key(Key::Char('y'));
     assert!(matches!(
         jobs(&mut shell).as_slice(),
-        [AppSetupJob::GitHubSignOut { .. }]
+        [AppSetupJob::GitHubSignOut]
     ));
     shell.arrive(event(AppSetupEvent::GitHubSignedOut(Ok(()))));
     assert_eq!(lead(&shell), "Signed out of GitHub.");

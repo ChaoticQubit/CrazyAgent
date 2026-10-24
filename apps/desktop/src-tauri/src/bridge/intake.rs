@@ -92,13 +92,13 @@ pub struct FolderSize {
     pub github: Option<String>,
 }
 
-/// One project's onboarding as the setup review shows it: the engine's onboarding record
-/// and the mapping agent's `.crazyagent/overview.md`, when it is a plain bounded file.
+/// One project's onboarding as the setup review shows it: the engine's onboarding record,
+/// whose `overview` is the mapping agent's `.crazyagent/overview.md` when it is a plain
+/// bounded file.
 #[derive(Debug, Serialize)]
 pub struct OnboardingView {
     #[serde(flatten)]
     pub onboarding: Onboarding,
-    pub overview: Option<String>,
 }
 
 fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
@@ -361,24 +361,23 @@ impl NativeBridge {
     /// Input: the project id. Output: the steps, the draft, what is missing and the overview.
     pub async fn onboarding(&mut self, id: &str) -> Result<OnboardingView, BridgeError> {
         let project_id = project(id)?;
-        let onboarding = match self
+        let mut onboarding = match self
             .owner_read(OwnerRead::Onboarding { project_id })
             .await?
         {
             OwnerData::Onboarding { onboarding } => *onboarding,
             _ => return Err(failure("owner_read_failed")),
         };
-        let folder = self.found_projects().await.ok().and_then(|found| {
-            found
-                .into_iter()
-                .find(|entry| entry.project_id.as_ref().is_some_and(|p| p.as_str() == id))
-                .map(|entry| entry.path)
-        });
-        let overview = folder.and_then(|path| read_overview(Path::new(&path)));
-        bounded(OnboardingView {
-            onboarding,
-            overview,
-        })
+        if onboarding.overview.is_none() {
+            let folder = self.found_projects().await.ok().and_then(|found| {
+                found
+                    .into_iter()
+                    .find(|entry| entry.project_id.as_ref().is_some_and(|p| p.as_str() == id))
+                    .map(|entry| entry.path)
+            });
+            onboarding.overview = folder.and_then(|path| read_overview(Path::new(&path)));
+        }
+        bounded(OnboardingView { onboarding })
     }
 
     fn github_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
@@ -540,8 +539,14 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         crazyagent::projects_home::path_text(&path, "projects_home_path_invalid")
             .map_err(intake_failure)?;
-        self.home_change(OwnerMutation::MoveProjectsHome { path }, generation)
-            .await
+        self.home_change(
+            OwnerMutation::MoveProjectsHome {
+                path,
+                move_projects: true,
+            },
+            generation,
+        )
+        .await
     }
 }
 

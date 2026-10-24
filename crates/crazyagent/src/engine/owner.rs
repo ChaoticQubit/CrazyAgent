@@ -990,7 +990,7 @@ pub enum OwnerData {
         bytes: u64,
     },
     Onboarding {
-        onboarding: Box<crate::onboarding::OnboardingView>,
+        onboarding: Box<crate::onboarding::Onboarding>,
     },
     Memories {
         page: crate::memory::library::MemoryPage,

@@ -406,6 +406,7 @@ fn waiting_review() -> (Shell, ProjectId) {
             entry_points: vec!["src/main.rs".into()],
         },
         missing: vec!["about".into(), "platforms".into()],
+        overview: None,
     };
     shell.arrive(intake(
         IntakeQuery::Onboarding {
