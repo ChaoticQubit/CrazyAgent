@@ -540,6 +540,12 @@ impl AppSetup {
         }
     }
 
+    /// True when no setup run is going and no change waits for the engine.
+    /// Input: none. Output: whether first run may leave for Home.
+    fn quiet(&self) -> bool {
+        !self.started && self.sent.is_none()
+    }
+
     fn space_label(&self) -> &'static str {
         match self.picked() {
             Some(entry) if Self::installed(&entry.state) && !self.first_run => {
@@ -913,17 +919,22 @@ impl Screen for AppSetup {
         }
         let mut hints = Vec::new();
         match &self.setup {
+            Load::Ready(_) if self.first_run => {
+                hints.push(hint("Enter", "Install and continue"));
+                if self.quiet() {
+                    let skip = if self.finished_with_problems {
+                        "Continue without it"
+                    } else {
+                        "Continue without installing"
+                    };
+                    hints.push(hint("c", skip));
+                }
+                hints.push(hint("Space", self.space_label()));
+            }
             Load::Ready(_) => {
                 hints.push(hint("Space", self.space_label()));
-                if self.first_run {
-                    hints.push(hint("Enter", "Install and continue"));
-                    if self.finished_with_problems {
-                        hints.push(hint("c", "Continue without it"));
-                    }
-                } else {
-                    hints.push(hint("Enter", "Install missing"));
-                    hints.push(hint("d", "Remove"));
-                }
+                hints.push(hint("Enter", "Install missing"));
+                hints.push(hint("d", "Remove"));
             }
             Load::NotReady if self.first_run => hints.push(hint("Enter", "Continue")),
             Load::Failed(_) => {
@@ -955,8 +966,7 @@ impl Screen for AppSetup {
             self.ask_key(ask, key, ctx);
             return Flow::Handled;
         }
-        let quiet = !self.started && self.sent.is_none();
-        let stuck = self.finished_with_problems || matches!(self.setup, Load::Failed(_));
+        let checked = matches!(self.setup, Load::Ready(_) | Load::Failed(_));
         match key {
             Key::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -977,7 +987,7 @@ impl Screen for AppSetup {
                 self.reload(ctx);
                 Flow::Handled
             }
-            Key::Char('c') if self.first_run && quiet && stuck => {
+            Key::Char('c') if self.first_run && self.quiet() && checked => {
                 Flow::Replace(open(&Place::Home, ctx))
             }
             Key::Char('d') if !self.first_run => {

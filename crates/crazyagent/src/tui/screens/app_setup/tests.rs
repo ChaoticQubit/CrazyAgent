@@ -301,6 +301,24 @@ fn continuing_installs_the_ticked_entries_then_opens_home() {
 }
 
 #[test]
+fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut shell = first_run(width, height);
+        let rows = render(&mut shell, width, height);
+        let help = rows.last().unwrap();
+        assert!(help.contains("Enter Install and continue"), "{help}");
+        assert!(help.contains("c Continue without installing"), "{help}");
+        shell.key(Key::Char('c'));
+        assert_eq!(shell.place(), Some(Place::Home));
+        let runs = jobs(&mut shell)
+            .iter()
+            .filter(|job| matches!(job, AppSetupJob::Run { .. }))
+            .count();
+        assert_eq!(runs, 0, "continuing without installing runs nothing");
+    }
+}
+
+#[test]
 fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
     let mut shell = first_run(120, 36);
     shell.key(Key::Enter);
