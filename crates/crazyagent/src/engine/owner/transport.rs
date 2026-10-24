@@ -1291,7 +1291,7 @@ impl OwnerServer {
                 }
                 accepted=crate::spawn_gate::accept_unix(&self.listener) => {
                     let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
-                    if handshakes.len()>=3 {drop(stream);continue;}
+                    if handshakes.len()>=3 {continue;}
                     let timeout=self.timeout;
                     handshakes.spawn(read_owner_handshake(stream,timeout));
                 }
