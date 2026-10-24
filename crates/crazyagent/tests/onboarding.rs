@@ -18,7 +18,8 @@ use crazyagent::research::runner::{
 };
 use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,9 +31,39 @@ const POOL: &str = "local-pool";
 const PROJECT: &str = "demo-app";
 const GRAPHIFY_MISSING: &str = "graphify not installed";
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
-const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"demo-app\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+const MODEL: &str = "qwen2.5:7b";
+const OLLAMA: &str = "127.0.0.1:11434";
+const OLLAMA_TIME: Duration = Duration::from_secs(10);
+const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
+const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"demo-app\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 const SAVED_DRAFT: &str = r#"{"name":"Demo Tool","draft":{"about":"Kept by the owner.","tech_stack":["Postgres"],"platforms":["cli"],"research":[],"pool":null,"team":null,"documents":[]},"facts":{"languages":[],"build_commands":[],"test_commands":[],"entry_points":[]}}"#;
 const OWNER_OVERVIEW: &str = "# Owner overview\n\nWritten by hand.\n";
+
+/// Fails the test with the command that fixes it unless the local Ollama serves the pool
+/// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+fn require_model() {
+    assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
+    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+        stream.set_read_timeout(Some(OLLAMA_TIME))?;
+        stream.set_write_timeout(Some(OLLAMA_TIME))?;
+        stream.write_all(
+            format!("GET /api/tags HTTP/1.1\r\nHost: {OLLAMA}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )?;
+        let mut reply = String::new();
+        stream
+            .take(OLLAMA_TAGS_BYTES_MAX)
+            .read_to_string(&mut reply)?;
+        Ok(reply)
+    });
+    let reply = listed.unwrap_or_else(|problem| {
+        panic!("the local Ollama at {OLLAMA} is required and did not answer: {problem}")
+    });
+    assert!(
+        reply.contains(&format!("\"name\":\"{MODEL}\"")),
+        "the local Ollama does not have {MODEL}; run: ollama pull {MODEL}"
+    );
+}
 
 /// Runs git in `repo` with no global or system configuration.
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -435,6 +466,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
+    require_model();
     let mut bench = Bench::start(|_| {}).await;
     bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
@@ -808,7 +840,7 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
     let pool = CredentialRef::new(POOL).unwrap();
     let local = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:11434/v1".into(),
-        model: "qwen2.5:0.5b".into(),
+        model: MODEL.into(),
     };
     assert_eq!(
         resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
