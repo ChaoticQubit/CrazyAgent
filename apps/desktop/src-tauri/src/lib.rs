@@ -3,7 +3,7 @@ pub mod bridge;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
-use bridge::intake::{FolderSize, OnboardingView};
+use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::Pick;
 use bridge::project_setup::{MemoryItem, ResearchLog};
@@ -25,6 +25,7 @@ use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubS
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
+use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;

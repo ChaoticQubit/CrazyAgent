@@ -29,7 +29,7 @@ const stored = (extra = {}) => ({
   documents: [], folder: "/Users/mira/Projects/shop", created_ms: 1, revision: 4, ...extra,
 });
 const view = (extra = {}) => ({
-  project_id: "p1", graph: { state: "done" }, mapping: { state: "done" },
+  project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
   missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", ...extra,
@@ -112,10 +112,10 @@ test("repositories filter by name and read their size and branch", () => {
 });
 
 test("onboarding steps use the fixed words and keep the failure reason", () => {
-  assert.deepEqual(intake.stepView({ state: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
-  assert.deepEqual(intake.stepView({ state: "running" }), { word: "Working", tone: "info", line: null });
-  assert.deepEqual(intake.stepView({ state: "done" }), { word: "Done", tone: "ok", line: null });
-  assert.deepEqual(intake.stepView({ state: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
+  assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
+  assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
+  assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
+  assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
 });
 
 test("missing items name the form fields, once each", () => {
@@ -138,16 +138,16 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
 
 test("confirm waits for the mapping agent unless a step failed", () => {
   assert.deepEqual(intake.confirmReady(view()), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
-  assert.deepEqual(intake.confirmReady(view({ mapping: { state: "failed", reason: "x" } })), { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." });
-  assert.deepEqual(intake.confirmReady(view({ graph: { state: "failed", reason: "x" }, mapping: { state: "waiting" } })),
+  assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "failed", reason: "x" } })), { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })),
     { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." });
-  assert.deepEqual(intake.confirmReady(view({ graph: { state: "running" }, mapping: { state: "waiting" } })),
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "running" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." });
-  assert.deepEqual(intake.confirmReady(view({ mapping: { state: "running" } })),
+  assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "running" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.equal(intake.settled(view()), true);
-  assert.equal(intake.settled(view({ mapping: { state: "running" } })), false);
-  assert.equal(intake.settled(view({ graph: { state: "failed", reason: "x" }, mapping: { state: "waiting" } })), true);
+  assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
+  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
 });
 
 test("a started onboarding opens only with a project id from an applied receipt", () => {
@@ -337,7 +337,7 @@ test("the repository list shows each repository with Clone and a search", () => 
 test("the setup review shows the steps, the overview, missing items and a confirm that waits", () => {
   const catalog = ok({ tech_stack: [], platforms: [{ kind: "website", label: "Website" }], research: [{ kind: "market_research", label: "Market research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
-  const working = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { state: "running" }, missing: [] })), draft: null });
+  const working = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "running" }, missing: [] })), draft: null });
   assert.match(working, /<h1>Set up Plant shop<\/h1>/);
   assert.match(working, /Build the code graph[\s\S]*Done/);
   assert.match(working, /Map the project[\s\S]*Working/);
@@ -351,7 +351,7 @@ test("the setup review shows the steps, the overview, missing items and a confir
   assert.match(done, /Target platforms[\s\S]*Missing/);
   assert.match(done, /Research is off for existing code/);
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
-  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { state: "failed", reason: "graphify isn't installed." }, mapping: { state: "waiting" } })), draft }), /graphify isn&#x27;t installed\./);
+  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /graphify isn&#x27;t installed\./);
   assert.match(html(OnboardingReviewView, { ...base, view: notReady, draft: null }), /Not ready yet/);
 });
 
