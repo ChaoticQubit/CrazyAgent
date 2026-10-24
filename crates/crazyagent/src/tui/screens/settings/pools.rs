@@ -450,6 +450,7 @@ mod tests {
                 status_label: "Signed in".into(),
             }],
             project_count: projects,
+            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
         }
     }
 

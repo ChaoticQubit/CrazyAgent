@@ -345,6 +345,7 @@ pub(crate) fn dataset(extra: Option<&str>) -> (Vec<AccountView>, Vec<PoolSummary
                 })
                 .collect(),
             project_count: 0,
+            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
         })
         .collect();
     (accounts, pools)

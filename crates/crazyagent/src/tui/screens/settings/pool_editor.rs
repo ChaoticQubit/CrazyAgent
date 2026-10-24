@@ -1,9 +1,10 @@
 use super::draw_page;
-use crate::config::{POOL_MEMBERS_MAX, plain_problem};
+use crate::config::{POOL_MEMBERS_MAX, ProviderQuotaPolicy, plain_problem};
 use crate::protocol::CredentialRef;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
+use crate::tui::model_access::{BOUNDED_QUOTA, STRICT_QUOTA, provider_quota_policy_name};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
 use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request};
 use crate::tui::text::{cells, join, list_row, restyle, row, status, styled, thumb, with_bar};
@@ -29,14 +30,16 @@ enum Focus {
     Cancel,
 }
 
-/// Settings, Pools, New pool or Edit pool: a name field and a checkbox table
-/// of every account, with a filter and "Show selected only".
+/// Settings, Pools, New pool or Edit pool: a name field, the provider quota
+/// policy that `p` switches, and a checkbox table of every account, with a
+/// filter and "Show selected only".
 /// Input: keys, the account list and the save reply. Output: one pool
-/// create or update request with at most 15 members.
+/// create or update request with at most 15 members and the chosen policy.
 pub struct PoolEditor {
     id: Option<CredentialRef>,
     name: TextField,
     members: BTreeSet<CredentialRef>,
+    quota: ProviderQuotaPolicy,
     focus: Focus,
     cursor: usize,
     offset: usize,
@@ -44,7 +47,7 @@ pub struct PoolEditor {
     filter: TextField,
     selected_only: bool,
     saving: bool,
-    start: (String, BTreeSet<CredentialRef>),
+    start: (String, BTreeSet<CredentialRef>, ProviderQuotaPolicy),
 }
 
 impl PoolEditor {
@@ -54,6 +57,7 @@ impl PoolEditor {
     pub fn new(id: Option<&CredentialRef>, ctx: &Ctx) -> Self {
         let mut name = TextField::new("Pool name", NAME_CHARS_MAX);
         let mut members = BTreeSet::new();
+        let mut quota = ProviderQuotaPolicy::default();
         if let Some(pool) = id.and_then(|id| {
             ctx.store
                 .pools
@@ -66,12 +70,14 @@ impl PoolEditor {
                 .iter()
                 .map(|member| member.id.clone())
                 .collect();
+            quota = pool.provider_quota_policy;
         }
-        let start = (name.value().to_owned(), members.clone());
+        let start = (name.value().to_owned(), members.clone(), quota);
         Self {
             id: id.cloned(),
             name,
             members,
+            quota,
             focus: Focus::Name,
             cursor: 0,
             offset: 0,
@@ -171,6 +177,20 @@ impl PoolEditor {
         assert!(self.members.len() <= POOL_MEMBERS_MAX);
     }
 
+    fn switch_quota(&mut self, ctx: &mut Ctx) {
+        self.quota = match self.quota {
+            ProviderQuotaPolicy::BoundedAttempt => ProviderQuotaPolicy::Strict,
+            ProviderQuotaPolicy::Strict => ProviderQuotaPolicy::BoundedAttempt,
+        };
+        ctx.say(Message::warning(
+            match self.quota {
+                ProviderQuotaPolicy::Strict => STRICT_QUOTA,
+                ProviderQuotaPolicy::BoundedAttempt => BOUNDED_QUOTA,
+            },
+            "",
+        ));
+    }
+
     fn submit(&mut self, ctx: &mut Ctx) {
         let name = self.name.value().trim().to_owned();
         if name.is_empty()
@@ -201,8 +221,13 @@ impl PoolEditor {
                 id: id.clone(),
                 name,
                 members,
+                quota: self.quota,
             },
-            None => PoolChange::Create { name, members },
+            None => PoolChange::Create {
+                name,
+                members,
+                quota: self.quota,
+            },
         };
         self.saving = true;
         ctx.request(Request::EditPool { change });
@@ -393,6 +418,10 @@ impl Screen for PoolEditor {
                 self.step_focus(false);
                 return Flow::Handled;
             }
+            (Focus::Table | Focus::Save | Focus::Cancel, Key::Char('p')) => {
+                self.switch_quota(ctx);
+                return Flow::Handled;
+            }
             _ => {}
         }
         match self.focus {
@@ -505,7 +534,14 @@ impl Screen for PoolEditor {
             cursor = Some(Position::new(at.x, at.y + content.len() as u16));
         }
         content.extend(field);
-        content.push(Line::default());
+        content.push(styled(
+            format!(
+                "Provider quota policy: {} | p switches",
+                provider_quota_policy_name(self.quota)
+            ),
+            Role::Muted,
+            theme,
+        ));
         let filter = if self.focus == Focus::Filter || !self.filter.is_empty() {
             let typed = format!("/ {}", self.filter.value());
             if self.focus == Focus::Filter {
@@ -583,7 +619,9 @@ impl Screen for PoolEditor {
     }
 
     fn draft(&self) -> bool {
-        self.name.value() != self.start.0 || self.members != self.start.1
+        self.name.value() != self.start.0
+            || self.members != self.start.1
+            || self.quota != self.start.2
     }
 
     fn loss(&self) -> &'static str {
@@ -597,6 +635,9 @@ impl Screen for PoolEditor {
         })
     }
 }
+
+#[cfg(all(test, unix))]
+mod engine_tests;
 
 #[cfg(test)]
 mod tests {
@@ -707,10 +748,16 @@ mod tests {
         editor.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                change: PoolChange::Create { name, members },
+                change:
+                    PoolChange::Create {
+                        name,
+                        members,
+                        quota,
+                    },
             }) => {
                 assert_eq!(name, "Build team");
                 assert_eq!(members, vec![account(1).id]);
+                assert_eq!(quota, ProviderQuotaPolicy::BoundedAttempt);
             }
             other => panic!("unexpected request {other:?}"),
         }
@@ -751,6 +798,7 @@ mod tests {
                 status_label: "Signed in".into(),
             }],
             project_count: 1,
+            provider_quota_policy: ProviderQuotaPolicy::Strict,
         }]);
         let mut editor = PoolEditor::new(Some(&id), &ctx);
         assert_eq!(editor.crumbs(), ["Settings", "Pools", "Edit pool"]);
@@ -766,11 +814,17 @@ mod tests {
                         id: sent,
                         name,
                         members,
+                        quota,
                     },
             }) => {
                 assert_eq!(sent, id);
                 assert_eq!(name, "Main 2");
                 assert_eq!(members, vec![account(2).id]);
+                assert_eq!(
+                    quota,
+                    ProviderQuotaPolicy::Strict,
+                    "editing keeps the policy"
+                );
             }
             other => panic!("unexpected request {other:?}"),
         }
@@ -793,10 +847,16 @@ mod tests {
         editor.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                change: PoolChange::Create { name, members },
+                change:
+                    PoolChange::Create {
+                        name,
+                        members,
+                        quota,
+                    },
             }) => {
                 assert_eq!(name, "Review team");
                 assert_eq!(members, vec![account(1).id, account(4).id]);
+                assert_eq!(quota, ProviderQuotaPolicy::BoundedAttempt);
             }
             other => panic!("unexpected request {other:?}"),
         }
