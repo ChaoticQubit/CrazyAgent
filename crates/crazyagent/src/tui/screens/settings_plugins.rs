@@ -947,6 +947,46 @@ impl Screen for Plugins {
     }
 }
 
+fn place_of(project: Option<&(ProjectId, String)>) -> Place {
+    match project {
+        Some((id, name)) => Place::Project {
+            id: id.clone(),
+            name: name.clone(),
+            tab: ProjectTab::Settings,
+        },
+        None => Place::Settings(SettingsSection::Plugins),
+    }
+}
+
+fn back_to(project: Option<&(ProjectId, String)>) -> Flow {
+    match project {
+        Some(_) => Flow::Open(place_of(project)),
+        None => Flow::Replace(Box::new(Plugins::new())),
+    }
+}
+
+fn crumbs_of(project: Option<&(ProjectId, String)>, page: &str) -> Vec<String> {
+    match project {
+        Some((_, name)) => vec![name.clone(), "Settings".into(), page.into()],
+        None => vec!["Settings".into(), "Plugins and skills".into(), page.into()],
+    }
+}
+
+fn draw_form(
+    frame: &mut Frame,
+    area: Rect,
+    for_project: bool,
+    content: Vec<Line<'static>>,
+    cursor: Option<Position>,
+    ctx: &Ctx,
+) -> Option<Position> {
+    if !for_project {
+        return draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx);
+    }
+    draw_lines(frame.buffer_mut(), area, &indent(content, 2));
+    cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + at.y))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Skill,
@@ -1013,14 +1053,7 @@ impl AddPlugin {
     }
 
     fn back(&self) -> Flow {
-        match &self.project {
-            Some((id, name)) => Flow::Open(Place::Project {
-                id: id.clone(),
-                name: name.clone(),
-                tab: ProjectTab::Settings,
-            }),
-            None => Flow::Replace(Box::new(Plugins::new())),
-        }
+        back_to(self.project.as_ref())
     }
 
     fn new(kind: Kind) -> Self {
@@ -1314,10 +1347,7 @@ impl Screen for AddPlugin {
             Kind::Skill => "Add skill",
             Kind::Server => "Add MCP server",
         };
-        match &self.project {
-            Some((_, name)) => vec![name.clone(), "Settings".into(), page.into()],
-            None => vec!["Settings".into(), "Plugins and skills".into(), page.into()],
-        }
+        crumbs_of(self.project.as_ref(), page)
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
@@ -1408,11 +1438,7 @@ impl Screen for AddPlugin {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4).max(8);
         let (content, cursor) = self.body(limit, ctx);
-        if self.project.is_none() {
-            return draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx);
-        }
-        draw_lines(frame.buffer_mut(), area, &indent(content, 2));
-        cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + at.y))
+        draw_form(frame, area, self.project.is_some(), content, cursor, ctx)
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
@@ -1427,14 +1453,7 @@ impl Screen for AddPlugin {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(match &self.project {
-            Some((id, name)) => Place::Project {
-                id: id.clone(),
-                name: name.clone(),
-                tab: ProjectTab::Settings,
-            },
-            None => Place::Settings(SettingsSection::Plugins),
-        })
+        Some(place_of(self.project.as_ref()))
     }
 }
 
@@ -1451,6 +1470,7 @@ enum EditFocus {
 /// Input: the server and keys. Output: one change at a time.
 pub struct EditServer {
     server: ServerView,
+    project: Option<(ProjectId, String)>,
     focus: EditFocus,
     selected: usize,
     target: TextField,
@@ -1474,6 +1494,7 @@ impl EditServer {
         target.set(&server.runs);
         Self {
             server,
+            project: None,
             focus: EditFocus::Target,
             selected: 0,
             target,
@@ -1482,6 +1503,14 @@ impl EditServer {
             confirm: None,
             changing: None,
         }
+    }
+
+    /// The same page for a server added for one project, returning to that
+    /// project's Settings tab.
+    /// Inputs: the page, the project and its name. Output: the page.
+    pub fn for_project(mut self, project: ProjectId, name: String) -> Self {
+        self.project = Some((project, name));
+        self
     }
 
     fn order(&self) -> Vec<EditFocus> {
@@ -1669,11 +1698,7 @@ impl EditServer {
 
 impl Screen for EditServer {
     fn crumbs(&self) -> Vec<String> {
-        vec![
-            "Settings".into(),
-            "Plugins and skills".into(),
-            self.server.name.clone(),
-        ]
+        crumbs_of(self.project.as_ref(), &self.server.name)
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
@@ -1732,7 +1757,7 @@ impl Screen for EditServer {
         }
         let count = self.server.secrets.len();
         match (self.focus, key) {
-            (_, Key::Esc) => return Flow::Replace(Box::new(Plugins::new())),
+            (_, Key::Esc) => return back_to(self.project.as_ref()),
             (_, Key::Tab) => self.move_focus(true),
             (_, Key::BackTab) => self.move_focus(false),
             (EditFocus::List, Key::Up) => self.selected = self.selected.saturating_sub(1),
@@ -1832,7 +1857,7 @@ impl Screen for EditServer {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4).max(8);
         let (content, cursor) = self.body(limit, ctx);
-        draw_page(frame, area, SettingsSection::Plugins, content, cursor, ctx)
+        draw_form(frame, area, self.project.is_some(), content, cursor, ctx)
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
@@ -1840,7 +1865,7 @@ impl Screen for EditServer {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Settings(SettingsSection::Plugins))
+        Some(place_of(self.project.as_ref()))
     }
 }
 

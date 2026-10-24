@@ -1,6 +1,7 @@
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::project_markdown::{MdLine, render};
+use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
@@ -267,6 +268,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub edit: Option<MemoryEdit>,
     pub confirm_delete: Option<String>,
     pub problem: Option<String>,
+    pub plugins: ProjectPlugins,
     pub now_ms: i64,
     pub offset: i64,
     jobs_read_ms: Option<i64>,
@@ -281,6 +283,7 @@ impl ProjectScreen {
     /// Returns the screen; engine reads start with `next_query`.
     pub fn new(project: ProjectId, name: String, home: Option<PathBuf>) -> Self {
         Self {
+            plugins: ProjectPlugins::new(project.clone()),
             project,
             name,
             tab: Tab::Overview,

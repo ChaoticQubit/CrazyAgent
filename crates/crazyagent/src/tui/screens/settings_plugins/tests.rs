@@ -625,4 +625,27 @@ fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
         other => panic!("add server expected, got {other:?}"),
     }
     back(form.key(&Key::Esc, &mut ctx));
+
+    let (_, servers) = lists();
+    let mut postgres = servers[0].clone();
+    postgres.scope = Scope::Project {
+        project_id: crate::protocol::ProjectId::new("tidepool").unwrap(),
+    };
+    let name = postgres.name.clone();
+    let mut page = EditServer::new(postgres).for_project(
+        crate::protocol::ProjectId::new("tidepool").unwrap(),
+        "Tidepool".into(),
+    );
+    assert_eq!(
+        page.crumbs(),
+        ["Tidepool".to_owned(), "Settings".into(), name]
+    );
+    assert!(matches!(
+        page.place(),
+        Some(Place::Project {
+            tab: ProjectTab::Settings,
+            ..
+        })
+    ));
+    back(page.key(&Key::Esc, &mut ctx));
 }
