@@ -1,12 +1,12 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
+    JobLog, PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, project_screen};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse};
+use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::engine::{Client, EngineError};
 use crate::memory::ReviewDecision;
 use crate::project_setup::{
@@ -72,6 +72,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::Log { project, job } => SetupView::Log(
+            controller
+                .research_log(project, job)
+                .await
+                .map_err(problem)?,
+        ),
         SetupQuery::ReviewMemory {
             project,
             entry_id,
@@ -100,16 +106,21 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                         .delete_project_context(project_id, path, generation)
                         .await
                 }
+                SetupAction::CancelResearch { project_id, job } => {
+                    controller
+                        .cancel_research(project_id, job, generation)
+                        .await
+                }
+                SetupAction::RetryResearch { project_id, job } => {
+                    controller.retry_research(project_id, job, generation).await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
         )?,
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
-        SetupQuery::Team { .. }
-        | SetupQuery::TeamChange { .. }
-        | SetupQuery::Library(_)
-        | SetupQuery::Log { .. } => {
-            panic!("the project screen never reads the team, the library or a research log")
+        SetupQuery::Team { .. } | SetupQuery::TeamChange { .. } | SetupQuery::Library(_) => {
+            panic!("the project screen never reads the team or the library")
         }
     })
 }
@@ -131,6 +142,7 @@ async fn settle(
             SetupQuery::Context { .. } => "context",
             SetupQuery::Item { .. } => "item",
             SetupQuery::Memories { .. } => "memories",
+            SetupQuery::Log { .. } => "log",
             _ => "other",
         });
         let result = serve(controller, query.clone()).await;
@@ -673,4 +685,294 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
     assert_eq!(steps(&job).last().unwrap().1, "Failed");
     job.status = ResearchStatus::Cancelled;
     assert_eq!(steps(&job).last().unwrap().1, "Stopped");
+}
+
+#[tokio::test]
+async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-agents-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let project = ProjectId::new("buoy-watch").unwrap();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Buoy Watch".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Alerts when buoy readings look wrong.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Cli],
+                research: vec![
+                    ResearchKind::MarketResearch,
+                    ResearchKind::CompetitorResearch,
+                ],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+
+    let mut screen = ProjectScreen::new(project.clone(), String::new(), None);
+    let start = 1_793_000_000_000;
+    assert_eq!(
+        settle(&mut screen, &mut controller, start).await,
+        ["setup", "jobs", "context", "memories"],
+        "no agent output is read outside the Agents tab"
+    );
+    screen.open(Tab::Agents);
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 1_000).await,
+        ["log"]
+    );
+    let first = screen.focused_job().unwrap().clone();
+    assert_eq!(first.status, ResearchStatus::NeedsPool);
+    assert_eq!(
+        screen.log.as_ref().map(|log| (log.job, log.lines.clone())),
+        Some((first.id, Some(Vec::new())))
+    );
+    assert!(
+        settle(&mut screen, &mut controller, start + 2_000)
+            .await
+            .is_empty(),
+        "a waiting agent's output is not read again until its status changes"
+    );
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(drawn.help[1], ("x", "Stop"));
+    assert!(!text(&drawn.rows).contains("No output yet."));
+
+    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Only failed or stopped research can run again.")
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
+    assert_eq!(screen.confirm_stop, Some(first.id));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("Stop Market research?"));
+    assert_eq!(drawn.help[0], ("y", "Stop"));
+    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
+    assert_eq!(screen.confirm_stop, None);
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(
+        screen.confirm_stop,
+        Some(first.id),
+        "only y, n or Esc answer"
+    );
+    let stop = screen.key(key(KeyCode::Char('y')));
+    assert_eq!(
+        stop,
+        ProjectReply::Change(Box::new(SetupAction::CancelResearch {
+            project_id: project.clone(),
+            job: first.id,
+        }))
+    );
+    assert_eq!(screen.confirm_stop, None);
+    let ProjectReply::Change(action) = stop else {
+        unreachable!()
+    };
+    send(
+        &mut screen,
+        &mut controller,
+        SetupQuery::Change {
+            action: *action,
+            generation: 2,
+        },
+    )
+    .await;
+
+    let run = root
+        .path()
+        .join("research/agents")
+        .join(format!("job-{}-1", first.id));
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join("stderr.log"),
+        "Searching ocean sensor pricing\nRead buoywatch.io/pricing\nwarning:\tslow network\n",
+    )
+    .unwrap();
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 3_000).await,
+        ["jobs", "log"]
+    );
+    assert_eq!(
+        screen.focused_job().map(|job| job.status),
+        Some(ResearchStatus::Cancelled)
+    );
+    assert_eq!(
+        screen.log.as_ref().and_then(|log| log.lines.clone()),
+        Some(vec![
+            "Searching ocean sensor pricing".to_owned(),
+            "Read buoywatch.io/pricing".to_owned(),
+            "warning: slow network".to_owned(),
+        ])
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("Stopped"), "{shown}");
+    assert!(
+        shown.contains("       Read buoywatch.io/pricing"),
+        "{shown}"
+    );
+    assert!(shown.contains("warning: slow network"), "{shown}");
+    assert_eq!(drawn.help[1], ("r", "Retry"));
+    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This research is not running.")
+    );
+    assert_eq!(screen.confirm_stop, None);
+
+    let again = screen.key(key(KeyCode::Char('r')));
+    assert_eq!(
+        again,
+        ProjectReply::Change(Box::new(SetupAction::RetryResearch {
+            project_id: project.clone(),
+            job: first.id,
+        }))
+    );
+    let ProjectReply::Change(action) = again else {
+        unreachable!()
+    };
+    send(
+        &mut screen,
+        &mut controller,
+        SetupQuery::Change {
+            action: *action,
+            generation: 3,
+        },
+    )
+    .await;
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 4_000).await,
+        ["jobs", "log"]
+    );
+    assert_eq!(
+        screen.focused_job().map(|job| (job.status, job.attempts)),
+        Some((ResearchStatus::NeedsPool, 0)),
+        "with no pool the retried research waits for one"
+    );
+
+    let stale = SetupQuery::Change {
+        action: SetupAction::RetryResearch {
+            project_id: project.clone(),
+            job: first.id,
+        },
+        generation: 4,
+    };
+    let refused = serve(&mut controller, stale.clone()).await;
+    assert_eq!(
+        refused,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "research_job_not_retryable".into()
+        }))
+    );
+    screen.apply(&stale, refused);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Only failed or stopped research can run again.")
+    );
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 4_500).await,
+        ["jobs"],
+        "a refused change reads the jobs again"
+    );
+}
+
+#[test]
+fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
+    let project = ProjectId::new("tidepool").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.jobs = Some(vec![ResearchJob {
+        id: 7,
+        project_id: project,
+        kind: ResearchKind::MarketResearch,
+        kind_label: "Market research".into(),
+        status: ResearchStatus::Running,
+        status_label: "Running".into(),
+        report_path: "context/research/market_research.md".into(),
+        harness: "codex".into(),
+        tools: true,
+        attempts: 1,
+        claimer: Some("runner".into()),
+        error: None,
+        cancel_requested: false,
+        output_bytes: 2048,
+        created_ms: 1_000,
+        started_ms: Some(2_000),
+        heartbeat_ms: Some(3_000),
+        finished_ms: None,
+    }]);
+    screen.open(Tab::Agents);
+    let look = Look::plain();
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(shown.contains("Reading the agent's output..."), "{shown}");
+
+    let mut lines: Vec<String> = (0..40).map(|n| format!("step {n}")).collect();
+    lines.push(format!("{}end", "x".repeat(120)));
+    screen.log = Some(JobLog {
+        job: 7,
+        status: ResearchStatus::Running,
+        lines: Some(lines),
+        read_ms: 3_000,
+    });
+    for (width, height) in [(80u16, 24u16), (120, 36)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        assert_eq!(drawn.rows.len(), usize::from(height) - 4);
+        assert!(
+            drawn
+                .rows
+                .iter()
+                .all(|row| row.width() == usize::from(width))
+        );
+        let shown = text(&drawn.rows);
+        assert!(shown.contains("step 39"), "{shown}");
+        assert!(
+            !drawn
+                .rows
+                .iter()
+                .any(|row| row.text().trim_end().ends_with("step 0")),
+            "the oldest lines give way to the newest: {shown}"
+        );
+        assert!(shown.contains("x\u{2026}"), "a long line is cut: {shown}");
+        assert!(!shown.contains("xend"), "{shown}");
+    }
+
+    screen.log.as_mut().unwrap().lines = Some(Vec::new());
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(shown.contains("No output yet."), "{shown}");
+    screen.log.as_mut().unwrap().lines = None;
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("The agent's output could not be read."),
+        "{shown}"
+    );
+    screen.log.as_mut().unwrap().job = 8;
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Reading the agent's output..."),
+        "another job's lines are never shown: {shown}"
+    );
 }

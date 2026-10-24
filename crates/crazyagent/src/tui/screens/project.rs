@@ -5,8 +5,8 @@ use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
-    CONTEXT_DIRECTORY, ContextItem, ContextKind, ProjectContext, ResearchJob, ResearchKind,
-    ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
+    CONTEXT_DIRECTORY, ContextItem, ContextKind, ProjectContext, RESEARCH_LOG_LINES_MAX,
+    ResearchJob, ResearchKind, ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::tui::seam::PoolScope;
@@ -216,6 +216,17 @@ pub(in crate::tui) struct MemoryEdit {
     pub input: TextInput,
 }
 
+/// The last lines of one research agent's output, as the engine last read them.
+/// Holds the job, its status at that read, the lines (none when the read failed) and when it was read.
+/// The engine hides secrets and control characters before the lines arrive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct JobLog {
+    pub job: i64,
+    pub status: ResearchStatus,
+    pub lines: Option<Vec<String>>,
+    pub read_ms: i64,
+}
+
 /// What the project screen asks its host to do after a key.
 /// Ignored lets global keys run; the other replies are engine calls or navigation.
 /// Engine calls carry exactly what the engine needs.
@@ -267,6 +278,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub reading: bool,
     pub edit: Option<MemoryEdit>,
     pub confirm_delete: Option<String>,
+    pub confirm_stop: Option<i64>,
+    pub log: Option<JobLog>,
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
     pub now_ms: i64,
@@ -309,6 +322,8 @@ impl ProjectScreen {
             reading: false,
             edit: None,
             confirm_delete: None,
+            confirm_stop: None,
+            log: None,
             problem: None,
             now_ms: 0,
             offset: 0,
@@ -326,6 +341,7 @@ impl ProjectScreen {
         self.tab = tab;
         self.reading = false;
         self.confirm_delete = None;
+        self.confirm_stop = None;
         self.typing = tab == Tab::Conversation;
     }
 
@@ -343,8 +359,10 @@ impl ProjectScreen {
             SetupQuery::Setup { project }
         } else if self.setup_missing {
             return None;
-        } else if due(self.jobs_read_ms) && self.jobs_live() {
+        } else if self.jobs_read_ms.is_none() || (due(self.jobs_read_ms) && self.jobs_live()) {
             SetupQuery::Jobs { project }
+        } else if let Some(job) = self.log_due(now_ms) {
+            SetupQuery::Log { project, job }
         } else if self.context.is_none()
             || (matches!(self.tab, Tab::Context) && due(self.context_read_ms))
         {
@@ -388,6 +406,52 @@ impl ProjectScreen {
         self.waiting = None;
     }
 
+    /// Gives the research job focused on the Agents tab.
+    /// Takes the screen.
+    /// Returns the job under the cursor, or none before the jobs are read.
+    pub fn focused_job(&self) -> Option<&ResearchJob> {
+        self.jobs.as_ref()?.get(self.agents_cursor)
+    }
+
+    fn log_due(&self, now_ms: i64) -> Option<i64> {
+        if self.tab != Tab::Agents {
+            return None;
+        }
+        let job = self.focused_job()?;
+        let fresh = self.log.as_ref().is_some_and(|log| {
+            log.job == job.id
+                && log.status == job.status
+                && (job.status != ResearchStatus::Running || now_ms - log.read_ms < REFRESH_MS)
+        });
+        (!fresh).then_some(job.id)
+    }
+
+    fn log_read(&mut self, job: i64, lines: Option<Vec<String>>) {
+        let Some(status) = self
+            .jobs
+            .iter()
+            .flatten()
+            .find(|known| known.id == job)
+            .map(|known| known.status)
+        else {
+            return;
+        };
+        let lines = match (lines, self.log.take()) {
+            (None, Some(old)) if old.job == job => old.lines,
+            (Some(mut lines), _) => {
+                let start = lines.len().saturating_sub(RESEARCH_LOG_LINES_MAX);
+                Some(lines.split_off(start))
+            }
+            (None, _) => None,
+        };
+        self.log = Some(JobLog {
+            job,
+            status,
+            lines,
+            read_ms: self.now_ms,
+        });
+    }
+
     fn jobs_live(&self) -> bool {
         self.jobs.as_ref().is_none_or(|jobs| {
             jobs.iter().any(|job| {
@@ -413,8 +477,15 @@ impl ProjectScreen {
                 return;
             }
             Err(problem) => {
-                if let SetupQuery::Jobs { .. } = query {
-                    self.jobs_read_ms = Some(self.now_ms);
+                match query {
+                    SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
+                    SetupQuery::Log { job, .. } => self.log_read(*job, None),
+                    SetupQuery::Change {
+                        action:
+                            SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                        ..
+                    } => self.jobs_read_ms = None,
+                    _ => {}
                 }
                 self.problem = Some(plain_problem(&problem));
                 return;
@@ -455,11 +526,13 @@ impl ProjectScreen {
                     preview.cache = None;
                 }
             }
+            SetupView::Log(lines) => {
+                if let SetupQuery::Log { job, .. } = query {
+                    self.log_read(*job, Some(lines));
+                }
+            }
             SetupView::Changed(result) => self.changed(query, result),
-            SetupView::Catalog(_)
-            | SetupView::Team(_)
-            | SetupView::Library(_)
-            | SetupView::Log(_) => {}
+            SetupView::Catalog(_) | SetupView::Team(_) | SetupView::Library(_) => {}
         }
         self.assert_consistent();
     }
@@ -481,6 +554,13 @@ impl ProjectScreen {
                 }
                 self.context_read_ms = None;
                 self.context = None;
+            }
+            SetupQuery::Change {
+                action: SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                ..
+            } => {
+                self.jobs_read_ms = None;
+                self.log = None;
             }
             SetupQuery::Change { .. } | SetupQuery::ReviewMemory { .. } => {
                 self.memories_read_ms = None;
@@ -590,6 +670,22 @@ impl ProjectScreen {
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirm_delete = None;
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            };
+        }
+        if let Some(job) = self.confirm_stop {
+            return match key.code {
+                KeyCode::Char('y') => {
+                    self.confirm_stop = None;
+                    ProjectReply::Change(Box::new(SetupAction::CancelResearch {
+                        project_id: self.project.clone(),
+                        job,
+                    }))
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.confirm_stop = None;
                     ProjectReply::Handled
                 }
                 _ => ProjectReply::Handled,
@@ -843,6 +939,39 @@ impl ProjectScreen {
                     self.read(&path);
                 }
             }
+            KeyCode::Char('x') => {
+                let Some((job, status, stopping)) = self
+                    .focused_job()
+                    .map(|job| (job.id, job.status, job.cancel_requested))
+                else {
+                    return ProjectReply::Handled;
+                };
+                match status {
+                    ResearchStatus::Running if stopping => {
+                        self.problem = Some("Stop was already asked. The agent is ending.".into());
+                    }
+                    ResearchStatus::Queued
+                    | ResearchStatus::NeedsPool
+                    | ResearchStatus::Running => {
+                        self.confirm_stop = Some(job);
+                    }
+                    ResearchStatus::Done | ResearchStatus::Failed | ResearchStatus::Cancelled => {
+                        self.problem = Some("This research is not running.".into());
+                    }
+                }
+            }
+            KeyCode::Char('r') => {
+                let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
+                    return ProjectReply::Handled;
+                };
+                if matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled) {
+                    return ProjectReply::Change(Box::new(SetupAction::RetryResearch {
+                        project_id: self.project.clone(),
+                        job,
+                    }));
+                }
+                self.problem = Some("Only failed or stopped research can run again.".into());
+            }
             _ => return ProjectReply::Ignored,
         }
         ProjectReply::Handled
@@ -1039,6 +1168,19 @@ impl ProjectScreen {
             assert!(self.tree_cursor <= context.items.len());
         }
         assert!(!self.reading || self.preview.is_some() || self.tab != Tab::Context);
+        assert!(self.confirm_stop.is_none() || self.confirm_delete.is_none());
+        if let Some(job) = self.confirm_stop {
+            assert_eq!(self.tab, Tab::Agents);
+            assert!(job > 0);
+        }
+        if let Some(log) = &self.log {
+            assert!(log.job > 0);
+            assert!(
+                log.lines
+                    .as_ref()
+                    .is_none_or(|lines| lines.len() <= RESEARCH_LOG_LINES_MAX)
+            );
+        }
         if let Some(preview) = &self.preview {
             assert!(preview.path.starts_with(CONTEXT_DIRECTORY));
         }
@@ -1097,6 +1239,10 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "pool_not_found" => "That pool no longer exists. Pick another pool.",
         "pool_changed" => "The pools changed meanwhile. Try again.",
         "model_access_read_only" => "Pools can't be changed in this setup.",
+        "research_job_finished" => "This research already ended.",
+        "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "research_job_missing" => "That research is gone. The list is up to date now.",
+        "research_log_unreadable" => "The agent's output could not be read.",
         _ => "That didn't work. Try again.",
     }
     .into()
