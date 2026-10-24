@@ -287,3 +287,15 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .stub-page { padding-top: var(--space-6); }
 
 @media (max-width: 1200px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.go-to { display: grid; gap: var(--space-3); min-width: min(520px, 80vw); }
+.go-to-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.go-to-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-control); cursor: pointer; }
+.go-to-item[aria-selected="true"] { background: var(--accent-soft); }
+.go-to-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.go-to-kind { flex: none; color: var(--text-3); font-size: 12px; }
+.shortcuts { display: grid; gap: var(--space-2); margin: 0; }
+.shortcut { display: grid; grid-template-columns: 160px 1fr; gap: var(--space-3); align-items: baseline; }
+.shortcut dd { margin: 0; color: var(--text-2); }
+.shortcut kbd { font-family: var(--mono); font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-segment); background: var(--surface-2); }
+.support-details { max-width: 100%; margin: 0; padding: var(--space-3); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface-2); font-family: var(--mono); font-size: 12px; text-align: left; user-select: text; }
