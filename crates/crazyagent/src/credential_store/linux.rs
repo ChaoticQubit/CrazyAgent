@@ -1,6 +1,5 @@
 use super::os_keyring::OsKeyring;
 use crate::credentials::{Store, StoreError};
-use keyring_core::api::CredentialStoreApi;
 use keyring_core::{CredentialStore, Entry};
 use std::path::Path;
 use std::sync::Arc;
