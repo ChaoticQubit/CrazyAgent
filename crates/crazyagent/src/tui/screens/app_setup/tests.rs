@@ -508,6 +508,16 @@ fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
         &render(&mut shell, 120, 36),
         "Use /Users/owner/Work as the projects home?",
     );
+    shell.arrive(event(AppSetupEvent::FolderSize(
+        "/Users/owner/Elsewhere".into(),
+        Ok(9 * GIB),
+    )));
+    assert!(
+        !render(&mut shell, 120, 36)
+            .iter()
+            .any(|row| row.contains("9.0 GB")),
+        "a size measured for another folder is ignored"
+    );
     shell.arrive(event(AppSetupEvent::FolderSize(path.clone(), Ok(3 * GIB))));
     find(
         &render(&mut shell, 120, 36),

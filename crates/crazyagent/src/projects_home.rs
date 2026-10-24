@@ -349,18 +349,6 @@ pub fn forgotten(folder: &str) -> String {
     )
 }
 
-/// The folder that holds a project's CrazyAgent files (context, worktrees).
-/// Input: the project folder. Output: its `.crazyagent/` folder when that is a
-/// real folder, as for projects in the home, otherwise the project folder
-/// itself, as for projects made before the projects home existed.
-pub fn state_folder(project: &Path) -> PathBuf {
-    let inner = project.join(CRAZYAGENT_DIRECTORY);
-    match std::fs::symlink_metadata(&inner) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => inner,
-        _ => project.to_path_buf(),
-    }
-}
-
 /// Plans moving every project folder from the current home to a new one.
 /// Input: the current home, the new folder the owner picked and the engine
 /// data folder. Output: the plan with the top-level folders to move, or a

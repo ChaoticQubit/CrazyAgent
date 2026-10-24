@@ -202,8 +202,8 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         limits: LaunchLimits::default(),
     };
     assert_eq!(
-        route(unsupported).unwrap_err().0,
-        "launch_key_relay_unsupported"
+        route(unsupported).err().map(|error| error.0).as_deref(),
+        Some("launch_key_relay_unsupported")
     );
     assert!(!format!("{:?}", Secret::new(DUMMY_KEY.into()).unwrap()).contains(DUMMY_KEY));
 }

@@ -137,7 +137,7 @@ impl NativeOwner {
             .controller
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
-        let mut problem = |error: crate::engine::EngineError| {
+        let problem = |error: crate::engine::EngineError| {
             if connection_lost(&error.0) {
                 *lost = true;
             }

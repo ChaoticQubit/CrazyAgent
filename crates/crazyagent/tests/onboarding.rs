@@ -871,7 +871,7 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
