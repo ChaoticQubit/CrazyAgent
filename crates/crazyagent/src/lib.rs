@@ -16,6 +16,7 @@ pub mod master_session;
 pub mod memory;
 pub mod model_gateway;
 pub mod owner_profile;
+pub mod platform;
 pub mod plugins;
 pub mod pools;
 pub mod project_setup;
