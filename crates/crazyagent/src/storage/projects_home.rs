@@ -96,7 +96,10 @@ pub(super) fn read(
         },
         OwnerRead::FoundProjects => {
             let folders = match (live, &saved) {
-                (Some(watch), _) => watch.folders().1,
+                (Some(watch), _) => {
+                    watch.refresh();
+                    watch.folders().1
+                }
                 (None, Some(path)) => home::scan(path).unwrap_or_default(),
                 (None, None) => Vec::new(),
             };

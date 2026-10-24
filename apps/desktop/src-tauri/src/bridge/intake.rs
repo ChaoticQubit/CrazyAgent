@@ -316,6 +316,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
+        self.owner_read(OwnerRead::ProjectsHome).await?;
         self.controller()?
             .begin_mutation(mutation, generation)
             .map_err(|_| failure("owner_not_ready"))?;

@@ -140,6 +140,12 @@ impl NativeBridge {
             return Err(failure("stale_selection"));
         }
         self.controller()?
+            .read(OwnerRead::ProjectMaster {
+                project_id: selected,
+            })
+            .await
+            .map_err(|_| failure("owner_read_failed"))?;
+        self.controller()?
             .begin_mutation(OwnerMutation::ProjectMaster { action }, generation)
             .map_err(|_| failure("owner_not_ready"))?;
         assert!(self.status().pending);
