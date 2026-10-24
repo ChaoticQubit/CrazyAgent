@@ -20,7 +20,7 @@ const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping"
  * overview, the pre-filled form with missing items marked, and a Confirm that waits for the agent.
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
  * catalog, field errors, flags, the last problem and the handlers. Output: the page. */
-export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink }: {
+export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry }: {
   name: string;
   view: Loaded<OnboardingView>;
   draft: ProjectDraft | null;
@@ -32,11 +32,12 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   onDraft: (draft: ProjectDraft) => void;
   onConfirm: () => void;
   onOpenLink: (href: string) => void;
+  onRetry?: () => void;
 }) {
   const header = <PageHeader title={`Set up ${name}`} description="Review what CrazyAgent found, fill in anything missing, then confirm." />;
   if (view.kind === "loading") return <div className="pj in-page">{header}<Skeleton shape="line" count={5} /></div>;
   if (view.kind === "not_ready") return <div className="pj in-page">{header}<NotReady what="Reviewing a found project" /></div>;
-  if (view.kind === "error") return <div className="pj in-page">{header}<LoadError message={view.message} onRetry={() => navigate({ name: "home" })} /></div>;
+  if (view.kind === "error") return <div className="pj in-page">{header}<LoadError message={view.message} onRetry={onRetry ?? (() => navigate({ name: "home" }))} /></div>;
   const value = view.value;
   const gate = confirmReady(value);
   const missing = missingLabels(value.missing);
@@ -122,5 +123,5 @@ export function OnboardingReview({ id }: { id: string }) {
   };
 
   return <OnboardingReviewView name={name} view={view} draft={draft} catalog={catalog} errors={errors} showErrors={showErrors} busy={busy} problem={problem}
-    onDraft={setDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} />;
+    onDraft={setDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView} />;
 }
