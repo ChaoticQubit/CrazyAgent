@@ -1463,10 +1463,13 @@ impl TeamRuntime {
                     |row| row.get(0),
                 )
                 .map_err(error)?;
+            let folder = stored.project_folder();
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
-                worktree.as_deref().unwrap_or(&stored.folder),
+                worktree
+                    .map_or(folder.clone(), |worktree| folder.join(worktree))
+                    .display(),
                 prompt
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
@@ -1729,7 +1732,8 @@ impl TeamRuntime {
             .executables
             .get(launch)
             .ok_or("harness is not installed")?;
-        let root = Path::new(&stored.folder)
+        let root = stored
+            .project_folder()
             .canonicalize()
             .map_err(|e| plain(&e))?;
         if root.starts_with(&self.state) {

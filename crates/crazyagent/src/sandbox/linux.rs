@@ -411,11 +411,14 @@ impl Grants {
     fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
         let project = sandbox.project_root();
         let git = project.join(".git");
+        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         let protected = sandbox.protected_paths();
         let mut write = Vec::new();
-        writable_children(project, &git, &protected, &mut write)?;
-        if fs::symlink_metadata(&git).is_ok_and(|meta| meta.is_dir()) {
-            writable_children(&git, &git, &protected, &mut write)?;
+        writable_children(project, &[&git, &state], &protected, &mut write)?;
+        for folder in [&git, &state] {
+            if fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()) {
+                writable_children(folder, &[], &protected, &mut write)?;
+            }
         }
         write.push(sandbox.agent_home().to_path_buf());
         write.push(sandbox.agent_tmp().to_path_buf());
@@ -425,10 +428,11 @@ impl Grants {
         if read.len() + write.len() > GRANTS_MAX {
             return Err(invalid("project folder has too many entries to grant"));
         }
-        if write
-            .iter()
-            .any(|path| protected.iter().any(|item| path.starts_with(item)))
-        {
+        if write.iter().any(|path| {
+            protected
+                .iter()
+                .any(|item| path.starts_with(item) || item.starts_with(path))
+        }) {
             return Err(invalid("a writable root sits inside a protected path"));
         }
         Ok(Self { read, write })
@@ -437,7 +441,7 @@ impl Grants {
 
 fn writable_children(
     dir: &Path,
-    git: &Path,
+    skip: &[&PathBuf],
     protected: &[PathBuf],
     write: &mut Vec<PathBuf>,
 ) -> Result<(), SandboxError> {
@@ -445,7 +449,7 @@ fn writable_children(
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
-        if kind.is_symlink() || path == git || protected.contains(&path) {
+        if kind.is_symlink() || skip.contains(&&path) || protected.contains(&path) {
             continue;
         }
         if kind.is_dir() || kind.is_file() {
