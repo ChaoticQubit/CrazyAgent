@@ -653,6 +653,51 @@ export interface TeamPlanStep {
   task: number | null;
 }
 
+/** What one node of a project's team graph stands for: the master, one harness with its
+ * agent count, or one agent. */
+export type GraphNodeKind = "master" | "harness_group" | "agent";
+export type GraphNodeStatus = TeamAgentStatus | "waiting";
+export type GraphEdgeState = "sent" | "running" | "done" | "failed";
+
+/** One node of a project's team graph, as the engine's TeamGraph read returns it. An agent
+ * node's id is the agent id the terminal commands take. */
+export interface GraphNode {
+  id: string;
+  kind: GraphNodeKind;
+  label: string;
+  harness: string | null;
+  status: GraphNodeStatus | null;
+  account: string | null;
+  agents: number | null;
+}
+
+/** One task the master handed out, drawn from the master to the agent running it. */
+export interface GraphEdge {
+  from: string;
+  to: string;
+  task_id: number;
+  text: string;
+  state: GraphEdgeState;
+  reply: string | null;
+}
+
+/** One project's team as a graph: the master, harness groups, agents and live tasks. */
+export interface TeamGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/** The last message on an attached terminal channel: the pane exited, the window detached,
+ * or the stream failed with a plain code. */
+export interface TerminalEnd {
+  end: "exited" | "detached" | "failed";
+  code: string | null;
+}
+
+/** One message on an attached terminal channel: raw screen or output bytes, in order (the
+ * current screen first), or the end of the stream. */
+export type TerminalMessage = ArrayBuffer | TerminalEnd;
+
 export function teamStatus(id: string): Promise<TeamStatus> {
   return invoke<TeamStatus>("desktop_team_status", { id });
 }
