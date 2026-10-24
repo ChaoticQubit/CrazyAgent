@@ -299,3 +299,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .shortcut dd { margin: 0; color: var(--text-2); }
 .shortcut kbd { font-family: var(--mono); font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-segment); background: var(--surface-2); }
 .support-details { max-width: 100%; margin: 0; padding: var(--space-3); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface-2); font-family: var(--mono); font-size: 12px; text-align: left; user-select: text; }
+.account-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; height: 100%; }
+.account-pick { width: 16px; height: 16px; margin: 0 0 0 var(--space-3); accent-color: var(--accent-solid); }
+.accounts-selectable .list-head { padding-left: calc(36px + var(--space-3)); }
+.toolbar.selection { padding: var(--space-2) 0; }

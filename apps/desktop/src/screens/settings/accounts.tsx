@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { listAccounts, poolSummaries, type AccountView, type PoolSummary } from "../../api";
+import { listAccounts, poolSummaries, POOL_MEMBER_MAX, type AccountView, type PoolSummary } from "../../api";
 import { useLoad, type Loaded } from "../../state";
 import { Button, EmptyState, LoadError, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton, StatusBadge, WindowedList, navigate } from "../../ui";
 import { AccountDrawer } from "./account-drawer";
 import { AddAccountDialog } from "./add-account";
+import { startPoolWith } from "./pool-draft";
 
 /** Filters accounts by search text (name, provider or method), provider and status.
  * Inputs: accounts and the three filters ("" means all). Output: the matching accounts. */
@@ -25,18 +26,35 @@ const STATUS_OPTIONS = [
   { value: "key_saved", label: "Key saved" }, { value: "unreachable", label: "Can't reach this URL" }, { value: "signing_in", label: "Signing in..." },
 ];
 
+/** Toggles one account in the Accounts page selection. Inputs: the selected ids and the
+ * account id. Output: the new selection, in the order picked. */
+export function toggleSelected(selected: readonly string[], id: string): string[] {
+  return selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
+}
+
+/** What "New pool from selected" can do with a selection: start a pool, or why not.
+ * Input: the selected ids that still exist. Output: ready, or the plain reason. */
+export function poolFromSelection(selected: readonly string[]): { kind: "ready" } | { kind: "blocked"; reason: string } {
+  if (selected.length === 0) return { kind: "blocked", reason: "Select accounts first." };
+  if (selected.length > POOL_MEMBER_MAX) return { kind: "blocked", reason: `A pool holds up to ${POOL_MEMBER_MAX} accounts. ${selected.length} are selected.` };
+  return { kind: "ready" };
+}
+
 /** The account list as a pure view: toolbar with search, filters, count and Add account,
- * then windowed rows. Inputs: the accounts and pools reads, and the add and open handlers. */
-export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry }: {
+ * then windowed rows with a checkbox each; selected accounts can start a new pool.
+ * Inputs: the accounts and pools reads, and the add, open, new pool and retry handlers. */
+export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPool }: {
   accounts: Loaded<AccountView[]>;
   pools: Loaded<PoolSummary[]>;
   onAdd: () => void;
   onOpen: (account: AccountView) => void;
   onRetry: () => void;
+  onNewPool?: (ids: string[]) => void;
 }) {
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("");
   const [status, setStatus] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
   if (accounts.kind === "loading") return <Skeleton shape="row" count={10} />;
   if (accounts.kind === "not_ready") return <NotReady what="Accounts" />;
   if (accounts.kind === "error") return <LoadError message="Couldn't load accounts." onRetry={onRetry} />;
@@ -47,7 +65,10 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry }: {
   const providers = [...new Map(accounts.value.map((account) => [account.provider, account.provider_name])).entries()];
   const shown = filterAccounts(accounts.value, search, provider, status);
   const poolCount = (id: string) => pools.kind === "ok" ? pools.value.filter((pool) => pool.members.some((member) => member.id === id)).length : undefined;
-  return <div>
+  const exists = new Set(accounts.value.map((account) => account.id));
+  const selected = picked.filter((id) => exists.has(id));
+  const fromSelection = poolFromSelection(selected);
+  return <div className={onNewPool ? "accounts-selectable" : undefined}>
     <div className="toolbar">
       <SearchField label="Search accounts" value={search} onValue={setSearch} />
       <Select id="account-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
@@ -56,19 +77,31 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry }: {
       <span className="count" aria-live="polite">{accountCount(shown.length, accounts.value.length)}</span>
       <Button variant="primary" icon="plus" onClick={onAdd}>Add account</Button>
     </div>
+    {onNewPool && selected.length > 0 && <div className="toolbar selection" role="group" aria-label="Selected accounts">
+      <span className="count" aria-live="polite">{selected.length} selected</span>
+      <Button icon="layers" disabled={fromSelection.kind !== "ready"} onClick={() => onNewPool(selected)}>New pool from selected</Button>
+      <Button variant="quiet" onClick={() => setPicked([])}>Clear selection</Button>
+      {fromSelection.kind === "blocked" && <span className="small secondary" role="status">{fromSelection.reason}</span>}
+    </div>}
     <Panel padded={false}>
       <div className="list-head" aria-hidden="true"><span>Name</span><span>Provider</span><span>Sign-in method</span><span>Status</span><span>Pools</span></div>
       {shown.length === 0 ? <p className="item-row">No accounts match.
         <Button variant="quiet" onClick={() => { setSearch(""); setProvider(""); setStatus(""); }}>Clear filters</Button></p>
         : <WindowedList label="Accounts" count={shown.length} renderRow={(index) => {
           const account = shown[index];
-          return <button type="button" className="account-row" onClick={() => onOpen(account)}>
+          const row = <button type="button" className="account-row" onClick={() => onOpen(account)}>
             <span className="cell"><ProviderMark provider={account.provider} name={account.provider_name} /><span className="ellipsis">{account.name}</span></span>
             <span className="ellipsis secondary">{account.provider_name}</span>
             <span className="ellipsis secondary">{account.method_label}</span>
             <span><StatusBadge word={account.status_label} /></span>
             <span className="secondary">{poolCount(account.id) ?? ""}</span>
           </button>;
+          if (!onNewPool) return row;
+          return <div className="account-line">
+            <input type="checkbox" className="account-pick" aria-label={`Select ${account.name}`} checked={selected.includes(account.id)}
+              onChange={() => setPicked((current) => toggleSelected(current.filter((id) => exists.has(id)), account.id))} />
+            {row}
+          </div>;
         }} />}
     </Panel>
   </div>;
@@ -86,7 +119,8 @@ export function Accounts({ adding }: { adding: boolean }) {
   const current = opened && (list.find((account) => account.id === opened.id) ?? opened);
   const refresh = () => { reload(); reloadPools(); };
   return <>
-    <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={setOpened} onRetry={reload} />
+    <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={setOpened} onRetry={reload}
+      onNewPool={(ids) => { startPoolWith(ids); navigate({ name: "settings", tab: "pools", action: "new" }); }} />
     <AddAccountDialog open={add} accounts={list} onAdded={refresh} onClose={() => {
       setAdd(false);
       if (adding) navigate({ name: "settings", tab: "accounts" }, true);
