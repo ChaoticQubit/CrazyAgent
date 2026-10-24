@@ -16,7 +16,6 @@ use crate::project_setup::{
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -167,15 +166,19 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     let sources = tempfile::tempdir().unwrap();
     std::fs::write(sources.path().join("scope.csv"), "item,size\nlogin,small\n").unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
     let project = ProjectId::new("notes-cli").unwrap();
     let created = controller
         .setup_project(
@@ -305,8 +308,8 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.setup.as_mut().unwrap().pool = None;
     screen.pool = None;
 
-    let folder = screen.setup.as_ref().unwrap().folder.clone();
-    let report = std::path::Path::new(&folder).join(ResearchKind::CompetitorResearch.report_path());
+    let state = screen.setup.as_ref().unwrap().state_folder();
+    let report = state.join(ResearchKind::CompetitorResearch.report_path());
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     let long = "word ".repeat(400);
     std::fs::write(
@@ -695,15 +698,19 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
     let project = ProjectId::new("buoy-watch").unwrap();
     let created = controller
         .setup_project(

@@ -574,6 +574,7 @@ fn exact_lines_keep_every_character() {
 
 struct Engine {
     root: tempfile::TempDir,
+    _home: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
@@ -586,15 +587,19 @@ async fn engine() -> Engine {
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let home = crate::tui::test_home::projects_home(&mut controller, 1).await;
     let created = controller
         .setup_project(
             project(),
@@ -632,6 +637,7 @@ async fn engine() -> Engine {
         .unwrap();
     Engine {
         root,
+        _home: home,
         _service: service,
         _stop: stop,
         controller,
@@ -770,7 +776,11 @@ fn render(shell: &mut Shell, width: u16, height: u16) -> String {
 async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
     let engine = engine().await;
     let mut connection = Connection::connect_paired(
-        Client::new(engine.root.path().join("e.sock"), Duration::from_secs(2)).unwrap(),
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
     )
     .unwrap();
     let mut ctx = Ctx::new(

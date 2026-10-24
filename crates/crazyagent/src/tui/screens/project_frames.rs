@@ -5,12 +5,11 @@ use super::project_view::project_screen;
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse};
+use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
 use crate::protocol::{ProjectId, ProjectSpec};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
 
 const REPORT: &str = "# Market research: Fieldnotes Mobile
 
@@ -93,15 +92,37 @@ async fn project_frames_from_a_real_engine_match_the_design() {
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let owner = tempfile::Builder::new()
+        .prefix("ca-tui-frames-owner-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(owner.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let owner_home = std::fs::canonicalize(owner.path()).unwrap();
+    let projects = owner_home.join("projects");
+    std::fs::create_dir(&projects).unwrap();
+    let homed = controller
+        .set_projects_home(projects.to_str().unwrap().into(), 1)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &homed,
+            OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+        ),
+        "{homed:?}"
+    );
     let project = ProjectId::new("fieldnotes-mobile").unwrap();
     let created = controller
         .setup_project(
@@ -131,12 +152,11 @@ async fn project_frames_from_a_real_engine_match_the_design() {
         created,
         OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
     ));
-    let home = std::fs::canonicalize(root.path()).unwrap();
-    let mut screen = ProjectScreen::new(project, String::new(), Some(home));
+    let mut screen = ProjectScreen::new(project, String::new(), Some(owner_home));
     let start = 1_793_000_000_000;
     read(&mut screen, &mut controller, start).await;
-    let folder = screen.setup.as_ref().unwrap().folder.clone();
-    let report = std::path::Path::new(&folder).join(ResearchKind::MarketResearch.report_path());
+    let state = screen.setup.as_ref().unwrap().state_folder();
+    let report = state.join(ResearchKind::MarketResearch.report_path());
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, REPORT).unwrap();
 

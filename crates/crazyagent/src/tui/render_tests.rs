@@ -448,9 +448,10 @@ fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     assert!(shown.contains("3 suggested memories"), "{shown}");
     assert!(shown.contains("1 suggested memory"), "{shown}");
     assert!(!shown.contains("Updated 4 min ago"), "{shown}");
-    assert!(
-        shown.contains(" n New project  a Add project  Enter Open  m Review memories  s Settings"),
-        "{shown}"
+    assert_eq!(
+        shown.lines().last(),
+        Some(" n New project  a Add project  Enter Open  m Review memories             ? Help "),
+        "s Settings no longer fits at 80 columns once m shows: {shown}"
     );
     shell.key(Key::Char('m'));
     assert_eq!(
