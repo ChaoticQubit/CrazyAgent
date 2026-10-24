@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -74,7 +75,6 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.logd",
     "com.apple.diagnosticd",
     "com.apple.system.notification_center",
-    "com.apple.SecurityServer",
     "com.apple.trustd",
     "com.apple.trustd.agent",
     "com.apple.ocspd",
@@ -82,6 +82,163 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.SystemConfiguration.DNSConfiguration",
     "com.apple.SystemConfiguration.configd",
 ];
+
+const KEYCHAIN_SERVICES: &[&str] = &[
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.securityd.xpc",
+    "com.apple.secd",
+    "com.apple.securityd.ckks",
+    "com.apple.securityd.sos",
+    "com.apple.security.agent",
+    "com.apple.security.agent.login",
+    "com.apple.security.authhost",
+    "com.apple.security.keychainsyncingoveridsproxy",
+    "com.apple.security.cloudkeychainproxy3",
+    "com.apple.security.keychain-circle-notification",
+];
+
+const OWNER_SECRET_PATHS: &[&str] = &[
+    "Library/Keychains",
+    ".ssh",
+    ".gnupg",
+    ".netrc",
+    ".git-credentials",
+    ".config/gh",
+    ".config/git/credentials",
+    ".aws",
+    ".docker",
+    ".kube",
+    ".codex",
+    ".claude",
+    ".claude.json",
+];
+
+const SYSTEM_SECRET_PATHS: &[&str] = &["/Library/Keychains", "/private/var/db/SystemKey"];
+
+const ENGINE_SECRET_FILES: &[&str] = &[
+    "engine.db",
+    "engine.db-wal",
+    "engine.db-shm",
+    "engine.db-journal",
+    "owner.sock",
+    "github.json",
+    "github.toml",
+];
+
+const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys"];
+
+const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"];
+
+const REFUSED_VARIABLES: &[&str] = &[
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SSH_AUTH_SOCK",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+];
+
+const REFUSED_PREFIXES: &[&str] = &[
+    "GH_",
+    "GITHUB_",
+    "GIT_CONFIG_KEY_",
+    "GIT_CONFIG_VALUE_",
+    "AWS_",
+    "AZURE_",
+    "CRAZYAGENT_",
+];
+
+const REFUSED_SUFFIXES: &[&str] = &[
+    "_API_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_ACCESS_KEY",
+    "_CREDENTIALS",
+];
+
+/// The git settings every sandboxed agent process gets: no system git config (whose
+/// `credential.helper=osxkeychain` would ask the owner's Keychain), no credential helper
+/// at all, and no terminal prompt. They are set after the harness's own variables, so a
+/// harness cannot replace them.
+pub const AGENT_GIT_ENV: [(&str, &str); 5] = [
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "credential.helper"),
+    ("GIT_CONFIG_VALUE_0", ""),
+];
+
+/// Tells whether an environment variable may never reach an agent process: GitHub and
+/// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
+/// secrets, passwords and the engine's own `CRAZYAGENT_` settings. Only the model key
+/// of the agent's own account (`ANTHROPIC_API_KEY`, `CRAZYAGENT_API_KEY`) passes.
+/// Input: the variable name. Output: true when it is refused.
+pub fn agent_env_refused(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return true;
+    };
+    let upper = name.to_ascii_uppercase();
+    if AGENT_KEY_VARIABLES.contains(&upper.as_str()) {
+        return false;
+    }
+    REFUSED_VARIABLES.contains(&upper.as_str())
+        || REFUSED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+        || REFUSED_SUFFIXES
+            .iter()
+            .any(|suffix| upper.ends_with(suffix))
+}
+
+/// Builds the one command every sandboxed agent process starts from, on every launch path
+/// (headless harness launch, research, team, master and the interactive terminal): `-f
+/// <profile> <program>` under `sandbox-exec`, a cleared environment holding only `base`,
+/// the harness's own variables and [`AGENT_GIT_ENV`], and its own process group. `HOME`
+/// and `TMPDIR` always come from `base`. Inputs: the installed profile, the absolute
+/// program, the base variables and the harness's variables (None removes one).
+/// Output: the command, or `Invalid` when any variable is refused by [`agent_env_refused`].
+pub fn agent_command<'a>(
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    let mut command = Command::new(SANDBOX_EXEC);
+    command.arg("-f").arg(profile).arg(program).env_clear();
+    for (name, value) in base {
+        if agent_env_refused(OsStr::new(name)) {
+            return Err(invalid("agent environment holds an owner secret"));
+        }
+        command.env(name, value);
+    }
+    for (name, value) in harness {
+        if agent_env_refused(name) {
+            return Err(invalid("agent environment holds an owner secret"));
+        }
+        if name == "HOME" || name == "TMPDIR" {
+            continue;
+        }
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    for (name, value) in AGENT_GIT_ENV {
+        command.env(name, value);
+    }
+    command.process_group(0);
+    assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert!(
+        command.get_envs().all(|(name, _)| !agent_env_refused(name)
+            || AGENT_GIT_ENV.iter().any(|(git, _)| name == *git))
+    );
+    Ok(command)
+}
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on,
 /// otherwise only the listed model endpoints.
@@ -165,6 +322,8 @@ pub struct ProjectSandbox {
     worktrees: Vec<PathBuf>,
     read_roots: Vec<PathBuf>,
     network: SandboxNetwork,
+    owner_home: PathBuf,
+    engine_runtime: Option<PathBuf>,
 }
 
 impl ProjectSandbox {
@@ -195,7 +354,50 @@ impl ProjectSandbox {
             worktrees: Vec::new(),
             read_roots: Vec::new(),
             network,
+            owner_home: owner,
+            engine_runtime: None,
         })
+    }
+
+    /// Names the engine runtime folder whose secrets this agent must never read or write:
+    /// the engine database, the owner socket, the GitHub sign-in and settings files and the
+    /// saved account keys. The agent's own home and temp dirs may sit inside it.
+    /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
+    pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
+        let runtime = runtime.canonicalize()?;
+        if !clean_absolute(&runtime) || !runtime.is_dir() {
+            return Err(invalid("engine runtime must be an existing plain folder"));
+        }
+        for secret in self.engine_secrets_in(&runtime) {
+            if self.writable_roots().any(|root| root.starts_with(&secret)) {
+                return Err(invalid("agent roots must not sit in engine secrets"));
+            }
+        }
+        self.engine_runtime = Some(runtime);
+        Ok(self)
+    }
+
+    fn engine_secrets_in(&self, runtime: &Path) -> Vec<PathBuf> {
+        ENGINE_SECRET_FILES
+            .iter()
+            .chain(ENGINE_SECRET_FOLDERS)
+            .map(|name| runtime.join(name))
+            .collect()
+    }
+
+    /// Every path this sandbox denies to the agent although an allowed root might cover
+    /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
+    /// the system Keychains and, once guarded, the engine runtime's secrets.
+    pub fn secret_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = OWNER_SECRET_PATHS
+            .iter()
+            .map(|path| self.owner_home.join(path))
+            .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
+            .collect();
+        if let Some(runtime) = &self.engine_runtime {
+            paths.extend(self.engine_secrets_in(runtime));
+        }
+        paths
     }
 
     /// Adds one writable worktree the agent may also start in, for a checkout the
@@ -307,6 +509,17 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
         }
         text.push_str(")\n");
+        text.push_str("(deny file-read* file-write*");
+        for secret in self.secret_paths() {
+            if clean_absolute(&secret) {
+                text.push_str(&format!("\n  (subpath \"{}\")", secret.display()));
+            }
+        }
+        text.push_str(")\n(deny mach-lookup");
+        for service in KEYCHAIN_SERVICES {
+            text.push_str(&format!("\n  (global-name \"{service}\")"));
+        }
+        text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
             "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
@@ -342,6 +555,11 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(
+            MACH_SERVICES
+                .iter()
+                .all(|service| !KEYCHAIN_SERVICES.contains(service))
+        );
         assert!(text.len() <= PROFILE_BYTES_MAX);
         text
     }
@@ -388,21 +606,25 @@ impl ProjectSandbox {
     /// environment: HOME and TMPDIR point at the agent's own dirs, and the
     /// process leads its own group so the whole tree can be stopped.
     pub fn command(&self, profile: &Path, program: &Path) -> Command {
-        let mut command = Command::new(SANDBOX_EXEC);
+        let mut command = agent_command(
+            profile,
+            program,
+            &self.base_env(),
+            std::iter::empty::<(&OsStr, Option<&OsStr>)>(),
+        )
+        .expect("the base agent environment holds no owner secret");
+        command.current_dir(&self.project_root);
         command
-            .arg("-f")
-            .arg(profile)
-            .arg(program)
-            .env_clear()
-            .env("HOME", &self.agent_home)
-            .env("TMPDIR", &self.agent_tmp)
-            .env("PATH", AGENT_PATH)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .current_dir(&self.project_root)
-            .process_group(0);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
-        command
+    }
+
+    fn base_env(&self) -> [(&str, &OsStr); 5] {
+        [
+            ("HOME", self.agent_home.as_os_str()),
+            ("TMPDIR", self.agent_tmp.as_os_str()),
+            ("PATH", OsStr::new(AGENT_PATH)),
+            ("LANG", OsStr::new("C")),
+            ("LC_ALL", OsStr::new("C")),
+        ]
     }
 
     /// Rebuilds a harness launch command (absolute program, arguments,
@@ -424,17 +646,8 @@ impl ProjectSandbox {
                 "harness must start inside the project folder or its worktree",
             ));
         }
-        let mut command = self.command(profile, program);
+        let mut command = agent_command(profile, program, &self.base_env(), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
-        for (key, value) in harness.get_envs() {
-            if key == "HOME" || key == "TMPDIR" {
-                continue;
-            }
-            match value {
-                Some(value) => command.env(key, value),
-                None => command.env_remove(key),
-            };
-        }
         assert_eq!(command.get_program(), SANDBOX_EXEC);
         Ok(command)
     }

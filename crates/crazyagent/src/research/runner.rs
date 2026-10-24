@@ -530,6 +530,9 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
+        if let Some(runtime) = self.state.parent() {
+            sandbox = sandbox.guard_engine(runtime)?;
+        }
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
@@ -541,21 +544,22 @@ impl ResearchRunner {
         drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, executable);
+        let mut launch = Command::new(executable);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
-                codex_arguments(&mut command, &worktree, &output, &home, job.tools, account)?;
+                codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, job.tools, account)?;
-                command.args(installed.arguments());
+                claude_arguments(&mut launch, &home, &tmp, job.tools, account)?;
+                launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
         };
+        launch.current_dir(&worktree);
+        let mut command = sandbox.wrap(&profile, &launch)?;
         command
-            .current_dir(&worktree)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -1,5 +1,6 @@
 use super::{
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, clean_absolute, invalid,
+    AGENT_GIT_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    agent_env_refused, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -381,6 +382,9 @@ impl Sandbox for LinuxSandbox {
             .current_dir(cwd)
             .process_group(0);
         for (key, value) in harness.get_envs() {
+            if agent_env_refused(key) {
+                return Err(invalid("agent environment holds an owner secret"));
+            }
             if key == "HOME" || key == "TMPDIR" {
                 continue;
             }
@@ -388,6 +392,9 @@ impl Sandbox for LinuxSandbox {
                 Some(value) => command.env(key, value),
                 None => command.env_remove(key),
             };
+        }
+        for (name, value) in AGENT_GIT_ENV {
+            command.env(name, value);
         }
         assert!(command.get_args().any(|arg| arg == "--"));
         Ok(command)
