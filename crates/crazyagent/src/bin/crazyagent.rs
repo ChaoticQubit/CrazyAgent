@@ -98,6 +98,19 @@ fn main() -> ExitCode {
             }
         };
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::credentials::GIT_HELPER_COMMAND)
+    {
+        return match run_git_credential(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.first().is_some_and(|arg| arg == "engine") {
         return match run_engine(&args) {
             Ok(()) => ExitCode::SUCCESS,
@@ -114,6 +127,34 @@ fn main() -> ExitCode {
             ExitCode::from(code)
         }
     }
+}
+
+/// Answers git's credential helper call with the engine's own store item, so a token
+/// never reaches git's config, argv or environment. Input: the subcommand arguments
+/// NAMESPACE REFERENCE USERNAME OPERATION with git's request on stdin. Output: the answer
+/// on stdout for `get`, nothing for other operations, or the store's error code.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn run_git_credential(args: &[OsString]) -> Result<(), String> {
+    let [_, namespace, reference, username, operation] = args else {
+        return Err(format!(
+            "usage: crazyagent {} NAMESPACE REFERENCE USERNAME OPERATION",
+            crazyagent::credentials::GIT_HELPER_COMMAND
+        ));
+    };
+    let text = |arg: &OsString| {
+        arg.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "credential_name_invalid".to_owned())
+    };
+    crazyagent::credentials::answer_git_credential(
+        &text(namespace)?,
+        &text(reference)?,
+        &text(username)?,
+        &text(operation)?,
+        io::stdin().lock(),
+        io::stdout().lock(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
