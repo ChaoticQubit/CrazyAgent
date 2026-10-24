@@ -584,6 +584,17 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
         },
         other => panic!("settings request expected, got {other:?}"),
     }
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => match *job {
+            SettingsJob::Suggestions { projects } => assert_eq!(
+                projects,
+                ["tidepool", "ledgerline", "fieldnotes"].map(|id| ProjectId::new(id).unwrap())
+            ),
+            other => panic!("suggestions expected, got {other:?}"),
+        },
+        other => panic!("settings request expected, got {other:?}"),
+    }
+    assert!(ctx.next_request().is_none());
     let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
         SettingsEvent::Memories(Ok(memories())),
     ))));
