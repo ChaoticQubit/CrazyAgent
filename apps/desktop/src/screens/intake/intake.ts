@@ -1,7 +1,7 @@
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, OnboardingStarted, OnboardingStep,
-  OnboardingView, PackEntry, ProjectsHome, SetupStatus,
+  OnboardingView, PackEntry, PackState, ProjectsHome, SetupStatus,
 } from "../../engine-client";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
@@ -203,7 +203,7 @@ const DEPENDENCY_ABOUT: Record<DependencyName, string> = {
   graphify: "Builds a code graph of each project.",
 };
 
-/** Badge word, tone and detail line for a tool or pack entry state.
+/** Badge word, tone and detail line for a tool state.
  * Input: the state. Output: the fixed word, its tone and one line or null. */
 export function stateView(state: DependencyState): { word: string; tone: Tone; line: string | null } {
   switch (state.kind) {
@@ -220,9 +220,21 @@ export function dependencyView(dependency: Dependency): { title: string; about: 
   return { title: dependency.name, about: DEPENDENCY_ABOUT[dependency.name] ?? "", ...stateView(dependency.state) };
 }
 
-/** The name a pack entry shows. Input: the entry. Output: its name, or its id. */
+/** Badge word, tone and detail line for a default-pack entry state.
+ * Input: the state. Output: the fixed word, its tone and one line or null. */
+export function packStateView(state: PackState): { word: string; tone: Tone; line: string | null } {
+  switch (state.kind) {
+    case "on": return { word: "On", tone: "ok", line: null };
+    case "off": return { word: "Off", tone: "neutral", line: "Installed and switched off." };
+    case "installing": return { word: "Installing", tone: "info", line: null };
+    case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
+    default: return { word: "Not installed", tone: "warn", line: "Setup installs it." };
+  }
+}
+
+/** The name a pack entry shows. Input: the entry. Output: its id. */
 export function entryName(entry: PackEntry): string {
-  return displayText(entry.name?.trim() || entry.id);
+  return displayText(entry.id);
 }
 
 /** The pack entries ticked before the owner changes anything: the ones on by default.
@@ -241,5 +253,5 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
 
 /** Tells whether anything in setup is still installing. Input: the status. Output: true while busy. */
 export function setupBusy(status: SetupStatus): boolean {
-  return [...status.dependencies.map((item) => item.state), ...status.pack.map((item) => item.state)].some((state) => state.kind === "installing");
+  return status.running || [...status.dependencies.map((item) => item.state), ...status.pack.map((item) => item.state)].some((state) => state.kind === "installing");
 }

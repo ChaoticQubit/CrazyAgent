@@ -7,7 +7,7 @@ import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_POLL_MS, approvalLine, dependencyView, entryName, packTicks, setupBusy, stateView } from "./intake";
+import { SETUP_POLL_MS, approvalLine, dependencyView, entryName, packStateView, packTicks, setupBusy } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -18,7 +18,7 @@ function PackGroup({ title, entries, ticks, onTick, locked }: {
   return <fieldset className="pj-field">
     <legend>{title}</legend>
     <ul className="in-list">{entries.map((entry) => {
-      const state = stateView(entry.state);
+      const state = packStateView(entry.state);
       return <li className="in-row" key={entry.id}>
         <span className="in-row-main">
           <Checkbox label={entryName(entry)} checked={ticks.includes(entry.id)} disabled={locked} onChecked={(on) => onTick(entry.id, on)} />

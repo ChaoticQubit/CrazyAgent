@@ -486,6 +486,9 @@ impl NativeBridge {
             OwnerMutation::RetryResearch { project_id, .. } => {
                 ("research_retry", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::RunSetup { .. } => ("run_setup", None, None),
+            OwnerMutation::SetPackEntry { .. } => ("pack_set", None, None),
+            OwnerMutation::RemovePackEntry { .. } => ("pack_remove", None, None),
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },
             } => ("memory_review", None, None),
@@ -963,6 +966,11 @@ fn rejection_code(code: &str) -> &'static str {
         "research_job_missing" => "research_job_missing",
         "research_job_finished" => "research_job_finished",
         "research_job_not_retryable" => "research_job_not_retryable",
+        "setup_busy" => "setup_busy",
+        "pack_unknown" => "pack_unknown",
+        "pack_required" => "pack_required",
+        "pack_not_installed" => "pack_not_installed",
+        "pack_name_taken" => "pack_name_taken",
         _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),
     }
 }

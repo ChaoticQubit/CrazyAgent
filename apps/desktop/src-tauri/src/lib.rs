@@ -1064,9 +1064,10 @@ async fn desktop_run_setup(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     pack: Vec<String>,
-) -> Result<SetupStatus, BridgeError> {
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.run_setup(pack).await
+    lock(&state)?.run_setup(pack, generation).await
 }
 
 #[tauri::command]
@@ -1075,9 +1076,10 @@ async fn desktop_set_pack_entry(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
-) -> Result<SetupStatus, BridgeError> {
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_pack_entry(id, on).await
+    lock(&state)?.set_pack_entry(id, on, generation).await
 }
 
 #[tauri::command]
@@ -1085,9 +1087,10 @@ async fn desktop_remove_pack_entry(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<SetupStatus, BridgeError> {
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_pack_entry(id).await
+    lock(&state)?.remove_pack_entry(id, generation).await
 }
 
 #[tauri::command]

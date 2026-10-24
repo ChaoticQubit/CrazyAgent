@@ -1,17 +1,12 @@
-use super::{BridgeError, NativeBridge, failure};
+use super::{BridgeError, IntentReceipt, NativeBridge, failure};
 use crazyagent::engine::EngineError;
+use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::setup::SetupStatus;
 
-const CODES: [&str; 9] = [
+const CODES: [&str; 3] = [
     "setup_busy",
-    "setup_readonly",
     "setup_store_unavailable",
-    "setup_owner_unavailable",
     "setup_outcome_unknown",
-    "pack_unknown",
-    "pack_required",
-    "pack_not_installed",
-    "pack_name_taken",
 ];
 
 fn setup_failure(error: EngineError) -> BridgeError {
@@ -20,7 +15,7 @@ fn setup_failure(error: EngineError) -> BridgeError {
             .iter()
             .find(|code| **code == error.0)
             .copied()
-            .unwrap_or("setup_failed"),
+            .unwrap_or("owner_read_failed"),
     )
 }
 
@@ -30,6 +25,30 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         Ok(())
+    }
+
+    async fn setup_intent(
+        &mut self,
+        mutation: OwnerMutation,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.setup_ready()?;
+        self.allow_new_auth()?;
+        if self.status().pending {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .setup_status()
+            .await
+            .map_err(setup_failure)?;
+        self.controller()?
+            .begin_mutation(mutation, generation)
+            .map_err(|_| failure("owner_not_ready"))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
     }
 
     /// Reads the setup screen: tmux, uv and Graphify with their states, each default-pack
@@ -42,35 +61,38 @@ impl NativeBridge {
             .map_err(setup_failure)
     }
 
-    /// Starts setup with the ticked default-pack entries; ticked MCP servers count as
-    /// approved by the owner. Input: the ticked entry ids. Output: the starting status.
-    pub async fn run_setup(&mut self, pack: Vec<String>) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
-        self.controller()?
-            .run_setup(pack)
+    /// Starts setup with the ticked default-pack entries as one retained owner intent;
+    /// ticked MCP servers count as approved by the owner.
+    /// Inputs: the ticked entry ids and a fresh draft generation. Output: the receipt.
+    pub async fn run_setup(
+        &mut self,
+        pack: Vec<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.setup_intent(OwnerMutation::RunSetup { pack }, generation)
             .await
-            .map_err(setup_failure)
     }
 
-    /// Switches one installed default-pack entry on or off. Inputs: its id and the state.
+    /// Switches one installed default-pack entry on or off as one retained owner intent.
+    /// Inputs: its id, the state and a fresh draft generation. Output: the receipt.
     pub async fn set_pack_entry(
         &mut self,
         id: String,
         on: bool,
-    ) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
-        self.controller()?
-            .set_pack_entry(id, on)
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.setup_intent(OwnerMutation::SetPackEntry { id, on }, generation)
             .await
-            .map_err(setup_failure)
     }
 
-    /// Removes one installed default-pack entry and everything it added. Input: its id.
-    pub async fn remove_pack_entry(&mut self, id: String) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
-        self.controller()?
-            .remove_pack_entry(id)
+    /// Removes one installed default-pack entry and everything it added, as one retained
+    /// owner intent. Inputs: its id and a fresh draft generation. Output: the receipt.
+    pub async fn remove_pack_entry(
+        &mut self,
+        id: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.setup_intent(OwnerMutation::RemovePackEntry { id }, generation)
             .await
-            .map_err(setup_failure)
     }
 }

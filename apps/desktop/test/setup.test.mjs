@@ -37,14 +37,16 @@ test("setup and default-pack refusals read as plain sentences", () => {
   const fallback = client.errorMessage({ code: "unknown" });
   assert.equal(client.errorMessage({ code: "setup_busy" }), "Setup is already running.");
   assert.equal(client.errorMessage({ code: "pack_required" }), "This entry is always on and can't be removed.");
-  for (const code of ["setup_readonly", "setup_store_unavailable", "setup_owner_unavailable", "setup_outcome_unknown", "setup_failed", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
+  for (const code of ["setup_store_unavailable", "setup_outcome_unknown", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
     assert.notEqual(client.errorMessage({ code }), fallback, code);
   }
 });
 
 test("every setup command the client calls is a desktop command the bridge maps plainly", () => {
   const source = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
-  const bridge = readFileSync(new URL("../src-tauri/src/bridge/setup.rs", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../src-tauri/src/bridge/setup.rs", import.meta.url), "utf8");
+  const commands = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const expected = {
     setupStatus: "desktop_setup_status",
     runSetup: "desktop_run_setup",
@@ -56,6 +58,14 @@ test("every setup command the client calls is a desktop command the bridge maps 
     const match = source.match(new RegExp(`export function ${name}\\([^)]*\\)[^{]*\\{\\s*return invoke<[^>]+>\\("(desktop_[a-z_]+)"`));
     assert.ok(match, `${name} must invoke a desktop command`);
     assert.equal(match[1], command);
+    assert.ok(commands.includes(`async fn ${command}(`), command);
+  }
+  for (const name of ["run_setup", "set_pack_entry", "remove_pack_entry"]) {
+    assert.match(setup, new RegExp(`pub async fn ${name}\\([^)]*generation: u64,?\\s*\\) -> Result<IntentReceipt, BridgeError>`), name);
+  }
+  for (const kind of ["run_setup", "pack_set", "pack_remove"]) {
+    assert.ok(bridge.includes(`=> ("${kind}", None, None)`), kind);
+    assert.ok(source.includes(`"${kind}"`), kind);
   }
   for (const code of ["setup_busy", "pack_unknown", "pack_required", "pack_not_installed", "pack_name_taken"]) {
     assert.ok(bridge.includes(`"${code}"`), code);

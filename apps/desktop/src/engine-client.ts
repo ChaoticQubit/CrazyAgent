@@ -204,11 +204,8 @@ export function errorMessage(error: unknown): string {
     plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
     setup_busy: "Setup is already running.",
-    setup_readonly: "Setup can't change anything while CrazyAgent is read-only.",
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
-    setup_owner_unavailable: "CrazyAgent is not reachable. Reconnect and try again.",
     setup_outcome_unknown: "The setup request did not finish. Refresh before continuing.",
-    setup_failed: "The setup request failed. Refresh before continuing.",
     pack_unknown: "This entry is not in the default pack.",
     pack_required: "This entry is always on and can't be removed.",
     pack_not_installed: "This entry is not installed yet. Run setup first.",
@@ -310,7 +307,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "run_setup" | "pack_set" | "pack_remove";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -840,32 +837,43 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
 export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
+  | { kind: "missing" }
   | { kind: "found"; version: string }
   | { kind: "installing" }
   | { kind: "installed"; version: string }
-  | { kind: "failed"; reason: string }
-  | { kind: "missing" };
+  | { kind: "failed"; reason: string };
 
 export interface Dependency {
   name: DependencyName;
+  label: string;
   state: DependencyState;
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
 
+export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
+
+export type PackState =
+  | { kind: "available" }
+  | { kind: "installing" }
+  | { kind: "on" }
+  | { kind: "off" }
+  | { kind: "failed"; reason: string };
+
 export interface PackEntry {
   id: string;
   kind: PackEntryKind;
+  group: PackGroup;
   source: string;
   license: string;
   on_by_default: boolean;
-  state: DependencyState;
-  name?: string;
+  state: PackState;
 }
 
 export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
+  running: boolean;
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
@@ -1224,66 +1232,25 @@ export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
   return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
 }
 
-export type SetupDependencyName = "tmux" | "uv" | "graphify";
-
-export type SetupDependencyState =
-  | { state: "missing" }
-  | { state: "found"; version: string }
-  | { state: "installing" }
-  | { state: "installed"; version: string }
-  | { state: "failed"; reason: string };
-
-export interface SetupDependency {
-  name: SetupDependencyName;
-  label: string;
-  state: SetupDependencyState;
-}
-
-export type PackKind = "skill" | "mcp_server";
-
-export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
-
-export type PackState =
-  | { state: "available" }
-  | { state: "installing" }
-  | { state: "on" }
-  | { state: "off" }
-  | { state: "failed"; reason: string };
-
-export interface PackEntry {
-  id: string;
-  kind: PackKind;
-  group: PackGroup;
-  source: string;
-  license: string;
-  on_by_default: boolean;
-  state: PackState;
-}
-
-export interface SetupStatus {
-  dependencies: SetupDependency[];
-  pack: PackEntry[];
-  running: boolean;
-}
-
 /** Reads the setup screen: tmux, uv and Graphify, each default-pack entry, and whether setup runs. */
 export function setupStatus(): Promise<SetupStatus> {
   return invoke<SetupStatus>("desktop_setup_status");
 }
 
-/** Starts setup with the ticked pack entries; ticked MCP servers count as approved by the owner. */
-export function runSetup(pack: string[]): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_run_setup", { pack });
+/** Starts setup with the ticked pack entries as one owner intent; ticked MCP servers count as
+ * approved by the owner. */
+export function runSetup(pack: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_run_setup", { pack, generation });
 }
 
-/** Switches one installed default-pack entry on or off with everything it added. */
-export function setPackEntry(id: string, on: boolean): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on });
+/** Switches one installed default-pack entry on or off with everything it added, as one owner intent. */
+export function setPackEntry(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_pack_entry", { id, on, generation });
 }
 
-/** Removes one installed default-pack entry and everything it added. */
-export function removePackEntry(id: string): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_remove_pack_entry", { id });
+/** Removes one installed default-pack entry and everything it added, as one owner intent. */
+export function removePackEntry(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_remove_pack_entry", { id, generation });
 }
 
 export interface MasterTurn {

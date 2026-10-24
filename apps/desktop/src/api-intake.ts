@@ -34,8 +34,8 @@ const COPY: Record<string, string> = {
   repo_missing: "This repository isn't on your GitHub account anymore.",
   repo_already_cloned: "This repository is already in your projects folder.",
   clone_failed: "Couldn't clone this repository. Nothing was kept. Try again.",
-  setup_running: "Setup is already running. Wait for it to finish.",
-  pack_entry_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
+  setup_busy: "Setup is already running. Wait for it to finish.",
+  pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
 };
 
 /** Plain sentence for one intake, GitHub or setup failure code.

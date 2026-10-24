@@ -166,13 +166,17 @@ test("setup lists each tool's state in plain words", () => {
     { title: "graphify", about: "Builds a code graph of each project.", word: "Installing", tone: "info", line: null });
   assert.deepEqual(intake.dependencyView({ name: "graphify", state: { kind: "failed", reason: "Checksum didn't match." } }).line, "Checksum didn't match.");
   assert.deepEqual(intake.dependencyView({ name: "tmux", state: { kind: "missing" } }).line, "Setup installs it.");
+  assert.deepEqual(intake.packStateView({ kind: "on" }), { word: "On", tone: "ok", line: null });
+  assert.equal(intake.packStateView({ kind: "off" }).word, "Off");
+  assert.equal(intake.packStateView({ kind: "available" }).word, "Not installed");
+  assert.equal(intake.packStateView({ kind: "failed", reason: "The download failed." }).line, "The download failed.");
 });
 
 const pack = [
-  { id: "superpowers", kind: "skill", source: "github.com/obra/superpowers", license: "MIT", on_by_default: true, state: { kind: "missing" }, name: "superpowers" },
-  { id: "serena", kind: "mcp_server", source: "github.com/oraios/serena", license: "MIT", on_by_default: false, state: { kind: "missing" } },
-  { id: "context-mode", kind: "mcp_server", source: "github.com/mksglu/context-mode", license: "MIT", on_by_default: true, state: { kind: "missing" }, name: "context-mode" },
-  { id: "headroom", kind: "mcp_server", source: "github.com/x/headroom", license: "Apache-2.0", on_by_default: true, state: { kind: "installed", version: "1.0" } },
+  { id: "superpowers", kind: "skill", group: "workflow", source: "github.com/obra/superpowers", license: "MIT", on_by_default: true, state: { kind: "available" } },
+  { id: "serena", kind: "mcp_server", group: "optional", source: "github.com/oraios/serena", license: "MIT", on_by_default: false, state: { kind: "available" } },
+  { id: "context-mode", kind: "mcp_server", group: "context", source: "github.com/mksglu/context-mode", license: "MIT", on_by_default: true, state: { kind: "available" } },
+  { id: "headroom", kind: "mcp_server", group: "context", source: "github.com/x/headroom", license: "Apache-2.0", on_by_default: true, state: { kind: "on" } },
 ];
 
 test("the pack starts with the on-by-default entries ticked and names every ticked MCP server before approval", () => {
@@ -180,8 +184,9 @@ test("the pack starts with the on-by-default entries ticked and names every tick
   assert.equal(intake.approvalLine(pack, ["superpowers", "context-mode", "headroom"]),
     "Continuing lets your agents run these MCP servers: context-mode, headroom. You can turn any of them off later.");
   assert.equal(intake.approvalLine(pack, ["superpowers"]), null);
-  assert.equal(intake.setupBusy({ dependencies: [{ name: "uv", state: { kind: "installing" } }], pack: [] }), true);
-  assert.equal(intake.setupBusy({ dependencies: [], pack }), false);
+  assert.equal(intake.setupBusy({ dependencies: [{ name: "uv", label: "uv", state: { kind: "installing" } }], pack: [], running: false }), true);
+  assert.equal(intake.setupBusy({ dependencies: [], pack, running: true }), true);
+  assert.equal(intake.setupBusy({ dependencies: [], pack, running: false }), false);
 });
 
 test("new routes for adding a project and reviewing its setup parse and format back", () => {
@@ -316,13 +321,14 @@ test("the setup review shows the steps, the overview, missing items and a confir
 });
 
 test("the tools step lists dependencies and the pack, and names the MCP servers it approves", () => {
-  const status = ok({ dependencies: [{ name: "tmux", state: { kind: "found", version: "3.5a" } }, { name: "graphify", state: { kind: "missing" } }], pack });
+  const status = ok({ dependencies: [{ name: "tmux", label: "tmux", state: { kind: "found", version: "3.5a" } }, { name: "graphify", label: "Graphify", state: { kind: "missing" } }], pack, running: false });
   const base = { status, ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
   const markup = html(ToolsSetupView, base);
   assert.match(markup, /tmux[\s\S]*Found[\s\S]*Version 3\.5a on this Mac\./);
   assert.match(markup, /graphify[\s\S]*Not installed/);
   assert.match(markup, /Skills[\s\S]*superpowers/);
   assert.match(markup, /MCP servers[\s\S]*serena/);
+  assert.match(markup, /headroom[\s\S]*>On</);
   assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode, headroom\./);
   assert.match(markup, />Set up tools<\/button>/);
   assert.match(markup, />Skip for now<\/button>/);
