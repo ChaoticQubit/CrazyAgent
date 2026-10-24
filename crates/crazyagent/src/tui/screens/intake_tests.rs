@@ -11,7 +11,7 @@ use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
 use crate::tui::client::{OwnerEvent, SetupEvent};
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::Status;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
@@ -417,7 +417,7 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
 
     shell.key(Key::Char('c'));
     assert_eq!(shell.place(), Some(Place::Home));
-    pump(&mut shell, &mut connection).await;
+    settle_setup(&mut shell, &mut connection).await;
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "Get set up"), "{rows:#?}");
     assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
@@ -428,6 +428,70 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     );
     let status = engine.controller.setup_status().await.unwrap();
     assert!(!status.running, "no setup run started");
+    let found = tools_found(&status);
+    assert_eq!(
+        shows(&rows, "[ ] Install tools"),
+        !found,
+        "the engine reports {:?}: {rows:#?}",
+        status.dependencies
+    );
+    assert_eq!(shows(&rows, "[x] Install tools"), found, "{rows:#?}");
+    assert_eq!(shell.ctx.store.setup, Load::Ready(status));
+}
+
+/// Pumps the shell, refreshing like the run loop, until the store holds a setup
+/// check with every tool checked.
+/// Input: the shell and its engine connection. Output: none; panics after 30 s.
+async fn settle_setup(shell: &mut Shell, connection: &mut Connection) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        pump(shell, connection).await;
+        if let Load::Ready(status) = &shell.ctx.store.setup
+            && status
+                .dependencies
+                .iter()
+                .all(|tool| tool.state != crate::setup::DependencyState::Checking)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the setup check never finished: {:?}",
+            shell.ctx.store.setup
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        shell.refresh();
+    }
+}
+
+fn tools_found(status: &crate::setup::SetupStatus) -> bool {
+    status.dependencies.iter().all(|tool| {
+        matches!(
+            tool.state,
+            crate::setup::DependencyState::Found { .. }
+                | crate::setup::DependencyState::Installed { .. }
+        )
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready() {
+    let mut engine = Engine::start().await;
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let status = engine.controller.setup_status().await.unwrap();
+    let rows = render(&mut shell, 80, 24);
+    let found = tools_found(&status);
+    assert_eq!(
+        shows(&rows, "Get set up"),
+        !found,
+        "the pool has a ready local account, so only tools decide; the engine reports {:?}: {rows:#?}",
+        status.dependencies
+    );
+    assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
 }
 
 fn waiting_review() -> (Shell, ProjectId) {

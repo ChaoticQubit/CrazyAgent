@@ -15,10 +15,10 @@
                                               │       2 of 9 harnesses ready    
                                               │       on this Mac.              
                                               │                                 
+                                              │   [ ] Install tools             
+                                              │       Missing: uv, Graphify.    
+                                              │                                 
                                               │ Enter opens Settings            
-                                              │                                 
-                                              │                                 
-                                              │                                 
                                               │                                 
                                                                                 
  Enter Add an account  n New project  a Add project  ↑↓ Move             ? Help 

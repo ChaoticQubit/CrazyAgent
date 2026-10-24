@@ -3,6 +3,7 @@ use super::ctx::{Ctx, Link, Load};
 use super::frame::Message;
 use super::glyphs::{ASCII, Glyphs, UNICODE};
 use super::keys::Key;
+use super::screens::home::tests::tools;
 use super::screens::new_project_page::kept_draft;
 use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::{Activity, ProjectCard, ResearchCounts};
@@ -12,6 +13,7 @@ use crate::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle}
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::Platform;
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::setup::Dependency;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
@@ -38,6 +40,7 @@ fn ctx(width: u16, height: u16) -> Ctx {
 fn ready(width: u16, height: u16) -> Ctx {
     let mut ctx = ctx(width, height);
     ctx.link = Link::Ready;
+    ctx.store.setup = Load::Ready(tools(&[]));
     ctx
 }
 
@@ -374,6 +377,7 @@ fn home_frames_match_the_design() {
         let mut ctx = ready(width, height);
         ctx.store.projects = Load::Ready(Vec::new());
         ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.setup = Load::Ready(tools(&[Dependency::Uv, Dependency::Graphify]));
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(Vec::new())));
         check(
@@ -820,6 +824,7 @@ fn styled(
     ctx.store.projects = Load::Ready(projects());
     ctx.store.pools = Load::Ready(pools());
     ctx.store.profile = Load::Ready(Some(profile()));
+    ctx.store.setup = Load::Ready(tools(&[]));
     ctx
 }
 
