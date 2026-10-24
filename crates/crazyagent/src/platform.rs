@@ -53,6 +53,23 @@ impl FileExt for std::fs::File {
     }
 }
 
+/// Reports whether the engine's effective user owns the file the metadata describes.
+/// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
+/// Unix owner to compare, so an ownership check refuses rather than passes.
+#[cfg(unix)]
+pub(crate) fn owned_by_effective_user(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.uid() == rustix::process::geteuid().as_raw()
+}
+
+/// Reports that no file is known to be owned by the engine's effective user, since the
+/// platform has no Unix owner to compare. Takes the metadata, unused. Returns false, so
+/// an ownership check refuses rather than passes.
+#[cfg(not(unix))]
+pub(crate) fn owned_by_effective_user(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// The most text one clipboard copy takes, so a copy never holds a large buffer.
 pub const CLIPBOARD_BYTES_MAX: usize = 64 * 1024;
 
@@ -333,5 +350,14 @@ mod tests {
                     .ends_with("clip.exe")
             );
         }
+    }
+
+    #[test]
+    fn ownership_matches_the_engine_user_only_on_unix() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("owned");
+        std::fs::write(&file, b"x").unwrap();
+        let metadata = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!(owned_by_effective_user(&metadata), cfg!(unix));
     }
 }

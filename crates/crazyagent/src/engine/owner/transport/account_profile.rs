@@ -4,7 +4,24 @@ use crate::engine::owner::account_profile::*;
 use crate::storage::account_profile::{Command, ResultValue};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
 mod writer;
+
+#[cfg(not(unix))]
+mod writer {
+    use super::*;
+    use crate::storage::account_profile::Work;
+
+    /// Leaves the account key unwritten where the Unix process-group writer cannot run,
+    /// exactly as when no private key writer is registered. Takes the owner runtime,
+    /// unused, and the queued work. Returns the work unchanged and false.
+    pub(super) async fn run(
+        _runtime: &OwnerRuntimeHandle,
+        work: Box<Work>,
+    ) -> Result<(Box<Work>, bool), EngineError> {
+        Ok((work, false))
+    }
+}
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

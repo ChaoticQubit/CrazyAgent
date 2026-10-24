@@ -17,6 +17,7 @@ use crate::storage::{
 };
 use std::fs::File;
 use std::io::{Seek, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::time::Duration;
@@ -85,6 +86,14 @@ impl MasterHost {
 }
 
 impl Capture {
+    /// Refuses a capture file where its Unix owner and 0600 mode cannot be checked.
+    /// Takes the file, dropped, and the limit, unused. Returns `master_capture_unavailable`.
+    #[cfg(not(unix))]
+    pub(super) fn new(_file: File, _limit: u64) -> Result<Self, EngineError> {
+        Err(failure("master_capture_unavailable"))
+    }
+
+    #[cfg(unix)]
     pub(super) fn new(mut file: File, limit: u64) -> Result<Self, EngineError> {
         assert!(limit > 0);
         let metadata = file
