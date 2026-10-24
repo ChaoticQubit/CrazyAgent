@@ -21,6 +21,7 @@ pub use native_auth::{
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENTS_PAGE, AgentPage};
 pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };
