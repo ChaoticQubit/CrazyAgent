@@ -377,5 +377,51 @@ async fn the_engine_keeps_the_home_watches_it_and_records_each_add() {
         Some(other.to_str().unwrap().into())
     );
 
+    let third = place.join("third-home");
+    fs::create_dir(&third).unwrap();
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::MoveProjectsHome {
+                path: other.to_str().unwrap().into(),
+                move_projects: true,
+            })
+            .await,
+        rejected("home_move_same")
+    );
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::MoveProjectsHome {
+                path: third.to_str().unwrap().into(),
+                move_projects: true,
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    assert!(third.join("elsewhere").is_dir() && !other.join("elsewhere").exists());
+    assert_eq!(
+        owner.home().await,
+        ProjectsHome {
+            path: Some(third.to_str().unwrap().into()),
+            watching: true
+        }
+    );
+    let moved_to = third.join("elsewhere");
+    owner
+        .found_until(|found| {
+            named(found, "elsewhere").is_some_and(|entry| entry.path == moved_to.to_str().unwrap())
+        })
+        .await;
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::MoveProjectsHome {
+                path: home.to_str().unwrap().into(),
+                move_projects: false,
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    assert!(third.join("elsewhere").is_dir() && !home.join("elsewhere").exists());
+    assert_eq!(owner.home().await.path, Some(home.to_str().unwrap().into()));
+
     engine.stop().await;
 }

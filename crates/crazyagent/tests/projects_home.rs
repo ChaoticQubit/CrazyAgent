@@ -588,3 +588,55 @@ fn folder_size_adds_file_bytes_without_following_links() {
         assert!(plain_problem(code).is_some(), "{code}");
     }
 }
+
+#[test]
+fn moving_the_home_moves_every_project_folder_or_puts_them_all_back() {
+    let case = case();
+    for name in ["alpha", "beta"] {
+        fs::create_dir(case.home.join(name)).unwrap();
+        fs::write(case.home.join(name).join("main.rs"), name).unwrap();
+    }
+    fs::create_dir(case.home.join(".hidden")).unwrap();
+    let next = case.root.join("next");
+    fs::create_dir(&next).unwrap();
+
+    let plan = plan_move(&case.home, &next, &case.engine).unwrap();
+    assert_eq!(plan.destination(), next.as_path());
+    assert_eq!(plan.folders(), ["alpha", "beta"]);
+    plan.run().unwrap();
+    assert_eq!(names(&next), ["alpha", "beta"]);
+    assert_eq!(
+        fs::read_to_string(next.join("beta").join("main.rs")).unwrap(),
+        "beta"
+    );
+    assert_eq!(names(&case.home), [".hidden"]);
+
+    let back = plan_move(&next, &case.home, &case.engine).unwrap();
+    fs::create_dir(case.home.join("beta")).unwrap();
+    assert_eq!(back.run().unwrap_err().0, "home_destination_exists");
+    assert_eq!(names(&next), ["alpha", "beta"]);
+    assert_eq!(names(&case.home), [".hidden", "beta"]);
+    assert_eq!(
+        plan_move(&next, &case.home, &case.engine).unwrap_err().0,
+        "home_destination_exists"
+    );
+
+    let inner = next.join("alpha").join("inner");
+    fs::create_dir(&inner).unwrap();
+    for (picked, code) in [
+        (next.clone(), "home_move_same"),
+        (inner.clone(), "home_move_nested"),
+        (case.root.clone(), "projects_home_unsafe"),
+        (PathBuf::from("/"), "projects_home_unsafe"),
+        (case.root.join("absent"), "projects_home_missing"),
+    ] {
+        assert_eq!(
+            plan_move(&next, &picked, &case.engine).unwrap_err().0,
+            code,
+            "{}",
+            picked.display()
+        );
+        assert!(plain_problem(code).is_some(), "{code}");
+    }
+    assert_eq!(names(&next), ["alpha", "beta"]);
+}
