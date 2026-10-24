@@ -588,6 +588,16 @@ export function saveEditedSuggestion(suggestion: Suggestion, text: string): Prom
   return keepGlobally(suggestion, { decision: "Edit", text: edit.text });
 }
 
+/** Keeps a project's research memory in the owner's own words, the TUI's "Edit first": the
+ * engine saves the edited text in the project and bumps its version. Inputs: project id,
+ * memory id, its version, the new text and a generation. Output: the receipt, or the plain
+ * reason the text is refused before any engine call. */
+export function editProjectMemory(id: string, memory: string, version: number, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  const edit = memoryEdit(text);
+  if (edit.kind === "invalid") return Promise.resolve({ kind: "error", code: "invalid_knowledge_text", message: edit.reason });
+  return call<IntentReceipt>("desktop_review_memory", { id, memory, version, decision: { decision: "Edit", text: edit.text }, generation });
+}
+
 /** Dismisses a research suggestion; it stays out of memory. Input: the suggestion. */
 export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>> {
   return change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Reject" }, generation: nextGeneration() });
