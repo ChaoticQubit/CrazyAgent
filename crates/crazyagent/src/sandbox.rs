@@ -454,23 +454,58 @@ pub trait Sandbox: Send + Sync {
 
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
-/// Seatbelt boundary.
+/// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux. Windows has none yet,
+/// so installing one there is refused.
 #[derive(Debug)]
 pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
+    #[cfg(target_os = "linux")]
+    linux: linux::LinuxSandbox,
 }
 
 impl InstalledSandbox {
-    /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]).
-    /// Output: the sandbox bound to that profile, or the install refusal.
+    /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]) and,
+    /// on Linux, picks the Landlock helper next to the engine's executable or bubblewrap.
+    /// Output: the sandbox bound to that profile, the install refusal, or `Unavailable`
+    /// where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
-        sandbox.install(profile)?;
-        assert!(profile.is_file());
-        Ok(Self {
-            sandbox,
-            profile: profile.to_path_buf(),
-        })
+        #[cfg(target_os = "windows")]
+        {
+            let _ = (sandbox, profile);
+            Err(SandboxError::Unavailable(
+                windows::APPCONTAINER_MISSING.into(),
+            ))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            sandbox.install(profile)?;
+            assert!(profile.is_file());
+            #[cfg(target_os = "linux")]
+            let linux = {
+                let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
+                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?
+            };
+            Ok(Self {
+                sandbox,
+                profile: profile.to_path_buf(),
+                #[cfg(target_os = "linux")]
+                linux,
+            })
+        }
+    }
+
+    /// The program every wrapped command starts: `sandbox-exec` on macOS, the Landlock
+    /// helper or bwrap on Linux.
+    pub fn launcher(&self) -> &Path {
+        #[cfg(target_os = "linux")]
+        {
+            self.linux.launcher()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Path::new(SANDBOX_EXEC)
+        }
     }
 
     /// The sandbox this profile was generated from.
@@ -483,10 +518,18 @@ impl InstalledSandbox {
         &self.profile
     }
 
-    /// Rebuilds a harness command to run under this profile; see [`ProjectSandbox::wrap`].
+    /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
+    /// on macOS and [`linux::LinuxSandbox`] on Linux.
     pub fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
-        let command = self.sandbox.wrap(&self.profile, harness)?;
-        assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
+        #[cfg(target_os = "linux")]
+        let command = Sandbox::wrap(&self.linux, harness)?;
+        #[cfg(not(target_os = "linux"))]
+        let command = {
+            let command = self.sandbox.wrap(&self.profile, harness)?;
+            assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
+            command
+        };
+        assert_eq!(command.get_program(), self.launcher().as_os_str());
         Ok(command)
     }
 }
