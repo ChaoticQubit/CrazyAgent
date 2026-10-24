@@ -241,7 +241,7 @@ fn stored_folder(database: &Connection, project: &str) -> Option<PathBuf> {
     let id = crate::protocol::ProjectId::new(project).ok()?;
     let tx = database.unchecked_transaction().ok()?;
     let stored = crate::project_setup::load_setup(&tx, &id).ok()??;
-    Some(PathBuf::from(stored.folder))
+    Some(stored.project_folder())
 }
 
 /// Proves a managed connection is signed in for the running engine with the

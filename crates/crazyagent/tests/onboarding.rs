@@ -2,10 +2,11 @@ mod research_support;
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
+use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::service::{OnboardingLimits, OnboardingService};
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::project_setup::Platform;
+use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use research_support::{codex, hanging_endpoint, processes_with};
@@ -182,6 +183,27 @@ impl Bench {
         project
     }
 
+    /// Sets the folder holding the bench repository as the projects home.
+    async fn use_repos_as_home(&mut self) {
+        self.generation += 1;
+        let home = self.repo.parent().unwrap().to_str().unwrap().to_owned();
+        let response = self
+            .owner
+            .set_projects_home(home, self.generation)
+            .await
+            .unwrap();
+        assert_eq!(rejection(&response), None, "{response:?}");
+    }
+
+    /// The projects home entry of the bench repository.
+    async fn home_entry(&mut self) -> FoundProject {
+        let found = self.owner.found_projects().await.unwrap();
+        found
+            .into_iter()
+            .find(|entry| Path::new(&entry.path) == self.repo)
+            .unwrap()
+    }
+
     async fn view(&mut self, project: &ProjectId) -> OnboardingView {
         self.owner.onboarding(project.clone()).await.unwrap()
     }
@@ -248,7 +270,9 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
+    assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
     let onboarding = crazyagent::onboarding::service::start_for_engine(
         &bench.root,
         &bench.global,
@@ -287,6 +311,9 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     );
     assert_eq!(git(&bench.repo, &["status", "--porcelain"]), "");
     assert!(processes_with(&bench.root.join("onboarding")).is_empty());
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Ready, "{entry:?}");
+    assert_eq!(entry.project_id.as_ref(), Some(&project));
     let setup = bench.owner.project_setup(project).await.unwrap().unwrap();
     assert!(setup.research.is_empty());
     assert_eq!(
@@ -299,6 +326,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retries() {
     let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
     let waiting = bench.view(&project).await;
     assert_eq!(waiting.graph, Step::Waiting);
@@ -320,11 +348,50 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     assert!(view.missing.contains(&"about".to_owned()));
     assert!(!bench.repo.join("graphify-out").join("graph.json").exists());
     assert_eq!(agent_runs(&agents, "onboard-"), 0);
+    assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
     let again = bench.start_onboarding().await;
     assert_eq!(again, project);
     let retried = bench.view(&project).await;
     assert_eq!(retried.graph, Step::Waiting);
     assert_eq!(retried.mapping, Step::Waiting);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_its_folder() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Found, "{entry:?}");
+    assert_eq!(entry.project_id, None);
+    let project = bench.start_onboarding().await;
+    let waiting = bench.view(&project).await;
+    assert_eq!(
+        (waiting.graph, waiting.mapping),
+        (Step::Waiting, Step::Waiting)
+    );
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Onboarding, "{entry:?}");
+    assert_eq!(entry.project_id.as_ref(), Some(&project));
+    assert!(entry.git && entry.known);
+    let found = bench.owner.found_projects().await.unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    bench.generation += 1;
+    bench
+        .owner
+        .begin_mutation(
+            OwnerMutation::DeleteProjectFolder {
+                path: bench.repo.to_str().unwrap().to_owned(),
+            },
+            bench.generation,
+        )
+        .unwrap();
+    let response = bench.owner.send_pending().await.unwrap();
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("home_trash_still_set_up")
+    );
+    assert!(bench.repo.join(".crazyagent").is_dir());
     bench.stop().await;
 }
 
