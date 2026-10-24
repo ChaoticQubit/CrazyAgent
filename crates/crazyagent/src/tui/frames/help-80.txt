@@ -12,10 +12,10 @@
    │                                                                        │   
    │ Text fields                         This screen                        │l  
    │ ←→         Move the cursor          n         New project              │   
-   │ Ctrl-A E   Start, end               s         Settings                 │9  
-   │ Ctrl-W     Delete a word            Enter     Open project             │   
-   │ Ctrl-U     Clear the field                                             │   
-   │ Ctrl-J     New line                                                    │   
+   │ Ctrl-A E   Start, end               a         Add project              │9  
+   │ Ctrl-W     Delete a word            s         Settings                 │   
+   │ Ctrl-U     Clear the field          Enter     Open project             │   
+   │ Ctrl-J     New line                 f         Projects folder          │   
    │                                                                        │   
    │ Letter keys work when you are not typing in a field.                   │   
    └────────────────────────────────────────────────────────────────────────┘   
