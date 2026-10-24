@@ -38,9 +38,13 @@ PROJECT = "Tidepool"
 ABOUT = "A live dashboard for marine researchers to watch sensor buoys and get alerts."
 RESEARCH = "Competitor research"
 REPORT = "competitor_research.md"
+FOLDER = "tidepool"
+SETUP = "CrazyAgent needs a few tools on this computer"
 ENTER = b"\r"
 ESC = b"\x1b"
 TAB = b"\t"
+CLEAR = b"\x15"
+GO_TO = b"\x0b"
 DOWN = b"\x1b[B"
 SHIFT_LEFT = b"\x1b[1;2D"
 SHIFT_RIGHT = b"\x1b[1;2C"
@@ -313,14 +317,44 @@ def first_run(term):
         term.key(TAB)
     term.wait("Enter Save and continue", 5)
     term.key(ENTER)
-    term.wait("No projects yet.", 30, ("Could not save your profile.",))
+    term.wait("Your projects folder", 30, ("Could not save your profile.",))
     step("first-run profile saved")
+
+
+def projects_folder(term, home):
+    term.wait("Enter Continue", 10)
+    term.key(CLEAR)
+    term.type(str(home))
+    term.key(ENTER)
+    term.wait(SETUP, 30, (
+        "Type a full folder path", "This path is too long.", "That folder does not exist.",
+        "Pick a folder, not a file or a link.", "Pick a separate folder for projects",
+        "CrazyAgent can't read this folder."))
+    step("first-run projects folder set to the test home")
+
+
+def setup(term, root):
+    screen = term.until("the Setup check", 60, lambda screen: "Enter Install and continue" in screen
+                        or "Enter Continue" in screen, ("Failed to check setup.",))
+    if "Enter Install and continue" in screen:
+        term.key(GO_TO)
+        term.wait("Enter Go", 10)
+        term.type("Home")
+        term.key(ENTER)
+        way = "Go to Home"
+    else:
+        term.key(ENTER)
+        way = "Continue"
+    term.wait("Get set up", 30)
+    assert not (root / "setup").exists(), "first-run Setup installed something"
+    step("first-run Setup checked this computer; %s went Home without installing" % way)
 
 
 def home_empty(term):
     screen = term.wait("Get set up", 10)
     assert "Add an account" in screen and "Create a pool" in screen, screen
     assert PROJECT not in screen, screen
+    assert "Pick your projects folder with f." not in screen, screen
     step("Home shows the empty state")
 
 
@@ -477,12 +511,13 @@ def reopened(term):
     term.wait(PROJECT, 30)
     screen = term.wait("Projects", 10)
     assert "Welcome to CrazyAgent" not in screen, screen
+    assert "Your projects folder" not in screen, screen
     step("a second TUI opens Home with the project and no first-run page")
 
 
-def files(root, logs, secrets):
-    reports = sorted(root.glob("projects/*/context/research/%s" % REPORT))
-    assert len(reports) == 1, reports
+def files(root, home, logs, secrets):
+    reports = sorted(home.glob("*/.crazyagent/context/research/%s" % REPORT))
+    assert reports == [home / FOLDER / ".crazyagent" / "context" / "research" / REPORT], reports
     report = reports[0].read_text()
     assert report.startswith("# %s\n" % RESEARCH), report[:200]
     assert "https://" in report, report[:2000]
@@ -491,8 +526,8 @@ def files(root, logs, secrets):
     checked = [root / "global.toml", logs / "engine.out", logs / "engine.err"]
     checked += [path for path in (root / "project.toml", root / "engine.db", root / "engine.db-wal")
                 if path.is_file()]
-    checked += [path for path in (root / "projects").rglob("*")
-                if path.is_file() and not path.is_symlink()]
+    checked += [path for folder in (root / "projects", home) if folder.is_dir()
+                for path in folder.rglob("*") if path.is_file() and not path.is_symlink()]
     for path in checked:
         data = path.read_bytes()
         assert len(data) <= 268435456, path
@@ -516,16 +551,20 @@ def run(binary, codex, source):
     engine = None
     try:
         root = base / "r"
+        home = base / "Projects"
         logs = base / "logs"
         root.mkdir(mode=0o700)
+        home.mkdir(mode=0o700)
         logs.mkdir(mode=0o700)
         private_file(root / "global.toml", SETTINGS.encode())
         engine = start_engine(binary, root, logs, codex)
         socket = root / "engine.sock"
         with terminal(binary, socket, secrets) as term:
             first_run(term)
+            projects_folder(term, home)
+            setup(term, root)
             home_empty(term)
-            home = accounts(term, root, source)
+            profile = accounts(term, root, source)
             pools(term)
             new_project(term)
             research(term)
@@ -535,7 +574,7 @@ def run(binary, codex, source):
             reopened(term)
         stop_engine(engine)
         engine = None
-        files(root, logs, secrets + secrets_of(home))
+        files(root, home, logs, secrets + secrets_of(profile))
         step("V1 TUI flow passed")
     finally:
         if engine is not None and engine.poll() is None:
