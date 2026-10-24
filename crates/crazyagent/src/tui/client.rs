@@ -25,6 +25,7 @@ pub(super) mod accounts;
 pub(super) mod agents;
 pub(super) mod app_setup;
 mod claude_code;
+pub(super) mod intake;
 mod project_setup;
 pub(super) mod settings;
 mod shell;
@@ -54,6 +55,7 @@ enum Job {
     Shell(Box<crate::tui::seam::ShellRequest>),
     Settings(Box<settings::SettingsJob>),
     TeamGraph(Box<ProjectId>),
+    Intake(Box<intake::IntakeJob>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -169,6 +171,7 @@ pub(super) enum OwnerEvent {
         project: ProjectId,
         result: Result<Box<crate::team::TeamGraph>, String>,
     },
+    Intake(Box<intake::IntakeEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -565,6 +568,41 @@ impl Connection {
                                         project: *project,
                                         result,
                                     },
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Intake(job) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.intake(*job));
+                                    if was_ready && !native.ready {
+                                        client = native.ordinary();
+                                        if owner_replies
+                                            .send(OwnerReply {
+                                                finished: false,
+                                                event: OwnerEvent::Access {
+                                                    ready: false,
+                                                    problem: "trusted_connection_lost".into(),
+                                                    identity: None,
+                                                },
+                                            })
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    event
+                                }
+                                None => intake::IntakeEvent::unavailable(&job),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Intake(Box::new(event)),
                                 })
                                 .is_err()
                             {
