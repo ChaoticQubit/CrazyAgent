@@ -1447,6 +1447,9 @@ impl TeamRuntime {
         };
         let mut sandbox =
             ProjectSandbox::new(&root, &home, &tmp, network).map_err(|e| plain(&e))?;
+        if let Some(runtime) = self.state.parent() {
+            sandbox = sandbox.guard_engine(runtime).map_err(|e| plain(&e))?;
+        }
         let install = executable
             .canonicalize()
             .map_err(|e| plain(&e))?

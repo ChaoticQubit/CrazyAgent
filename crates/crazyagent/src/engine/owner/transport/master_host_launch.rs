@@ -264,6 +264,7 @@ pub(super) fn master_sandbox(
         .and_then(|sandbox| sandbox.allow_worktree(worktree))
         .and_then(|sandbox| sandbox.allow_read(&install))
         .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+        .and_then(|sandbox| sandbox.guard_engine(&root.path))
         .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
@@ -651,17 +652,16 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            environment,
-            BTreeMap::from([
-                ("CODEX_HOME", home.to_str().unwrap()),
-                ("HOME", home.to_str().unwrap()),
-                ("LANG", "C"),
-                ("LC_ALL", "C"),
-                ("PATH", "/usr/bin:/bin"),
-                ("TMPDIR", tmp.to_str().unwrap()),
-            ])
-        );
+        let mut expected = BTreeMap::from([
+            ("CODEX_HOME", home.to_str().unwrap()),
+            ("HOME", home.to_str().unwrap()),
+            ("LANG", "C"),
+            ("LC_ALL", "C"),
+            ("PATH", "/usr/bin:/bin"),
+            ("TMPDIR", tmp.to_str().unwrap()),
+        ]);
+        expected.extend(crate::sandbox::AGENT_GIT_ENV);
+        assert_eq!(environment, expected);
 
         let claude = crate::engine::claude_host::launch_command(
             &executable,
@@ -691,22 +691,21 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            claude_environment,
-            BTreeMap::from([
-                ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
-                ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
-                ("HOME", home.to_str().unwrap()),
-                ("LANG", "C"),
-                ("LC_ALL", "C"),
-                (
-                    "PATH",
-                    "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
-                ),
-                ("TERM", "dumb"),
-                ("TMPDIR", tmp.to_str().unwrap()),
-            ])
-        );
+        let mut expected_claude = BTreeMap::from([
+            ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
+            ("HOME", home.to_str().unwrap()),
+            ("LANG", "C"),
+            ("LC_ALL", "C"),
+            (
+                "PATH",
+                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            ),
+            ("TERM", "dumb"),
+            ("TMPDIR", tmp.to_str().unwrap()),
+        ]);
+        expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
+        assert_eq!(claude_environment, expected_claude);
 
         let run = |target: &Path| {
             let mut harness = Command::new("/bin/sh");
