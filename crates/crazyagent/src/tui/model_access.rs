@@ -1236,7 +1236,17 @@ fn record_lines(record: &ModelAccessRecord) -> Vec<String> {
     }
 }
 
-fn provider_quota_policy_name(policy: ProviderQuotaPolicy) -> &'static str {
+/// What a strict provider quota policy means, shown wherever the policy switches.
+pub(in crate::tui) const STRICT_QUOTA: &str =
+    "Strict blocks unknown provider quota; numeric quota is currently unavailable.";
+
+/// What a bounded attempt provider quota policy means, shown wherever the policy switches.
+pub(in crate::tui) const BOUNDED_QUOTA: &str =
+    "Bounded attempt still requires fresh readiness and execution admission.";
+
+/// The settings name of a provider quota policy.
+/// Input: the policy. Output: "bounded_attempt" or "strict".
+pub(in crate::tui) fn provider_quota_policy_name(policy: ProviderQuotaPolicy) -> &'static str {
     match policy {
         ProviderQuotaPolicy::BoundedAttempt => "bounded_attempt",
         ProviderQuotaPolicy::Strict => "strict",
@@ -1552,13 +1562,8 @@ impl Form {
             ));
         }
         if self.collection == ModelAccessCollection::Pools {
-            lines.push(
-                "Strict blocks unknown provider quota; numeric quota is currently unavailable."
-                    .into(),
-            );
-            lines.push(
-                "Bounded attempt still requires fresh readiness and execution admission.".into(),
-            );
+            lines.push(STRICT_QUOTA.into());
+            lines.push(BOUNDED_QUOTA.into());
         }
         lines.push("Reference IDs only; never paste keys/tokens".into());
         lines.push("Tab fields | arrows choices | Enter save | Esc retain".into());

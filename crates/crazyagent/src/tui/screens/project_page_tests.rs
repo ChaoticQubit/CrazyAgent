@@ -286,6 +286,7 @@ fn pool_choices_count_accounts_and_the_harnesses_they_run_on() {
             member("a-claude", MemberKind::Claude),
         ],
         project_count: 0,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
     }];
     let choices = pool_choices_from(&pools);
     assert_eq!(choices.len(), 1);

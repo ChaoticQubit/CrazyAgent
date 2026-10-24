@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
+use crate::config::{AccountPool, ModelAccessEdit};
 use crate::engine::EngineError;
 use crate::engine::owner::{ModelAccessCollection, ModelAccessRecord, OwnerResult};
 use crate::memory::KnowledgeStatus;
@@ -340,7 +340,11 @@ async fn unchanged(
 /// they apply, or the plain problem code.
 fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAccessEdit>, String> {
     Ok(match change {
-        PoolChange::Create { name, members } => vec![ModelAccessEdit::CreatePool {
+        PoolChange::Create {
+            name,
+            members,
+            quota,
+        } => vec![ModelAccessEdit::CreatePool {
             pool: AccountPool {
                 id: new_pool_id(&name)?,
                 name: Some(name),
@@ -348,10 +352,15 @@ fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAcce
                 projects: Vec::new(),
                 roles: Vec::new(),
                 fallback_allowed: false,
-                provider_quota_policy: ProviderQuotaPolicy::default(),
+                provider_quota_policy: quota,
             },
         }],
-        PoolChange::Update { id, name, members } => {
+        PoolChange::Update {
+            id,
+            name,
+            members,
+            quota,
+        } => {
             let mut pool = pools
                 .iter()
                 .find(|pool| pool.id == id)
@@ -359,6 +368,7 @@ fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAcce
                 .ok_or_else(|| "pool_not_found".to_string())?;
             pool.name = Some(name);
             pool.members = members;
+            pool.provider_quota_policy = quota;
             vec![ModelAccessEdit::ReplacePool { pool }]
         }
         PoolChange::Remove { id } => vec![ModelAccessEdit::RemovePool { id }],
@@ -444,6 +454,7 @@ fn transport(error: &EngineError, lost: &mut bool) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::config::ProviderQuotaPolicy;
     use crate::engine::bootstrap::EngineService;
     use crate::tui::ctx::Ctx;
     use crate::tui::glyphs::UNICODE;
@@ -718,6 +729,7 @@ pools = [
                 id: reference("pool-a"),
                 name: "Renamed".into(),
                 members: vec![reference("local-b")],
+                quota: ProviderQuotaPolicy::Strict,
             },
             &pools,
         )
@@ -729,12 +741,14 @@ pools = [
         assert_eq!(pool.members, vec![reference("local-b")]);
         assert_eq!(pool.projects, vec![reference("demo")]);
         assert_eq!(pool.roles, vec![reference("project_leader")]);
+        assert_eq!(pool.provider_quota_policy, ProviderQuotaPolicy::Strict);
         assert_eq!(
             pool_edits(
                 PoolChange::Update {
                     id: reference("pool-x"),
                     name: "Gone".into(),
                     members: vec![],
+                    quota: ProviderQuotaPolicy::BoundedAttempt,
                 },
                 &pools,
             ),

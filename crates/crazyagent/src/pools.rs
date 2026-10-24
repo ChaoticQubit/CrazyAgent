@@ -1,4 +1,6 @@
-use crate::config::{ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint};
+use crate::config::{
+    ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ProviderQuotaPolicy,
+};
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +92,8 @@ pub struct PoolSummary {
     pub summary: String,
     pub members: Vec<PoolMember>,
     pub project_count: usize,
+    #[serde(default)]
+    pub provider_quota_policy: ProviderQuotaPolicy,
 }
 
 /// Builds the plain pool list shown to the owner.
@@ -146,6 +150,7 @@ pub fn summarize(
                 },
                 members,
                 project_count: pool.projects.len(),
+                provider_quota_policy: pool.provider_quota_policy,
             }
         })
         .collect();
