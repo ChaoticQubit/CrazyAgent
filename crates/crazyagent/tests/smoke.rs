@@ -321,15 +321,33 @@ async fn setup_status_projects_home_and_an_empty_team_graph_read_on_a_fresh_engi
 
     assert_eq!(
         owner.create_project("smoke-empty", "Smoke empty").await,
+        OwnerResult::Rejected {
+            code: "projects_home_unset".into()
+        }
+    );
+    let home = scratch("ca-smoke-home-");
+    assert_eq!(owner.set_home(home.path()).await, OwnerResult::Applied);
+    assert_eq!(
+        owner.create_project("smoke-empty", "Smoke empty").await,
         OwnerResult::Applied
     );
+    assert!(home.path().join("smoke-empty/.crazyagent").is_dir());
     let project = ProjectId::new("smoke-empty").unwrap();
     let graph = owner.controller.team_graph(project.clone()).await.unwrap();
     assert_eq!(graph.project_id, project);
     assert_eq!(
-        graph.nodes.iter().map(|node| node.kind).collect::<Vec<_>>(),
-        [NodeKind::Master]
+        graph
+            .nodes
+            .iter()
+            .map(|node| (node.kind, node.harness.as_str(), node.agents))
+            .collect::<Vec<_>>(),
+        [
+            (NodeKind::Master, "codex", None),
+            (NodeKind::HarnessGroup, "codex", Some(0))
+        ],
+        "the default team is a Codex master and one Codex research group with no agent running"
     );
+    assert!(graph.nodes.iter().all(|node| node.terminal.is_none()));
     assert!(graph.edges.is_empty());
     owner.controller.detach();
     engine.stop();
