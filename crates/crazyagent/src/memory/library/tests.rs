@@ -11,6 +11,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// How long these engine tests let the engine and its owner client wait for
+/// one answer. Every test engine in the lib test binary shares one
+/// process-wide git setup lock, so parallel New Projects queue behind each
+/// other's real git work; the 1 s owner deadline and a 2 s client wait then
+/// time out although the engine is healthy. The same value as the TUI tests'
+/// `test_home::ENGINE_WAIT`.
+const ENGINE_WAIT: Duration = Duration::from_secs(10);
+
 struct Engine {
     root: tempfile::TempDir,
     home: tempfile::TempDir,
@@ -26,7 +34,11 @@ impl Engine {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, "timeout_ms = 1000\n").unwrap();
+        std::fs::write(
+            &global,
+            format!("timeout_ms = {}\n", ENGINE_WAIT.as_millis()),
+        )
+        .unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let home = tempfile::Builder::new()
             .prefix("ca-mem-home-")
@@ -76,13 +88,9 @@ impl Engine {
     }
 
     async fn owner(&self) -> OwnerController {
-        OwnerController::attach(
-            self.root.path(),
-            OwnerClientKind::Tui,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap()
+        OwnerController::attach(self.root.path(), OwnerClientKind::Tui, ENGINE_WAIT)
+            .await
+            .unwrap()
     }
 
     fn database(&self) -> rusqlite::Connection {
