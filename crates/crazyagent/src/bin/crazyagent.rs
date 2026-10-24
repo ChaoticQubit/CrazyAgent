@@ -421,18 +421,27 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         claude.as_deref(),
                         agent_terminal(&service),
                     )
-                    .and_then(|research| {
-                        crazyagent::onboarding::service::start_for_engine(
-                            runtime_dir,
-                            Path::new(&args[2]),
-                            Path::new(&args[3]),
-                            executable,
-                            claude.as_deref(),
-                        )
-                        .map(|onboarding| Some((research, onboarding)))
-                    }),
+                    .map(Some),
                 })
                 .and_then(|research| {
+                    if !writable {
+                        return Ok((research, None));
+                    }
+                    match crazyagent::onboarding::service::start_for_engine(
+                        runtime_dir,
+                        Path::new(&args[2]),
+                        Path::new(&args[3]),
+                        codex.as_deref(),
+                        claude.as_deref(),
+                    ) {
+                        Ok(onboarding) => Ok((research, Some(onboarding))),
+                        Err(error) => {
+                            stop_background(research, None);
+                            Err(error)
+                        }
+                    }
+                })
+                .and_then(|(research, onboarding)| {
                     let mut executables = std::collections::BTreeMap::new();
                     if let Some(executable) = codex.as_deref() {
                         executables.insert("codex", executable.to_path_buf());
@@ -441,7 +450,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         executables.insert("claude-code", executable.to_path_buf());
                     }
                     if !writable || executables.is_empty() {
-                        return Ok((research, None));
+                        return Ok((research, onboarding, None));
                     }
                     let agents = match service
                         .owner_runtime()
@@ -450,10 +459,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     {
                         Ok(agents) => agents,
                         Err(error) => {
-                            if let Some((research, onboarding)) = research {
-                                research.stop();
-                                onboarding.stop();
-                            }
+                            stop_background(research, onboarding);
                             return Err(error.0);
                         }
                     };
@@ -466,30 +472,24 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         agents,
                         agent_terminal(&service),
                     ) {
-                        Ok(team) => Ok((research, Some(team))),
+                        Ok(team) => Ok((research, onboarding, Some(team))),
                         Err(error) => {
-                            if let Some((research, onboarding)) = research {
-                                research.stop();
-                                onboarding.stop();
-                            }
+                            stop_background(research, onboarding);
                             Err(error)
                         }
                     }
                 })
-                .and_then(|(research, team)| {
+                .and_then(|(research, onboarding, team)| {
                     let mut output = io::stdout().lock();
                     match writeln!(output, "ready").and_then(|()| output.flush()) {
-                        Ok(()) => Ok((research, team)),
+                        Ok(()) => Ok((research, onboarding, team)),
                         Err(error) => {
-                            if let Some((research, onboarding)) = research {
-                                research.stop();
-                                onboarding.stop();
-                            }
+                            stop_background(research, onboarding);
                             Err(error.to_string())
                         }
                     }
                 });
-            let (research, team) = match ready {
+            let (research, onboarding, team) = match ready {
                 Ok(started) => started,
                 Err(error) => {
                     return match service.shutdown().await {
@@ -502,12 +502,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 .owner_runtime()
                 .and_then(|handle| handle.terminal().ok());
             let result = service.run(stopped).await.map_err(|e| e.to_string());
-            if let Some((research, onboarding)) = research {
-                let _ = tokio::task::spawn_blocking(move || {
-                    research.stop();
-                    onboarding.stop();
-                })
-                .await;
+            if research.is_some() || onboarding.is_some() {
+                let _ = tokio::task::spawn_blocking(move || stop_background(research, onboarding))
+                    .await;
             }
             let kept = match team {
                 Some(team) => tokio::task::spawn_blocking(move || team.stop())
@@ -528,6 +525,21 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         let _ = signal.await;
         result
     })
+}
+
+/// Stops the research and onboarding services the engine started, research
+/// first, each with every agent process it runs. Takes either service, or
+/// none for one the engine did not start.
+fn stop_background(
+    research: Option<crazyagent::research::service::ResearchService>,
+    onboarding: Option<crazyagent::onboarding::service::OnboardingService>,
+) {
+    if let Some(research) = research {
+        research.stop();
+    }
+    if let Some(onboarding) = onboarding {
+        onboarding.stop();
+    }
 }
 
 /// Opens the engine's terminal host for team and research agents when it can run now.

@@ -369,6 +369,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         sandbox.protected_paths(),
         [
             case.project.join("context"),
+            case.project.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),

@@ -4,8 +4,8 @@
 ───────────────────────────────────────────────────────━━━━━━━━━━───────────────
   Project settings
 
-  Name      Fieldnotes Mobile
-  Folder    ~/projects/fieldnotes-mobile
+  Name      Fieldnotes Mobile   g Edit details
+  Folder    ~/projects/fieldnotes-mobile   x Remove project
   Pool      No pool yet   Enter Pick a pool
   Team      Codex leads. Codex x3. Tools on.
 

@@ -114,7 +114,8 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     );
     assert!(finished[0].elapsed_seconds.is_some());
     let report = fs::read_to_string(
-        project
+        runtime
+            .crazyagent("project-a")
             .join("context")
             .join("research")
             .join("market_research.md"),

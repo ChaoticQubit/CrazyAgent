@@ -355,6 +355,27 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
+impl StoredSetup {
+    /// The folder holding this project's context and agent worktrees:
+    /// `.crazyagent/` inside the project for projects in the projects home,
+    /// or the project folder itself for projects made before it.
+    pub fn state_folder(&self) -> PathBuf {
+        crate::projects_home::state_folder(Path::new(&self.folder))
+    }
+
+    /// The project's own folder: the recorded folder, or the folder holding
+    /// it when onboarding recorded the project's `.crazyagent/` folder.
+    pub fn project_folder(&self) -> PathBuf {
+        let folder = Path::new(&self.folder);
+        match folder.parent() {
+            Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+                parent.to_path_buf()
+            }
+            _ => folder.to_path_buf(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectCatalog {
@@ -1525,35 +1546,58 @@ fn write_brief(context: &Directory, stored: &StoredSetup) -> Result<(), &'static
     rustix::fs::renameat(context, BRIEF_PARTIAL, context, "brief.md").map_err(unwritable)
 }
 
-/// Refuses to stage a project folder where its 0700 folders cannot be made.
-/// Takes the staging path and setup, both unused. Returns `project_folder_unavailable`.
+/// Refuses to build a new project's folder where its private 0700 git home cannot
+/// be made. Takes the database path, staging folder and setup, all
+/// unused. Returns `project_folder_unavailable`.
 #[cfg(not(unix))]
-fn stage(_staging: &Path, _setup: &ProjectSetup) -> Result<Vec<StoredDocument>, &'static str> {
+fn stage_in_home(
+    _database: &Path,
+    _staging: &Path,
+    _setup: &ProjectSetup,
+) -> Result<Vec<StoredDocument>, &'static str> {
     Err("project_folder_unavailable")
 }
 
+/// Builds a new project's folder in a hidden staging folder of the projects
+/// home: a git repository with one empty start commit, the `.crazyagent/`
+/// layout with its git exclude lines, and the owner's documents.
+/// Takes the database path (for git's private home), the staging folder and
+/// the setup. Returns the copied documents, or a plain code with nothing kept.
 #[cfg(unix)]
-fn stage(staging: &Path, setup: &ProjectSetup) -> Result<Vec<StoredDocument>, &'static str> {
-    let builder = || {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.mode(0o700);
-        builder
-    };
-    let unwritable = |_| "project_folder_unwritable";
-    builder().create(staging).map_err(unwritable)?;
-    for directory in [
-        "context",
-        "context/documents",
-        "context/research",
-        "worktrees",
-    ] {
-        builder()
-            .create(staging.join(directory))
-            .map_err(unwritable)?;
+fn stage_in_home(
+    database: &Path,
+    staging: &Path,
+    setup: &ProjectSetup,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    const FAILED: &str = "home_new_project_failed";
+    let failed = |_: EngineError| FAILED;
+    let io_failed = |_: std::io::Error| FAILED;
+    let git_home = projects_root(database).map_err(failed)?.join(".git-home");
+    match std::fs::DirBuilder::new().mode(0o700).create(&git_home) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(FAILED),
     }
+    std::fs::DirBuilder::new()
+        .mode(0o755)
+        .create(staging)
+        .map_err(io_failed)?;
+    crate::research::runner::ensure_repository(staging, &git_home).map_err(|_| FAILED)?;
+    let state = crate::projects_home::prepare_layout(staging).map_err(failed)?;
+    if !crate::projects_home::exclude_from_git(staging).map_err(failed)? {
+        return Err(FAILED);
+    }
+    let context = state.join(CONTEXT_DIRECTORY);
+    for directory in ["documents", "research"] {
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(context.join(directory))
+            .map_err(io_failed)?;
+    }
+    assert!(state.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY));
     copy_documents(
         &setup.documents,
-        &staging.join("context/documents"),
+        &context.join("documents"),
         PROJECT_DOCUMENT_BYTES_MAX,
     )
 }
@@ -1631,7 +1675,7 @@ pub(crate) fn context_text(
         return Ok(Err("project_setup_missing"));
     };
     Ok(
-        read_beneath(Path::new(&stored.folder), path, 0, REPORT_BYTES_MAX)
+        read_beneath(&stored.state_folder(), path, 0, REPORT_BYTES_MAX)
             .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned()),
     )
 }
@@ -1649,7 +1693,7 @@ pub(crate) fn research_text(
         return Ok(Err("project_setup_missing"));
     };
     let report = match read_beneath(
-        Path::new(&stored.folder),
+        &stored.state_folder(),
         &research.report_path(),
         0,
         REPORT_BYTES_MAX,
@@ -1682,7 +1726,7 @@ fn add_documents(
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
     };
-    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+    let Ok(context) = open_beneath(&stored.state_folder(), &[CONTEXT_DIRECTORY]) else {
         return Ok(rejected("project_folder_missing"));
     };
     let Ok(directory) = open_directory(&context, "documents") else {
@@ -1723,7 +1767,7 @@ fn delete_context(
         .strip_prefix("context/")
         .and_then(|rest| rest.split_once('/'))
         .ok_or_else(|| failure("context_path_invalid"))?;
-    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+    let Ok(context) = open_beneath(&stored.state_folder(), &[CONTEXT_DIRECTORY]) else {
         return Ok(rejected("context_item_missing"));
     };
     let Ok(parent) = open_directory(&context, directory) else {
@@ -1774,7 +1818,7 @@ fn update(
     {
         return Ok(rejected("pool_missing"));
     }
-    let Ok(context) = open_beneath(Path::new(&stored.folder), &[CONTEXT_DIRECTORY]) else {
+    let Ok(context) = open_beneath(&stored.state_folder(), &[CONTEXT_DIRECTORY]) else {
         return Ok(rejected("project_folder_missing"));
     };
     if let Some(name) = name {
@@ -2048,16 +2092,23 @@ fn create(
         }
     };
     team.validate()?;
-    let root = projects_root(database)?;
-    let folder = root.join(project_id.as_str());
-    if std::fs::symlink_metadata(&folder).is_ok() {
-        return Ok(rejected("project_folder_exists"));
-    }
-    let staging = root.join(format!(".staging-{}", project_id.as_str()));
+    let Some(home) = crate::projects_home::load(tx)? else {
+        return Ok(rejected("projects_home_unset"));
+    };
+    let Some(name) = crate::projects_home::slug(&spec.name)
+        .or_else(|| crate::projects_home::slug(project_id.as_str()))
+    else {
+        return Ok(rejected("home_folder_name_invalid"));
+    };
+    let folder = match crate::projects_home::destination(&home, &name) {
+        Ok(folder) => folder,
+        Err(e) => return Ok(rejected(&e.0)),
+    };
+    let staging = home.join(format!(".crazyagent-new-{}", project_id.as_str()));
     if std::fs::symlink_metadata(&staging).is_ok() {
         std::fs::remove_dir_all(&staging).map_err(error)?;
     }
-    let documents = match stage(&staging, setup) {
+    let documents = match stage_in_home(database, &staging, setup) {
         Ok(documents) => documents,
         Err(code) => {
             let _ = std::fs::remove_dir_all(&staging);
@@ -2071,8 +2122,13 @@ fn create(
         if outcome == Outcome::Applied {
             let stored =
                 load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
-            let context = open_beneath(&staging, &[CONTEXT_DIRECTORY]).map_err(error)?;
+            let state = crate::projects_home::state_folder(&staging);
+            assert_ne!(state, staging);
+            let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;
             write_brief(&context, &stored).map_err(failure)?;
+            if std::fs::symlink_metadata(&folder).is_ok() {
+                return Err(failure("home_destination_exists"));
+            }
             std::fs::rename(&staging, &folder).map_err(error)?;
         }
         Ok(outcome)
@@ -2262,7 +2318,8 @@ fn read_beneath(
 /// Takes the stored setup.
 /// Returns at most 64 regular-file items; links and special files are skipped.
 pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError> {
-    let folder = Path::new(&stored.folder);
+    let state = stored.state_folder();
+    let folder = state.as_path();
     let mut items = Vec::new();
     let mut push = |path: String, kind: ContextKind| -> Result<(), EngineError> {
         if items.len() >= CONTEXT_ITEMS_MAX {
@@ -2304,7 +2361,7 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
     assert!(items.len() <= CONTEXT_ITEMS_MAX);
     Ok(ProjectContext {
         project_id: stored.project_id.clone(),
-        folder: stored.folder.clone(),
+        folder: folder.to_string_lossy().into_owned(),
         items,
     })
 }
@@ -2327,7 +2384,7 @@ pub fn read_context(
         0
     };
     let (mut bytes, size) =
-        read_beneath(Path::new(&stored.folder), path, offset, limit).map_err(failure)?;
+        read_beneath(&stored.state_folder(), path, offset, limit).map_err(failure)?;
     if !textual {
         return Ok(ContextChunk {
             path: path.into(),

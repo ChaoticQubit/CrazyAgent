@@ -122,8 +122,9 @@ fn usable(
     }
 }
 
-/// Resolves a project to its folder under `projects_root` and the account
-/// picked from its assigned pool, rereading the engine's settings files and
+/// Resolves a project to the folder the engine recorded when it was set up,
+/// or else its folder under `projects_root`, and the account picked from its
+/// assigned pool, rereading the engine's settings files and
 /// sign-in records on every call so pool assignment and sign-in take effect
 /// without a restart. A managed account is offered only while it passes the
 /// sign-in check every master and team turn uses for this engine run.
@@ -170,14 +171,17 @@ impl SettingsResolver {
     /// be read.
     pub fn resolve(&self, project: &str, harness: &str) -> Option<(PathBuf, AccountPick)> {
         CredentialRef::new(project).ok()?;
-        let folder = self.projects_root.join(project);
+        let database = self.engine();
+        let folder = database
+            .as_ref()
+            .and_then(|database| stored_folder(database, project))
+            .unwrap_or_else(|| self.projects_root.join(project));
         let metadata = std::fs::symlink_metadata(&folder).ok()?;
         if !metadata.file_type().is_dir() || folder.canonicalize().ok()? != folder {
             return None;
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
-        let database = self.engine();
         let pick = pick_account(&access, project, harness, |connection| {
             database
                 .as_ref()
@@ -190,11 +194,16 @@ impl SettingsResolver {
     }
 
     /// The account an agent outside the research queue, such as onboarding's
-    /// mapping agent, runs on for `pool`: the pool's first member Codex can
-    /// use, else its first member Claude Code can use, with the same sign-in
-    /// check as [`Self::resolve`]. Rereads the settings on every call. Returns
-    /// `None` for an unknown pool or a pool with no usable member.
-    pub fn pool_pick(&self, pool: &CredentialRef) -> Option<ResearchAccount> {
+    /// mapping agent, runs on for `pool`: the pool's first member the first of
+    /// `harnesses` can use, else the next harness's, with the same sign-in
+    /// check as [`Self::resolve`]. `harnesses` are the installed ones, Codex
+    /// first. Rereads the settings on every call. Returns `None` for an
+    /// unknown pool, no harness, or a pool with no member they can use.
+    pub fn pool_pick(
+        &self,
+        pool: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> Option<ResearchAccount> {
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
         let chosen = access
@@ -210,9 +219,15 @@ impl SettingsResolver {
                     Err(code) => code == PROFILE_BUSY,
                 })
         };
-        ["codex", "claude-code"].into_iter().find_map(|harness| {
-            pool_account(&access, chosen, harness, &signed_in).map(|(_, account)| account)
-        })
+        let picked = harnesses.iter().find_map(|harness| {
+            pool_account(&access, chosen, harness.id(), &signed_in).map(|(_, account)| account)
+        });
+        assert!(
+            picked
+                .as_ref()
+                .is_none_or(|account| harnesses.contains(&account.harness()))
+        );
+        picked
     }
 
     /// Opens the engine database for one resolve, or `None` when it cannot be
@@ -228,6 +243,16 @@ impl SettingsResolver {
         database.busy_timeout(DATABASE_WAIT).ok()?;
         Some(database)
     }
+}
+
+/// The folder the engine recorded for a set-up project, such as its folder
+/// in the projects home. Takes the engine database and the project id.
+/// Returns `None` when the project has no setup record or it cannot be read.
+fn stored_folder(database: &Connection, project: &str) -> Option<PathBuf> {
+    let id = crate::protocol::ProjectId::new(project).ok()?;
+    let tx = database.unchecked_transaction().ok()?;
+    let stored = crate::project_setup::load_setup(&tx, &id).ok()??;
+    Some(stored.project_folder())
 }
 
 /// Proves a managed connection is signed in for the running engine with the

@@ -4,6 +4,7 @@ use super::launch::{
     failure, harness_id, validate,
 };
 use crate::launch_context::Installed;
+use std::ffi::OsStr;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -277,6 +278,7 @@ pub fn command(
             Transcript::Unavailable
         }
     };
+    let env = agent_env(&env)?;
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -288,6 +290,23 @@ pub fn command(
     }
     assert_eq!(built.argv[0], SANDBOX_EXEC);
     Ok(built)
+}
+
+/// Passes a pane's variables through the one agent environment builder, so a pane gets
+/// the same refusals and git settings as every other agent process.
+/// Input: the variables in order. Output: them with [`crate::sandbox::AGENT_GIT_ENV`]
+/// appended, or `launch_environment_refused`.
+fn agent_env(env: &[(String, String)]) -> Result<Vec<(String, String)>, LaunchError> {
+    let base: Vec<(&str, &OsStr)> = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), OsStr::new(value)))
+        .collect();
+    crate::sandbox::agent_env(&base, std::iter::empty())
+        .map_err(|_| failure("launch_environment_refused"))?
+        .into_iter()
+        .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| failure("launch_environment_refused"))
 }
 
 fn exposes(command: &InteractiveCommand, key: &Secret) -> bool {

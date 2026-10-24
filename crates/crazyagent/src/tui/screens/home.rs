@@ -252,7 +252,13 @@ impl Home {
 
     fn running(ctx: &Ctx) -> usize {
         ctx.store.projects.ready().map_or(0, |projects| {
-            projects.iter().map(|card| card.research.running).sum()
+            projects.iter().map(ProjectCard::working).sum()
+        })
+    }
+
+    fn suggestions(ctx: &Ctx) -> usize {
+        ctx.store.projects.ready().map_or(0, |projects| {
+            projects.iter().map(|card| card.activity.suggestions).sum()
         })
     }
 
@@ -365,8 +371,8 @@ impl Home {
     ) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let gutter = || Self::gutter(selected, ctx);
-        let state = if card.research.running > 0 {
-            let count = card.research.running;
+        let state = if card.working() > 0 {
+            let count = card.working();
             styled(
                 format!("{count} agent{} running", if count == 1 { "" } else { "s" }),
                 Role::Running,
@@ -402,6 +408,17 @@ impl Home {
             "Pool: {}",
             card.pool.clone().unwrap_or_else(|| "none".into())
         );
+        let corner = match card.activity.suggestions {
+            0 => styled(created, Role::Muted, theme),
+            count => styled(
+                format!(
+                    "{count} suggested memor{}",
+                    if count == 1 { "y" } else { "ies" }
+                ),
+                Role::Warning,
+                theme,
+            ),
+        };
         vec![
             join([
                 gutter(),
@@ -441,7 +458,7 @@ impl Home {
                         Role::Muted,
                         theme,
                     ),
-                    styled(created, Role::Muted, theme),
+                    corner,
                     ctx.glyphs,
                 ),
             ]),
@@ -684,24 +701,30 @@ impl Screen for Home {
         if self.panel == Panel::Setup && Self::panel_visible(ctx) {
             return vec![
                 hint("Enter", Self::items(ctx)[self.setup_selected].1),
-                hint(&arrows, "Move"),
-                hint("Tab", "Switch panel"),
                 hint("n", "New project"),
                 hint("a", "Add project"),
+                hint(&arrows, "Move"),
+                hint("Tab", "Switch panel"),
                 hint("s", "Settings"),
                 hint("Ctrl-K", "Go to"),
                 hint("Ctrl-Q", "Quit"),
             ];
         }
-        vec![
+        let mut hints = vec![
             hint("n", "New project"),
             hint("a", "Add project"),
             hint("Enter", "Open"),
+        ];
+        if Self::suggestions(ctx) > 0 {
+            hints.push(hint("m", "Review memories"));
+        }
+        hints.extend([
             hint("s", "Settings"),
             hint("/", "Filter"),
             hint("Ctrl-K", "Go to"),
             hint("Ctrl-Q", "Quit"),
-        ]
+        ]);
+        hints
     }
 
     fn keys(&self, _ctx: &Ctx) -> Vec<Hint> {
@@ -750,6 +773,7 @@ impl Screen for Home {
             Key::Char('a') => Flow::Open(Place::AddProject),
             Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
             Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
+            Key::Char('m') => Flow::Open(Place::Settings(SettingsSection::Memory)),
             Key::Char('r') if matches!(ctx.store.projects, Load::Failed(_)) => {
                 ctx.request(Request::Projects);
                 Flow::Handled

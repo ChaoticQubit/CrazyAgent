@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const PATH_BYTES_MAX: usize = 1024;
+pub const NAME_BYTES_MAX: usize = 255;
+pub const SLUG_BYTES_MAX: usize = 64;
+const RESERVED_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
 
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -74,6 +80,7 @@ pub enum HomeAction {
     SetHome { path: String },
     MoveHome { path: String, move_projects: bool },
     Added { source: String, mode: AddMode },
+    Trash { path: String },
 }
 
 impl HomeAction {
@@ -85,6 +92,7 @@ impl HomeAction {
                 path_text(path, "projects_home_path_invalid")
             }
             Self::Added { source, .. } => path_text(source, "home_source_invalid"),
+            Self::Trash { path } => path_text(path, "home_trash_invalid"),
         }
     }
 }
@@ -207,12 +215,150 @@ pub fn plan_add(
     if name.starts_with('.') {
         return Err(refused("home_source_hidden"));
     }
-    let destination = home.join(name);
-    if std::fs::symlink_metadata(&destination).is_ok() {
+    folder_name(name).map_err(|_| refused("home_source_name"))?;
+    let destination = destination(home, name)?;
+    Ok(AddPlan::new(real, destination, mode))
+}
+
+/// Checks a name for a folder directly inside the projects home. This one rule
+/// covers new projects (through `slug`) and folders brought in by intake.
+/// Input: the name. Output: Ok for a plain, non-hidden name of at most 255
+/// bytes with no path separators, control characters, trailing dot or space,
+/// or Windows device name; otherwise `home_folder_name_invalid`.
+pub fn folder_name(name: &str) -> Result<(), EngineError> {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    if name.is_empty()
+        || name.len() > NAME_BYTES_MAX
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.ends_with(' ')
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        || RESERVED_NAMES.contains(&stem.as_str())
+    {
+        return Err(refused("home_folder_name_invalid"));
+    }
+    Ok(())
+}
+
+/// Turns a project name into the folder name a new project gets in the home.
+/// Input: the owner's project name. Output: lowercase ASCII letters and digits
+/// with one `-` between words, at most 64 bytes, or None when the name has no
+/// ASCII letter or digit. The result always passes `folder_name`.
+pub fn slug(name: &str) -> Option<String> {
+    let mut slug = String::with_capacity(SLUG_BYTES_MAX);
+    let mut gap = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() {
+            gap = true;
+            continue;
+        }
+        if gap && !slug.is_empty() {
+            if slug.len() + 2 > SLUG_BYTES_MAX {
+                break;
+            }
+            slug.push('-');
+        }
+        gap = false;
+        if slug.len() + 1 > SLUG_BYTES_MAX {
+            break;
+        }
+        slug.push(c.to_ascii_lowercase());
+    }
+    if slug.is_empty() || RESERVED_NAMES.contains(&slug.as_str()) {
+        return None;
+    }
+    assert!(slug.len() <= SLUG_BYTES_MAX && !slug.ends_with('-'));
+    assert!(folder_name(&slug).is_ok());
+    Some(slug)
+}
+
+/// Gives the path a folder named `name` takes in the home when it is free.
+/// Input: the canonical home and a name that passes `folder_name`. Output:
+/// the path, or `home_destination_exists` when anything already has that
+/// name, checked before anything is written.
+pub fn destination(home: &Path, name: &str) -> Result<PathBuf, EngineError> {
+    folder_name(name)?;
+    let path = home.join(name);
+    if std::fs::symlink_metadata(&path).is_ok() {
         return Err(refused("home_destination_exists"));
     }
-    assert_eq!(destination.parent(), Some(home));
-    Ok(AddPlan::new(real, destination, mode))
+    assert_eq!(path.parent(), Some(home));
+    Ok(path)
+}
+
+/// The folder that holds a project's CrazyAgent files (context, worktrees).
+/// Input: the project folder. Output: its `.crazyagent/` folder when that is a
+/// real folder, as for projects in the home, otherwise the project folder
+/// itself, as for projects made before the projects home existed.
+pub fn state_folder(project: &Path) -> PathBuf {
+    let inner = project.join(CRAZYAGENT_DIRECTORY);
+    match std::fs::symlink_metadata(&inner) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => inner,
+        _ => project.to_path_buf(),
+    }
+}
+
+/// Checks a folder the owner asked to delete from the projects home.
+/// Input: the canonical home, the owner's path text and the folders of
+/// set-up projects. Output: the real folder, or a refusal unless it is a
+/// plain top-level folder of the home that no set-up project uses.
+pub fn plan_trash(
+    home: &Path,
+    path: &str,
+    registered: &[Registered],
+) -> Result<PathBuf, EngineError> {
+    path_text(path, "home_trash_invalid")?;
+    let real = real_folder(
+        Path::new(path),
+        "home_trash_missing",
+        "home_trash_not_folder",
+    )?;
+    if real.parent() != Some(home) {
+        return Err(refused("home_trash_outside"));
+    }
+    let name = real
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| refused("home_trash_outside"))?;
+    folder_name(name).map_err(|_| refused("home_trash_outside"))?;
+    if registered.iter().any(|project| project.folder == real) {
+        return Err(refused("home_trash_still_set_up"));
+    }
+    assert!(real.starts_with(home) && real != home);
+    Ok(real)
+}
+
+/// Moves a folder of the projects home to the system Trash, never deleting
+/// it outright. Input: a folder checked by `plan_trash`. Output: Ok once it is
+/// gone from the home, or `home_trash_failed` with the folder left in place.
+pub fn trash(folder: &Path) -> Result<(), EngineError> {
+    platform::move_to_trash(folder).map_err(|_| refused("home_trash_failed"))?;
+    if std::fs::symlink_metadata(folder).is_ok() {
+        return Err(refused("home_trash_failed"));
+    }
+    Ok(())
+}
+
+/// The sentence shown after the owner removes a project from CrazyAgent.
+/// Input: the project folder. Output: a plain note that the folder stays.
+pub fn forgotten(folder: &str) -> String {
+    format!(
+        "CrazyAgent no longer tracks this project. Its folder is still at {folder}. Use Delete folder to move it to the Trash."
+    )
+}
+
+/// The folder that holds a project's CrazyAgent files (context, worktrees).
+/// Input: the project folder. Output: its `.crazyagent/` folder when that is a
+/// real folder, as for projects in the home, otherwise the project folder
+/// itself, as for projects made before the projects home existed.
+pub fn state_folder(project: &Path) -> PathBuf {
+    let inner = project.join(CRAZYAGENT_DIRECTORY);
+    match std::fs::symlink_metadata(&inner) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => inner,
+        _ => project.to_path_buf(),
+    }
 }
 
 /// Plans moving every project folder from the current home to a new one.
@@ -369,7 +515,18 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "projects_home_unsafe" => {
             "Pick a separate folder for your projects, not your home folder or a system folder."
         }
-        "projects_home_unset" => "Choose your projects folder first.",
+        "projects_home_unset" => "Choose a projects home first.",
+        "home_folder_name_invalid" => {
+            "Give the project a name with letters or digits, and no folder by that name."
+        }
+        "home_trash_invalid" | "home_trash_missing" => "That folder is no longer there.",
+        "home_trash_not_folder" => "Pick a folder, not a file or a link.",
+        "home_trash_outside" => {
+            "Only folders directly in your projects folder can be deleted here."
+        }
+        "home_trash_still_set_up" => "Remove the project from CrazyAgent first.",
+        "home_trash_failed" => "The folder could not be moved to the Trash. Nothing was deleted.",
+        "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
         "home_source_in_home" => "That folder is already in your projects folder.",

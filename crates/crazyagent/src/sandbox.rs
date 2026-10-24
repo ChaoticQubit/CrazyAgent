@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -132,6 +132,8 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys"];
 
 const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"];
 
+const AGENT_ENV_MAX: usize = 128;
+
 const REFUSED_VARIABLES: &[&str] = &[
     "GIT_ASKPASS",
     "SSH_ASKPASS",
@@ -175,19 +177,16 @@ pub const AGENT_GIT_ENV: [(&str, &str); 5] = [
     ("GIT_CONFIG_VALUE_0", ""),
 ];
 
-/// Tells whether an environment variable may never reach an agent process: GitHub and
+/// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
-/// secrets, passwords and the engine's own `CRAZYAGENT_` settings. Only the model key
-/// of the agent's own account (`ANTHROPIC_API_KEY`, `CRAZYAGENT_API_KEY`) passes.
-/// Input: the variable name. Output: true when it is refused.
+/// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
+/// names `ANTHROPIC_API_KEY` and `CRAZYAGENT_API_KEY`, which pass only with a placeholder
+/// (see [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
 pub fn agent_env_refused(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return true;
     };
     let upper = name.to_ascii_uppercase();
-    if AGENT_KEY_VARIABLES.contains(&upper.as_str()) {
-        return false;
-    }
     REFUSED_VARIABLES.contains(&upper.as_str())
         || REFUSED_PREFIXES
             .iter()
@@ -197,13 +196,84 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
             .any(|suffix| upper.ends_with(suffix))
 }
 
-/// Builds the one command every sandboxed agent process starts from, on every launch path
-/// (headless harness launch, research, team, master and the interactive terminal): `-f
-/// <profile> <program>` under `sandbox-exec`, a cleared environment holding only `base`,
-/// the harness's own variables and [`AGENT_GIT_ENV`], and its own process group. `HOME`
-/// and `TMPDIR` always come from `base`. Inputs: the installed profile, the absolute
+/// Tells whether one variable may reach an agent process with this value: a name
+/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, or a model key
+/// name holding a CrazyAgent placeholder (the local placeholder or a key relay token),
+/// never a real provider key. Inputs: the name and value. Output: true when allowed.
+pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
+    if AGENT_GIT_ENV
+        .iter()
+        .any(|(git, fixed)| name == *git && value == *fixed)
+    {
+        return true;
+    }
+    let placeholder = value
+        .to_str()
+        .is_some_and(crate::model_gateway::relay::is_placeholder);
+    if name
+        .to_str()
+        .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
+    {
+        return placeholder;
+    }
+    !agent_env_refused(name)
+}
+
+/// Builds the environment of every agent process in launch order: `base`, then the
+/// harness's variables (a later value replaces an earlier one and None removes it, but
+/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`].
+/// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
+/// one fails [`agent_variable_allowed`].
+pub fn agent_env<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    let refused = || invalid("agent environment holds an owner secret");
+    let mut env: Vec<(OsString, OsString)> = Vec::new();
+    let set = |env: &mut Vec<(OsString, OsString)>, name: &OsStr, value: Option<&OsStr>| {
+        let at = env.iter().position(|(known, _)| known == name);
+        match (at, value) {
+            (Some(at), Some(value)) => env[at].1 = value.to_owned(),
+            (Some(at), None) => {
+                env.remove(at);
+            }
+            (None, Some(value)) => env.push((name.to_owned(), value.to_owned())),
+            (None, None) => {}
+        }
+    };
+    for (name, value) in base {
+        if !agent_variable_allowed(OsStr::new(name), value) {
+            return Err(refused());
+        }
+        set(&mut env, OsStr::new(name), Some(value));
+    }
+    for (name, value) in harness {
+        if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
+            return Err(refused());
+        }
+        if name == "HOME" || name == "TMPDIR" {
+            continue;
+        }
+        set(&mut env, name, value);
+    }
+    for (name, value) in AGENT_GIT_ENV {
+        set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
+    }
+    if env.len() > AGENT_ENV_MAX {
+        return Err(invalid("agent environment holds too many variables"));
+    }
+    assert!(
+        env.iter()
+            .all(|(name, value)| agent_variable_allowed(name, value))
+    );
+    Ok(env)
+}
+
+/// Builds the one command every sandboxed headless agent process starts from: `-f
+/// <profile> <program>` under `sandbox-exec`, a cleared environment holding exactly
+/// [`agent_env`], and its own process group. Inputs: the installed profile, the absolute
 /// program, the base variables and the harness's variables (None removes one).
-/// Output: the command, or `Invalid` when any variable is refused by [`agent_env_refused`].
+/// Output: the command, or `Invalid` when any variable fails [`agent_variable_allowed`].
 #[cfg(unix)]
 pub fn agent_command<'a>(
     profile: &Path,
@@ -211,35 +281,17 @@ pub fn agent_command<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
+    let env = agent_env(base, harness)?;
     let mut command = Command::new(SANDBOX_EXEC);
-    command.arg("-f").arg(profile).arg(program).env_clear();
-    for (name, value) in base {
-        if agent_env_refused(OsStr::new(name)) {
-            return Err(invalid("agent environment holds an owner secret"));
-        }
-        command.env(name, value);
-    }
-    for (name, value) in harness {
-        if agent_env_refused(name) {
-            return Err(invalid("agent environment holds an owner secret"));
-        }
-        if name == "HOME" || name == "TMPDIR" {
-            continue;
-        }
-        match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
-    for (name, value) in AGENT_GIT_ENV {
-        command.env(name, value);
-    }
-    command.process_group(0);
+    command
+        .arg("-f")
+        .arg(profile)
+        .arg(program)
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .process_group(0);
     assert_eq!(command.get_program(), SANDBOX_EXEC);
-    assert!(
-        command.get_envs().all(|(name, _)| !agent_env_refused(name)
-            || AGENT_GIT_ENV.iter().any(|(git, _)| name == *git))
-    );
+    assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
 }
 
@@ -467,12 +519,13 @@ impl ProjectSandbox {
     }
 
     /// Paths inside the project folder no agent may write although the folder is writable:
-    /// the `context/` folder, the git hooks, and the git config with its lock file. Every
-    /// platform boundary keeps these read-only.
-    pub fn protected_paths(&self) -> [PathBuf; 4] {
+    /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
+    /// and the git config with its lock file. Every platform boundary keeps these read-only.
+    pub fn protected_paths(&self) -> [PathBuf; 5] {
         let git = self.project_root.join(".git");
         [
             self.project_root.join("context"),
+            self.project_root.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -540,7 +593,7 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
         ));
         text.push_str(
             "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",

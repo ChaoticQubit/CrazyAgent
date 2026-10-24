@@ -317,15 +317,13 @@ async fn the_engine_keeps_the_home_watches_it_and_records_each_add() {
         OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
         other => panic!("{other:?}"),
     }
-    let folder = engine
-        .root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join("projects")
-        .join("reading");
+    let folder = home.join("reading-list");
     assert!(folder.is_dir());
-    assert!(named(&owner.found().await, "Reading list").is_none());
+    let found = owner.found().await;
+    assert!(named(&found, "Reading list").is_none());
+    let ready = named(&found, "reading-list").unwrap();
+    assert_eq!(ready.state, FoundState::Ready);
+    assert_eq!(ready.project_id.as_ref(), Some(&project));
     fs::remove_dir_all(&folder).unwrap();
     let found = owner.found().await;
     let missing = named(&found, "Reading list").unwrap();

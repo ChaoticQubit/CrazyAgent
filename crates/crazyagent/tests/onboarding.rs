@@ -2,18 +2,25 @@ mod research_support;
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
-use crazyagent::onboarding::service::{OnboardingLimits, OnboardingService};
+use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
+use crazyagent::onboarding::service::{
+    CODEX_MISSING, OnboardingLimits, OnboardingService, installed_graphify,
+};
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::project_setup::Platform;
+use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
-use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
-use research_support::{codex, hanging_endpoint, processes_with};
+use crazyagent::research::accounts::SettingsResolver;
+use crazyagent::research::runner::{
+    ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
+};
+use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -96,8 +103,83 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
     }
 }
 
-/// A real in-process engine with the local pool in its settings, its owner
-/// client and a real git repository outside the engine's runtime folder.
+/// The real `crazyagent engine` binary on a runtime folder, started with
+/// writable settings and no `--codex-executable` or `--claude-executable`.
+struct EngineProcess {
+    child: Child,
+}
+
+impl EngineProcess {
+    /// Starts the binary and waits up to 20 s for its `ready` line.
+    fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .arg("engine")
+            .arg(root)
+            .arg(global)
+            .arg(project_settings)
+            .arg("engine.sock")
+            .arg("--writable-settings")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (send, ready) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = send.send(line);
+            let mut rest = Vec::new();
+            let _ = reader.take(65536).read_to_end(&mut rest);
+        });
+        let line = ready
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_default();
+        let engine = Self { child };
+        assert_eq!(line, "ready\n", "engine without codex did not start");
+        engine
+    }
+
+    /// Sends SIGTERM, as the owner's stop does, and waits up to 30 s for a
+    /// clean exit. Returns whether the engine exited successfully.
+    fn terminate(&mut self) -> bool {
+        if let Some(status) = self.child.try_wait().ok().flatten() {
+            return status.success();
+        }
+        let _ = Command::new("/bin/kill")
+            .args(["-s", "TERM", &self.child.id().to_string()])
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().ok().flatten() {
+                return status.success();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        false
+    }
+}
+
+impl Drop for EngineProcess {
+    /// Stops an engine a failed test left running, so no step process
+    /// outlives the test.
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+/// The engine a bench drives: in this test process, or the real binary.
+enum Engine {
+    InProcess(EngineService, watch::Sender<bool>),
+    Binary(EngineProcess),
+}
+
+/// A real engine with the local pool in its settings, its owner client and a
+/// real git repository outside the engine's runtime folder.
 struct Bench {
     _runtime: tempfile::TempDir,
     _repos: tempfile::TempDir,
@@ -105,15 +187,24 @@ struct Bench {
     repo: PathBuf,
     global: PathBuf,
     project_settings: PathBuf,
-    service: EngineService,
+    engine: Engine,
     owner: OwnerController,
     generation: u64,
-    _stop: watch::Sender<bool>,
 }
 
-impl Bench {
-    /// Starts the engine; `prepare` may add files to the committed repo.
-    async fn start(prepare: impl FnOnce(&Path)) -> Self {
+/// The private runtime folder with the settings, and the committed repo
+/// beside it. `prepare` may add files to the repo.
+struct Folders {
+    runtime: tempfile::TempDir,
+    repos: tempfile::TempDir,
+    root: PathBuf,
+    repo: PathBuf,
+    global: PathBuf,
+    project_settings: PathBuf,
+}
+
+impl Folders {
+    fn new(prepare: impl FnOnce(&Path)) -> Self {
         let runtime = tempfile::Builder::new()
             .prefix("ca-onboard-")
             .tempdir_in("/private/tmp")
@@ -124,6 +215,8 @@ impl Bench {
         fs::write(&global, CATALOG).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let project_settings = root.join("project.toml");
+        fs::write(&project_settings, "").unwrap();
+        fs::set_permissions(&project_settings, fs::Permissions::from_mode(0o600)).unwrap();
         let repos = tempfile::Builder::new()
             .prefix("ca-onboard-repos-")
             .tempdir_in("/private/tmp")
@@ -131,31 +224,75 @@ impl Bench {
         let repo = repos.path().canonicalize().unwrap().join(PROJECT);
         rust_repo(&repo);
         prepare(&repo);
-        let (stop, stopped) = watch::channel(false);
-        let service = EngineService::start_with_settings_sources(
-            &root,
-            "e.sock",
-            &global,
-            &project_settings,
-            &stopped,
-        )
-        .await
-        .unwrap();
-        let owner = OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(5))
-            .await
-            .unwrap();
         Self {
-            _runtime: runtime,
-            _repos: repos,
+            runtime,
+            repos,
             root,
             repo,
             global,
             project_settings,
-            service,
+        }
+    }
+}
+
+impl Bench {
+    fn with(folders: Folders, engine: Engine, owner: OwnerController) -> Self {
+        Self {
+            _runtime: folders.runtime,
+            _repos: folders.repos,
+            root: folders.root,
+            repo: folders.repo,
+            global: folders.global,
+            project_settings: folders.project_settings,
+            engine,
             owner,
             generation: 0,
-            _stop: stop,
         }
+    }
+
+    /// Starts an in-process engine; `prepare` may add files to the repo.
+    async fn start(prepare: impl FnOnce(&Path)) -> Self {
+        let folders = Folders::new(prepare);
+        let (stop, stopped) = watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            &folders.root,
+            "e.sock",
+            &folders.global,
+            &folders.project_settings,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let owner =
+            OwnerController::attach(&folders.root, OwnerClientKind::Tui, Duration::from_secs(5))
+                .await
+                .unwrap();
+        Self::with(folders, Engine::InProcess(service, stop), owner)
+    }
+
+    /// Starts the real engine binary without Codex or Claude Code and
+    /// attaches the owner client, retrying for up to 20 s.
+    async fn start_binary() -> Self {
+        let folders = Folders::new(|_| {});
+        let process =
+            EngineProcess::start(&folders.root, &folders.global, &folders.project_settings);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let owner = loop {
+            match OwnerController::attach(
+                &folders.root,
+                OwnerClientKind::Tui,
+                Duration::from_secs(2),
+            )
+            .await
+            {
+                Ok(owner) => break owner,
+                Err(error) => {
+                    assert!(Instant::now() < deadline, "owner attach: {error:?}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
+        Self::with(folders, Engine::Binary(process), owner)
     }
 
     /// Asks the engine to onboard `path` on the local pool through the owner
@@ -182,6 +319,27 @@ impl Bench {
         project
     }
 
+    /// Sets the folder holding the bench repository as the projects home.
+    async fn use_repos_as_home(&mut self) {
+        self.generation += 1;
+        let home = self.repo.parent().unwrap().to_str().unwrap().to_owned();
+        let response = self
+            .owner
+            .set_projects_home(home, self.generation)
+            .await
+            .unwrap();
+        assert_eq!(rejection(&response), None, "{response:?}");
+    }
+
+    /// The projects home entry of the bench repository.
+    async fn home_entry(&mut self) -> FoundProject {
+        let found = self.owner.found_projects().await.unwrap();
+        found
+            .into_iter()
+            .find(|entry| Path::new(&entry.path) == self.repo)
+            .unwrap()
+    }
+
     async fn view(&mut self, project: &ProjectId) -> OnboardingView {
         self.owner.onboarding(project.clone()).await.unwrap()
     }
@@ -202,13 +360,18 @@ impl Bench {
         }
     }
 
-    /// A runner with its own private state folder in the runtime, and that
-    /// folder's `agents/` where every step's agent state goes.
-    fn runner(&self) -> (Arc<ResearchRunner>, PathBuf) {
+    /// A private state folder in the runtime for a test's own runner.
+    fn state(&self) -> PathBuf {
         let state = self.root.join("onboarding-test");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let state = state.canonicalize().unwrap();
+        state.canonicalize().unwrap()
+    }
+
+    /// A Codex runner with its own private state folder in the runtime, and
+    /// that folder's `agents/` where every step's agent state goes.
+    fn runner(&self) -> (Arc<ResearchRunner>, PathBuf) {
+        let state = self.state();
         let runner = ResearchRunner::new(
             &self.root.join("engine.db"),
             &state,
@@ -219,12 +382,35 @@ impl Bench {
         (Arc::new(runner), state.join("agents"))
     }
 
+    /// A runner with no Codex, and Claude Code only when `with_claude`.
+    fn runner_without_codex(&self, with_claude: bool) -> (Arc<ResearchRunner>, PathBuf) {
+        let state = self.state();
+        let mut runner = ResearchRunner::without_codex(
+            &self.root.join("engine.db"),
+            &state,
+            ResearchLimits::default(),
+        )
+        .unwrap();
+        if with_claude {
+            runner = runner.with_claude(&claude()).unwrap();
+        }
+        assert!(!runner.can_run(ResearchHarness::Codex));
+        assert_eq!(runner.can_run(ResearchHarness::ClaudeCode), with_claude);
+        (Arc::new(runner), state.join("agents"))
+    }
+
     async fn stop(self) {
-        let Self {
-            mut service, owner, ..
-        } = self;
+        let Self { engine, owner, .. } = self;
         drop(owner);
-        service.shutdown().await.unwrap();
+        match engine {
+            Engine::InProcess(mut service, _stop) => service.shutdown().await.unwrap(),
+            Engine::Binary(mut process) => {
+                let clean = tokio::task::spawn_blocking(move || process.terminate())
+                    .await
+                    .unwrap();
+                assert!(clean, "engine without codex did not stop cleanly");
+            }
+        }
     }
 }
 
@@ -248,12 +434,14 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
+    assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
     let onboarding = crazyagent::onboarding::service::start_for_engine(
         &bench.root,
         &bench.global,
         &bench.project_settings,
-        &codex(),
+        Some(&codex()),
         None,
     )
     .unwrap();
@@ -287,6 +475,9 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     );
     assert_eq!(git(&bench.repo, &["status", "--porcelain"]), "");
     assert!(processes_with(&bench.root.join("onboarding")).is_empty());
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Ready, "{entry:?}");
+    assert_eq!(entry.project_id.as_ref(), Some(&project));
     let setup = bench.owner.project_setup(project).await.unwrap().unwrap();
     assert!(setup.research.is_empty());
     assert_eq!(
@@ -299,6 +490,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retries() {
     let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
     let waiting = bench.view(&project).await;
     assert_eq!(waiting.graph, Step::Waiting);
@@ -307,7 +499,7 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -320,11 +512,50 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     assert!(view.missing.contains(&"about".to_owned()));
     assert!(!bench.repo.join("graphify-out").join("graph.json").exists());
     assert_eq!(agent_runs(&agents, "onboard-"), 0);
+    assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
     let again = bench.start_onboarding().await;
     assert_eq!(again, project);
     let retried = bench.view(&project).await;
     assert_eq!(retried.graph, Step::Waiting);
     assert_eq!(retried.mapping, Step::Waiting);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_its_folder() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Found, "{entry:?}");
+    assert_eq!(entry.project_id, None);
+    let project = bench.start_onboarding().await;
+    let waiting = bench.view(&project).await;
+    assert_eq!(
+        (waiting.graph, waiting.mapping),
+        (Step::Waiting, Step::Waiting)
+    );
+    let entry = bench.home_entry().await;
+    assert_eq!(entry.state, FoundState::Onboarding, "{entry:?}");
+    assert_eq!(entry.project_id.as_ref(), Some(&project));
+    assert!(entry.git && entry.known);
+    let found = bench.owner.found_projects().await.unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    bench.generation += 1;
+    bench
+        .owner
+        .begin_mutation(
+            OwnerMutation::DeleteProjectFolder {
+                path: bench.repo.to_str().unwrap().to_owned(),
+            },
+            bench.generation,
+        )
+        .unwrap();
+    let response = bench.owner.send_pending().await.unwrap();
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("home_trash_still_set_up")
+    );
+    assert!(bench.repo.join(".crazyagent").is_dir());
     bench.stop().await;
 }
 
@@ -340,7 +571,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef| Some(account.clone()),
+        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
         || None,
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
@@ -369,7 +600,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef| Some(account.clone()),
+        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -416,7 +647,7 @@ async fn an_existing_crazyagent_folder_is_reused_not_overwritten() {
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -460,5 +691,197 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
         Some("onboarding_folder_missing")
     );
     assert!(!bench.repo.join(".crazyagent").exists());
+    bench.stop().await;
+}
+
+/// The installed graphify, or a BLOCKED panic naming the missing tool.
+fn graphify() -> PathBuf {
+    installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_missing() {
+    graphify();
+    let mut bench = Bench::start_binary().await;
+    let project = bench.start_onboarding().await;
+    let view = bench.settle(&project, Duration::from_secs(660)).await;
+    assert_eq!(view.graph, Step::Done, "{view:?}");
+    assert_eq!(view.mapping, failed(CODEX_MISSING), "{view:?}");
+    assert!(bench.repo.join("graphify-out/graph.json").is_file());
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert!(
+        view.facts
+            .build_commands
+            .contains(&"cargo build".to_owned())
+    );
+    assert!(view.overview.is_none());
+    assert!(bench.repo.join(".crazyagent/setup/draft.json").is_file());
+    assert_eq!(git(&bench.repo, &["status", "--porcelain"]), "");
+    let onboarding_state = bench.root.join("onboarding");
+    assert!(onboarding_state.is_dir());
+    bench.stop().await;
+    assert!(processes_with(&onboarding_state).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
+    let graphify = graphify();
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (port, _server) = hanging_endpoint();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "hanging-model".into(),
+    };
+    let asked = Arc::new(Mutex::new(0_usize));
+    let (runner, agents) = bench.runner_without_codex(false);
+    let service = {
+        let asked = asked.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, _: &[ResearchHarness]| {
+                *asked.lock().unwrap() += 1;
+                Some(account.clone())
+            },
+            move || Some(graphify.clone()),
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let view = bench.settle(&project, Duration::from_secs(660)).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, Step::Done, "{view:?}");
+    assert_eq!(view.mapping, failed(CODEX_MISSING), "{view:?}");
+    assert_eq!(*asked.lock().unwrap(), 0);
+    assert_eq!(agent_runs(&agents, "onboard-g-"), 1);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_only_claude_code_installed_mapping_asks_for_a_claude_code_account() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let seen: Arc<Mutex<Vec<Vec<ResearchHarness>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (runner, agents) = bench.runner_without_codex(true);
+    let service = {
+        let seen = seen.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, harnesses: &[ResearchHarness]| {
+                seen.lock().unwrap().push(harnesses.to_vec());
+                Some(ResearchAccount::Endpoint {
+                    base_url: "http://127.0.0.1:9/v1".into(),
+                    model: "codex-only-model".into(),
+                })
+            },
+            || None,
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, failed(GRAPHIFY_MISSING));
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
+    assert_eq!(*seen.lock().unwrap(), [vec![ResearchHarness::ClaudeCode]]);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
+    let bench = Bench::start(|_| {}).await;
+    let projects = bench.root.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    let resolver = SettingsResolver::new(
+        &bench.global,
+        &bench.project_settings,
+        &projects,
+        &bench.root.join("engine.db"),
+    )
+    .unwrap();
+    let pool = CredentialRef::new(POOL).unwrap();
+    let local = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        model: "qwen2.5:0.5b".into(),
+    };
+    assert_eq!(
+        resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
+        Some(local.clone())
+    );
+    assert_eq!(
+        resolver.pool_pick(
+            &pool,
+            &[ResearchHarness::ClaudeCode, ResearchHarness::Codex]
+        ),
+        Some(local)
+    );
+    assert_eq!(
+        resolver.pool_pick(&pool, &[ResearchHarness::ClaudeCode]),
+        None
+    );
+    assert_eq!(resolver.pool_pick(&pool, &[]), None);
+    assert_eq!(
+        resolver.pool_pick(
+            &CredentialRef::new("absent-pool").unwrap(),
+            &[ResearchHarness::Codex]
+        ),
+        None
+    );
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
+    let mut bench = Bench::start(|_| {}).await;
+    let home = bench.repo.parent().unwrap().to_str().unwrap().to_owned();
+    bench.generation += 1;
+    let set = bench
+        .owner
+        .set_projects_home(home, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&set), None, "{set:?}");
+    let listed = |found: &[FoundProject]| {
+        found
+            .iter()
+            .filter(|entry| entry.name == PROJECT)
+            .map(|entry| (entry.state, entry.project_id.clone(), entry.known))
+            .collect::<Vec<_>>()
+    };
+    let before = bench.owner.found_projects().await.unwrap();
+    assert_eq!(listed(&before), vec![(FoundState::Found, None, false)]);
+
+    let project = bench.start_onboarding().await;
+    let onboarding = bench.owner.found_projects().await.unwrap();
+    assert_eq!(
+        listed(&onboarding),
+        vec![(FoundState::Onboarding, Some(project.clone()), true)]
+    );
+    assert!(
+        onboarding
+            .iter()
+            .all(|entry| entry.state != FoundState::Missing),
+        "{onboarding:?}"
+    );
+
+    let (runner, _) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef| None,
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    let settled = bench.owner.found_projects().await.unwrap();
+    assert_eq!(
+        listed(&settled),
+        vec![(FoundState::Ready, Some(project), true)]
+    );
     bench.stop().await;
 }

@@ -218,7 +218,7 @@ impl From<io::Error> for RunError {
 pub struct ResearchRunner {
     database: PathBuf,
     state: PathBuf,
-    codex: PathBuf,
+    codex: Option<PathBuf>,
     claude: Option<PathBuf>,
     limits: ResearchLimits,
     claimer: String,
@@ -246,16 +246,38 @@ impl ResearchRunner {
         codex: &Path,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
-            return Err(RunError::Invalid(
-                "state directory must be canonical".into(),
-            ));
-        }
         if !codex.is_absolute() || !codex.is_file() {
             return Err(RunError::Invalid(
                 "codex executable must be absolute".into(),
             ));
         }
+        Self::build(database, state, Some(codex), limits)
+    }
+
+    /// A runner with no Codex executable, for an engine where Codex is not
+    /// installed: it runs Claude Code once [`Self::with_claude`] adds it, and
+    /// refuses every Codex run with a plain error. Takes the same database,
+    /// state directory and limits as [`Self::new`]. Returns the runner.
+    pub fn without_codex(
+        database: &Path,
+        state: &Path,
+        limits: ResearchLimits,
+    ) -> Result<Self, RunError> {
+        Self::build(database, state, None, limits)
+    }
+
+    fn build(
+        database: &Path,
+        state: &Path,
+        codex: Option<&Path>,
+        limits: ResearchLimits,
+    ) -> Result<Self, RunError> {
+        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+            return Err(RunError::Invalid(
+                "state directory must be canonical".into(),
+            ));
+        }
+        assert!(codex.is_none_or(Path::is_absolute));
         if limits.wall_time.is_zero()
             || limits.output_bytes_max == 0
             || limits.report_bytes_max == 0
@@ -280,7 +302,7 @@ impl ResearchRunner {
         Ok(Self {
             database: database.to_path_buf(),
             state: state.to_path_buf(),
-            codex: codex.to_path_buf(),
+            codex: codex.map(Path::to_path_buf),
             claude: None,
             limits,
             claimer: format!("runner-{}-{nanos}", std::process::id()),
@@ -322,6 +344,14 @@ impl ResearchRunner {
         }
         self.claude = Some(claude.to_path_buf());
         Ok(self)
+    }
+
+    /// Whether this runner has the executable `harness` needs.
+    pub fn can_run(&self, harness: ResearchHarness) -> bool {
+        match harness {
+            ResearchHarness::Codex => self.codex.is_some(),
+            ResearchHarness::ClaudeCode => self.claude.is_some(),
+        }
     }
 
     /// The job store this runner claims from.
@@ -553,7 +583,10 @@ impl ResearchRunner {
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
         let executable = match harness {
-            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
             ResearchHarness::ClaudeCode => self
                 .claude
                 .as_deref()
@@ -816,10 +849,12 @@ impl ResearchRunner {
                 format!("-{launch}")
             };
             let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
-            let worktree = root.join("worktrees").join(format!(
-                "research-{}-{}-{}{suffix}",
-                job.kind, job.id, job.attempts
-            ));
+            let worktree = crate::projects_home::state_folder(root)
+                .join("worktrees")
+                .join(format!(
+                    "research-{}-{}-{}{suffix}",
+                    job.kind, job.id, job.attempts
+                ));
             let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
             if !taken(&self.state.join("agents").join(&name)) && !taken(&worktree) {
                 return Ok((name, worktree));
@@ -925,7 +960,10 @@ impl ResearchRunner {
         private_directory(&tmp)?;
         let harness = run.account.harness();
         let executable = match harness {
-            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
             ResearchHarness::ClaudeCode => self
                 .claude
                 .as_deref()
@@ -1379,15 +1417,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Makes the project folder a git repository with one empty start commit and
-/// worktrees/ and context/ excluded, once per process at a time.
-/// Takes the project folder and a private temporary home for git.
+/// Makes a project folder the engine created a git repository with one empty start commit,
+/// once per process at a time. A folder with any `.git` entry is the owner's repository and
+/// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
+/// gets a repository from the engine. Takes the project folder and a private home for git.
+/// Returns Ok once the folder is a repository, or a plain refusal for an owner's folder.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
     let _setup = REPOSITORY_SETUP
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if root.join(".git").is_dir() {
+    if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
+    }
+    let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
+    if owners {
+        return Err(RunError::Invalid(
+            "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
+        ));
     }
     let git = |arguments: &[&str]| -> Result<bool, RunError> {
         let mut command = Command::new(GIT);
@@ -1440,7 +1487,7 @@ pub(crate) fn add_worktree(
     let _setup = REPOSITORY_SETUP
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let worktrees = sandbox.project_root().join("worktrees");
+    let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
@@ -1630,7 +1677,7 @@ fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
 }
 
 fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
-    let context = root.join("context");
+    let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -1768,7 +1815,7 @@ fn write_report(_root: &Path, _kind: &str, _report: &str) -> io::Result<PathBuf>
 #[cfg(unix)]
 fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
     assert!(valid_kind(kind));
-    let context = root.join("context");
+    let context = crate::projects_home::state_folder(root).join("context");
     let research = context.join("research");
     for directory in [&context, &research] {
         match fs::DirBuilder::new().mode(0o755).create(directory) {
@@ -2142,5 +2189,48 @@ mod tests {
             model: "m".into(),
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
+    }
+
+    #[test]
+    fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let home = base.join("git-home");
+        fs::create_dir(&home).unwrap();
+        let refused = |folder: &Path| match ensure_repository(folder, &home) {
+            Err(RunError::Invalid(reason)) => reason.contains("not a git repository"),
+            _ => false,
+        };
+
+        let owners = base.join("owners");
+        fs::create_dir_all(owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::write(owners.join("notes.txt"), "the owner's file\n").unwrap();
+        assert!(refused(&owners), "an owner's folder gets no repository");
+        assert!(!owners.join(".git").exists());
+        let state = owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        assert!(refused(&state), "nor does its .crazyagent folder");
+        assert!(!state.join(".git").exists());
+
+        let linked = base.join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(
+            linked.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/linked\n",
+        )
+        .unwrap();
+        ensure_repository(&linked, &home).unwrap();
+        assert!(
+            fs::symlink_metadata(linked.join(".git")).unwrap().is_file(),
+            "a linked worktree stays as the owner made it"
+        );
+
+        let created = base.join("created");
+        fs::create_dir(&created).unwrap();
+        ensure_repository(&created, &home).unwrap();
+        assert!(
+            created.join(".git").is_dir(),
+            "a folder the engine made gets its repository"
+        );
+        ensure_repository(&created, &home).unwrap();
     }
 }

@@ -1238,7 +1238,7 @@ impl TeamRuntime {
     }
 
     fn framing(&self, stored: &StoredSetup, team_tool: bool) -> String {
-        let brief = std::fs::read_to_string(Path::new(&stored.folder).join("context/brief.md"))
+        let brief = std::fs::read_to_string(stored.state_folder().join("context/brief.md"))
             .map(|brief| bound_text(&brief, BRIEF_BYTES_MAX))
             .unwrap_or_default();
         let team = stored
@@ -1472,10 +1472,13 @@ impl TeamRuntime {
                     |row| row.get(0),
                 )
                 .map_err(error)?;
+            let folder = stored.project_folder();
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
-                worktree.as_deref().unwrap_or(&stored.folder),
+                worktree
+                    .map_or(folder.clone(), |worktree| folder.join(worktree))
+                    .display(),
                 prompt
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
@@ -1738,7 +1741,8 @@ impl TeamRuntime {
             .executables
             .get(launch)
             .ok_or("harness is not installed")?;
-        let root = Path::new(&stored.folder)
+        let root = stored
+            .project_folder()
             .canonicalize()
             .map_err(|e| plain(&e))?;
         if root.starts_with(&self.state) {
@@ -1796,7 +1800,9 @@ impl TeamRuntime {
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
         sandbox.install(&profile).map_err(|e| plain(&e))?;
         ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
-        let worktree = root.join("worktrees").join(format!("agent-{id}"));
+        let worktree = crate::projects_home::state_folder(&root)
+            .join("worktrees")
+            .join(format!("agent-{id}"));
         add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
         let working_dir = worktree.canonicalize().map_err(|e| plain(&e))?;
         if working_dir != worktree {

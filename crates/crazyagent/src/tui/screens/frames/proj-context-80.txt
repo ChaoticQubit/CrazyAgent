@@ -21,4 +21,4 @@
 
 
 
- Enter Open  o Open in editor  d Delete  m Save to memory                ? Help
+ Enter Open  a Add file  o Open in editor  d Delete  m Save to memory    ? Help

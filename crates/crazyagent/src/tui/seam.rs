@@ -259,6 +259,15 @@ impl ResearchCounts {
     }
 }
 
+/// A project's live team work and memory suggestions for its Home card.
+/// `working` is None when the team read failed or is not ready, so the card
+/// shows only research; `suggestions` counts memories waiting for review.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    pub working: Option<usize>,
+    pub suggestions: usize,
+}
+
 /// One project as Home shows it, built only from engine data.
 /// Input: the stored project, its setup and research jobs, and pool names.
 /// Output: the card fields in plain words.
@@ -271,6 +280,7 @@ pub struct ProjectCard {
     pub pool: Option<String>,
     pub research: ResearchCounts,
     pub created_ms: Option<i64>,
+    pub activity: Activity,
 }
 
 impl ProjectCard {
@@ -302,7 +312,15 @@ impl ProjectCard {
             pool,
             research: ResearchCounts::of(jobs),
             created_ms: setup.map(|setup| setup.created_ms),
+            activity: Activity::default(),
         }
+    }
+
+    /// Counts the project's agents at work: research agents running plus
+    /// team agents working, as the desktop dashboard counts them.
+    /// Input: the card. Output: the count.
+    pub fn working(&self) -> usize {
+        self.research.running + self.activity.working.unwrap_or(0)
     }
 }
 

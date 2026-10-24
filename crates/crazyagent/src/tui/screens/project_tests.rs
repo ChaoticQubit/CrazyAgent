@@ -11,7 +11,7 @@ use crate::engine::{Client, EngineError};
 use crate::memory::ReviewDecision;
 use crate::project_setup::{
     ContextKind, Platform, ProjectSetup, ResearchJob, ResearchKind, ResearchStatus, SetupAction,
-    SetupQuery, SetupView,
+    SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -974,5 +974,419 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
     assert!(
         shown.contains("Reading the agent's output..."),
         "another job's lines are never shown: {shown}"
+    );
+}
+
+fn stored(project: &ProjectId) -> StoredSetup {
+    StoredSetup {
+        project_id: project.clone(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into(), "sqlite".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![
+            ResearchKind::TechStackResearch,
+            ResearchKind::CompetitorResearch,
+        ],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/private/tmp/ca-notes-cli".into(),
+        created_ms: 1_793_000_000_000,
+        revision: 4,
+    }
+}
+
+fn loaded(project: &ProjectId) -> ProjectScreen {
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    assert_eq!(
+        first,
+        SetupQuery::Setup {
+            project: project.clone()
+        }
+    );
+    screen.apply(
+        &first,
+        Ok(SetupView::Setup(Some(Box::new(stored(project))))),
+    );
+    assert_eq!(screen.name, "Notes CLI");
+    screen
+}
+
+#[test]
+fn the_add_file_box_checks_the_path_before_the_engine_copies_it() {
+    let project = ProjectId::new("files").unwrap();
+    let mut screen =
+        ProjectScreen::new(project.clone(), "Files".into(), Some("/Users/owner".into()));
+    screen.open(Tab::Context);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert!(screen.adding.is_some());
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.adding.as_ref().unwrap().error.as_deref(),
+        Some("Type the full path of a file on this computer.")
+    );
+    assert_eq!(screen.paste("notes/scope.csv"), ProjectReply::Handled);
+    assert_eq!(screen.adding.as_ref().unwrap().error, None);
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.adding.as_ref().unwrap().error.as_deref(),
+        Some("Use the full path of a file, starting with / or ~/.")
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.adding.is_none());
+
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.paste("~/notes/scope.csv"), ProjectReply::Handled);
+    let add = SetupAction::AddDocuments {
+        project_id: project.clone(),
+        documents: vec!["/Users/owner/notes/scope.csv".into()],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(add.clone()))
+    );
+    assert!(screen.adding.as_ref().unwrap().busy);
+    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
+    assert_eq!(screen.paste("more"), ProjectReply::Ignored);
+    assert_eq!(
+        screen.adding.as_ref().unwrap().input.value(),
+        "~/notes/scope.csv",
+        "the path waits while the engine copies it"
+    );
+
+    let change = SetupQuery::Change {
+        action: add.clone(),
+        generation: 1,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "document_not_found".into(),
+        })),
+    );
+    let adding = screen.adding.as_ref().unwrap();
+    assert!(!adding.busy);
+    assert_eq!(
+        adding.error.as_deref(),
+        Some("There is no file at that path. Check it and try again.")
+    );
+    assert_eq!(adding.input.value(), "~/notes/scope.csv");
+    assert_eq!(screen.problem, None);
+
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(add))
+    );
+    screen.apply(&change, Err("trusted_connection_unavailable".into()));
+    assert_eq!(
+        screen.adding.as_ref().unwrap().error.as_deref(),
+        Some("Not connected to the engine. Retrying.")
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(SetupAction::AddDocuments {
+            project_id: project.clone(),
+            documents: vec!["/Users/owner/notes/scope.csv".into()],
+        }))
+    );
+    screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
+    assert!(screen.adding.is_none());
+    assert_eq!(screen.problem, None);
+
+    let mut homeless = ProjectScreen::new(project, "Files".into(), None);
+    homeless.open(Tab::Context);
+    homeless.key(key(KeyCode::Char('a')));
+    homeless.paste("~/notes/scope.csv");
+    assert_eq!(homeless.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        homeless.adding.as_ref().unwrap().error.as_deref(),
+        Some("Use the full path of a file, starting with / or ~/.")
+    );
+}
+
+#[test]
+fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
+    let project = ProjectId::new("general").unwrap();
+    let mut early = ProjectScreen::new(project.clone(), "General".into(), None);
+    early.open(Tab::Settings);
+    assert_eq!(early.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    assert!(early.general.is_none());
+    assert_eq!(
+        early.problem.as_deref(),
+        Some("Still loading the project. Try again.")
+    );
+
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes CLI");
+    assert_eq!(general.about.value(), "Terminal-first notes.");
+    assert_eq!(general.stack.value(), "rust, sqlite");
+    assert_eq!(general.revision, 4);
+    assert_eq!(general.cursor, 0);
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "nothing changed, so nothing is sent"
+    );
+    assert!(screen.general.is_none());
+
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(screen.key(control_u), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.general.as_ref().unwrap().error.as_deref(),
+        Some("Enter a project name of 1 to 256 characters.")
+    );
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+    assert_eq!(screen.general.as_ref().unwrap().error, None);
+
+    assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+    assert_eq!(screen.general.as_ref().unwrap().name.value(), "Notes Pro ");
+    assert_eq!(screen.key(key(KeyCode::Backspace)), ProjectReply::Handled);
+    screen.key(key(KeyCode::Tab));
+    screen.key(key(KeyCode::Tab));
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 2);
+    assert_eq!(screen.paste(", tauri, ,"), ProjectReply::Handled);
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+    for _ in 0..3 {
+        screen.key(key(KeyCode::Tab));
+    }
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 6);
+    screen.key(key(KeyCode::Char(' ')));
+    for _ in 0..4 {
+        screen.key(key(KeyCode::Tab));
+    }
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 10);
+    screen.key(key(KeyCode::Char(' ')));
+    assert_eq!(
+        screen.general.as_ref().unwrap().platforms,
+        [Platform::Website]
+    );
+    assert_eq!(
+        screen.general.as_ref().unwrap().research,
+        [ResearchKind::TechStackResearch]
+    );
+    for _ in 0..20 {
+        screen.key(key(KeyCode::Tab));
+    }
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 13);
+    screen.key(shifted(KeyCode::BackTab));
+    screen.key(key(KeyCode::Up));
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 11);
+
+    let update = SetupAction::Update {
+        project_id: project.clone(),
+        expected_revision: 4,
+        name: Some("Notes Pro".into()),
+        setup: ProjectSetup {
+            about: "Terminal-first notes.".into(),
+            tech_stack: vec!["rust".into(), "sqlite".into(), "tauri".into()],
+            platforms: vec![Platform::Website],
+            research: vec![ResearchKind::TechStackResearch],
+            pool: None,
+            team: Some(stored(&project).team),
+            documents: vec![],
+        },
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(update.clone()))
+    );
+    assert!(screen.general.as_ref().unwrap().busy);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 11);
+
+    let change = SetupQuery::Change {
+        action: update.clone(),
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "project_setup_revision".into(),
+        })),
+    );
+    let general = screen.general.as_ref().unwrap();
+    assert!(!general.busy);
+    assert_eq!(
+        general.error.as_deref(),
+        Some("This project changed since you opened the form. Open it again.")
+    );
+    assert_eq!(screen.problem, None);
+    assert_eq!(
+        screen.next_query(20),
+        Some(SetupQuery::Setup {
+            project: project.clone()
+        }),
+        "an edit always re-reads the setup"
+    );
+
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(update))
+    );
+    screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
+    assert!(screen.general.is_none());
+    assert_eq!(screen.problem, None);
+
+    screen.key(key(KeyCode::Char('g')));
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.general.is_none());
+}
+
+#[test]
+fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Gone".into(), None);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
+    assert!(screen.confirm_remove);
+    assert_eq!(screen.key(key(KeyCode::Char('q'))), ProjectReply::Handled);
+    assert!(screen.confirm_remove);
+    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
+    assert!(!screen.confirm_remove);
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(!screen.confirm_remove);
+
+    screen.key(key(KeyCode::Char('x')));
+    let remove = SetupAction::Remove {
+        project_id: project.clone(),
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Change(Box::new(remove.clone()))
+    );
+    assert!(!screen.confirm_remove);
+    let change = SetupQuery::Change {
+        action: remove,
+        generation: 3,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "project_master_open".into(),
+        })),
+    );
+    assert!(!screen.removed);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("End this project's master conversation first, then remove the project.")
+    );
+    screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
+    assert!(screen.removed);
+
+    screen.open(Tab::Agents);
+    assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Team);
+}
+
+#[test]
+fn the_add_file_box_general_form_and_remove_question_draw_with_their_keys() {
+    let look = Look::plain();
+    let project = ProjectId::new("drawn").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.key(key(KeyCode::Char('a')));
+    screen.paste("/Users/owner/notes/scope.csv");
+    for (width, height) in [(120u16, 36u16), (80, 24)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        assert!(
+            drawn
+                .rows
+                .iter()
+                .all(|row| row.width() == usize::from(width))
+        );
+        let shown = text(&drawn.rows);
+        assert!(shown.contains("Add file"), "{shown}");
+        assert!(shown.contains("Type the full path of a file"), "{shown}");
+        assert!(shown.contains("/Users/owner/notes/scope.csv"), "{shown}");
+        assert!(shown.contains("[> Add file ]"), "{shown}");
+        assert_eq!(drawn.help, [("Enter", "Add file"), ("Esc", "Cancel")]);
+        assert!(drawn.cursor.is_some());
+    }
+    screen.key(key(KeyCode::Enter));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("Adding..."));
+    assert_eq!(drawn.help, [("Esc", "Close")]);
+    assert_eq!(drawn.cursor, None);
+    screen.key(key(KeyCode::Esc));
+
+    screen.open(Tab::Settings);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("Notes CLI   g Edit details"), "{shown}");
+    assert!(shown.contains("x Remove project"), "{shown}");
+
+    screen.key(key(KeyCode::Char('g')));
+    for (width, height) in [(120u16, 36u16), (80, 24)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        let shown = text(&drawn.rows);
+        assert!(shown.contains("Edit project"), "{shown}");
+        assert!(shown.contains("[ Notes CLI"), "{shown}");
+        assert!(shown.contains("[ rust, sqlite"), "{shown}");
+        assert!(shown.contains("[x] CLI"), "{shown}");
+        assert!(shown.contains("[ ] Website"), "{shown}");
+        assert!(shown.contains("[x] Competitor research"), "{shown}");
+        assert!(shown.contains("[ ] Market research"), "{shown}");
+        assert_eq!(
+            drawn.help,
+            [("Enter", "Save"), ("Tab", "Next"), ("Esc", "Cancel")]
+        );
+        assert!(drawn.cursor.is_some());
+    }
+    screen.key(key(KeyCode::Tab));
+    assert_eq!(
+        project_screen(&mut screen, 80, 24, &look).help,
+        [
+            ("Enter", "Save"),
+            ("Tab", "Next"),
+            ("Ctrl-J", "New line"),
+            ("Esc", "Cancel")
+        ]
+    );
+    screen.key(key(KeyCode::Tab));
+    screen.key(key(KeyCode::Tab));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert_eq!(
+        drawn.help,
+        [
+            ("Enter", "Save"),
+            ("Tab", "Next"),
+            ("Space", "Switch"),
+            ("Esc", "Cancel")
+        ]
+    );
+    assert_eq!(drawn.cursor, None);
+    screen.key(key(KeyCode::Char(' ')));
+    screen.key(key(KeyCode::Enter));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("Saving..."));
+    assert_eq!(drawn.cursor, None);
+    screen.key(key(KeyCode::Esc));
+
+    screen.key(key(KeyCode::Char('x')));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("Remove Notes CLI from CrazyAgent?"),
+        "{shown}"
+    );
+    assert!(shown.contains("[ Remove project ]"), "{shown}");
+    assert!(shown.contains("[> Keep project ]"), "{shown}");
+    assert_eq!(
+        drawn.help,
+        [("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")]
     );
 }

@@ -2,7 +2,9 @@ use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
+use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
+use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
@@ -26,7 +28,9 @@ pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 pub(super) const CODEX_KEY_VARIABLE: &str = "CRAZYAGENT_API_KEY";
-pub(super) const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+pub(super) const LOCAL_PLACEHOLDER_KEY: &str = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
 const MKFIFO: &str = "/usr/bin/mkfifo";
@@ -228,6 +232,45 @@ pub(super) fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
 }
 
+/// Routes a launch that carries a real provider key through an engine-owned key relay on
+/// 127.0.0.1: the relay keeps the key in engine memory and the returned request names the
+/// relay's base URL and a random placeholder token instead, so the key never reaches the
+/// agent's environment, arguments or files. Keyless, subscription and already routed
+/// launches come back unchanged. Input: the request. Output: the request to launch and
+/// the relay, which must live as long as the agent; `launch_key_relay_unsupported` for a
+/// harness whose model protocol the relay does not carry (only Codex and Claude Code).
+pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>), LaunchError> {
+    let Some(key) = request
+        .account
+        .key()
+        .filter(|key| !is_placeholder(key.reveal()))
+    else {
+        return Ok((request, None));
+    };
+    let default = match harness_id(&request) {
+        "codex" => CODEX_DEFAULT_BASE_URL,
+        "claude-code" => CLAUDE_DEFAULT_BASE_URL,
+        _ => return Err(failure("launch_key_relay_unsupported")),
+    };
+    let upstream = request.account.base_url().unwrap_or(default).to_owned();
+    let secret = SecretString::new(key.reveal().as_bytes().to_vec())
+        .map_err(|_| failure("launch_secret_invalid"))?;
+    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0))?;
+    let home = request.account.home().to_path_buf();
+    request.account = AccountBinding::Url {
+        home,
+        base_url: relay.base_url(),
+        key: Some(Secret::new(relay.token().to_owned())?),
+    };
+    assert!(
+        request
+            .account
+            .key()
+            .is_some_and(|key| is_placeholder(key.reveal()))
+    );
+    Ok((request, Some(relay)))
+}
+
 /// Builds the exact command a launch would spawn, without spawning it.
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
@@ -338,10 +381,7 @@ pub(super) fn codex_configuration(request: &LaunchRequest, context: bool) -> Vec
             configuration.push("model_provider=\"openai\"".into());
         }
         AccountBinding::ApiKey { .. } | AccountBinding::Url { .. } => {
-            let base_url = request
-                .account
-                .base_url()
-                .unwrap_or("https://api.openai.com/v1");
+            let base_url = request.account.base_url().unwrap_or(CODEX_DEFAULT_BASE_URL);
             let key = request.account.key().map_or(String::new(), |_| {
                 format!(",env_key=\"{CODEX_KEY_VARIABLE}\"")
             });
@@ -838,14 +878,17 @@ pub struct Session {
     exited: bool,
     stopped: bool,
     _context: Option<Installed>,
+    _relay: Option<Relay>,
 }
 
 impl Session {
-    /// Spawns the harness for a request and begins its handshake.
-    /// Input: the launch request. Output: a running session, or a plain refusal code.
+    /// Spawns the harness for a request and begins its handshake; a real provider key goes
+    /// through [`route`]. Input: the launch request. Output: a running session, or a plain
+    /// refusal code.
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
+        let (request, relay) = route(request)?;
         let command = command(&request)?;
-        Self::spawn(request, command, None, None)
+        Self::spawn(request, command, None, None, relay)
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -856,9 +899,10 @@ impl Session {
         request: LaunchRequest,
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
+        let (request, relay) = route(request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
-        Self::spawn(request, command, Some(installed), None)
+        Self::spawn(request, command, Some(installed), None, relay)
     }
 
     /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
@@ -871,6 +915,7 @@ impl Session {
         context: Option<AgentContext>,
         state: &Path,
     ) -> Result<Self, LaunchError> {
+        let (request, relay) = route(request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
@@ -880,7 +925,7 @@ impl Session {
         };
         drop(context);
         let io = DurableIo::create(state)?;
-        Self::spawn(request, command, installed, Some(io))
+        Self::spawn(request, command, installed, Some(io), relay)
     }
 
     fn spawn(
@@ -888,6 +933,7 @@ impl Session {
         mut command: Command,
         context: Option<Installed>,
         durable: Option<DurableIo>,
+        relay: Option<Relay>,
     ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
         let output_bytes = request.limits.output_bytes;
@@ -950,6 +996,7 @@ impl Session {
             exited: false,
             stopped: false,
             _context: context,
+            _relay: relay,
         };
         for bytes in startup {
             session.write(&bytes)?;

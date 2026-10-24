@@ -402,6 +402,19 @@ impl ProjectPage {
                     "",
                 ));
             }
+            SetupAction::AddDocuments { .. } if applied => {
+                ctx.say(Message::success("Document added.", ""));
+            }
+            SetupAction::Update { .. } if applied => {
+                ctx.say(Message::success("Changes saved.", ""));
+            }
+            SetupAction::Remove { .. } if applied => {
+                ctx.request(Request::Projects);
+                ctx.say(Message::success(
+                    &format!("{} was removed.", self.screen.name),
+                    "Its folder stays on disk.",
+                ));
+            }
             _ => {}
         }
     }
@@ -588,6 +601,10 @@ impl ProjectPage {
                 self.retry_master(ctx);
                 Flow::Handled
             }
+            ProjectReply::Team => Flow::Open(Place::Team {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
         };
         self.sync_master(ctx);
         self.pump(ctx);
@@ -601,6 +618,8 @@ impl ProjectPage {
             && self.screen.pool_picker.is_none()
             && self.screen.edit.is_none()
             && self.screen.confirm_delete.is_none()
+            && self.screen.general.is_none()
+            && !self.screen.confirm_remove
     }
 
     fn plugins_reply(&mut self, reply: PluginsReply, ctx: &mut Ctx) -> Flow {
@@ -645,7 +664,10 @@ impl Screen for ProjectPage {
     }
 
     fn typing(&self) -> bool {
-        self.screen.edit.is_some() || (self.screen.tab == Tab::Conversation && self.screen.typing)
+        self.screen.edit.is_some()
+            || self.screen.adding.is_some()
+            || self.screen.general.is_some()
+            || (self.screen.tab == Tab::Conversation && self.screen.typing)
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -701,6 +723,9 @@ impl Screen for ProjectPage {
             }
             _ => return Flow::Handled,
         }
+        if self.screen.removed {
+            return Flow::Back;
+        }
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
@@ -739,12 +764,16 @@ impl Screen for ProjectPage {
     }
 
     fn draft(&self) -> bool {
-        self.screen.edit.is_some() || !self.screen.input.value().trim().is_empty()
+        self.screen.edit.is_some()
+            || self.screen.general.is_some()
+            || !self.screen.input.value().trim().is_empty()
     }
 
     fn loss(&self) -> &'static str {
         if self.screen.edit.is_some() {
             "Your memory edit will be lost."
+        } else if self.screen.general.is_some() {
+            "Your project changes will be lost."
         } else {
             "Your unsent message will be lost."
         }

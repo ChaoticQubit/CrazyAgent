@@ -1,6 +1,6 @@
 use super::{
-    AGENT_GIT_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
-    agent_env_refused, clean_absolute, invalid,
+    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
+    clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -379,33 +379,24 @@ impl Sandbox for LinuxSandbox {
             }
             LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
         };
+        let env = agent_env(
+            &[
+                ("HOME", self.sandbox.agent_home().as_os_str()),
+                ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
+                ("PATH", OsStr::new(AGENT_PATH)),
+                ("LANG", OsStr::new("C")),
+                ("LC_ALL", OsStr::new("C")),
+            ],
+            harness.get_envs(),
+        )?;
         command
             .arg("--")
             .arg(program)
             .args(harness.get_args())
             .env_clear()
-            .env("HOME", self.sandbox.agent_home())
-            .env("TMPDIR", self.sandbox.agent_tmp())
-            .env("PATH", AGENT_PATH)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .current_dir(cwd)
             .process_group(0);
-        for (key, value) in harness.get_envs() {
-            if agent_env_refused(key) {
-                return Err(invalid("agent environment holds an owner secret"));
-            }
-            if key == "HOME" || key == "TMPDIR" {
-                continue;
-            }
-            match value {
-                Some(value) => command.env(key, value),
-                None => command.env_remove(key),
-            };
-        }
-        for (name, value) in AGENT_GIT_ENV {
-            command.env(name, value);
-        }
         assert!(command.get_args().any(|arg| arg == "--"));
         Ok(command)
     }
@@ -420,11 +411,14 @@ impl Grants {
     fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
         let project = sandbox.project_root();
         let git = project.join(".git");
+        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         let protected = sandbox.protected_paths();
         let mut write = Vec::new();
-        writable_children(project, &git, &protected, &mut write)?;
-        if fs::symlink_metadata(&git).is_ok_and(|meta| meta.is_dir()) {
-            writable_children(&git, &git, &protected, &mut write)?;
+        writable_children(project, &[&git, &state], &protected, &mut write)?;
+        for folder in [&git, &state] {
+            if fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()) {
+                writable_children(folder, &[], &protected, &mut write)?;
+            }
         }
         write.push(sandbox.agent_home().to_path_buf());
         write.push(sandbox.agent_tmp().to_path_buf());
@@ -434,10 +428,11 @@ impl Grants {
         if read.len() + write.len() > GRANTS_MAX {
             return Err(invalid("project folder has too many entries to grant"));
         }
-        if write
-            .iter()
-            .any(|path| protected.iter().any(|item| path.starts_with(item)))
-        {
+        if write.iter().any(|path| {
+            protected
+                .iter()
+                .any(|item| path.starts_with(item) || item.starts_with(path))
+        }) {
             return Err(invalid("a writable root sits inside a protected path"));
         }
         Ok(Self { read, write })
@@ -446,7 +441,7 @@ impl Grants {
 
 fn writable_children(
     dir: &Path,
-    git: &Path,
+    skip: &[&PathBuf],
     protected: &[PathBuf],
     write: &mut Vec<PathBuf>,
 ) -> Result<(), SandboxError> {
@@ -454,7 +449,7 @@ fn writable_children(
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
-        if kind.is_symlink() || path == git || protected.contains(&path) {
+        if kind.is_symlink() || skip.contains(&&path) || protected.contains(&path) {
             continue;
         }
         if kind.is_dir() || kind.is_file() {

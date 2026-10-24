@@ -10,7 +10,7 @@ use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::Arrival;
+use super::seam::{Arrival, ProjectCard};
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::Role;
 use super::widgets::{TextField, buttons};
@@ -258,9 +258,11 @@ impl Shell {
     }
 
     fn running(&self) -> usize {
-        self.ctx.store.projects.ready().map_or(0, |cards| {
-            cards.iter().map(|card| card.research.running).sum()
-        })
+        self.ctx
+            .store
+            .projects
+            .ready()
+            .map_or(0, |cards| cards.iter().map(ProjectCard::working).sum())
     }
 
     fn loss(&self) -> Option<&'static str> {
@@ -785,7 +787,7 @@ mod tests {
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
     use crate::tui::glyphs::UNICODE;
-    use crate::tui::seam::{ProjectCard, ResearchCounts};
+    use crate::tui::seam::{Activity, ResearchCounts};
     use crate::tui::theme::{Appearance, Colors, Depth};
 
     fn ctx() -> Ctx {
@@ -812,6 +814,7 @@ mod tests {
                 ..Default::default()
             },
             created_ms: None,
+            activity: Default::default(),
         }
     }
 
@@ -962,6 +965,20 @@ mod tests {
         shell.key(Key::Ctrl('q'));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a second Ctrl-Q quits");
+
+        let mut ctx = self::ctx();
+        let mut team = card("Ledgerline", 0);
+        team.activity = Activity {
+            working: Some(2),
+            suggestions: 0,
+        };
+        ctx.store.projects = Load::Ready(vec![team, card("Tidepool", 1)]);
+        let mut shell = at(Place::Home, ctx);
+        shell.key(Key::Ctrl('q'));
+        match &shell.overlay {
+            Some(Overlay::Quit(ask)) => assert_eq!(ask.running, 3),
+            _ => panic!("team agents at work count as running"),
+        }
     }
 
     #[test]
