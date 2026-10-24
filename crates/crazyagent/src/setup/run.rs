@@ -1,155 +1,148 @@
 use super::{InstallError, Version};
-use sha2::{Digest, Sha256};
-use std::ffi::OsString;
 use std::io::Read;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
+const OUTPUT_BYTES_MAX: u64 = 4096;
 const POLL: Duration = Duration::from_millis(50);
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Runs one program with only the given environment, no input and a time bound, then
-/// stops its whole process group. Inputs: the absolute program, its arguments, the
-/// environment pairs, the working folder and the bound. Output: whether it exited with
-/// success and at most `OUTPUT_BYTES_MAX` bytes of its standard output, or `setup_timeout`.
-pub fn run(
-    program: &Path,
-    args: &[OsString],
-    env: &[(&str, OsString)],
-    cwd: &Path,
+/// Runs one setup command with no input and a time limit. Input: the command, the limit,
+/// and whether to keep its standard output, which is only for short version reports;
+/// install output goes nowhere, so it can never fill a pipe. Output: up to 4 KiB of
+/// standard output, `setup_timeout` after killing it at the limit, or
+/// `setup_install_failed` when it cannot start or exits with a failure.
+pub fn run_bounded(
+    command: &mut Command,
     limit: Duration,
-) -> Result<(bool, Vec<u8>), InstallError> {
-    assert!(program.is_absolute());
-    let mut command = Command::new(program);
+    capture: bool,
+) -> Result<Vec<u8>, InstallError> {
     command
-        .args(args)
-        .env_clear()
-        .current_dir(cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0);
-    for (name, value) in env {
-        command.env(name, value);
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command
         .spawn()
         .map_err(|_| InstallError("setup_install_failed"))?;
-    let pid = child.id();
-    let stdout = child.stdout.take();
-    let reader = std::thread::Builder::new()
-        .name("crazyagent-setup-output".into())
-        .spawn(move || {
-            let mut kept = Vec::new();
-            if let Some(stdout) = stdout {
-                let mut limited = stdout.take(OUTPUT_BYTES_MAX as u64);
-                let _ = limited.read_to_end(&mut kept);
-                let _ = std::io::copy(&mut limited.into_inner(), &mut std::io::sink());
-            }
-            kept
-        });
     let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() >= deadline => break Err(InstallError("setup_timeout")),
-            Ok(None) => std::thread::sleep(POLL),
-            Err(_) => break Err(InstallError("setup_install_failed")),
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(InstallError(if outcome.is_ok() {
+                    "setup_timeout"
+                } else {
+                    "setup_install_failed"
+                }));
+            }
         }
     };
-    stop(pid);
-    let _ = child.kill();
-    let _ = child.wait();
-    let output = match reader {
-        Ok(reader) => reader.join().unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    assert!(output.len() <= OUTPUT_BYTES_MAX);
-    Ok((status?.success(), output))
-}
-
-fn stop(pid: u32) {
-    if let Some(pid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        assert!(pid.as_raw_nonzero().get() > 1);
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    if !status.success() {
+        return Err(InstallError("setup_install_failed"));
     }
+    let mut output = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        stdout
+            .take(OUTPUT_BYTES_MAX)
+            .read_to_end(&mut output)
+            .map_err(|_| InstallError("setup_version_unreadable"))?;
+    }
+    assert!(output.len() as u64 <= OUTPUT_BYTES_MAX);
+    Ok(output)
 }
 
-/// Reads the version a program printed for `--version` or `-V`, such as `uv 0.9.5 (...)`.
-/// Input: the program's output. Output: the second word of its first line as a version.
-pub fn version_from(output: &[u8]) -> Result<Version, InstallError> {
-    let text = std::str::from_utf8(output).map_err(|_| InstallError("setup_version_unreadable"))?;
-    let line = text.lines().next().unwrap_or_default();
-    let word = line
+/// Reads a tool's version from its version report, such as `tmux 3.4` or
+/// `uv 0.9.5 (0a1b2c3 2025-10-01)`: the first word holding a digit, without a leading `v`.
+/// Output: the version, or `setup_version_unreadable`.
+pub fn reported_version(output: &[u8]) -> Result<Version, InstallError> {
+    let unreadable = InstallError("setup_version_unreadable");
+    let text = std::str::from_utf8(output).map_err(|_| unreadable)?;
+    let word = text
         .split_whitespace()
-        .nth(1)
-        .ok_or(InstallError("setup_version_unreadable"))?;
+        .find(|word| word.bytes().any(|b| b.is_ascii_digit()))
+        .ok_or(unreadable)?;
+    let word = word
+        .strip_prefix('v')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(word);
     Version::parse(word)
 }
 
-/// Returns the lowercase hex SHA-256 of one file, read as a stream.
-/// Input: the file path. Output: 64 hex characters, or `setup_store_unavailable`.
-pub fn file_sha256(path: &Path) -> Result<String, InstallError> {
-    let mut file =
-        std::fs::File::open(path).map_err(|_| InstallError("setup_store_unavailable"))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|_| InstallError("setup_store_unavailable"))?;
-    let text: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    assert_eq!(text.len(), 64);
-    Ok(text)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Tells whether a text is exactly 64 lowercase hex characters, the shape of a SHA-256.
-pub fn is_sha256(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// Creates one folder owned by this user with mode 0700, or checks an existing one.
-/// Input: the folder path. Output: `setup_store_unavailable` when it can't be created or
-/// is a link, another user's folder or open to others.
-pub fn private_folder(path: &Path) -> Result<(), InstallError> {
-    let unavailable = InstallError("setup_store_unavailable");
-    match std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-    {
-        Ok(()) => {}
-        Err(_) => return Err(unavailable),
+    #[test]
+    fn version_reports_from_tmux_uv_and_graphify_read_the_same_way() {
+        for (report, version) in [
+            ("tmux 3.4\n", "3.4"),
+            ("tmux next-3.5\n", "next-3.5"),
+            ("uv 0.9.5 (0a1b2c3 2025-10-01)\n", "0.9.5"),
+            ("graphify v0.9.9\n", "0.9.9"),
+            ("0.9.9", "0.9.9"),
+        ] {
+            assert_eq!(
+                reported_version(report.as_bytes()).unwrap().as_str(),
+                version
+            );
+        }
+        for report in ["", "tmux\n", "tmux 3.4;rm\n"] {
+            assert_eq!(
+                reported_version(report.as_bytes()),
+                Err(InstallError("setup_version_unreadable"))
+            );
+        }
+        assert_eq!(
+            reported_version(&[0xff, b'3']),
+            Err(InstallError("setup_version_unreadable"))
+        );
     }
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| unavailable)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(unavailable);
-    }
-    Ok(())
-}
 
-/// Makes a fresh private staging folder inside a parent, named with a random suffix.
-/// Inputs: the parent folder and a name prefix. Output: the new folder path.
-pub fn staging_folder(parent: &Path, prefix: &str) -> Result<PathBuf, InstallError> {
-    private_folder(parent)?;
-    let random =
-        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
-    let path = parent.join(format!(".{prefix}-{}", &random[..24]));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&path)
-        .map_err(|_| InstallError("setup_store_unavailable"))?;
-    Ok(path)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_setup_command_keeps_its_report_fails_plainly_and_stops_at_its_limit() {
+        let limit = Duration::from_secs(10);
+        let report =
+            run_bounded(Command::new("/bin/echo").args(["tmux", "3.4"]), limit, true).unwrap();
+        assert_eq!(report, b"tmux 3.4\n");
+        assert_eq!(
+            run_bounded(Command::new("/bin/echo").arg("quiet"), limit, false),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            run_bounded(&mut Command::new("/bin/false"), limit, false),
+            Err(InstallError("setup_install_failed"))
+        );
+        assert_eq!(
+            run_bounded(
+                &mut Command::new("/nonexistent/crazyagent-setup"),
+                limit,
+                false
+            ),
+            Err(InstallError("setup_install_failed"))
+        );
+        let started = Instant::now();
+        assert_eq!(
+            run_bounded(
+                Command::new("/bin/sleep").arg("30"),
+                Duration::from_millis(200),
+                false
+            ),
+            Err(InstallError("setup_timeout"))
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }

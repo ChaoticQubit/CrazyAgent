@@ -1,4 +1,4 @@
-use super::run::{file_sha256, is_sha256, private_folder, run, staging_folder, version_from};
+use super::process::{file_sha256, is_sha256, private_folder, run, staging_folder, version_from};
 use super::{Dependency, InstallError, Installer, Pin, Version};
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;

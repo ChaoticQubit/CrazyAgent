@@ -2,6 +2,9 @@ import { useEffect } from "react";
 import { SessionContext, useSession, type Session } from "./state";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
+import { AddFolder } from "./screens/intake/add-folder";
+import { CloneFromGitHub } from "./screens/intake/clone";
+import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
@@ -31,6 +34,8 @@ function Screen({ route, session }: { route: Route; session: Session }) {
   switch (route.name) {
     case "settings": return <Settings tab={route.tab} action={route.action} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
+    case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
+    case "onboarding": return <OnboardingReview id={route.id} />;
     case "project": return <ProjectPage id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
     default: return <Home />;
   }
@@ -45,8 +50,8 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
-      <Welcome onSaved={() => { void session.refreshProfile().then(() => navigate({ name: "home" }, true)); }}
-        onSkip={() => navigate({ name: "home" }, true)} />
+      <Welcome onSaved={(_, next) => { void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
+        onSkip={(next) => navigate(next ?? { name: "home" }, true)} />
     </SessionContext.Provider>;
   }
   const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => ({ id: project.id, name: project.name })) : undefined;

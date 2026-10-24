@@ -12,6 +12,7 @@ use std::time::Duration;
 mod account_profile;
 mod accounts;
 mod agents;
+mod intake;
 mod memory;
 mod owner_setup;
 mod plugins;

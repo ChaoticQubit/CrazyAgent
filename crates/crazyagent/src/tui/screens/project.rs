@@ -560,7 +560,9 @@ impl ProjectScreen {
                 ..
             } => {
                 self.jobs_read_ms = None;
-                self.log = None;
+                if applied {
+                    self.log = None;
+                }
             }
             SetupQuery::Change { .. } | SetupQuery::ReviewMemory { .. } => {
                 self.memories_read_ms = None;

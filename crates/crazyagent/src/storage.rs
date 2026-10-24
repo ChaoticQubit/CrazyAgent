@@ -2008,6 +2008,12 @@ fn owner_read(
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
         },
+        OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
+            graph: Box::new(crate::team::graph(&crate::team::status(
+                &tx,
+                &stored_setup(&tx, project_id)?,
+            )?)),
+        },
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,

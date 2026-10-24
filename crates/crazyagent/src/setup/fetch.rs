@@ -1,6 +1,6 @@
 use super::InstallError;
 use super::pack::{PackManifestEntry, PackSource};
-use super::run::{private_folder, run, staging_folder};
+use super::process::{private_folder, run, staging_folder};
 use crate::plugins::ServerSpec;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;

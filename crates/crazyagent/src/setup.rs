@@ -1,9 +1,18 @@
+#[cfg(unix)]
 pub mod bundled;
+#[cfg(unix)]
 pub mod fetch;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod pack;
-pub(crate) mod run;
+#[cfg(unix)]
+pub(crate) mod process;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod run;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use serde::{Deserialize, Serialize};
 

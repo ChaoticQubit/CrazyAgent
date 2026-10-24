@@ -1,5 +1,5 @@
 use super::InstallError;
-use super::run::{private_folder, staging_folder};
+use super::process::{private_folder, staging_folder};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;

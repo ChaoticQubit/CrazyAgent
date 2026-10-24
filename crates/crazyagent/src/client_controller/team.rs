@@ -1,6 +1,8 @@
 use super::*;
+use crate::engine::owner::TerminalSession;
 use crate::protocol::ProjectId;
-use crate::team::{TeamAction, TeamStatus};
+use crate::team::{TeamAction, TeamGraph, TeamStatus};
+use crate::terminal::AgentId;
 
 impl OwnerController {
     /// Reads a project's team: harness plan, agents, tasks and the master conversation.
@@ -11,6 +13,30 @@ impl OwnerController {
             OwnerData::TeamStatus { status } => Ok(*status),
             _ => Err(EngineError("controller_read_response".into())),
         }
+    }
+
+    /// Reads a project's team as a graph: the master, harness groups, agents and task edges.
+    /// Takes the project id.
+    /// Returns the graph, or the engine's plain rejection code.
+    pub async fn team_graph(&mut self, project_id: ProjectId) -> Result<TeamGraph, EngineError> {
+        match self.read(OwnerRead::TeamGraph { project_id }).await?.data {
+            OwnerData::TeamGraph { graph } => Ok(*graph),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Opens a live view of one agent's terminal, such as a graph node's `terminal`.
+    /// Takes the terminal name.
+    /// Returns the session with the screen, live output and controls, or a plain code.
+    pub async fn terminal_attach(
+        &mut self,
+        agent: AgentId,
+    ) -> Result<TerminalSession, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .terminal_attach(agent)
+            .await
     }
 
     /// Sends one owner team action: a message to the master, a task handed straight

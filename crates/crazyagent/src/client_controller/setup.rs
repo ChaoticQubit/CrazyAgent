@@ -1,34 +1,78 @@
 use super::*;
-use crate::engine::owner::OwnerClient;
 use crate::setup::SetupStatus;
 
 impl OwnerController {
-    fn setup_client(&self) -> Result<&OwnerClient, EngineError> {
-        self.client
-            .as_ref()
-            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    /// Reads what setup shows: each tool CrazyAgent needs, each default-pack entry
+    /// and whether a setup run is going on.
+    /// Takes nothing. Returns the status.
+    pub async fn setup_status(&mut self) -> Result<SetupStatus, EngineError> {
+        match self.read(OwnerRead::SetupStatus).await?.data {
+            OwnerData::SetupStatus { status } => Ok(status),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
     }
 
-    /// Reads the setup screen: each dependency with its state, each default-pack entry
-    /// with its source, license and state, and whether setup is running.
-    pub async fn setup_status(&self) -> Result<SetupStatus, EngineError> {
-        self.setup_client()?.setup_status().await
+    /// Installs the missing tools and the ticked default-pack entries; the ticked
+    /// MCP servers count as approved by the owner.
+    /// Takes the ticked entry ids and the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code.
+    pub async fn run_setup(
+        &mut self,
+        pack: Vec<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::RunSetup { pack }, generation)?;
+        self.send_pending().await
     }
 
-    /// Starts setup with the ticked default-pack entries; continuing past the ticked MCP
-    /// servers records the owner's approval of them. Input: the ticked entry ids.
-    /// Output: the status as the run starts.
-    pub async fn run_setup(&self, pack: Vec<String>) -> Result<SetupStatus, EngineError> {
-        self.setup_client()?.run_setup(pack).await
+    /// Turns one installed default-pack entry on or off for every project.
+    /// Takes the entry id, on or off and the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code.
+    pub async fn set_pack_entry(
+        &mut self,
+        id: String,
+        on: bool,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::SetPackEntry { id, on }, generation)?;
+        self.send_pending().await
     }
 
-    /// Switches one installed default-pack entry on or off. Inputs: its id and the state.
-    pub async fn set_pack_entry(&self, id: String, on: bool) -> Result<SetupStatus, EngineError> {
-        self.setup_client()?.set_pack_entry(id, on).await
+    /// Removes one installed default-pack entry; an always-on entry is refused.
+    /// Takes the entry id and the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code.
+    pub async fn remove_pack_entry(
+        &mut self,
+        id: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::RemovePackEntry { id }, generation)?;
+        self.send_pending().await
     }
 
-    /// Removes one installed default-pack entry and everything it added. Input: its id.
-    pub async fn remove_pack_entry(&self, id: String) -> Result<SetupStatus, EngineError> {
-        self.setup_client()?.remove_pack_entry(id).await
+    /// Moves every project folder from the current projects home into another
+    /// folder and makes that folder the home.
+    /// Takes the absolute folder path and the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code.
+    pub async fn move_projects_home(
+        &mut self,
+        path: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.projects_home().await?;
+        self.begin_mutation(OwnerMutation::MoveProjectsHome { path }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Signs CrazyAgent out of GitHub and deletes the token it kept.
+    /// Takes the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code.
+    pub async fn github_sign_out(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
+        self.github_status().await?;
+        self.begin_mutation(OwnerMutation::GitHubSignOut, generation)?;
+        self.send_pending().await
     }
 }
