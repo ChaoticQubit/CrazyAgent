@@ -10,6 +10,13 @@ pub const LINUXBREW: &str = "/home/linuxbrew/.linuxbrew/bin/brew";
 pub const APT_GET: &str = "/usr/bin/apt-get";
 /// The fixed path of dnf on Fedora and RHEL.
 pub const DNF: &str = "/usr/bin/dnf";
+/// The folders searched for uv and Graphify after `setup/bin`, `~/.local/bin` and `PATH`.
+pub const SYSTEM_PATH: [&str; 4] = [
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+];
 
 const TMUX_DIRS: &[&str] = &[
     "/usr/bin",
@@ -129,6 +136,14 @@ impl Installer for LinuxInstaller {
         }
     }
 
+    fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
+        self.common.install_tool(package, version)
+    }
+
+    fn program(&self, name: &str) -> Option<PathBuf> {
+        self.common.program(name)
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         if dep != Dependency::Tmux {
             return self.common.install(dep, pin);
@@ -151,6 +166,40 @@ impl Installer for LinuxInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::pinned::PinnedInstaller;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn uv_graphify_tools_and_programs_go_through_the_shared_installer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let shared = PinnedInstaller::with_paths(root.path(), vec![]);
+        let installer = LinuxInstaller::new(Box::new(shared));
+        assert_eq!(installer.find(Dependency::Uv), Ok(None));
+        let uv = root.path().join("setup/bin/uv");
+        crate::setup::process::private_folder(uv.parent().unwrap()).unwrap();
+        std::fs::write(&uv, "#!/bin/sh\necho \"uv 0.13.5 (fixture)\"\n").unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            installer.find(Dependency::Uv),
+            Ok(Some(Version::parse("0.13.5").unwrap()))
+        );
+        assert_eq!(installer.program("uv"), Some(uv.clone()));
+        assert_eq!(installer.program("../uv"), None);
+        assert_eq!(installer.install_tool("graphifyy", "0.9.9"), Ok(()));
+        assert!(root.path().join("setup/uv/tools").is_dir());
+        assert_eq!(
+            installer.install_tool("Graph ify", "0.9.9"),
+            Err(InstallError("setup_pin_invalid"))
+        );
+        let brew = Pin::Homebrew {
+            formula: "uv".into(),
+        };
+        assert_eq!(
+            installer.install(Dependency::Uv, &brew),
+            Err(InstallError("setup_pin_invalid"))
+        );
+    }
 
     #[test]
     fn tmux_installs_through_homebrew_or_a_root_package_manager_and_never_sudo() {
