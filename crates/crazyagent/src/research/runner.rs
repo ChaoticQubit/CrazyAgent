@@ -1068,18 +1068,24 @@ impl ResearchRunner {
         })
     }
 
-    /// Refuses a read-only agent run, which needs the Seatbelt command Windows does not
-    /// have; Windows agents wait for the AppContainer boundary. Takes the run and `stop`,
-    /// both unused. Returns the sandbox's `Unavailable` refusal.
+    /// Asks the Windows boundary for a read-only run's network reach before any agent
+    /// state is made. A read-only run always limits the agent to its model endpoint, which
+    /// the AppContainer boundary refuses until its firewall rule exists rather than widen it.
+    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, or the boundary's
+    /// `Unavailable` refusal.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
-        _run: &ReadOnlyRun<'_>,
+        run: &ReadOnlyRun<'_>,
         _stop: &dyn Fn() -> bool,
     ) -> Result<ReadOnlyEnding, RunError> {
-        Err(RunError::Sandbox(SandboxError::Unavailable(
-            crate::sandbox::windows::APPCONTAINER_MISSING.into(),
-        )))
+        if !valid_run_name(run.name) || run.wall_time.is_zero() {
+            return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
+        let refusal = crate::sandbox::windows::capabilities(&network)
+            .expect_err("an endpoint limit needs the AppContainer firewall rule");
+        Err(RunError::Sandbox(refusal))
     }
 }
 
