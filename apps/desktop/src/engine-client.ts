@@ -723,6 +723,141 @@ export function researchLog(id: string, job: number): Promise<{ lines: string[] 
   return invoke<{ lines: string[] }>("desktop_research_log", { id, job });
 }
 
+export interface ProjectsHome {
+  path: string | null;
+  watching: boolean;
+}
+
+export type FoundProjectState = "found" | "missing" | "onboarding" | "ready";
+
+export interface FoundProject {
+  name: string;
+  path: string;
+  git: boolean;
+  known: boolean;
+  state: FoundProjectState;
+  project_id?: string | null;
+}
+
+export interface FolderSize {
+  bytes: number;
+  github?: string | null;
+}
+
+export type AddFolderMode = "move" | "copy";
+
+export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+
+export interface OnboardingView {
+  graph: OnboardingStep;
+  mapping: OnboardingStep;
+  draft: ProjectSetup;
+  missing: string[];
+  name?: string;
+  overview?: string | null;
+}
+
+export interface OnboardingStarted extends IntentReceipt {
+  project_id: string | null;
+}
+
+export interface GitHubDeviceCode {
+  user_code: string;
+  verification_uri: string;
+  expires_s: number;
+}
+
+export type GitHubMethod = "device" | "token" | "cli" | "none";
+
+export interface GitHubStatus {
+  signed_in: boolean;
+  login: string | null;
+  method: GitHubMethod;
+  waiting: boolean;
+  problem: string | null;
+}
+
+export interface GitHubRepo {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  size_kb: number;
+}
+
+export interface GitHubRepoPage {
+  repos: GitHubRepo[];
+  next: number | null;
+}
+
+export interface CloneReceipt {
+  full_name: string;
+  path: string;
+}
+
+/** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
+ * address; the engine waits for approval in the background, so poll githubStatus. */
+export function githubSignIn(): Promise<GitHubDeviceCode> {
+  return invoke<GitHubDeviceCode>("desktop_github_sign_in");
+}
+
+/** Saves a pasted GitHub token. It goes to the engine once and is never kept by the page.
+ * Output: the status after the engine checked the token with GitHub. */
+export function githubToken(token: string): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_token", { token });
+}
+
+/** Reuses the token of a signed-in GitHub CLI on this Mac. Output: the new status. */
+export function githubUseCli(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_use_cli");
+}
+
+/** Reads whether CrazyAgent is signed in to GitHub, as whom, how, and any plain problem.
+ * Output: the status. */
+export function githubStatus(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_status");
+}
+
+/** Lists one page (from 1) of the repositories the signed-in owner can clone. */
+export function githubRepos(page = 1): Promise<GitHubRepoPage> {
+  return invoke<GitHubRepoPage>("desktop_github_repos", { page });
+}
+
+/** Clones one repository, as "owner/name", into the projects home. Output: where it landed. */
+export function cloneRepo(fullName: string): Promise<CloneReceipt> {
+  return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
+}
+
+export type DependencyName = "tmux" | "uv" | "graphify";
+
+export type DependencyState =
+  | { kind: "found"; version: string }
+  | { kind: "installing" }
+  | { kind: "installed"; version: string }
+  | { kind: "failed"; reason: string }
+  | { kind: "missing" };
+
+export interface Dependency {
+  name: DependencyName;
+  state: DependencyState;
+}
+
+export type PackEntryKind = "skill" | "mcp_server";
+
+export interface PackEntry {
+  id: string;
+  kind: PackEntryKind;
+  source: string;
+  license: string;
+  on_by_default: boolean;
+  state: DependencyState;
+  name?: string;
+}
+
+export interface SetupStatus {
+  dependencies: Dependency[];
+  pack: PackEntry[];
+}
+
 export function openProject(id: string): Promise<ProjectDetail> {
   return invoke<ProjectDetail>("desktop_open_project", { id });
 }
