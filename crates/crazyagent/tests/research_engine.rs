@@ -5,7 +5,9 @@ mod research_support;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
-use research_support::{claude, codex, hanging_endpoint, processes_with};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::{SOCKET, installed};
+use research_support::{claude, codex, counted_hanging_endpoint, processes_with};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -13,12 +15,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:7b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 const ENGINE_STOP_WAIT: Duration = Duration::from_secs(30);
+const AGENT_END_WAIT: Duration = Duration::from_secs(10);
 const MODEL: &str = "qwen2.5:7b";
 const OLLAMA: &str = "127.0.0.1:11434";
 const OLLAMA_TIME: Duration = Duration::from_secs(10);
@@ -86,6 +90,27 @@ fn create_cafe(runtime: &Path) {
             )
             .await;
         });
+}
+
+/// The engine's private tmux server. Agent sessions outlive the engine, so dropping
+/// this ends the server and every pane left in it, also when the test fails.
+struct Server {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 struct Engine {
@@ -233,6 +258,10 @@ fn runtime(name: &str, catalog: &str) -> PathBuf {
 fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
     require_model();
     let runtime = runtime("q", CATALOG);
+    let server = installed(&runtime).map(|tmux| Server {
+        tmux,
+        socket: runtime.join(FOLDER).join(SOCKET),
+    });
     let engine = Engine::start(&runtime);
     let projects = runtime.join("projects");
     let research = runtime.join("research");
@@ -324,6 +353,7 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
         Some("context/research/front_end_design.md")
     );
     assert!(state.join("worktrees").is_dir());
+    drop(server);
     fs::remove_dir_all(&runtime).unwrap();
     fs::remove_dir_all(home(&runtime)).unwrap();
 }
@@ -331,13 +361,17 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
 #[test]
 fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     const MID_RUN: &str = "the test fails while the engine's research agent runs";
-    let (port, _endpoint) = hanging_endpoint();
+    let (port, _endpoint, requests) = counted_hanging_endpoint();
     let catalog = CATALOG.replace(
         "http://127.0.0.1:11434/v1",
         &format!("http://127.0.0.1:{port}/v1"),
     );
     assert_ne!(catalog, CATALOG);
     let runtime = runtime("p", &catalog);
+    let server = installed(&runtime).map(|tmux| Server {
+        tmux,
+        socket: runtime.join(FOLDER).join(SOCKET),
+    });
     let marker = home(&runtime)
         .join("project-cafe")
         .join(".crazyagent")
@@ -351,8 +385,11 @@ fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
         jobs.enqueue("project-cafe", "market_research", "codex", false)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
-        while agents.is_empty() {
-            assert!(Instant::now() < deadline, "no research agent started");
+        while requests.load(Ordering::SeqCst) == 0 || agents.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "no research agent asked its model"
+            );
             std::thread::sleep(Duration::from_millis(200));
             agents = processes_with(&marker);
         }
@@ -362,6 +399,57 @@ fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     assert_eq!(payload.downcast_ref::<&str>(), Some(&MID_RUN));
     assert!(!agents.is_empty());
     assert_eq!(processes_with(&marker), Vec::<u32>::new());
+    drop(server);
+    fs::remove_dir_all(&runtime).unwrap();
+    fs::remove_dir_all(home(&runtime)).unwrap();
+}
+
+#[test]
+fn killing_the_engine_ends_its_research_agents() {
+    let (port, _endpoint, requests) = counted_hanging_endpoint();
+    let catalog = CATALOG.replace(
+        "http://127.0.0.1:11434/v1",
+        &format!("http://127.0.0.1:{port}/v1"),
+    );
+    assert_ne!(catalog, CATALOG);
+    let runtime = runtime("k", &catalog);
+    let server = installed(&runtime).map(|tmux| Server {
+        tmux,
+        socket: runtime.join(FOLDER).join(SOCKET),
+    });
+    let marker = home(&runtime)
+        .join("project-cafe")
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("research-market_research-");
+    let mut engine = Engine::start(&runtime);
+    create_cafe(&runtime);
+    let jobs = ResearchJobs::open(&runtime.join("engine.db")).unwrap();
+    jobs.enqueue("project-cafe", "market_research", "codex", false)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while requests.load(Ordering::SeqCst) == 0 || processes_with(&marker).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "no research agent asked its model"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    engine.child.kill().unwrap();
+    engine.child.wait().unwrap();
+    let deadline = Instant::now() + AGENT_END_WAIT;
+    let mut left = processes_with(&marker);
+    while !left.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        left = processes_with(&marker);
+    }
+    for pid in &left {
+        let _ = Command::new("/bin/kill")
+            .args(["-s", "KILL", &pid.to_string()])
+            .status();
+    }
+    drop(server);
+    assert_eq!(left, Vec::<u32>::new(), "agents outlived the killed engine");
     fs::remove_dir_all(&runtime).unwrap();
     fs::remove_dir_all(home(&runtime)).unwrap();
 }

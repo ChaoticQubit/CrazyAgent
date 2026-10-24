@@ -11,6 +11,8 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -219,19 +221,31 @@ pub fn managed_project(variable: &str, harness: &str) -> (PathBuf, String) {
 /// request once and never answers, so an agent pointed at it keeps running
 /// until it is stopped. Returns the port and the serving thread.
 pub fn hanging_endpoint() -> (u16, std::thread::JoinHandle<()>) {
+    let (port, handle, _requests) = counted_hanging_endpoint();
+    (port, handle)
+}
+
+/// A [`hanging_endpoint`] that also counts the connections that sent it a
+/// request, so a test can wait until an agent is mid-run, waiting on its model.
+/// Returns the port, the serving thread and the count.
+pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
     let handle = std::thread::spawn(move || {
         let mut held = Vec::new();
         for stream in listener.incoming().take(64) {
             let Ok(mut stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
             let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
+            if stream.read(&mut buffer).is_ok_and(|read| read > 0) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
             held.push(stream);
         }
     });
-    (port, handle)
+    (port, handle, requests)
 }
 
 /// The ids of the live processes whose command line contains `marker`, such
