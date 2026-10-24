@@ -9,11 +9,8 @@
   Pool      No pool yet   Enter Pick a pool
   Team      Codex leads. Codex x3. Tools on.
 
-  Skills                                                                              From Settings, plus this project
-    Not ready yet. Project skills come with the plugins and skills update.
-
-  MCP servers
-    Not ready yet. Project MCP servers come with the same update.
+  Skills  0                                                                           From Settings, plus this project
+    Loading...
 
 
 
@@ -33,4 +30,7 @@
 
 
 
- Enter Change pool   o Open folder   Shift-←→ Tabs   Esc Home                                                    ? Help
+
+
+
+ Enter Pick a pool   ↑↓ Move   Space On or off here   a Add skill   m Add MCP server   o Open folder             ? Help
