@@ -6,8 +6,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod graph;
 pub mod runtime;
 pub mod tool;
+
+pub use graph::{EdgeState, GraphEdge, GraphNode, NodeKind, TeamGraph};
 
 pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
