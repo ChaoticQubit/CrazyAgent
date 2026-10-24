@@ -191,7 +191,7 @@ fn spawn_suspended(
             return Err(last_error());
         }
     }
-    let null = std::ptr::null_mut();
+    let null: HANDLE = std::ptr::null_mut();
     let startup = STARTUPINFOEXW {
         StartupInfo: STARTUPINFOW {
             cb: size_of::<STARTUPINFOEXW>() as u32,
