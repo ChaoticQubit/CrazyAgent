@@ -1,7 +1,19 @@
 use super::{BridgeError, failure};
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 
+#[cfg(target_os = "macos")]
 const OSASCRIPT: &str = "/usr/bin/osascript";
+#[cfg(target_os = "linux")]
+const LINUX_BIN_DIRS: &[&str] = &["/usr/bin", "/usr/local/bin", "/run/current-system/sw/bin"];
+#[cfg(target_os = "linux")]
+const LINUX_CANCELED: i32 = 1;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(target_os = "linux")]
+const FOLDER_TITLE: &str = "Choose a skill folder. It holds a SKILL.md file.";
+#[cfg(target_os = "linux")]
+const DOCUMENTS_TITLE: &str = "Choose documents to add";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
 const CANCELED: &str = "(-128)";
@@ -17,6 +29,13 @@ repeat with chosen in picked
 set reply to reply & POSIX path of chosen & linefeed
 end repeat
 return reply";
+
+/// The Windows folder chooser, a fixed PowerShell script that prints the chosen folder.
+/// Nothing the owner or the web view sends is ever placed into it.
+pub const WINDOWS_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a skill folder. It holds a SKILL.md file.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
+/// The Windows document chooser, a fixed PowerShell script that prints one chosen path per line.
+pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose documents to add'; $d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { foreach ($f in $d.FileNames) { [Console]::Out.Write($f + [char]10) } }";
 
 /// What the owner did in a native chooser: closed it, or chose absolute paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,14 +62,15 @@ pub fn read_reply(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Pick, B
     let text = std::str::from_utf8(stdout).map_err(|_| failure("picker_failed"))?;
     let mut paths = Vec::new();
     for line in text.split('\n').filter(|line| !line.is_empty()) {
-        if !line.starts_with('/') || line.contains('\0') || paths.len() == PATHS_MAX {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if !Path::new(line).is_absolute() || line.contains('\0') || paths.len() == PATHS_MAX {
             return Err(failure("picker_failed"));
         }
-        let trimmed = line.trim_end_matches('/');
-        paths.push(if trimmed.is_empty() {
-            "/".to_owned()
-        } else {
+        let trimmed = line.trim_end_matches(std::path::is_separator);
+        paths.push(if Path::new(trimmed).is_absolute() {
             trimmed.to_owned()
+        } else {
+            line.to_owned()
         });
     }
     assert!(paths.len() <= PATHS_MAX);
@@ -61,14 +81,102 @@ pub fn read_reply(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Pick, B
     })
 }
 
-/// Shows one fixed macOS chooser and waits for the owner without blocking the async runtime.
-/// Input: one of the fixed scripts. Output: the owner's pick or `picker_failed`.
-pub async fn choose(script: &'static str) -> Result<Pick, BridgeError> {
+/// The command for one fixed chooser on this system: osascript on macOS, zenity or kdialog
+/// from a fixed folder on Linux, PowerShell with Windows Forms on Windows. Input: the folder
+/// or documents script. Output: the command, or `picker_unavailable` when this system has no
+/// chooser.
+pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
     assert!(script == FOLDER_SCRIPT || script == DOCUMENTS_SCRIPT);
-    let output =
-        tokio::task::spawn_blocking(move || Command::new(OSASCRIPT).arg("-e").arg(script).output())
-            .await
-            .map_err(|_| failure("picker_failed"))?
-            .map_err(|_| failure("picker_failed"))?;
+    let folder = script == FOLDER_SCRIPT;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = folder;
+        let mut command = Command::new(OSASCRIPT);
+        command.arg("-e").arg(script);
+        Ok(command)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let tool = |name: &str| {
+            LINUX_BIN_DIRS
+                .iter()
+                .map(|dir| Path::new(dir).join(name))
+                .find(|path| path.is_file())
+        };
+        if let Some(zenity) = tool("zenity") {
+            let mut command = Command::new(zenity);
+            command.arg("--file-selection");
+            if folder {
+                command
+                    .arg("--directory")
+                    .arg(format!("--title={FOLDER_TITLE}"));
+            } else {
+                command
+                    .args(["--multiple", "--separator=\n"])
+                    .arg(format!("--title={DOCUMENTS_TITLE}"));
+            }
+            return Ok(command);
+        }
+        if let Some(kdialog) = tool("kdialog") {
+            let mut command = Command::new(kdialog);
+            if folder {
+                command.args(["--getexistingdirectory", "."]);
+                command.args(["--title", FOLDER_TITLE]);
+            } else {
+                command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
+                command.args(["--title", DOCUMENTS_TITLE]);
+            }
+            return Ok(command);
+        }
+        Err(failure("picker_unavailable"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let root = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .filter(|root| root.is_absolute())
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let mut command = Command::new(
+            root.join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+        command
+            .args(["-NoProfile", "-NonInteractive", "-STA", "-Command"])
+            .arg(if folder {
+                WINDOWS_FOLDER_SCRIPT
+            } else {
+                WINDOWS_DOCUMENTS_SCRIPT
+            })
+            .creation_flags(CREATE_NO_WINDOW);
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = folder;
+        Err(failure("picker_unavailable"))
+    }
+}
+
+fn read_output(output: &Output) -> Result<Pick, BridgeError> {
+    #[cfg(target_os = "linux")]
+    if output.status.code() == Some(LINUX_CANCELED) && output.stdout.is_empty() {
+        return Ok(Pick::Canceled);
+    }
     read_reply(output.status.success(), &output.stdout, &output.stderr)
+}
+
+/// Shows one fixed chooser and waits for the owner without blocking the async runtime.
+/// Input: one of the fixed scripts. Output: the owner's pick, `picker_unavailable` or
+/// `picker_failed`.
+pub async fn choose(script: &'static str) -> Result<Pick, BridgeError> {
+    let mut command = chooser_command(script)?;
+    command.stdin(Stdio::null());
+    let output = tokio::task::spawn_blocking(move || command.output())
+        .await
+        .map_err(|_| failure("picker_failed"))?
+        .map_err(|_| failure("picker_failed"))?;
+    read_output(&output)
 }

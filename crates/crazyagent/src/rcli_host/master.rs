@@ -5,7 +5,7 @@ use super::{
     Control, ControlBody, Event, EventBody, EventSequence, HOST_PROTOCOL_VERSION, RawControl,
 };
 use crate::protocol::{ProtocolError, RequestId};
-use crate::sandbox::{InstalledSandbox, SANDBOX_EXEC};
+use crate::sandbox::InstalledSandbox;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::process::Stdio;
@@ -63,7 +63,7 @@ impl RcliMasterHost {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
         let process = HostProcess::spawn(command)?;
         let sequence = EventSequence::new(
             launch.binding.session_id.clone(),

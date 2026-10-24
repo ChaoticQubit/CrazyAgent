@@ -386,8 +386,18 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         Path::new(&args[3]),
                         executable,
                         claude.as_deref(),
+                        agent_terminal(&service),
                     )
-                    .map(Some),
+                    .and_then(|research| {
+                        crazyagent::onboarding::service::start_for_engine(
+                            runtime_dir,
+                            Path::new(&args[2]),
+                            Path::new(&args[3]),
+                            executable,
+                            claude.as_deref(),
+                        )
+                        .map(|onboarding| Some((research, onboarding)))
+                    }),
                 })
                 .and_then(|research| {
                     let mut executables = std::collections::BTreeMap::new();
@@ -407,8 +417,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     {
                         Ok(agents) => agents,
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             return Err(error.0);
                         }
@@ -420,11 +431,13 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         executables,
                         std::env::current_exe().ok().as_deref(),
                         agents,
+                        agent_terminal(&service),
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             Err(error)
                         }
@@ -435,8 +448,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     match writeln!(output, "ready").and_then(|()| output.flush()) {
                         Ok(()) => Ok((research, team)),
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             Err(error.to_string())
                         }
@@ -452,8 +466,12 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 }
             };
             let result = service.run(stopped).await.map_err(|e| e.to_string());
-            if let Some(research) = research {
-                let _ = tokio::task::spawn_blocking(move || research.stop()).await;
+            if let Some((research, onboarding)) = research {
+                let _ = tokio::task::spawn_blocking(move || {
+                    research.stop();
+                    onboarding.stop();
+                })
+                .await;
             }
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
@@ -465,6 +483,22 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         let _ = signal.await;
         result
     })
+}
+
+/// Opens the engine's terminal host for team and research agents when it can run now.
+/// Takes the engine service. Returns the host, or none after saying why on stderr; agents
+/// then run headless until the engine restarts with tmux available.
+fn agent_terminal(
+    service: &crazyagent::engine::bootstrap::EngineService,
+) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
+    let host = service.owner_runtime()?.terminal().ok()?;
+    match host.alive() {
+        Ok(_) => Some(host),
+        Err(problem) => {
+            eprintln!("agent terminals unavailable ({problem}); agents run headless");
+            None
+        }
+    }
 }
 
 fn execute(args: Vec<OsString>) -> Result<(), (u8, String)> {

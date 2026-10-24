@@ -1,9 +1,10 @@
+use super::client::terminal::Terminals;
 use super::client::{Connection, OwnerEvent};
 use super::ctx::{Ctx, Link};
 use super::glyphs::Glyphs;
 use super::keys::Key;
 use super::prefs;
-use super::seam::{Arrival, NOT_READY, Request, ShellEvent, ShellRequest, TerminalChunk};
+use super::seam::{Arrival, Request, ShellEvent, ShellRequest};
 use super::shell::Shell;
 use super::theme::{self, Appearance, Colors};
 use super::{TerminalGuard, TuiError, bounded_area};
@@ -21,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(100);
 const IDLE_WAKE: Duration = Duration::from_millis(500);
+const STREAM_WAKE: Duration = Duration::from_millis(16);
+const FRAMES_PER_PASS: usize = 64;
 const REFRESH: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(3);
 const PASTE_CHARS_MAX: usize = 100_000;
@@ -98,6 +101,7 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
         |name| std::env::var(name).ok(),
         socket.display().to_string(),
     )?;
+    let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
     restore_on_panic();
@@ -114,13 +118,20 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     .map_err(|error| TuiError(error.to_string()))?;
     let mut shell = Shell::new(ctx);
     shell.resize(width, height);
-    drive(&mut terminal, &mut shell, &mut connection, stopped)
+    drive(
+        &mut terminal,
+        &mut shell,
+        &mut connection,
+        &mut terminals,
+        stopped,
+    )
 }
 
 fn drive(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     shell: &mut Shell,
     connection: &mut Connection,
+    terminals: &mut Terminals,
     stopped: &AtomicBool,
 ) -> Result<(), TuiError> {
     let mut dirty = true;
@@ -138,6 +149,17 @@ fn drive(
             shell.arrive(Arrival::Wire(result.map_err(|error| error.to_string())));
             dirty = true;
         }
+        for _ in 0..FRAMES_PER_PASS {
+            let Some((agent, frame)) = terminals.poll() else {
+                break;
+            };
+            shell.arrive(Arrival::Terminal { agent, frame });
+            dirty = true;
+        }
+        while let Some(request) = shell.ctx.next_terminal_request() {
+            terminals.handle(request);
+            dirty = true;
+        }
         let now = Instant::now();
         if shell.ctx.link != link {
             if shell.ctx.link == Link::Reconnecting {
@@ -151,7 +173,7 @@ fn drive(
                 reconnect = now + RECONNECT;
             } else if link == Link::Ready {
                 if let Some(request) = shell.ctx.next_request() {
-                    send(request, shell, connection)?;
+                    send(request, shell, connection, terminals)?;
                     dirty = true;
                 } else if now >= refresh {
                     shell.refresh();
@@ -179,7 +201,9 @@ fn drive(
             dirty = false;
         }
         let waiting = shell.ctx.link == Link::Ready && shell.ctx.queued() > 0;
-        let wait = if shell.busy() || connection.busy() || waiting {
+        let wait = if terminals.live() {
+            STREAM_WAKE
+        } else if shell.busy() || connection.busy() || waiting {
             TICK
         } else {
             IDLE_WAKE
@@ -241,14 +265,21 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
             ShellEvent::Projects(result) => Arrival::Projects(result),
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
+        OwnerEvent::TeamGraph { project, result } => Arrival::TeamGraph { project, result },
         other => Arrival::Owner(Box::new(other)),
     }
 }
 
-/// Sends one queued request on the idle, connected engine connection.
-/// Inputs: the request, the shell and the connection. Output: Ok, or the
-/// connection error that ends the TUI.
-fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Result<(), TuiError> {
+/// Sends one queued request on the idle, connected engine connection, or to
+/// the agent terminal on its own connection.
+/// Inputs: the request, the shell, the connection and the terminals.
+/// Output: Ok, or the connection error that ends the TUI.
+fn send(
+    request: Request,
+    shell: &mut Shell,
+    connection: &mut Connection,
+    terminals: &mut Terminals,
+) -> Result<(), TuiError> {
     assert!(!connection.busy());
     assert!(shell.ctx.link == Link::Ready);
     let result = match request {
@@ -270,23 +301,14 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Master(job) => connection.master(*job),
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),
         Request::Settings(job) => connection.settings(*job),
-        Request::TeamGraph { project } => {
-            shell.arrive(Arrival::TeamGraph {
-                project,
-                result: Err(NOT_READY.into()),
-            });
-            Ok(())
-        }
-        Request::TerminalAttach { agent } => {
-            shell.arrive(Arrival::Terminal {
-                agent,
-                chunk: TerminalChunk::Closed(NOT_READY.into()),
-            });
-            Ok(())
-        }
-        Request::TerminalInput { .. }
+        Request::TeamGraph { project } => connection.team_graph(project),
+        request @ (Request::TerminalAttach { .. }
+        | Request::TerminalInput { .. }
         | Request::TerminalResize { .. }
-        | Request::TerminalDetach { .. } => Ok(()),
+        | Request::TerminalDetach { .. }) => {
+            terminals.handle(request);
+            Ok(())
+        }
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

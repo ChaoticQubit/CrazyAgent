@@ -189,6 +189,32 @@ impl SettingsResolver {
         Some((folder, pick))
     }
 
+    /// The account an agent outside the research queue, such as onboarding's
+    /// mapping agent, runs on for `pool`: the pool's first member Codex can
+    /// use, else its first member Claude Code can use, with the same sign-in
+    /// check as [`Self::resolve`]. Rereads the settings on every call. Returns
+    /// `None` for an unknown pool or a pool with no usable member.
+    pub fn pool_pick(&self, pool: &CredentialRef) -> Option<ResearchAccount> {
+        let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
+        let access = config.settings.model_access.unwrap_or_default();
+        let chosen = access
+            .pools
+            .iter()
+            .find(|candidate| &candidate.id == pool)?;
+        let database = self.engine();
+        let signed_in = |connection: &ModelConnection| {
+            database
+                .as_ref()
+                .is_some_and(|database| match managed_sign_in(database, connection) {
+                    Ok(_) => true,
+                    Err(code) => code == PROFILE_BUSY,
+                })
+        };
+        ["codex", "claude-code"].into_iter().find_map(|harness| {
+            pool_account(&access, chosen, harness, &signed_in).map(|(_, account)| account)
+        })
+    }
+
     /// Opens the engine database for one resolve, or `None` when it cannot be
     /// opened, so managed accounts are then treated as signed out.
     fn engine(&self) -> Option<Connection> {
