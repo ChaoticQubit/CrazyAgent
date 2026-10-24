@@ -206,6 +206,14 @@ impl Ctx {
         self.requests.pop_front()
     }
 
+    /// Takes the oldest queued agent terminal request, ahead of requests
+    /// waiting for the engine connection, so typing never waits on a read.
+    /// Input: none. Output: the request, if one waits.
+    pub fn next_terminal_request(&mut self) -> Option<Request> {
+        let index = self.requests.iter().position(Request::is_terminal)?;
+        self.requests.remove(index)
+    }
+
     /// Takes a pending reconnect ask; it goes ahead of queued requests,
     /// which wait for the connection.
     /// Input: none. Output: true once per ask.
@@ -299,6 +307,37 @@ mod tests {
         assert!(matches!(ctx.next_request(), Some(Request::Projects)));
         ctx.request(Request::Projects);
         assert_eq!(ctx.queued(), 2, "a sent read may be asked for again");
+    }
+
+    #[test]
+    fn terminal_requests_jump_the_engine_queue_in_their_own_order() {
+        let mut ctx = ctx();
+        let agent = crate::terminal::AgentId::team(1).unwrap();
+        ctx.request(Request::Projects);
+        ctx.request(Request::TerminalInput {
+            agent: agent.clone(),
+            bytes: b"l".to_vec(),
+        });
+        ctx.request(Request::TerminalInput {
+            agent: agent.clone(),
+            bytes: b"s".to_vec(),
+        });
+        ctx.request(Request::Pools);
+        ctx.request(Request::TerminalDetach {
+            agent: agent.clone(),
+        });
+        assert_eq!(ctx.queued(), 4, "typed keys join one input");
+        assert!(matches!(
+            ctx.next_terminal_request(),
+            Some(Request::TerminalInput { bytes, .. }) if bytes == b"ls"
+        ));
+        assert!(matches!(
+            ctx.next_terminal_request(),
+            Some(Request::TerminalDetach { .. })
+        ));
+        assert!(ctx.next_terminal_request().is_none());
+        assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+        assert!(matches!(ctx.next_request(), Some(Request::Pools)));
     }
 
     #[test]

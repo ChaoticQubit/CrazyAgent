@@ -28,6 +28,7 @@ mod claude_code;
 mod project_setup;
 pub(super) mod settings;
 mod shell;
+pub(super) mod terminal;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {

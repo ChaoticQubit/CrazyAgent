@@ -105,6 +105,21 @@ pub enum Request {
     Reconnect,
 }
 
+impl Request {
+    /// Says whether the request goes to an agent terminal, which streams on
+    /// its own connection instead of waiting for the engine connection.
+    /// Input: the request. Output: true for attach, input, resize and detach.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::TerminalAttach { .. }
+                | Self::TerminalInput { .. }
+                | Self::TerminalResize { .. }
+                | Self::TerminalDetach { .. }
+        )
+    }
+}
+
 impl std::fmt::Debug for Request {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
