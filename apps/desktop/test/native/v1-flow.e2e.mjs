@@ -156,6 +156,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     assert.match(main, /Projects/);
     assert.match(main, /No projects yet/);
     assert.match(main, /Get set up/);
+    assert.match(main, /Install tools/);
     assert.equal(await page("button=Add account"), true);
     assert.equal(await page("button=Create pool"), true);
     await shot("02-dashboard-empty");
