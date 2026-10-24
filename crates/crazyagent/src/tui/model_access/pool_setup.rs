@@ -96,6 +96,20 @@ impl Setup {
                 lines.push(pool.id.as_str().to_owned());
             }
             lines.push(format!("{} selected across all pages", self.members.len()));
+            if let Some(pool) = &self.pool {
+                lines.push(format!(
+                    "Provider quota policy: {} | p switches",
+                    provider_quota_policy_name(pool.provider_quota_policy)
+                ));
+                lines.push(
+                    "Strict blocks unknown provider quota; numeric quota is currently unavailable."
+                        .into(),
+                );
+                lines.push(
+                    "Bounded attempt still requires fresh readiness and execution admission."
+                        .into(),
+                );
+            }
             for (index, record) in self.page.iter().enumerate() {
                 lines.push(format!(
                     "{} [{}] {}",
@@ -223,6 +237,13 @@ impl State {
                         return Err("A pool admits at most 64 connections".into());
                     }
                 }
+            }
+            (Stage::Members, UiEvent::Character('p')) => {
+                let pool = setup.pool.as_mut().ok_or("Confirm a pool label first")?;
+                pool.provider_quota_policy = match pool.provider_quota_policy {
+                    ProviderQuotaPolicy::BoundedAttempt => ProviderQuotaPolicy::Strict,
+                    ProviderQuotaPolicy::Strict => ProviderQuotaPolicy::BoundedAttempt,
+                };
             }
             (Stage::Members, UiEvent::HistoryFirst | UiEvent::HistoryNext) => {
                 setup.cursor = if matches!(event, UiEvent::HistoryNext) {

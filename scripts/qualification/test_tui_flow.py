@@ -41,6 +41,21 @@ def test_unpaired_continuation_trips_internal_invariant():
         return
     assert False, "unpaired wide continuation must trip its internal invariant"
 
+def test_growing_output_renders_as_one_full_parse_at_every_split():
+    raw = '\x1b[?1049h\x1b[2;3H日本\x1b[1;1Hab\x1b(Bc\x1b[Kȩ́\x1b[2J\x1b[1;2Hok\r\nZ'.encode()
+    for split in range(len(raw) + 1):
+        output = bytearray(raw[:split])
+        screen_text(output, 6, 2)
+        output.extend(raw[split:])
+        assert screen_text(output, 6, 2) == screen_text(bytes(raw), 6, 2), split
+    output = bytearray()
+    for byte in raw:
+        output.append(byte)
+        screen_text(output, 6, 2)
+    assert screen_text(output, 6, 2) == screen_text(bytes(raw), 6, 2)
+    output[:] = b'new'
+    assert screen_text(output, 6, 1) == 'new   '
+
 
 if __name__ == '__main__':
     test_adjacent_cjk_has_no_continuation_spaces()
@@ -53,4 +68,5 @@ if __name__ == '__main__':
     test_carriage_return_newline_and_relative_cursor()
     test_erase_display_removes_previous_cells()
     test_unpaired_continuation_trips_internal_invariant()
-    print('decoder_checks=10')
+    test_growing_output_renders_as_one_full_parse_at_every_split()
+    print('decoder_checks=11')

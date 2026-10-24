@@ -50,6 +50,7 @@ def actual_rows(database, project):
 def committed(master, child, database, project, kind, version, text):
     deadline = time.monotonic() + 8
     rows = []
+    notices = []
     while time.monotonic() < deadline:
         rows = actual_rows(database, project)
         if (kind, version, text) in rows:
@@ -57,10 +58,13 @@ def committed(master, child, database, project, kind, version, text):
         if child.poll() is not None:
             break
         drain(master)
+        notice = screen(master).splitlines()[-2].strip()
+        if notice not in notices and len(notices) < 16:
+            notices.append(notice)
     raise AssertionError(
         "actual TUI owner %s not committed: expected_version=%r text=%r "
-        "rows=%r status=%r screen=%r"
-        % (kind, version, text, rows, child.poll(), screen(master))
+        "rows=%r status=%r notices=%r screen=%r"
+        % (kind, version, text, rows, child.poll(), notices, screen(master))
     )
 
 
@@ -131,10 +135,12 @@ def isolated_drafts(master, child, database, project, initial, marker):
     draft_contains(master, child, marker + "-brief-A", marker + "-brief-B")
     os.write(master, b"\x1b")
     draft_contains(master, child, first)
+    body_contains(master, child, "No master configured")
     os.write(master, b"\r")
     committed(master, child, database, project, "message", 0, first)
     select_other(master, child, other, True)
     draft_contains(master, child, second, first)
+    body_contains(master, child, "No master configured")
     os.write(master, b"\r")
     committed(master, child, database, other, "message", 0, second)
     os.write(master, b"\x02")

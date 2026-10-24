@@ -36,6 +36,8 @@ def group_absent(group):
         os.killpg(group, 0)
     except ProcessLookupError:
         return True
+    except PermissionError:
+        return False
     return False
 
 
@@ -43,7 +45,7 @@ def kill_group(group):
     assert group is not None and group > 0 and group != os.getpgrp()
     try:
         os.killpg(group, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -275,7 +277,7 @@ def inspect_pool(state, session, policy):
     expect_screen(state, session, "actual owner pool details " + policy,
                   "Provider quota policy: " + policy,
                   "Member connections: connection-1",
-                  "Projects: project-1 | Roles: leader | Fallback policy: false")
+                  "Projects:  | Roles:  | Fallback policy: false")
 
 
 def close_session(state, session):
@@ -370,13 +372,15 @@ def run(binary, root, unix_deadline):
         session = launch_session(state)
         enter_pools(state, session, 0)
         send(state, session, b"n")
-        expect_screen(state, session, "create form", "Add/Create Pools | field 1/6", "> Pool ID:")
-        send(state, session, b"pty-quota-pool\tconnection-1\tproject-1\tleader\t\t")
-        expect_screen(state, session, "default quota choice", "> Provider quota policy: bounded_attempt",
+        expect_screen(state, session, "pool label", "Account pool", "Pool label (optional)")
+        send(state, session, b"pty quota pool\r")
+        expect_screen(state, session, "default quota choice", "Choose connections", "> [ ] connection-1",
+                      "Provider quota policy: bounded_attempt",
                       "Strict blocks unknown provider quota; numeric quota is currently unavailable.")
+        send(state, session, b" ")
+        expect_screen(state, session, "member chosen", "> [x] connection-1", "1 selected across all pages")
         send(state, session, b"\r")
-        expect_screen(state, session, "created pool saved", "Metadata saved", "Pools: 1 records",
-                      "> pty-quota-pool")
+        expect_screen(state, session, "created pool saved", "Pools: 1 records", "> pool-ptyquotapool-")
         inspect_pool(state, session, "bounded_attempt")
         global_path = state["root"] / "global.toml"
         with global_path.open("rb") as stream:
@@ -384,17 +388,14 @@ def run(binary, root, unix_deadline):
         assert len(snapshot) <= STREAM_MAX, "actual persisted config exceeded 64 KiB"
         write_private(state["root"] / "created-default.toml", snapshot)
         send(state, session, b"e")
-        expect_screen(state, session, "replace form", "Replace Pools | field 1/6",
-                      "Pool ID (fixed): pty-quota-pool")
-        send(state, session, b"\t" * 5)
-        expect_screen(state, session, "replace retains default", "> Provider quota policy: bounded_attempt")
-        send(state, session, b"\x1b[B")
-        expect_screen(state, session, "strict selected", "> Provider quota policy: strict",
+        expect_screen(state, session, "replace retains default", "Choose connections", "> [x] connection-1",
+                      "Provider quota policy: bounded_attempt")
+        send(state, session, b"p")
+        expect_screen(state, session, "strict selected", "Provider quota policy: strict",
                       "Strict blocks unknown provider quota; numeric quota is currently unavailable.",
                       "Bounded attempt still requires fresh readiness and execution admission.")
         send(state, session, b"\r")
-        expect_screen(state, session, "strict pool saved", "Metadata saved", "Pools: 1 records",
-                      "> pty-quota-pool")
+        expect_screen(state, session, "strict pool saved", "Pools: 1 records", "> pool-ptyquotapool-")
         close_session(state, session)
         fresh = launch_session(state)
         enter_pools(state, fresh, 1)
