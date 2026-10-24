@@ -399,6 +399,7 @@ pub struct Engine {
     owner_egress: tokio::sync::RwLock<()>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
+    terminal: Mutex<Option<(bool, std::sync::Arc<dyn crate::terminal::Host>)>>,
 }
 
 impl Engine {
@@ -440,6 +441,7 @@ impl Engine {
                 owner_egress: tokio::sync::RwLock::new(()),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
+                terminal: Mutex::default(),
             },
             config,
         ))
@@ -455,6 +457,7 @@ impl Engine {
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            terminal: Mutex::default(),
         })
     }
 
@@ -468,6 +471,7 @@ impl Engine {
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            terminal: Mutex::default(),
         })
     }
 
