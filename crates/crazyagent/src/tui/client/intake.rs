@@ -6,6 +6,9 @@ use crate::onboarding::Onboarding;
 use crate::projects_home::{AddMode, FoundProject, FoundState, ProjectsHome};
 use crate::protocol::CredentialRef;
 
+#[cfg(test)]
+mod tests;
+
 /// One projects home, add project, onboarding or GitHub request a TUI screen sends.
 /// Built by the first run, Home, Add project and onboarding screens, and by Settings for the home folder.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Intake` with this query.
