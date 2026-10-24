@@ -1,6 +1,6 @@
 use super::{
-    AGENT_GIT_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
-    agent_env_refused, clean_absolute, invalid,
+    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
+    clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -379,33 +379,24 @@ impl Sandbox for LinuxSandbox {
             }
             LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
         };
+        let env = agent_env(
+            &[
+                ("HOME", self.sandbox.agent_home().as_os_str()),
+                ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
+                ("PATH", OsStr::new(AGENT_PATH)),
+                ("LANG", OsStr::new("C")),
+                ("LC_ALL", OsStr::new("C")),
+            ],
+            harness.get_envs(),
+        )?;
         command
             .arg("--")
             .arg(program)
             .args(harness.get_args())
             .env_clear()
-            .env("HOME", self.sandbox.agent_home())
-            .env("TMPDIR", self.sandbox.agent_tmp())
-            .env("PATH", AGENT_PATH)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .current_dir(cwd)
             .process_group(0);
-        for (key, value) in harness.get_envs() {
-            if agent_env_refused(key) {
-                return Err(invalid("agent environment holds an owner secret"));
-            }
-            if key == "HOME" || key == "TMPDIR" {
-                continue;
-            }
-            match value {
-                Some(value) => command.env(key, value),
-                None => command.env_remove(key),
-            };
-        }
-        for (name, value) in AGENT_GIT_ENV {
-            command.env(name, value);
-        }
         assert!(command.get_args().any(|arg| arg == "--"));
         Ok(command)
     }
