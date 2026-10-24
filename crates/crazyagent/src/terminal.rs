@@ -2,6 +2,9 @@ use crate::engine::EngineError;
 use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
 pub const CHUNK_BYTES_MAX: usize = 8192;

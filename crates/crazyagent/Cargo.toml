@@ -30,6 +30,10 @@ nix = { version = "=0.28.0", default-features = false, features = ["socket", "us
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "=0.4.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+portable-pty = "=0.9.0"
+vt100 = "=0.15.2"
+
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 sha2 = { version = "=0.10.9", features = ["asm"] }
 
