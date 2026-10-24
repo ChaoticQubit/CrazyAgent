@@ -372,7 +372,7 @@ impl OnboardingPage {
     fn step_line(label: &str, step: &Step, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let state = match step {
-            Step::Waiting => styled("Waiting", Role::Muted, theme),
+            Step::Waiting => status("Waiting", theme, ctx.glyphs),
             Step::Running => Line::from(vec![
                 Span::styled(ctx.spinner(), theme.running),
                 Span::styled(" Running", theme.running),

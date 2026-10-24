@@ -4,16 +4,21 @@ import { Icon, type IconName } from "./icon";
 export type Tone = "ok" | "warn" | "danger" | "info" | "neutral";
 
 const STATUSES: [RegExp, IconName, Tone][] = [
-  [/^(Signed in|Connected|Ready|Done|Approved|Saved|Research done|Replied)$/, "circle-check", "ok"],
+  [/^(Signed in|Connected|Ready|Done|Approved|Saved|Research done|Replied|Installed|On)$/, "circle-check", "ok"],
   [/^Key saved$/, "key-round", "ok"],
   [/^(Not signed in|Needs a pool|Needs approval|Needs you)$/, "circle-alert", "warn"],
   [/^Limited control/, "triangle-alert", "warn"],
-  [/^(Can't reach this URL|Failed|Can't start.*)$/, "circle-x", "danger"],
-  [/^(Running|Signing in\.\.\.|Starting|Thinking\.\.\.|Writing)$/, "loader-circle", "info"],
+  [/^(Can't reach this URL|Failed|Can't start.*|Folder missing)$/, "circle-x", "danger"],
+  [/^(Running|Signing in\.\.\.|Starting|Thinking\.\.\.|Writing|Working|Installing)$/, "loader-circle", "info"],
+  [/^Found$/, "search", "info"],
+  [/^Setting up$/, "list-checks", "warn"],
   [/^(Queued|Starts after .+)$/, "clock", "neutral"],
   [/^Waiting for a free account$/, "hourglass", "neutral"],
+  [/^Waiting$/, "circle-dashed", "neutral"],
+  [/^Idle$/, "circle-pause", "neutral"],
+  [/^Sent$/, "send", "neutral"],
   [/^Stopped$/, "circle-stop", "neutral"],
-  [/^(Turned off|Not installed)$/, "power-off", "neutral"],
+  [/^(Turned off|Not installed|Off)$/, "power-off", "neutral"],
   [/^Suggested$/, "lightbulb", "neutral"],
 ];
 

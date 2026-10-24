@@ -51,3 +51,28 @@ test("the spinner only turns when the system allows motion", () => {
   const media = css.lastIndexOf("@media (prefers-reduced-motion: no-preference)", rule);
   assert.ok(media >= 0 && css.slice(media, rule).split("}").length <= 2, ".icon.spin sits inside the no-preference media block");
 });
+
+test("projects folder, onboarding, setup, pack and team words carry their icons", () => {
+  for (const [words, icon, tone] of [
+    [["Found"], "search", "info"],
+    [["Setting up"], "list-checks", "warn"],
+    [["Folder missing"], "circle-x", "danger"],
+    [["Working", "Installing"], "loader-circle", "info"],
+    [["Waiting"], "circle-dashed", "neutral"],
+    [["Idle"], "circle-pause", "neutral"],
+    [["Sent"], "send", "neutral"],
+    [["Installed", "On"], "circle-check", "ok"],
+    [["Off"], "power-off", "neutral"],
+  ]) {
+    assert.ok(ICON_NAMES.includes(icon), `${icon} is vendored`);
+    for (const word of words) {
+      assert.equal(statusIcon(word), icon, word);
+      assert.equal(statusTone(word), tone, word);
+    }
+  }
+  assert.equal(statusIcon("Waiting for a free account"), "hourglass");
+  assert.equal(statusIcon("Found 3.4"), undefined);
+  assert.equal(statusIcon("Online"), undefined);
+  for (const name of ["folder-input", "git-branch", "wrench", "blocks"]) assert.ok(ICON_NAMES.includes(name), `${name} is vendored`);
+  assert.match(renderToStaticMarkup(createElement(StatusBadge, { word: "Installing" })), /class="icon spin"/);
+});
