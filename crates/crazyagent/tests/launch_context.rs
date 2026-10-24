@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};

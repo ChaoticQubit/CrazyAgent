@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{EffectiveConfig, resolve_config};
 use crazyagent::coordination::{OwnerAction, PlanAuthority, Role, WorkItem, WorkPlan};
 use crazyagent::engine::Client;

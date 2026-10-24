@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{EffectiveConfig, resolve_config};
 use crazyagent::engine::Engine;
 use crazyagent::protocol::*;

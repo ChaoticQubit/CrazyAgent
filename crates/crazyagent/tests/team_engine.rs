@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::team::{

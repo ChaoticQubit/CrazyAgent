@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::isolation::run_resource_probe;
 use std::fs;
 use std::path::PathBuf;

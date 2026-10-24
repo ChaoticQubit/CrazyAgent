@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::assets::AssetAction;
 use crazyagent::config::resolve_config;
 use crazyagent::coordination::OwnerAction;

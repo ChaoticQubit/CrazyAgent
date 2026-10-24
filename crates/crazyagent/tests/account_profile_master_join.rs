@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{
     AccountPool, ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint,
     ModelReference, ProviderQuotaPolicy,

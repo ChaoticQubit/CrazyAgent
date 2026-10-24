@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{ProviderQuotaPolicy, resolve_config};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;

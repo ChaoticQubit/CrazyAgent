@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };

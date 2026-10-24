@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::{
     config::resolve_config,
     engine::{Client, Engine, Server},

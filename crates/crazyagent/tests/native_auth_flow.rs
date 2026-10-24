@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::ModelConnection;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::bootstrap::EngineService;

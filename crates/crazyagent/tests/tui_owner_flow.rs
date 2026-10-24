@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::Client;
 use crazyagent::engine::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerRead,

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::{config::resolve_config, engine::Engine, protocol::*};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
