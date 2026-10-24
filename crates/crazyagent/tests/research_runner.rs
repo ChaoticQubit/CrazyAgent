@@ -117,6 +117,18 @@ fn files_containing(root: &Path, needle: &str) -> usize {
     found
 }
 
+/// Asserts no agent worktree was added to the project: project setup creates
+/// the `worktrees` folder empty and only a started agent adds one to it.
+fn assert_no_agent_worktree(case: &Case) {
+    let worktrees = case.project.join("worktrees");
+    assert!(worktrees.is_dir(), "{} is missing", worktrees.display());
+    let added: Vec<_> = fs::read_dir(&worktrees)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(added.is_empty(), "{added:?}");
+}
+
 #[test]
 fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_report() {
     let _model = local_model();
@@ -194,7 +206,7 @@ fn research_without_a_pool_waits_with_a_plain_status() {
     assert_eq!(run.status, ResearchStatus::NeedsPool);
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status.label(), "Needs a pool");
-    assert!(!case.project.join("worktrees").exists());
+    assert_no_agent_worktree(&case);
 }
 
 #[test]
@@ -499,7 +511,7 @@ fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
     assert_eq!(run.job, codex_job);
     assert_eq!(run.status, ResearchStatus::NeedsPool);
     assert_eq!(jobs.get(codex_job).unwrap().unwrap().attempts, 0);
-    assert!(!case.project.join("worktrees").exists());
+    assert_no_agent_worktree(&case);
 }
 
 #[test]
@@ -708,7 +720,7 @@ fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status.label(), "Needs a pool");
     assert_eq!(job.attempts, 0);
-    assert!(!case.project.join("worktrees").exists());
+    assert_no_agent_worktree(&case);
     assert!(
         !case
             .state
@@ -740,7 +752,7 @@ fn research_for_a_project_the_engine_does_not_know_fails_without_starting_an_age
         job.error.as_deref(),
         Some("Could not give the agent this project's context")
     );
-    assert!(!case.project.join("worktrees").exists());
+    assert_no_agent_worktree(&case);
     assert!(
         !case.state.join("agents").exists()
             || fs::read_dir(case.state.join("agents")).unwrap().count() == 0
