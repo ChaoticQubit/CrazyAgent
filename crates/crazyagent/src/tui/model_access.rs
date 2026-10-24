@@ -496,19 +496,28 @@ impl State {
             UiEvent::Character('a')
                 if !self.pinned && self.collection == ModelAccessCollection::Pools =>
             {
-                self.begin_assignment()?;
+                if let Err(error) = self.begin_assignment() {
+                    self.notice = error;
+                }
             }
             UiEvent::Character('k') if !self.pinned => self.open_profile()?,
             UiEvent::Character('h') if !self.pinned => self.open_home()?,
             UiEvent::Character('n')
                 if !self.pinned && self.collection == ModelAccessCollection::Pools =>
             {
-                self.begin_pool_setup(self.writable()?, None)?;
+                let begun = self
+                    .writable()
+                    .and_then(|basis| self.begin_pool_setup(basis, None));
+                if let Err(error) = begun {
+                    self.notice = error;
+                }
             }
             UiEvent::Character('a')
                 if !self.pinned && self.collection == ModelAccessCollection::Accounts =>
             {
-                self.begin_managed_setup()?;
+                if let Err(error) = self.begin_managed_setup() {
+                    self.notice = error;
+                }
             }
             UiEvent::Character(character @ ('1' | '2' | '3' | '4')) => {
                 self.explicit = true;

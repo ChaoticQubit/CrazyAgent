@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
+use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint, ProviderQuotaPolicy};
 use std::collections::BTreeSet;
 
 async fn empty_accounts(case: &Case) -> Ui {
@@ -303,6 +303,86 @@ async fn second_local_account_and_pool_membership_keep_actual_connection_and_poo
         assert!(observed.contains(&ModelAccessRecord::Pool {
             pool: changed.clone()
         }));
+        assert_no_auth(&case);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pool_setup_chooses_the_provider_quota_policy_and_edit_keeps_it() {
+    run(|case| async move {
+        let mut ui = empty_accounts(&case).await;
+        choose_local(&mut ui, "Quota local account");
+        add_local(&mut ui, "http://127.0.0.1:9/v1", "quota-local-1033").await;
+        let before = catalog(&case);
+        let connections = page(&case, ModelAccessCollection::Connections).await;
+        assert_eq!(connections.len(), 1);
+        ui.key(KeyCode::Char('3'));
+        ui.drain().await;
+        ui.key(KeyCode::Char('n'));
+        type_text(&mut ui, "Strict quota pool");
+        ui.key(KeyCode::Enter);
+        ui.drain().await;
+        let chooser = views::body(&ui.app);
+        assert!(
+            chooser.contains("Provider quota policy: bounded_attempt"),
+            "{chooser}"
+        );
+        assert!(
+            chooser.contains("Strict blocks unknown provider quota"),
+            "{chooser}"
+        );
+        ui.key(KeyCode::Char(' '));
+        ui.key(KeyCode::Char('p'));
+        let strict = views::body(&ui.app);
+        assert!(strict.contains("Provider quota policy: strict"), "{strict}");
+        ui.key(KeyCode::Enter);
+        ui.drain().await;
+        let saved = catalog(&case);
+        assert_eq!(saved.pools.len(), before.pools.len() + 1);
+        let created = saved
+            .pools
+            .iter()
+            .find(|pool| !before.pools.contains(pool))
+            .unwrap()
+            .clone();
+        assert_eq!(created.provider_quota_policy, ProviderQuotaPolicy::Strict);
+        assert_eq!(created.members, vec![connections[0].id().clone()]);
+        let refresh = key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &ui.app,
+        )
+        .unwrap();
+        ui.app.reduce(refresh).unwrap();
+        ui.drain().await;
+        let pools = page(&case, ModelAccessCollection::Pools).await;
+        let index = pools
+            .iter()
+            .position(|record| record.id() == &created.id)
+            .unwrap();
+        for _ in 0..index {
+            ui.key(KeyCode::Down);
+        }
+        ui.key(KeyCode::Char('e'));
+        ui.drain().await;
+        let editor = views::body(&ui.app);
+        assert!(editor.contains("Provider quota policy: strict"), "{editor}");
+        ui.key(KeyCode::Char('p'));
+        ui.key(KeyCode::Enter);
+        ui.drain().await;
+        let edited = catalog(&case);
+        let changed = edited
+            .pools
+            .iter()
+            .find(|pool| pool.id == created.id)
+            .unwrap();
+        assert_eq!(
+            changed.provider_quota_policy,
+            ProviderQuotaPolicy::BoundedAttempt
+        );
+        assert_eq!(changed.members, created.members);
+        assert_eq!(changed.name, created.name);
+        assert_eq!(edited.connections, saved.connections);
         assert_no_auth(&case);
     })
     .await;

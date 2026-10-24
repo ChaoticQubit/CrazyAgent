@@ -41,7 +41,7 @@ database = root / 'engine.db'
 raw = bytearray()
 typed = bytearray()
 steps = [b'\t\t1', b'a', b'\x1b[B' * 3, b'\r', b'Local acceptance', b'\r',
-         endpoint.encode(), b'\r', model.encode(), b'\r', b'3', b'2', b'\r', b'k', b'\r']
+         endpoint.encode(), b'\r', model.encode(), b'\r', b'\r', b'\x1b', b'3', b'2', b'\r']
 step = 0
 result = {'passed': False, 'authentication_started': False}
 
@@ -117,10 +117,22 @@ try:
         assert (root / 'global.toml').read_bytes() == original
         key(model.encode())
         key(b'\r')
-        expect('Connections: 1 records on this page')
+        expect('Press Enter to finish local endpoint setup')
+        expect('Private profile setup')
+        expect('No API key')
+        expect(endpoint)
+        expect(model)
+        screen = ordinary_screen()
+        assert 'API key (hidden)' not in screen
         assert counts() == (3, 0, 0, 0, 0)
         saved = (root / 'global.toml').read_bytes()
         assert saved != original
+        key(b'\r')
+        expect('ConfiguredOnly')
+        ordinary_screen()
+        assert (root / 'global.toml').read_bytes() == saved
+        key(b'\x1b')
+        expect('Private setup closed')
         key(b'3')
         expect('Pools: 1 records on this page')
         expect('Unassigned')
@@ -129,15 +141,6 @@ try:
         key(b'\r')
         expect('Provider: openai-compatible')
         expect('Auth method/reference: None')
-        key(b'k')
-        expect('Private profile setup')
-        expect('No API key')
-        expect(endpoint)
-        expect(model)
-        screen = ordinary_screen()
-        assert 'API key (hidden)' not in screen
-        key(b'\r')
-        expect('ConfiguredOnly')
         ordinary_screen()
         assert step == len(steps) and bytes(typed) == b''.join(steps)
         assert counts() == (3, 0, 0, 0, 0)

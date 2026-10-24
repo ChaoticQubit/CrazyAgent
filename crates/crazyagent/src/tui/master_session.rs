@@ -112,6 +112,7 @@ struct Form {
     generation: u64,
     open: bool,
     explicit: bool,
+    edited: bool,
 }
 
 struct Pending {
@@ -276,6 +277,7 @@ impl State {
                 generation: 1,
                 open: false,
                 explicit: false,
+                edited: false,
             });
             self.forms.len() - 1
         };
@@ -410,6 +412,10 @@ impl State {
         }
         if form.target.is_none() {
             form.target = catalog.target(form);
+        }
+        if !form.edited {
+            form.values = budget_values(&default_master_budget(&catalog.capacities))
+                .map(|value| value.to_string());
         }
     }
 
@@ -1378,7 +1384,8 @@ impl Form {
             }
             3 => {
                 if let Some(catalog) = catalog {
-                    self.target = cycle(&catalog.targets, self.target.as_ref(), forward);
+                    self.target =
+                        cycle(&catalog.target_choices(self), self.target.as_ref(), forward);
                 }
             }
             _ => return Ok(false),
@@ -1425,6 +1432,7 @@ impl Form {
         } else if value.pop().is_none() {
             return Ok(());
         }
+        self.edited = true;
         self.advance_generation()
     }
 
@@ -1527,62 +1535,54 @@ impl Catalog {
                 generation: form.generation,
                 open: false,
                 explicit: false,
+                edited: form.edited,
             };
             !self.pools(&probe).is_empty()
         })
     }
 
     /// Picks the execution target a new master of this form would use under DEC-076.
-    /// Input: the form's backend, pool and account. Output: for a signed-in backend, the
-    /// allowed connection of that account in the pool; for RCLI, the first allowed target
-    /// that is not a signed-in connection; None when policy allows no such target.
+    /// Input: the form's backend, pool and account. Output: the first of its target
+    /// choices; None when policy allows no such target.
     fn target(&self, form: &Form) -> Option<CredentialRef> {
-        if form.backend == MasterBackend::Rcli {
-            let pool = self
-                .models
-                .pools
-                .iter()
-                .find(|pool| Some(&pool.id) == form.pool.as_ref());
-            let own = self
-                .models
-                .connections
-                .iter()
-                .filter(|connection| {
-                    pool.is_some_and(|pool| pool.members.contains(&connection.id))
-                        && Some(&connection.account_ref) == form.account.as_ref()
-                        && backend_matches(form.backend, connection)
-                })
-                .filter_map(crate::config::configured_profile_ref)
-                .find(|profile| self.targets.contains(profile));
-            if own.is_some() {
-                return own;
-            }
-            return self
-                .targets
-                .iter()
-                .find(|target| {
-                    !self.models.connections.iter().any(|connection| {
-                        &connection.id == *target
-                            && matches!(connection.endpoint, ModelEndpoint::Native {})
-                    })
-                })
-                .cloned();
-        }
+        self.target_choices(form).into_iter().next()
+    }
+
+    /// Lists the execution targets a master of this form may use under DEC-076.
+    /// Input: the form's backend, pool and account. Output: for a signed-in backend, the
+    /// allowed connections of that account in the pool; for RCLI, the account's own allowed
+    /// profiles first, then every allowed target that is not a signed-in connection.
+    fn target_choices(&self, form: &Form) -> Vec<CredentialRef> {
         let pool = self
             .models
             .pools
             .iter()
-            .find(|pool| Some(&pool.id) == form.pool.as_ref())?;
-        self.models
-            .connections
-            .iter()
-            .find(|connection| {
-                pool.members.contains(&connection.id)
-                    && Some(&connection.account_ref) == form.account.as_ref()
-                    && backend_matches(form.backend, connection)
-                    && self.targets.contains(&connection.id)
-            })
-            .map(|connection| connection.id.clone())
+            .find(|pool| Some(&pool.id) == form.pool.as_ref());
+        let members = self.models.connections.iter().filter(|connection| {
+            pool.is_some_and(|pool| pool.members.contains(&connection.id))
+                && Some(&connection.account_ref) == form.account.as_ref()
+                && backend_matches(form.backend, connection)
+        });
+        if form.backend != MasterBackend::Rcli {
+            return members
+                .filter(|connection| self.targets.contains(&connection.id))
+                .map(|connection| connection.id.clone())
+                .collect();
+        }
+        let mut choices: Vec<CredentialRef> = members
+            .filter_map(crate::config::configured_profile_ref)
+            .filter(|profile| self.targets.contains(profile))
+            .collect();
+        for target in &self.targets {
+            let native = self.models.connections.iter().any(|connection| {
+                &connection.id == target && matches!(connection.endpoint, ModelEndpoint::Native {})
+            });
+            if !native && !choices.contains(target) {
+                choices.push(target.clone());
+            }
+        }
+        assert!(choices.len() <= self.targets.len() + self.models.connections.len());
+        choices
     }
 
     fn accounts(&self, form: &Form) -> Vec<CredentialRef> {
@@ -2183,6 +2183,7 @@ pub async fn default_master_open(
             generation: 1,
             open: false,
             explicit: false,
+            edited: false,
         };
         form.pool = catalog.pools(&form).first().map(|pool| pool.id.clone());
         let Some(pool) = form.pool.clone() else {
@@ -2231,6 +2232,58 @@ mod default_budget_tests {
     use super::*;
 
     #[test]
+    fn an_unedited_allowance_follows_the_owner_policy_once_it_is_read() {
+        let capacity = |wall_time_ms| ResourceBudget {
+            slots: 2,
+            cpu_millis: 2000,
+            memory_mib: 1024,
+            processes: 8,
+            output_bytes: 2_097_152,
+            wall_time_ms,
+            spend_microunits: 10,
+        };
+        let catalog = |wall_time_ms| Catalog {
+            config_id: ConfigId::new("0".repeat(64)).unwrap(),
+            source_hash: "0".repeat(64),
+            revision: Cursor::new(1),
+            models: ModelAccess::default(),
+            approved: Vec::new(),
+            targets: Vec::new(),
+            capacities: [
+                capacity(wall_time_ms),
+                capacity(wall_time_ms),
+                capacity(wall_time_ms),
+            ],
+        };
+        let mut state = State::default();
+        state
+            .select(None, Some(ProjectId::new("demo").unwrap()), true)
+            .unwrap();
+        state.open().unwrap();
+        let index = state.form_index().unwrap();
+        state.catalog = Some(catalog(120_000));
+        state.defaults();
+        let mut expected = ResourceBudget::unit();
+        expected.wall_time_ms = 120_000;
+        assert_eq!(
+            state.forms[index].values,
+            budget_values(&expected).map(|value| value.to_string()),
+            "the default allowance fits the owner's actual capacity"
+        );
+
+        state.forms[index].field = 4 + 5;
+        state.forms[index].edit_allowance(None).unwrap();
+        state.forms[index].edit_allowance(Some('9')).unwrap();
+        assert_eq!(state.forms[index].values[5], "120009");
+        state.catalog = Some(catalog(90_000));
+        state.defaults();
+        assert_eq!(
+            state.forms[index].values[5], "120009",
+            "a value the owner typed is kept for them to fix"
+        );
+    }
+
+    #[test]
     fn signed_in_master_targets_its_own_connection_and_rcli_keeps_the_sandbox() {
         let reference = |value: &str| CredentialRef::new(value).unwrap();
         let models: ModelAccess = toml::from_str(r#"accounts = ["codex-account", "local-account"]
@@ -2267,12 +2320,26 @@ pools = [
             generation: 1,
             open: false,
             explicit: false,
+            edited: false,
         };
         assert_eq!(catalog.target(&form), Some(reference("codex-connection")));
+        assert_eq!(
+            catalog.target_choices(&form),
+            vec![reference("codex-connection")]
+        );
         form.backend = MasterBackend::Rcli;
         form.pool = Some(reference("local-pool"));
         form.account = Some(reference("local-account"));
         assert_eq!(catalog.target(&form), Some(reference("local")));
+        assert_eq!(catalog.target_choices(&form), vec![reference("local")]);
+        form.target = Some(reference("local"));
+        form.field = 3;
+        assert!(form.select(Some(&catalog), true).unwrap());
+        assert_eq!(
+            form.target,
+            Some(reference("local")),
+            "an RCLI master never cycles onto a signed-in connection"
+        );
     }
 
     #[test]
@@ -2317,6 +2384,7 @@ pools = [
             generation: 1,
             open: false,
             explicit: false,
+            edited: false,
         };
         assert_eq!(catalog.target(&form), Some(reference("key-ref")));
         form.pool = Some(reference("local-pool"));
@@ -2363,6 +2431,7 @@ pools = [
             generation: 1,
             open: false,
             explicit: false,
+            edited: false,
         };
         let codex_only = catalog(models(""));
         assert_eq!(

@@ -13,7 +13,7 @@ use crazyagent::setup::{Dependency, DependencyState};
 use crazyagent::team::NodeKind;
 use crazyagent::terminal::tmux::{SOCKET, installed};
 use crazyagent::terminal::{AgentId, FOLDER, TerminalFrame};
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, scratch};
+use e2e_support::{ENGINE, Engine, Owner, Survivors, TMUX, hex, scratch, stop_tmux};
 use std::collections::BTreeSet;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
@@ -28,6 +28,7 @@ const SETTLE_TIME: Duration = Duration::from_secs(10);
 const FRAME_TIME: Duration = Duration::from_secs(10);
 const POLL_TIME: Duration = Duration::from_millis(100);
 const QUIT: &str = "C-q";
+const HANGUP_EXIT_TIME: Duration = Duration::from_secs(6);
 
 struct Server {
     tmux: PathBuf,
@@ -63,15 +64,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_remove("TMUX")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        stop_tmux(&self.tmux, &self.socket);
     }
 }
 
@@ -477,6 +470,56 @@ fn the_tui_starts_in_a_pty_draws_its_first_screen_and_quits_on_the_quit_key() {
     pty.checked(&["send-keys", "-t", "smoke", QUIT]);
     settled("the TUI exits on the quit key", || dead().starts_with('1'));
     assert_eq!(dead(), "1 0", "the TUI exits cleanly:\n{}", screen());
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn the_tui_exits_when_its_terminal_hangs_up() {
+    let mut engine = Engine::start("ca-smoke-hup-");
+    let folder = scratch("ca-smoke-hup-pty-");
+    let pty = Server {
+        tmux: installed(engine.path()).expect(TMUX),
+        socket: folder.path().join("pty.sock"),
+    };
+    let socket = engine.socket();
+    let socket = socket.to_str().unwrap();
+    assert!(!ENGINE.contains('\'') && !socket.contains('\''));
+    let command = format!("'{ENGINE}' tui '{socket}'");
+    pty.checked(&[
+        "-f",
+        "/dev/null",
+        "new-session",
+        "-d",
+        "-s",
+        "hangup",
+        "-x",
+        "100",
+        "-y",
+        "30",
+        &command,
+    ]);
+    settled("the TUI draws its first screen", || {
+        pty.checked(&["capture-pane", "-p", "-t", "hangup"])
+            .contains("Welcome to CrazyAgent")
+    });
+    let pid: u32 = pty
+        .checked(&["display-message", "-p", "-t", "hangup", "#{pane_pid}"])
+        .trim()
+        .parse()
+        .unwrap();
+    let survivor = Survivors(vec![pid]);
+    assert!(running(pid), "the TUI runs before its terminal hangs up");
+    pty.run(&["kill-server"]);
+    let start = Instant::now();
+    while running(pid) {
+        assert!(
+            start.elapsed() < HANGUP_EXIT_TIME,
+            "the TUI {pid} kept running {HANGUP_EXIT_TIME:?} after its terminal hung up"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
+    drop(survivor);
     drop(pty);
     engine.stop();
 }

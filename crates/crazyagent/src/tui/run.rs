@@ -47,7 +47,7 @@ impl Drop for Extras {
 /// Writes the sequences that hand the terminal back: stop focus and paste
 /// events, show the cursor, leave the alternate screen.
 /// Input: the terminal writer. Output: the write result.
-fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
+pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
     execute!(
         out,
         DisableFocusChange,
