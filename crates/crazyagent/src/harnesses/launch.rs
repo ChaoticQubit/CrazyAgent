@@ -7,12 +7,11 @@ use crate::protocol::{CredentialRef, RequestId, SessionId};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -272,32 +271,31 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
-    let mut command = Command::new(SANDBOX_EXEC);
+    let path = if request.tools {
+        TOOLS_ON_PATH
+    } else {
+        TOOLS_OFF_PATH
+    };
+    let mut command = crate::sandbox::agent_command(
+        profile,
+        &request.executable,
+        &[
+            ("HOME", home.as_os_str()),
+            ("PATH", OsStr::new(path)),
+            ("LANG", OsStr::new("C")),
+            ("LC_ALL", OsStr::new("C")),
+        ],
+        environment
+            .iter()
+            .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
+    )
+    .map_err(|_| failure("launch_environment_refused"))?;
     command
-        .arg("-f")
-        .arg(profile)
-        .arg(&request.executable)
         .args(&arguments)
-        .env_clear()
-        .env("HOME", home)
-        .env(
-            "PATH",
-            if request.tools {
-                TOOLS_ON_PATH
-            } else {
-                TOOLS_OFF_PATH
-            },
-        )
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
         .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    for (name, value) in environment {
-        command.env(name, value);
-    }
+        .stderr(Stdio::piped());
     assert_eq!(
         command.get_current_dir(),
         Some(request.working_dir.as_path())
