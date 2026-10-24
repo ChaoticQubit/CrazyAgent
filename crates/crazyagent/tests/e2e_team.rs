@@ -8,7 +8,7 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::NodeKind;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
-use e2e_support::{Engine, Owner, TMUX, hex};
+use e2e_support::{Engine, Owner, TMUX, hex, scratch};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -178,6 +178,10 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         Some("terminal_agent_unknown".into())
     );
 
+    let disk = scratch("ca-e2e-team-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
     assert_eq!(
         owner.create_project("e2e-team", "Tidepool team").await,
         OwnerResult::Applied
