@@ -6,6 +6,7 @@ use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -712,6 +713,15 @@ struct OpenedDatabase {
     custody: Result<NativeProfileCustody, EngineError>,
 }
 
+/// Refuses engine storage where the Unix owner and mode checks do not exist.
+/// Takes the database path and read-only mode, both unused.
+/// Returns `storage_unavailable` until Windows has its own owner-only access check.
+#[cfg(not(unix))]
+fn open_actor_database(_path: &Path, _readonly: bool) -> Result<OpenedDatabase, EngineError> {
+    Err(error("storage_unavailable"))
+}
+
+#[cfg(unix)]
 fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, EngineError> {
     let parent = path
         .parent()
@@ -959,6 +969,7 @@ fn gateway_connection_state(
     Ok(state)
 }
 
+#[cfg(unix)]
 fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
     let lock_path = path.with_extension("engine-lock");
     let lock = std::fs::OpenOptions::new()
@@ -985,6 +996,16 @@ fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
     Ok(lock)
 }
 
+/// Releases the engine database lock taken with the standard library file lock.
+/// Takes the locked file. Returns once the lock is released, or
+/// `database_lock_release_failed`.
+#[cfg(not(unix))]
+fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
+    lock.unlock()
+        .map_err(|e| error(format!("database_lock_release_failed: {e}")))
+}
+
+#[cfg(unix)]
 fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))

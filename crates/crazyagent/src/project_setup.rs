@@ -2,10 +2,13 @@ use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
@@ -933,14 +936,26 @@ fn extension_allowed(name: &str) -> bool {
         .is_some_and(|e| DOCUMENT_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// A directory opened beneath a project folder without following links.
+#[cfg(unix)]
+type Directory = rustix::fd::OwnedFd;
+
+/// A directory opened beneath a project folder, which cannot exist where no
+/// directory-relative no-follow open does; every use is unreachable by construction.
+#[cfg(not(unix))]
+enum Directory {}
+
+#[cfg(unix)]
 fn open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC
 }
 
+#[cfg(unix)]
 fn create_flags() -> OFlags {
     OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
 
+#[cfg(unix)]
 fn open_regular(path: &Path) -> Result<(std::fs::File, u64), &'static str> {
     let fd = rustix::fs::open(path, open_flags(), Mode::empty()).map_err(|e| match e {
         rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR => "document_not_found",
@@ -950,6 +965,7 @@ fn open_regular(path: &Path) -> Result<(std::fs::File, u64), &'static str> {
     regular(fd, "document_not_a_regular_file")
 }
 
+#[cfg(unix)]
 fn regular(
     fd: rustix::fd::OwnedFd,
     code: &'static str,
@@ -965,6 +981,7 @@ fn regular(
 /// Copies owner-picked documents into a project's document folder without executing anything.
 /// Takes absolute source paths, the destination folder and the byte budget left for the project.
 /// Returns the stored names and sizes, or a plain rejection code after removing partial copies.
+#[cfg(unix)]
 pub fn copy_documents(
     sources: &[String],
     destination: &Path,
@@ -975,9 +992,54 @@ pub fn copy_documents(
     copy_into(sources, &directory, &[], budget)
 }
 
+/// Refuses to copy documents where no directory-relative no-follow copy exists.
+/// Takes the sources, destination and budget, all unused.
+/// Returns `project_folder_unavailable`.
+#[cfg(not(unix))]
+pub fn copy_documents(
+    _sources: &[String],
+    _destination: &Path,
+    _budget: u64,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    Err("project_folder_unavailable")
+}
+
+#[cfg(not(unix))]
+fn copy_into(
+    _sources: &[String],
+    directory: &Directory,
+    _kept: &[StoredDocument],
+    _budget: u64,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    match *directory {}
+}
+
+#[cfg(not(unix))]
+fn remove_documents(directory: &Directory, _documents: &[StoredDocument]) {
+    match *directory {}
+}
+
+#[cfg(not(unix))]
+fn present(directory: &Directory, _name: &str) -> bool {
+    match *directory {}
+}
+
+#[cfg(not(unix))]
+fn unlink_in(directory: &Directory, _name: &str) -> std::io::Result<()> {
+    match *directory {}
+}
+
+/// Removes one entry from an opened directory without following a link.
+/// Takes the directory and the entry name. Returns the OS error on failure.
+#[cfg(unix)]
+fn unlink_in(directory: &Directory, name: &str) -> rustix::io::Result<()> {
+    rustix::fs::unlinkat(directory, name, AtFlags::empty())
+}
+
+#[cfg(unix)]
 fn copy_into(
     sources: &[String],
-    directory: &rustix::fd::OwnedFd,
+    directory: &Directory,
     kept: &[StoredDocument],
     budget: u64,
 ) -> Result<Vec<StoredDocument>, &'static str> {
@@ -989,20 +1051,23 @@ fn copy_into(
     result.map(|()| stored)
 }
 
-fn remove_documents(directory: &rustix::fd::OwnedFd, documents: &[StoredDocument]) {
+#[cfg(unix)]
+fn remove_documents(directory: &Directory, documents: &[StoredDocument]) {
     for document in documents {
         let _ = rustix::fs::unlinkat(directory, document.name.as_str(), AtFlags::empty());
     }
 }
 
-fn present(directory: &rustix::fd::OwnedFd, name: &str) -> bool {
+#[cfg(unix)]
+fn present(directory: &Directory, name: &str) -> bool {
     rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
         .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
 }
 
+#[cfg(unix)]
 fn copy_each(
     sources: &[String],
-    directory: &rustix::fd::OwnedFd,
+    directory: &Directory,
     kept: &[StoredDocument],
     budget: u64,
     stored: &mut Vec<StoredDocument>,
@@ -1374,6 +1439,14 @@ pub fn section(report: &str, heading: Option<&str>) -> Option<String> {
     Some(lines[start..end].join("\n").trim().to_owned())
 }
 
+/// Refuses the projects root where no 0700 directory can be made.
+/// Takes the engine database path, unused. Returns `project_folder_unavailable`.
+#[cfg(not(unix))]
+fn projects_root(_database: &Path) -> Result<PathBuf, EngineError> {
+    Err(failure("project_folder_unavailable"))
+}
+
+#[cfg(unix)]
 fn projects_root(database: &Path) -> Result<PathBuf, EngineError> {
     let runtime = std::fs::canonicalize(
         database
@@ -1449,7 +1522,13 @@ pub(crate) fn write_brief_at(folder: &Path, stored: &StoredSetup) -> Result<(), 
     write_brief(&context, stored)
 }
 
-fn write_brief(context: &rustix::fd::OwnedFd, stored: &StoredSetup) -> Result<(), &'static str> {
+#[cfg(not(unix))]
+fn write_brief(context: &Directory, _stored: &StoredSetup) -> Result<(), &'static str> {
+    match *context {}
+}
+
+#[cfg(unix)]
+fn write_brief(context: &Directory, stored: &StoredSetup) -> Result<(), &'static str> {
     let unwritable = |_| "project_folder_unwritable";
     let _ = rustix::fs::unlinkat(context, BRIEF_PARTIAL, AtFlags::empty());
     let mut file = std::fs::File::from(
@@ -1467,11 +1546,24 @@ fn write_brief(context: &rustix::fd::OwnedFd, stored: &StoredSetup) -> Result<()
     rustix::fs::renameat(context, BRIEF_PARTIAL, context, "brief.md").map_err(unwritable)
 }
 
+/// Refuses to build a new project's folder where its private 0700 git home cannot
+/// be made. Takes the database path, staging folder and setup, all
+/// unused. Returns `project_folder_unavailable`.
+#[cfg(not(unix))]
+fn stage_in_home(
+    _database: &Path,
+    _staging: &Path,
+    _setup: &ProjectSetup,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    Err("project_folder_unavailable")
+}
+
 /// Builds a new project's folder in a hidden staging folder of the projects
 /// home: a git repository with one empty start commit, the `.crazyagent/`
 /// layout with its git exclude lines, and the owner's documents.
 /// Takes the database path (for git's private home), the staging folder and
 /// the setup. Returns the copied documents, or a plain code with nothing kept.
+#[cfg(unix)]
 fn stage_in_home(
     database: &Path,
     staging: &Path,
@@ -1684,7 +1776,7 @@ fn delete_context(
     if !present(&parent, name) {
         return Ok(rejected("context_item_missing"));
     }
-    rustix::fs::unlinkat(&parent, name, AtFlags::empty()).map_err(error)?;
+    unlink_in(&parent, name).map_err(error)?;
     assert!(!present(&parent, name));
     if kind == ContextKind::Document {
         stored
@@ -2148,10 +2240,36 @@ fn context_kind(path: &str) -> Option<ContextKind> {
     }
 }
 
-fn open_directory(
-    parent: &rustix::fd::OwnedFd,
-    name: &str,
-) -> rustix::io::Result<rustix::fd::OwnedFd> {
+#[cfg(not(unix))]
+fn open_directory(parent: &Directory, _name: &str) -> std::io::Result<Directory> {
+    match *parent {}
+}
+
+/// Refuses to open a project folder where no directory-relative no-follow open exists.
+/// Takes the folder and directories, both unused. Returns an `Unsupported` error reading
+/// `project_folder_unavailable`.
+#[cfg(not(unix))]
+fn open_beneath(_folder: &Path, _directories: &[&str]) -> std::io::Result<Directory> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "project_folder_unavailable",
+    ))
+}
+
+/// Refuses to read a project context item where no no-follow open exists.
+/// Takes the folder, path, offset and limit, all unused. Returns `project_folder_unavailable`.
+#[cfg(not(unix))]
+fn read_beneath(
+    _folder: &Path,
+    _relative: &str,
+    _offset: u64,
+    _limit: u64,
+) -> Result<(Vec<u8>, u64), &'static str> {
+    Err("project_folder_unavailable")
+}
+
+#[cfg(unix)]
+fn open_directory(parent: &Directory, name: &str) -> rustix::io::Result<Directory> {
     rustix::fs::openat(
         parent,
         name,
@@ -2160,7 +2278,8 @@ fn open_directory(
     )
 }
 
-fn open_beneath(folder: &Path, directories: &[&str]) -> rustix::io::Result<rustix::fd::OwnedFd> {
+#[cfg(unix)]
+fn open_beneath(folder: &Path, directories: &[&str]) -> rustix::io::Result<Directory> {
     let mut fd = rustix::fs::open(folder, open_flags() | OFlags::DIRECTORY, Mode::empty())?;
     for directory in directories {
         fd = open_directory(&fd, directory)?;
@@ -2168,6 +2287,7 @@ fn open_beneath(folder: &Path, directories: &[&str]) -> rustix::io::Result<rusti
     Ok(fd)
 }
 
+#[cfg(unix)]
 fn read_beneath(
     folder: &Path,
     relative: &str,
@@ -2299,6 +2419,7 @@ pub fn read_context(
 /// Takes the engine database path, whose folder holds the research runner's agent state,
 /// and the job id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and
 /// RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame; none before the first run.
+#[cfg(unix)]
 pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineError> {
     assert!(job > 0);
     let agents = database
@@ -2353,6 +2474,14 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     assert!(lines.len() <= RESEARCH_LOG_LINES_MAX);
     assert!(lines.iter().map(String::len).sum::<usize>() <= RESEARCH_LOG_BYTES_MAX);
     Ok(lines)
+}
+
+/// Refuses research job output where no directory-relative no-follow read exists.
+/// Takes the engine database path and job id, both unused.
+/// Returns `research_log_unavailable`.
+#[cfg(not(unix))]
+pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineError> {
+    Err(failure("research_log_unavailable"))
 }
 
 /// Names the newest run folder of a research job in the runner's agent state.

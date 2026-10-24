@@ -3,21 +3,30 @@ use super::owner::{
     OwnerResponse,
 };
 use super::owner::{OwnerRuntimeHandle, OwnerServer};
-use super::{Engine, EngineError, Server, io_error, verify_peer};
+#[cfg(unix)]
+use super::verify_peer;
+use super::{Engine, EngineError, Server, io_error};
 use crate::config::EffectiveConfig;
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId, SessionId};
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
+#[cfg(unix)]
+mod native_profiles;
+#[cfg(not(unix))]
+#[path = "bootstrap/native_profiles_unavailable.rs"]
 mod native_profiles;
 #[cfg(test)]
 pub(crate) use native_profiles::MAX_PROFILES;
@@ -50,6 +59,18 @@ struct Identity {
 }
 
 impl Identity {
+    /// A placeholder identity where the standard library has no stable device and inode.
+    /// Takes the metadata, unused. Returns zeros; `safe_directory` and `safe_file` reject
+    /// every Windows entry first, so no Windows decision ever rests on this value.
+    #[cfg(not(unix))]
+    fn of(_metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: 0,
+            inode: 0,
+        }
+    }
+
+    #[cfg(unix)]
     fn of(metadata: &std::fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
@@ -127,10 +148,26 @@ struct Anchor {
     identity: Identity,
 }
 
+/// Rejects every directory where the Unix owner and mode check does not exist.
+/// Takes the metadata, unused. Returns false, so Windows trusts no anchor or generation.
+#[cfg(not(unix))]
+fn safe_directory(_m: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Rejects every file where the Unix owner, mode and link check does not exist.
+/// Takes the metadata, unused. Returns false, so Windows trusts no locator or database.
+#[cfg(not(unix))]
+fn safe_file(_m: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn safe_directory(m: &std::fs::Metadata) -> bool {
     m.is_dir() && m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o7777 == 0o700
 }
 
+#[cfg(unix)]
 fn safe_file(m: &std::fs::Metadata) -> bool {
     m.is_file()
         && m.uid() == rustix::process::getuid().as_raw()
@@ -139,6 +176,15 @@ fn safe_file(m: &std::fs::Metadata) -> bool {
 }
 
 impl Anchor {
+    /// Refuses the engine root as an owner anchor without Unix directory-relative opens.
+    /// Takes the root, unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    fn open(_input: &Path) -> Result<Self, EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn open(input: &Path) -> Result<Self, EngineError> {
         let supplied: PathBuf = if input.is_absolute() {
             input.to_path_buf()
@@ -197,6 +243,15 @@ struct PinnedLocator {
 }
 
 impl PinnedLocator {
+    /// Refuses to read the owner locator without Unix directory-relative opens.
+    /// Takes the anchor, unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    fn read(_anchor: &Anchor) -> Result<Option<Self>, EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn read(anchor: &Anchor) -> Result<Option<Self>, EngineError> {
         anchor.verify()?;
         let file = match rustix::fs::openat(
@@ -229,6 +284,15 @@ impl PinnedLocator {
         Ok(Some(pinned))
     }
 
+    /// Refuses to confirm the owner locator without positioned Unix reads.
+    /// Takes the anchor, unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    fn verify(&self, _anchor: &Anchor) -> Result<(), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn verify(&self, anchor: &Anchor) -> Result<(), EngineError> {
         let current = anchor.metadata(LOCATOR)?;
         let metadata = self.file.metadata().map_err(io_error)?;
@@ -251,6 +315,15 @@ impl PinnedLocator {
     }
 }
 
+/// Refuses an engine socket where Unix domain sockets are not used.
+/// Takes the anchor, socket path and identity, all unused.
+/// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+#[cfg(not(unix))]
+fn check_socket(_anchor: &Anchor, _name: &Path, _identity: Identity) -> Result<(), EngineError> {
+    Err(fail("owner_anchor_unavailable"))
+}
+
+#[cfg(unix)]
 fn check_socket(anchor: &Anchor, name: &Path, identity: Identity) -> Result<(), EngineError> {
     anchor.verify()?;
     let metadata = std::fs::symlink_metadata(name).map_err(io_error)?;
@@ -438,9 +511,8 @@ fn cancelled(shutdown: &watch::Receiver<bool>) -> Result<(), EngineError> {
 }
 
 fn check_path_length(path: &Path) -> Result<(), EngineError> {
-    use std::os::unix::ffi::OsStrExt;
     let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
-    if path.as_os_str().as_bytes().len() >= limit {
+    if path.as_os_str().as_encoded_bytes().len() >= limit {
         return Err(fail("owner_socket_path_too_long"));
     }
     Ok(())
@@ -640,6 +712,21 @@ impl EngineService {
         self.owner_runtime.as_ref()
     }
 
+    /// Refuses to start the owner and ordinary listeners without Unix domain sockets.
+    /// Takes the socket name, settings, previous locator and shutdown signal, all unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    async fn start_inner(
+        &mut self,
+        _ordinary: &str,
+        _config: &EffectiveConfig,
+        _previous: Option<&PinnedLocator>,
+        _shutdown: &watch::Receiver<bool>,
+    ) -> Result<(), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     async fn start_inner(
         &mut self,
         ordinary: &str,
@@ -725,6 +812,15 @@ impl EngineService {
         Ok(())
     }
 
+    /// Refuses to create an owner generation without directory-relative Unix mkdir.
+    /// Takes the service.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    fn create_generation(&mut self) -> Result<(), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn create_generation(&mut self) -> Result<(), EngineError> {
         for _ in 0..8 {
             self.anchor.verify()?;
@@ -753,6 +849,19 @@ impl EngineService {
         Err(fail("owner_generation_collision_limit"))
     }
 
+    /// Refuses to retire a stale engine socket where Unix domain sockets are not used.
+    /// Takes the socket name and previous locator, both unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    async fn retire_socket(
+        &self,
+        _ordinary: &str,
+        _previous: Option<&PinnedLocator>,
+    ) -> Result<(), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     async fn retire_socket(
         &self,
         ordinary: &str,
@@ -784,6 +893,19 @@ impl EngineService {
         .map_err(io_error)
     }
 
+    /// Refuses to publish the owner locator without directory-relative Unix renames.
+    /// Takes the locator and the previous one, both unused.
+    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+    #[cfg(not(unix))]
+    fn publish(
+        &mut self,
+        _value: Locator,
+        _previous: Option<&PinnedLocator>,
+    ) -> Result<(), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn publish(
         &mut self,
         value: Locator,
@@ -908,14 +1030,9 @@ impl EngineService {
             }
         }
         if let Some(locator) = self.locator.take() {
-            let result = locator.verify(&self.anchor).and_then(|()| {
-                rustix::fs::unlinkat(
-                    &self.anchor.directory,
-                    LOCATOR,
-                    rustix::fs::AtFlags::empty(),
-                )
-                .map_err(io_error)
-            });
+            let result = locator
+                .verify(&self.anchor)
+                .and_then(|()| remove_locator(&self.anchor));
             if let Err(error) = result {
                 errors.push(error.0);
             }
@@ -961,6 +1078,20 @@ impl EngineService {
             Err(EngineError(errors.join("; ")))
         }
     }
+}
+
+/// Removes the published owner locator relative to the pinned engine root.
+/// Takes the anchor. Returns once the locator is unlinked, or the I/O error.
+#[cfg(unix)]
+fn remove_locator(anchor: &Anchor) -> Result<(), EngineError> {
+    rustix::fs::unlinkat(&anchor.directory, LOCATOR, rustix::fs::AtFlags::empty()).map_err(io_error)
+}
+
+/// Refuses to remove the owner locator without directory-relative Unix unlinks.
+/// Takes the anchor, unused. Returns `owner_anchor_unavailable`.
+#[cfg(not(unix))]
+fn remove_locator(_anchor: &Anchor) -> Result<(), EngineError> {
+    Err(fail("owner_anchor_unavailable"))
 }
 
 impl Drop for EngineService {

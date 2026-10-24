@@ -194,6 +194,15 @@ pub fn project_id_for(folder: &Path) -> Result<ProjectId, EngineError> {
     ProjectId::new(slug).map_err(|problem| failure(&problem.0))
 }
 
+/// The owner's home folder from the user profile, canonical when it resolves, so
+/// onboarding can refuse it. Takes nothing. Returns the folder, or none when unset.
+#[cfg(not(unix))]
+fn owner_home() -> Option<PathBuf> {
+    let dir = std::env::home_dir()?;
+    Some(dir.canonicalize().unwrap_or(dir))
+}
+
+#[cfg(unix)]
 fn owner_home() -> Option<PathBuf> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok()??;
     Some(user.dir.canonicalize().unwrap_or(user.dir))

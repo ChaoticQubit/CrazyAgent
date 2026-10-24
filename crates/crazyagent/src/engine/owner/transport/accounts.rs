@@ -7,6 +7,7 @@ use crate::protocol::{CredentialRef, encode_frame};
 use crate::storage::accounts::{Command, Listed, ResultValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
 
 const KEYS: &str = "account-keys";
@@ -419,6 +420,7 @@ fn key_name(credential: &CredentialRef) -> Result<&str, EngineError> {
     Ok(name)
 }
 
+#[cfg(unix)]
 fn keys_directory(root: &Root, create: bool) -> Result<Option<File>, EngineError> {
     root.verify()?;
     let anchor = Root::open(
@@ -454,6 +456,7 @@ fn keys_directory(root: &Root, create: bool) -> Result<Option<File>, EngineError
     Ok(Some(directory))
 }
 
+#[cfg(unix)]
 fn store_key(
     root: &Root,
     credential: &CredentialRef,
@@ -486,6 +489,21 @@ fn store_key(
     Ok(())
 }
 
+/// Refuses to save an account key where the Unix owner-only key directory does not exist.
+/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
+/// Returns `account_key_store_unavailable`.
+#[cfg(not(unix))]
+fn store_key(
+    _root: &Root,
+    _credential: &CredentialRef,
+    key: AccountSecret,
+) -> Result<(), EngineError> {
+    let mut bytes = key.into_bytes();
+    bytes.fill(0);
+    Err(failure("account_key_store_unavailable"))
+}
+
+#[cfg(unix)]
 fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, EngineError> {
     let Some(directory) = keys_directory(root, false)? else {
         return Ok(None);
@@ -512,6 +530,13 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
         return Err(failure("account_key_store_unsafe"));
     }
     Ok(Some(file))
+}
+
+/// Refuses to open an account key where the Unix owner-only key directory does not exist.
+/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
+#[cfg(not(unix))]
+fn open_key(_root: &Root, _credential: &CredentialRef) -> Result<Option<File>, EngineError> {
+    Err(failure("account_key_store_unavailable"))
 }
 
 fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, EngineError> {
@@ -546,6 +571,7 @@ pub(super) fn saved_key(
         .map_err(|_| failure("account_key_store_unsafe"))
 }
 
+#[cfg(unix)]
 fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError> {
     let Some(directory) = keys_directory(root, false)? else {
         return Ok(());
@@ -558,6 +584,13 @@ fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(_) => Err(failure("account_key_store_unavailable")),
     }
+}
+
+/// Refuses to remove an account key where the Unix owner-only key directory does not exist.
+/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
+#[cfg(not(unix))]
+fn remove_key(_root: &Root, _credential: &CredentialRef) -> Result<(), EngineError> {
+    Err(failure("account_key_store_unavailable"))
 }
 
 fn http_url(connection: &ModelConnection) -> Option<url::Url> {

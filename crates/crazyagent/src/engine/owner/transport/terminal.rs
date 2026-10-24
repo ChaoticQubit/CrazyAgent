@@ -1,11 +1,11 @@
 use super::*;
+use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 use crate::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, TerminalFrame, TerminalRequest,
     TerminalStream,
 };
 use tokio::io::AsyncWrite;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 const GRANT_CHECK: Duration = Duration::from_secs(5);

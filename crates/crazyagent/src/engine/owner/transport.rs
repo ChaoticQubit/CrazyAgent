@@ -11,21 +11,24 @@ mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
+use crate::platform::FileExt;
+use crate::platform::unix_socket::{UnixListener, UnixStream};
 use crate::storage::Job;
 use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
 };
 use crate::worker_dispatch::*;
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -59,6 +62,18 @@ struct Identity {
 }
 
 impl Identity {
+    /// A placeholder identity where the standard library has no stable device and inode.
+    /// Takes the metadata, unused. Returns zeros; `Root::open` refuses every Windows root
+    /// first, so no Windows decision ever rests on this value.
+    #[cfg(not(unix))]
+    fn of(_m: &std::fs::Metadata) -> Self {
+        Self {
+            device: 0,
+            inode: 0,
+        }
+    }
+
+    #[cfg(unix)]
     fn of(m: &std::fs::Metadata) -> Self {
         Self {
             device: m.dev(),
@@ -74,6 +89,15 @@ struct Root {
 }
 
 impl Root {
+    /// Refuses an owner root without Unix owner, mode and directory-relative checks.
+    /// Takes the root path, unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn open(_path: &Path) -> Result<Self, EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn open(path: &Path) -> Result<Self, EngineError> {
         if !path.is_absolute() || std::fs::canonicalize(path).map_err(io_error)? != path {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
@@ -102,6 +126,15 @@ impl Root {
         Ok(root)
     }
 
+    /// Refuses to confirm an owner root without Unix owner and mode checks.
+    /// Takes the root.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn verify(&self) -> Result<(), EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn verify(&self) -> Result<(), EngineError> {
         let m = std::fs::symlink_metadata(&self.path).map_err(io_error)?;
         if !m.is_dir()
@@ -114,6 +147,15 @@ impl Root {
         Ok(())
     }
 
+    /// Refuses to open a capability file without directory-relative Unix opens.
+    /// Takes the file name and create flag, both unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn open_key(&self, _name: &str, _create: bool) -> Result<File, EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn open_key(&self, name: &str, create: bool) -> Result<File, EngineError> {
         self.verify()?;
         let flags = if create {
@@ -133,6 +175,15 @@ impl Root {
         Ok(f)
     }
 
+    /// Refuses to confirm a capability file without Unix owner and inode checks.
+    /// Takes the name, file and identity, all unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn verify_key(&self, _name: &str, _file: &File, _id: Identity) -> Result<(), EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn verify_key(&self, name: &str, file: &File, id: Identity) -> Result<(), EngineError> {
         self.verify()?;
         let m = file.metadata().map_err(io_error)?;
@@ -156,6 +207,15 @@ impl Root {
         self.socket_identity_at(SOCKET)
     }
 
+    /// Refuses to identify a socket where Unix domain sockets are not used.
+    /// Takes the socket name, unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn socket_identity_at(&self, _name: &str) -> Result<Identity, EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn socket_identity_at(&self, name: &str) -> Result<Identity, EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
@@ -169,6 +229,15 @@ impl Root {
         Ok(Identity::of(&m))
     }
 
+    /// Refuses to remove an owned artifact without directory-relative Unix unlinks.
+    /// Takes the name, identity and socket flag, all unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn unlink_owned(&self, _name: &str, _id: Identity, _socket: bool) -> Result<(), EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn unlink_owned(&self, name: &str, id: Identity, socket: bool) -> Result<(), EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
@@ -182,6 +251,20 @@ impl Root {
             return Err(failure("owner_cleanup_replaced_artifact_preserved"));
         }
         rustix::fs::unlinkat(&self.directory, name, rustix::fs::AtFlags::empty()).map_err(io_error)
+    }
+
+    /// Creates one private 0700 directory inside this root, relative to its open handle.
+    /// Takes the new directory's name. Returns once it exists, or the I/O error.
+    #[cfg(unix)]
+    fn create_directory(&self, name: &str) -> Result<(), EngineError> {
+        rustix::fs::mkdirat(&self.directory, name, Mode::RWXU).map_err(io_error)
+    }
+
+    /// Refuses to create a directory without directory-relative Unix mkdir.
+    /// Takes the name, unused. Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn create_directory(&self, _name: &str) -> Result<(), EngineError> {
+        Err(failure("owner_root_unavailable"))
     }
 }
 
@@ -243,6 +326,15 @@ impl PinnedBootstrap {
         Ok(pinned)
     }
 
+    /// Refuses to confirm the runner bootstrap file without Unix owner and inode checks.
+    /// Takes the root, unused.
+    /// Returns `owner_root_unavailable`.
+    #[cfg(not(unix))]
+    fn verify(&self, _root: &Root) -> Result<(), EngineError> {
+        Err(failure("owner_root_unavailable"))
+    }
+
+    #[cfg(unix)]
     fn verify(&self, root: &Root) -> Result<(), EngineError> {
         root.verify()?;
         let actual = self.file.metadata().map_err(io_error)?;
@@ -399,7 +491,7 @@ impl Authority {
         let registration_id =
             RequestId::new(format!("runner-{}", random_id()?)).map_err(io_error)?;
         runners.push(None);
-        rustix::fs::mkdirat(&parent.directory, name.as_str(), Mode::RWXU).map_err(io_error)?;
+        parent.create_directory(name.as_str())?;
         parent.verify()?;
         let root = Root::open(&path)?;
         let prepared = PreparedRunner {
@@ -963,6 +1055,19 @@ impl OwnerServer {
     /// Publishes authenticated native owner access under a host trusted root.
     /// Requires canonical private root and protected ancestors, processes and DB.
     /// Returns server and host control; it does not qualify worker containment.
+    #[cfg(not(unix))]
+    pub async fn bind(
+        _path: &Path,
+        _engine: Arc<Engine>,
+        _config: &crate::config::EffectiveConfig,
+    ) -> Result<(Self, OwnerRuntimeHandle), EngineError> {
+        Err(failure("owner_socket_unavailable"))
+    }
+
+    /// Publishes authenticated native owner access under a host trusted root.
+    /// Requires canonical private root and protected ancestors, processes and DB.
+    /// Returns server and host control; it does not qualify worker containment.
+    #[cfg(unix)]
     pub async fn bind(
         path: &Path,
         engine: Arc<Engine>,
@@ -1916,6 +2021,15 @@ async fn runner_control(
     .map_err(|_| failure("runner_control_outcome_unknown"))?
 }
 
+/// Refuses to trust a dispatch directory without Unix owner, mode and inode checks.
+/// Takes the path and expected identity, both unused.
+/// Returns `dispatch_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn dispatch_directory(_path: &Path, _expected: &LeaseIdentity) -> Result<(), EngineError> {
+    Err(failure("dispatch_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), EngineError> {
     if !path.is_absolute()
         || path.components().count() > 64
@@ -1952,6 +2066,15 @@ fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), Engin
     Ok(())
 }
 
+/// Refuses to read a dispatch file without Unix owner, mode and inode checks.
+/// Takes the path and size limit, both unused.
+/// Returns `dispatch_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn dispatch_file(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
+    Err(failure("dispatch_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = File::from(
         rustix::fs::open(
@@ -1989,6 +2112,15 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     Ok(bytes)
 }
 
+/// Refuses to trust Git metadata without Unix owner and mode checks.
+/// Takes the repository path, unused.
+/// Returns `dispatch_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn dispatch_config(_path: &Path) -> Result<(), EngineError> {
+    Err(failure("dispatch_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 fn dispatch_config(path: &Path) -> Result<(), EngineError> {
     let mut pending = vec![path.join(".git")];
     let mut visited = 0;
@@ -2121,6 +2253,18 @@ impl Drop for DispatchGit {
     }
 }
 
+/// Refuses to observe a dispatch Git head without non-blocking Unix pipe reads.
+/// Takes the snapshot and timeout, both unused.
+/// Returns `dispatch_filesystem_unavailable`.
+#[cfg(not(unix))]
+async fn observe_dispatch(
+    _snapshot: DispatchSnapshot,
+    _timeout: Duration,
+) -> Result<DispatchSnapshot, EngineError> {
+    Err(failure("dispatch_filesystem_unavailable"))
+}
+
+#[cfg(unix)]
 async fn observe_dispatch(
     snapshot: DispatchSnapshot,
     timeout: Duration,

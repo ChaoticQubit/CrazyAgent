@@ -10,6 +10,7 @@ use crate::research::runner::{
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -448,6 +449,7 @@ fn mapping_step(
 /// The graphify executable this machine has, looked up again on each call:
 /// the owner's `~/.local/bin/graphify` from a uv tool install, then the
 /// Homebrew locations. Returns the canonical file, or `None`.
+#[cfg(unix)]
 pub fn installed_graphify() -> Option<PathBuf> {
     let home = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()
@@ -459,12 +461,38 @@ pub fn installed_graphify() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The graphify executable a uv tool install puts in the owner's
+/// `.local\bin` folder, looked up again on each call. Returns the canonical
+/// file, or `None`.
+#[cfg(not(unix))]
+pub fn installed_graphify() -> Option<PathBuf> {
+    std::env::home_dir()
+        .map(|home| home.join(".local").join("bin").join("graphify.exe"))
+        .and_then(|candidate| candidate.canonicalize().ok())
+        .filter(|candidate| candidate.is_file())
+}
+
+/// Refuses engine onboarding where its 0700 state folders and private database cannot
+/// be made or checked. Takes the runtime, settings files and the optional Codex and
+/// Claude Code paths, all unused. Returns `onboarding_runtime_unavailable`.
+#[cfg(not(unix))]
+pub fn start_for_engine(
+    _runtime: &Path,
+    _global: &Path,
+    _project: &Path,
+    _codex: Option<&Path>,
+    _claude: Option<&Path>,
+) -> Result<OnboardingService, String> {
+    Err("onboarding_runtime_unavailable".into())
+}
+
 /// Starts onboarding for a running writable engine: steps claimed from the
 /// engine database's `onboarding` table, agent state in
 /// `<runtime>/onboarding`, the mapping account picked live from the settings
 /// files among the installed harnesses and graphify found on every graph
 /// step. Codex and Claude Code are both optional: without either, graphs
 /// still build and only mapping fails with [`CODEX_MISSING`].
+#[cfg(unix)]
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,

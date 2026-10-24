@@ -1,8 +1,11 @@
+#[cfg(unix)]
 use crazyagent::protocol;
 
+#[cfg(unix)]
 #[path = "../runner.rs"]
 mod runner;
 
+#[cfg(unix)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
@@ -14,4 +17,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustix::process::setsid().map_err(|error| format!("runner_session_detach: {error}"))?;
     runner::run(std::path::Path::new(&args[1])).await?;
     Ok(())
+}
+
+/// Refuses to serve where the runner's Unix socket, peer and private state checks do not
+/// exist. Takes no input. Returns `runner_unavailable`.
+#[cfg(not(unix))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Err("runner_unavailable".into())
 }

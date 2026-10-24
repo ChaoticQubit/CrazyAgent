@@ -1,11 +1,18 @@
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+#[cfg(unix)]
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{Command, ExitCode};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::ExitCode;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 fn main() -> ExitCode {
     match execute() {
         Ok(()) => ExitCode::SUCCESS,
@@ -16,6 +23,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// Refuses every resource probe role where Unix resource limits do not exist.
+/// Takes no input. Reports `resource_limits_unavailable` on stderr and returns exit code 2,
+/// the same code as a failed probe on Unix.
+#[cfg(not(unix))]
+fn main() -> ExitCode {
+    eprintln!("resource probe: resource_limits_unavailable");
+    ExitCode::from(2)
+}
+
+#[cfg(unix)]
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).take(4).collect();
     let core_limit = Rlimit {
@@ -63,6 +80,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[cfg(unix)]
 fn limit_and_exec(resource: Resource, limit: u64) -> Result<(), Box<dyn std::error::Error>> {
     let result = setrlimit(
         resource,
@@ -80,6 +98,7 @@ fn limit_and_exec(resource: Resource, limit: u64) -> Result<(), Box<dyn std::err
     Err(error.into())
 }
 
+#[cfg(unix)]
 fn allocate() -> Result<(), Box<dyn std::error::Error>> {
     let size = 24 * 1024 * 1024;
     let mut allocation: Vec<u8> = Vec::new();
@@ -98,6 +117,7 @@ fn allocate() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn burn_cpu() {
     let started = Instant::now();
     let mut work = 1_u64;
@@ -107,6 +127,7 @@ fn burn_cpu() {
     println!("cpu-workload-completed={work}");
 }
 
+#[cfg(unix)]
 fn spawn_children() -> Result<(), Box<dyn std::error::Error>> {
     let mut children = Vec::new();
     for index in 0..6 {

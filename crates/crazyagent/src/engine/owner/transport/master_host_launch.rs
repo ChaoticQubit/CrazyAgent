@@ -11,10 +11,14 @@ use crate::sandbox::{
 };
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -181,6 +185,7 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
 fn master_command(
     executable: &Path,
     home: &Path,
@@ -227,11 +232,25 @@ fn master_command(
     Ok(command)
 }
 
+/// Refuses the master app-server command where the engine cannot give it its own
+/// process group to stop as a whole. Takes the executable, home, working directory and
+/// model, all unused. Returns `master_host_unavailable`.
+#[cfg(not(unix))]
+fn master_command(
+    _executable: &Path,
+    _home: &Path,
+    _cwd: &Path,
+    _model: &str,
+) -> Result<Command, EngineError> {
+    Err(failure("master_host_unavailable"))
+}
+
 /// Builds and installs the Seatbelt boundary for one master turn. The master writes only
 /// in the project repository, its leased worktree, the account's managed home and the
 /// turn's own temp folder; it reads the harness install folder and the turn directory,
 /// and reaches only its model endpoint (HTTPS for a native account) because its tools
 /// are off. Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+#[cfg(unix)]
 pub(super) fn master_sandbox(
     root: &Root,
     runtime_ref: &RequestId,
@@ -279,6 +298,23 @@ pub(super) fn master_sandbox(
     Ok(installed)
 }
 
+/// Refuses the master turn boundary where the owner-only turn directory cannot be made.
+/// Takes the owner root, turn reference, repository, worktree, home, executable and
+/// endpoint, all unused. Returns `master_sandbox_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn master_sandbox(
+    _root: &Root,
+    _runtime_ref: &RequestId,
+    _repository: &Path,
+    _worktree: &Path,
+    _home: &Path,
+    _executable: &Path,
+    _endpoint: &ModelEndpoint,
+) -> Result<InstalledSandbox, EngineError> {
+    Err(failure("master_sandbox_unavailable"))
+}
+
+#[cfg(unix)]
 pub(super) fn allocate_master_capture(
     root: &Root,
 ) -> Result<(RequestId, RequestId, File), EngineError> {
@@ -313,10 +349,20 @@ pub(super) fn allocate_master_capture(
     Err(failure("master_capture_unavailable"))
 }
 
+/// Refuses a master capture where the owner-only turn directory cannot be made.
+/// Takes the owner root, unused. Returns `master_capture_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn allocate_master_capture(
+    _root: &Root,
+) -> Result<(RequestId, RequestId, File), EngineError> {
+    Err(failure("master_capture_unavailable"))
+}
+
 /// Writes the master's startup instruction into its private turn directory as the 0600
 /// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
 /// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
 /// file's absolute path, or a plain refusal when the directory or file is not the engine's.
+#[cfg(unix)]
 fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
@@ -353,6 +399,19 @@ fn write_master_instructions(
     Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
+/// Refuses the master instruction file where the owner-only turn directory cannot be made.
+/// Takes the owner root, turn reference and text, all unused.
+/// Returns `master_capture_unavailable`.
+#[cfg(not(unix))]
+fn write_master_instructions(
+    _root: &Root,
+    _runtime_ref: &RequestId,
+    _text: &str,
+) -> Result<PathBuf, EngineError> {
+    Err(failure("master_capture_unavailable"))
+}
+
+#[cfg(unix)]
 fn verify_master_runtime(root: &Root, runtime: &Root, name: &str) -> Result<(), EngineError> {
     root.verify()?;
     runtime.verify()?;
@@ -371,6 +430,7 @@ fn verify_master_runtime(root: &Root, runtime: &Root, name: &str) -> Result<(), 
     Ok(())
 }
 
+#[cfg(unix)]
 fn verify_master_capture(runtime: &Root, name: &str, capture: &File) -> Result<(), EngineError> {
     runtime.verify()?;
     let named = rustix::fs::statat(&runtime.directory, name, AtFlags::SYMLINK_NOFOLLOW)

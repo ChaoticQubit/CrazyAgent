@@ -9,7 +9,6 @@ use crate::protocol::RequestId;
 use crate::rcli_host::{RcliMasterBinding, RcliMasterLaunch, checked_configured_profile};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -135,7 +134,7 @@ fn validate_prepared(
         let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
         if !path.is_absolute()
             || !metadata.is_dir()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || !crate::platform::owned_by_effective_user(&metadata)
             || std::fs::canonicalize(path).map_err(io_error)? != *path
         {
             return Err(failure("master_runtime_binding"));

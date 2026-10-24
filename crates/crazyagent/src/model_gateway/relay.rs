@@ -2,6 +2,7 @@ use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -151,10 +152,7 @@ impl Relay {
         let token = format!("{TOKEN_PREFIX}{}", random_hex(TOKEN_HEX / 2)?);
         assert!(is_placeholder(&token));
         let scratch = std::env::temp_dir().join(format!("crazyagent-relay-{}", random_hex(8)?));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&scratch)
-            .map_err(|_| failure("model_relay_unavailable"))?;
+        private_scratch(&scratch).map_err(|_| failure("model_relay_unavailable"))?;
         let bound = TcpListener::bind(("127.0.0.1", 0)).and_then(|listener| {
             listener.set_nonblocking(true)?;
             let port = listener.local_addr()?.port();
@@ -347,16 +345,51 @@ impl BodyFile {
     fn write(scratch: &Path, body: &[u8]) -> std::io::Result<Self> {
         let name = random_hex(16).map_err(|_| std::io::Error::other("random"))?;
         let path = scratch.join(format!("request-{name}"));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(&path)?;
+        let mut file = create_private(&path)?;
         let file_path = Self(path);
         file.write_all(body)?;
         Ok(file_path)
     }
+}
+
+/// Creates the relay's scratch folder for request bodies, private to the engine user.
+/// Input: the new folder path. Output: Ok once it exists with mode 0700.
+#[cfg(unix)]
+fn private_scratch(path: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// Refuses the relay's scratch folder where it cannot be made private to the engine
+/// user. Input: the folder path, unused. Output: an `Unsupported` error, which the
+/// relay reports as `model_relay_unavailable`.
+#[cfg(not(unix))]
+fn private_scratch(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model_relay_unavailable",
+    ))
+}
+
+/// Creates one request body file, readable only by the engine user, refusing a link
+/// placed at its path. Input: the new file path. Output: the open file.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+/// Refuses a request body file where it cannot be made private to the engine user.
+/// Input: the file path, unused. Output: an `Unsupported` error.
+#[cfg(not(unix))]
+fn create_private(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model_relay_unavailable",
+    ))
 }
 
 impl Drop for BodyFile {

@@ -1,8 +1,10 @@
 use super::process::{CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest};
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+#[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsFd;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -300,6 +302,14 @@ impl Drop for Custody {
     }
 }
 
+/// Refuses the host's child pipes where std offers no non-blocking anonymous pipe.
+/// Takes the pipe, unused. Returns `codex_host_unavailable`.
+#[cfg(not(unix))]
+fn nonblocking<T>(_pipe: &T) -> Result<(), &'static str> {
+    Err("codex_host_unavailable")
+}
+
+#[cfg(unix)]
 fn nonblocking(pipe: &impl AsFd) -> Result<(), &'static str> {
     let flags = fcntl_getfl(pipe).map_err(|_| "codex_host_pipe_flags")?;
     fcntl_setfl(pipe, flags | OFlags::NONBLOCK).map_err(|_| "codex_host_pipe_flags")

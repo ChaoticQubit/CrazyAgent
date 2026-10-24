@@ -15,6 +15,7 @@ use crate::terminal::{AgentId, Host};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -689,12 +690,7 @@ impl ResearchRunner {
             ),
         ] {
             let Some(stream) = stream else { continue };
-            let log = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-                .open(agent.join(name))?;
+            let log = create_private(&agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             std::thread::spawn(move || drain(stream, &counted, log, log_max));
@@ -915,6 +911,7 @@ impl ResearchRunner {
     /// lease for the whole run. Takes the run and `stop`, polled while the
     /// agent runs. Returns how it ended; the agent's process group is stopped
     /// on every path, including a panic or an early error.
+    #[cfg(unix)]
     pub(crate) fn run_read_only(
         &self,
         run: &ReadOnlyRun<'_>,
@@ -1025,12 +1022,7 @@ impl ResearchRunner {
         ];
         for (stream, name) in streams {
             let Some(stream) = stream else { continue };
-            let log = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-                .open(agent.join(name))?;
+            let log = create_private(&agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
@@ -1074,6 +1066,20 @@ impl ResearchRunner {
         } else {
             ReadOnlyEnding::Answered(answer)
         })
+    }
+
+    /// Refuses a read-only agent run, which needs the Seatbelt command Windows does not
+    /// have; Windows agents wait for the AppContainer boundary. Takes the run and `stop`,
+    /// both unused. Returns the sandbox's `Unavailable` refusal.
+    #[cfg(windows)]
+    pub(crate) fn run_read_only(
+        &self,
+        _run: &ReadOnlyRun<'_>,
+        _stop: &dyn Fn() -> bool,
+    ) -> Result<ReadOnlyEnding, RunError> {
+        Err(RunError::Sandbox(SandboxError::Unavailable(
+            crate::sandbox::windows::APPCONTAINER_MISSING.into(),
+        )))
     }
 }
 
@@ -1335,13 +1341,78 @@ fn pane_account(account: &ResearchAccount, home: &Path) -> (AccountBinding, Opti
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new()
+/// The error every owner-only research file or folder reports where none can be made.
+/// Takes nothing. Returns an `Unsupported` I/O error reading `research_runner_unavailable`.
+#[cfg(not(unix))]
+fn unavailable() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "research_runner_unavailable")
+}
+
+/// Creates a fresh 0600 file without following a link at `path`.
+/// Takes the path. Returns the new file, or the I/O error, also when it exists.
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)?;
+        .open(path)
+}
+
+/// Refuses an owner-only research file where none can be made.
+/// Takes the path, unused. Returns `research_runner_unavailable`.
+#[cfg(not(unix))]
+fn create_private(_path: &Path) -> io::Result<File> {
+    Err(unavailable())
+}
+
+/// Opens a file to append, creating it, without following a link at `path`.
+/// Takes the path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_append(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+/// Opens a file to append, creating it, as the reparse point itself and never a link's
+/// target. Takes the path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_append(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Opens a file to read without following a link at `path`.
+/// Takes the path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_read(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+/// Opens a file to read as the reparse point itself, never a link's target.
+/// Takes the path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_read(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_private(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -1400,11 +1471,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     }
     let info = root.join(".git").join("info");
     fs::create_dir_all(&info)?;
-    let mut exclude = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(info.join("exclude"))?;
+    let mut exclude = open_append(&info.join("exclude"))?;
     exclude.write_all(b"/worktrees/\n/context/\n")?;
     Ok(())
 }
@@ -1487,6 +1554,7 @@ impl AgentProcess {
 
     /// Kills the agent's group once, reaps the agent and waits for the group
     /// to empty. Later calls do nothing, so a reused group id is never killed.
+    #[cfg(unix)]
     pub(crate) fn stop(&mut self) {
         if self.stopped {
             return;
@@ -1494,6 +1562,18 @@ impl AgentProcess {
         stop_group(self.group);
         let _ = self.child.wait();
         await_group_exit(self.group);
+        self.stopped = true;
+    }
+
+    /// Kills the agent and reaps it where no process group exists, once; later calls do
+    /// nothing. Takes the process. Returns nothing.
+    #[cfg(not(unix))]
+    pub(crate) fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
         self.stopped = true;
     }
 }
@@ -1505,6 +1585,7 @@ impl Drop for AgentProcess {
     }
 }
 
+#[cfg(unix)]
 fn stop_group(group: u32) {
     let Ok(raw) = i32::try_from(group) else {
         return;
@@ -1520,6 +1601,7 @@ fn stop_group(group: u32) {
 /// any member that is still there. Takes the group id; returns once the group
 /// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
 /// stopped while one of its processes still lingers unnoticed.
+#[cfg(unix)]
 fn await_group_exit(group: u32) {
     let Some(pid) = i32::try_from(group)
         .ok()
@@ -1559,7 +1641,15 @@ pub(crate) fn drain(
     }
 }
 
+/// Refuses an owner-only research folder where no 0700 directory can be made.
+/// Takes the path, unused. Returns `research_runner_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn private_directory(_path: &Path) -> io::Result<()> {
+    Err(unavailable())
+}
+
 /// Creates a 0700 directory, or accepts an existing real directory there.
+#[cfg(unix)]
 pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
@@ -1576,10 +1666,7 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
 }
 
 fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)?;
+    let file = open_read(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > max {
         return Err(io::Error::other("report is not a bounded regular file"));
@@ -1718,6 +1805,14 @@ fn links_in(text: &str) -> Vec<String> {
     links
 }
 
+/// Refuses to publish a research report where its no-follow staged write is not made.
+/// Takes the project root, kind and report, all unused. Returns `research_runner_unavailable`.
+#[cfg(not(unix))]
+fn write_report(_root: &Path, _kind: &str, _report: &str) -> io::Result<PathBuf> {
+    Err(unavailable())
+}
+
+#[cfg(unix)]
 fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
     assert!(valid_kind(kind));
     let context = crate::projects_home::state_folder(root).join("context");
