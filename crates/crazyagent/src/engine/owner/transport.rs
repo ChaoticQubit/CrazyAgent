@@ -1740,7 +1740,7 @@ async fn read_owner_handshake(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 async fn serve_owner(
     stream: UnixStream,
     engine: Arc<Engine>,
