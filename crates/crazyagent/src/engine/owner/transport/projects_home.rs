@@ -4,7 +4,7 @@ use crate::projects_home::{AddMode, folder_size};
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 
 enum Step {
-    Reply(OwnerResponse),
+    Reply(Box<OwnerResponse>),
     Record(Result<(), String>),
     Size(u64),
 }
@@ -91,10 +91,10 @@ async fn replayed(
         {
             OwnerResponse::Committed { mut operation } => {
                 operation.historical_replay = true;
-                Some(Step::Reply(OwnerResponse::Applied { operation }))
+                Some(Step::Reply(Box::new(OwnerResponse::Applied { operation })))
             }
             OwnerResponse::NotRecordedAtBarrier { .. } => None,
-            other => Some(Step::Reply(other)),
+            other => Some(Step::Reply(Box::new(other))),
         },
     )
 }
@@ -153,7 +153,7 @@ async fn measure(path: &str, deadline: Instant) -> Result<Step, EngineError> {
         .map_err(|_| failure("folder_size_interrupted"))?
     {
         Ok(bytes) => Ok(Step::Size(bytes)),
-        Err(e) => Ok(Step::Reply(OwnerResponse::Rejected { code: e.0 })),
+        Err(e) => Ok(Step::Reply(Box::new(OwnerResponse::Rejected { code: e.0 }))),
     }
 }
 
@@ -165,7 +165,7 @@ async fn finish(
 ) -> Result<OwnerReply, EngineError> {
     let id = request.request_id.clone();
     let response = match step? {
-        Step::Reply(response) => response,
+        Step::Reply(response) => *response,
         Step::Record(effect) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| Job::HomeRecord(a.clone(), Box::new(request), effect, reply))

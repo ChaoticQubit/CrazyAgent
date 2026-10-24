@@ -128,7 +128,7 @@ fn an_agent_terminal_takes_input_resizes_and_survives_a_new_engine_client() {
         host.spawn(&agent, &command).unwrap_err().0,
         "terminal_agent_running"
     );
-    assert_eq!(host.alive().unwrap(), [agent.clone()]);
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
 
     let folder_metadata = std::fs::symlink_metadata(&folder).unwrap();
     assert_eq!(folder_metadata.mode() & 0o777, 0o700);
@@ -169,7 +169,7 @@ fn an_agent_terminal_takes_input_resizes_and_survives_a_new_engine_client() {
     let again = Tmux::open(Some(tmux), &folder);
     assert_eq!(
         again.alive().unwrap(),
-        [agent.clone()],
+        std::slice::from_ref(&agent),
         "a new client finds the agent still running"
     );
     let mut stream = again.attach(&agent).unwrap();
@@ -415,13 +415,13 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     host.close(std::slice::from_ref(&master)).unwrap();
     assert_eq!(
         host.alive().unwrap(),
-        [master.clone()],
+        std::slice::from_ref(&master),
         "the kept master stays"
     );
     drop(host);
 
     let again = Tmux::open(Some(tmux.clone()), &folder);
-    assert_eq!(again.alive().unwrap(), [master.clone()]);
+    assert_eq!(again.alive().unwrap(), std::slice::from_ref(&master));
     again.close(&[]).unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let listed = Command::new(&tmux)

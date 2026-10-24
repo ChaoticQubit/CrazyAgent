@@ -174,7 +174,7 @@ impl Drop for EngineProcess {
 
 /// The engine a bench drives: in this test process, or the real binary.
 enum Engine {
-    InProcess(EngineService, watch::Sender<bool>),
+    InProcess(Box<EngineService>, watch::Sender<bool>),
     Binary(EngineProcess),
 }
 
@@ -267,7 +267,7 @@ impl Bench {
             OwnerController::attach(&folders.root, OwnerClientKind::Tui, Duration::from_secs(5))
                 .await
                 .unwrap();
-        Self::with(folders, Engine::InProcess(service, stop), owner)
+        Self::with(folders, Engine::InProcess(Box::new(service), stop), owner)
     }
 
     /// Starts the real engine binary without Codex or Claude Code and
@@ -871,7 +871,7 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),

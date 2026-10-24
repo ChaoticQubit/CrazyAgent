@@ -1650,7 +1650,7 @@ async fn serve_session(
             if let Some(secret) = secret {
                 claude::write_secret(&mut writer, secret).await?;
             }
-            Ok(())
+            Ok::<(), EngineError>(())
         };
         tokio::time::timeout_at(deadline, exchange)
             .await

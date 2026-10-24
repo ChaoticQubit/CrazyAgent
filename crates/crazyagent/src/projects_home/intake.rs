@@ -331,7 +331,7 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<u64, EngineError> {
             if entries > ENTRIES_MAX {
                 return Err(refused("folder_size_too_large"));
             }
-            if entries % DEADLINE_EVERY == 0 && Instant::now() >= deadline {
+            if entries.is_multiple_of(DEADLINE_EVERY) && Instant::now() >= deadline {
                 return Err(refused("folder_size_timeout"));
             }
             let entry = entry.map_err(|_| refused("folder_size_unreadable"))?;

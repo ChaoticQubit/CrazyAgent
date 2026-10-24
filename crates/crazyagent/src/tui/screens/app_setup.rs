@@ -1025,8 +1025,14 @@ impl Screen for AppSetup {
                 self.reading[2] = false;
                 self.github = loaded(result);
             }
-            AppSetupEvent::FolderSize(_, result) => {
-                if let Some(Ask::HomeChoice { size, .. }) = &mut self.ask {
+            AppSetupEvent::FolderSize(measured, result) => {
+                let current = match &self.home {
+                    Load::Ready(home) => home.path.as_deref(),
+                    _ => None,
+                };
+                if current == Some(measured.as_str())
+                    && let Some(Ask::HomeChoice { size, .. }) = &mut self.ask
+                {
                     *size = Some(result.clone());
                 }
             }

@@ -88,12 +88,17 @@ struct Claimed {
     kind: Kind,
 }
 
+/// Picks the research account for a pool and the harnesses the runner can
+/// start. Input: the pool reference and the usable harnesses. Output: the
+/// account, or `None` when no pool member fits.
+type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send;
+
 /// What the account and graphify lookups resolve to on every step, so a
 /// newly assigned pool member or a newly installed graphify takes effect
 /// without a restart.
 struct Work {
     runner: Arc<ResearchRunner>,
-    accounts: Box<dyn Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send>,
+    accounts: Box<AccountLookup>,
     graphify: Box<dyn Fn() -> Option<PathBuf> + Send>,
     limits: OnboardingLimits,
     tick: Duration,
