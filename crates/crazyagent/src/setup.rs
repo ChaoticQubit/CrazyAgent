@@ -1,3 +1,4 @@
+pub mod fetch;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod pack;
@@ -186,7 +187,7 @@ pub trait Installer: Send + Sync {
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
 }
 
-const REASONS: [(&str, &str); 19] = [
+const REASONS: [(&str, &str); 20] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -234,6 +235,10 @@ const REASONS: [(&str, &str); 19] = [
     (
         "pack_server_invalid",
         "The server's start command is not valid.",
+    ),
+    (
+        "pack_server_command_missing",
+        "The program this server needs is not installed.",
     ),
     (
         "pack_bundled_unavailable",
