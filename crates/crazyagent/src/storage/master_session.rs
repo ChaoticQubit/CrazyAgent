@@ -101,6 +101,7 @@ pub(crate) struct PreparedMasterTurn {
 }
 
 pub(crate) enum MasterRuntimeResult {
+    #[cfg(test)]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
@@ -2203,7 +2204,7 @@ fn register_rcli_profile(
     sources: Option<&settings::SettingsSources>,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     registration: RcliRegistration<'_>,
-) -> Result<MasterRuntimeResult, EngineError> {
+) -> Result<RcliConfiguredProfileProof, EngineError> {
     let host = registration.host;
     let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
     let tx = db.transaction().map_err(error)?;
@@ -2230,7 +2231,7 @@ fn register_rcli_profile(
     let tx = db.transaction().map_err(error)?;
     let proof = publish_rcli_profile(&tx, config, sources, host, &original, candidate)?;
     tx.commit().map_err(error)?;
-    Ok(MasterRuntimeResult::ConfiguredProfile(Box::new(proof)))
+    Ok(proof)
 }
 
 /// Registers the engine-generated SDK home for an unregistered configured RCLI master.
@@ -2557,7 +2558,8 @@ pub(super) fn runtime(
             session_id: &session_id,
             configured_home: &configured_home,
         };
-        return register_rcli_profile(db, config, sources, custody, registration);
+        return register_rcli_profile(db, config, sources, custody, registration)
+            .map(|proof| MasterRuntimeResult::ConfiguredProfile(Box::new(proof)));
     }
     if let MasterRuntimeCommand::Prepare {
         host,
