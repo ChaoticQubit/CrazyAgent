@@ -31,10 +31,15 @@ pub(crate) struct NativeAuthWork {
 }
 
 struct NativeAuthPhysical {
+    #[cfg(unix)]
     file: std::fs::File,
+    #[cfg(unix)]
     path: std::path::PathBuf,
+    #[cfg(unix)]
     device: u64,
+    #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
     bytes: u64,
 }
 
@@ -136,6 +141,7 @@ impl NativeAuthDispatch {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn dispatch_native_auth(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -238,6 +244,7 @@ fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
     }
 }
 
+#[cfg(unix)]
 fn custody_purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
     match fact.action {
         NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
@@ -385,7 +392,7 @@ fn commit_native_auth_custody(
         )
         .map_err(error)?;
     assert_eq!(deleted, 1);
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     retirement_checkpoint::before_commit(retirement)?;
     retirement.validate_session()?;
     tx.commit().map_err(error)?;
@@ -398,6 +405,7 @@ pub(crate) enum NativeAuthHostUpdate {
     Unavailable,
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS native_auth_operations (
@@ -1059,10 +1067,10 @@ fn reply(admission: &Admission, command: &Command, fact: NativeAuthFact) -> Nati
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use retirement_checkpoint::NativeAuthRetirementCheckpoint;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod retirement_checkpoint {
     use super::{EngineError, NativeAuthCustodyRetirement, NativeAuthFact, error};
     use std::collections::HashMap;

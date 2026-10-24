@@ -2,7 +2,7 @@
 #[path = "master_rcli_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "master_rcli_capture_tests.rs"]
 mod capture_tests;
 use super::master_runtime::Capture;

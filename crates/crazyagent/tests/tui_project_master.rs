@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::conversation::ConversationContent;
 use crazyagent::engine::Client;
 use crazyagent::engine::bootstrap::EngineService;

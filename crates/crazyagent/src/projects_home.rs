@@ -20,6 +20,7 @@ const RESERVED_NAMES: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
+#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
@@ -451,6 +452,7 @@ pub fn found(
 
 /// Creates the projects home table when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)

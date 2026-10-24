@@ -49,10 +49,12 @@ mod master_process {
 mod master_reply;
 
 pub use master::{RcliMasterCompletion, RcliMasterHost, RcliMasterObservation, RcliMasterStatus};
+pub(crate) use master_launch::checked_configured_profile;
+#[cfg(unix)]
+pub(crate) use master_launch::configured_sdk_connection;
 pub use master_launch::{RcliMasterBinding, RcliMasterLaunch};
-pub(crate) use master_launch::{checked_configured_profile, configured_sdk_connection};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "rcli_host/master_tests.rs"]
 mod master_tests;
 

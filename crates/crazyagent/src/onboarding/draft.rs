@@ -39,6 +39,7 @@ const ENTRY_NAME_BYTES_MAX: usize = 128;
 const FACTS_MAX: usize = 16;
 const FACT_BYTES_MAX: usize = 200;
 const NAME_BYTES_MAX: usize = 256;
+#[cfg(unix)]
 const ABOUT_FALLBACK_BYTES_MAX: usize = 600;
 const OVERVIEW_BYTES_MAX: usize = 64 * 1024;
 const DRAFT_BYTES_MAX: u64 = 64 * 1024;
@@ -120,6 +121,7 @@ pub(crate) struct Answer {
     pub facts: MappingFacts,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Reply {
@@ -405,6 +407,7 @@ pub(crate) fn found_facts(evidence: &Evidence, repo: &Path) -> (MappingFacts, Ve
 
 /// The mapping agent's task with the project's evidence. Everything after
 /// "Project facts" is untrusted file content the agent only describes.
+#[cfg(unix)]
 pub(crate) fn prompt(evidence: &Evidence, found: &MappingFacts) -> String {
     let mut text = String::from(concat!(
         "You map an existing software project for CrazyAgent. You cannot change any file, ",
@@ -470,6 +473,7 @@ fn clean_about(value: &str) -> String {
     clip(value.trim(), ABOUT_BYTES_MAX).trim().to_owned()
 }
 
+#[cfg(unix)]
 fn platform(value: &str) -> Option<Platform> {
     let key = value.trim().to_lowercase().replace([' ', '-'], "_");
     serde_json::from_value(serde_json::Value::String(key))
@@ -483,6 +487,7 @@ fn platform(value: &str) -> Option<Platform> {
 
 /// The first plain paragraph of `overview`, skipping headings, lists and
 /// code, bounded for the `about` field when the agent gave none.
+#[cfg(unix)]
 fn first_paragraph(overview: &str) -> String {
     let mut fenced = false;
     for paragraph in overview.split("\n\n") {
@@ -510,6 +515,7 @@ fn first_paragraph(overview: &str) -> String {
 /// Splits the agent's answer into its overview and the draft fields of its
 /// last fenced json block. A missing or unreadable block leaves the fields
 /// empty; `about` then falls back to the overview's first paragraph.
+#[cfg(unix)]
 pub(crate) fn parse_answer(text: &str) -> Answer {
     let text = clip(text, OVERVIEW_BYTES_MAX * 2);
     let block = text.rfind("```json").and_then(|start| {
@@ -676,6 +682,7 @@ pub(crate) fn overview(layout: &Path) -> Option<String> {
 /// Writes the agent's overview as `layout`/overview.md unless one already
 /// exists there, which is kept as the owner or an earlier run left it.
 /// Takes the layout folder and the overview text. Returns whether it wrote.
+#[cfg(unix)]
 pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<bool> {
     if std::fs::symlink_metadata(layout.join(OVERVIEW_FILE)).is_ok() || overview.trim().is_empty() {
         return Ok(false);

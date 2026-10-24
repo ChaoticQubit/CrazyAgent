@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::project_setup::{

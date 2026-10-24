@@ -1,10 +1,12 @@
 use super::*;
+#[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{PackGroup, PackManifest};
 use crate::setup::{SetupAction, SetupStatus, progress};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS setup_pack (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536)
@@ -16,6 +18,7 @@ const REMOVED: &str = ".removed-";
 const SKILLS: [&str; 2] = ["skills", "global"];
 
 pub(crate) enum Command {
+    #[cfg(unix)]
     Install {
         id: String,
         source: String,
@@ -37,6 +40,7 @@ struct PackRecord {
 
 /// Creates the installed default-pack tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
@@ -63,6 +67,7 @@ fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineErro
     Ok(())
 }
 
+#[cfg(unix)]
 fn taken(problem: EngineError) -> EngineError {
     match problem.0.as_str() {
         "skill_name_taken" | "server_name_taken" => error("pack_name_taken"),
@@ -129,6 +134,7 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+#[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
     root: &Path,
@@ -390,6 +396,7 @@ fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
 /// skill folders are removed again and moved ones put back when an install does not
 /// commit; replaced ones are deleted after it commits. Inputs: the engine connection, the
 /// engine root and the job. Output: nothing, or the plain reason.
+#[cfg(unix)]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
@@ -436,6 +443,19 @@ pub(crate) fn execute(
     }
 }
 
-#[cfg(test)]
+/// Runs the only default-pack job that exists where setup cannot install packs: the sweep
+/// of folder and secret removals left by an earlier run. Inputs: the engine connection,
+/// engine root and job. Output: nothing, or a plain reason.
+#[cfg(not(unix))]
+pub(crate) fn execute(
+    connection: &mut Connection,
+    root: &Path,
+    command: Command,
+) -> Result<(), EngineError> {
+    let Command::Sweep = command;
+    sweep(connection, root)
+}
+
+#[cfg(all(test, unix))]
 #[path = "setup_tests.rs"]
 mod tests;

@@ -9,7 +9,9 @@ use rusqlite::{Connection, Transaction};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -33,6 +35,7 @@ const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
 const STATE: &str = "crazyagent";
+#[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
 
@@ -627,13 +630,6 @@ fn directory(path: &Path, private: bool) -> Result<(), LaunchError> {
     Ok(())
 }
 
-/// Refuses launch context files where owner-only no-follow creation does not exist.
-/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
-#[cfg(not(unix))]
-fn create(_path: &Path) -> Result<File, LaunchError> {
-    Err(failure("launch_context_unavailable"))
-}
-
 #[cfg(unix)]
 fn create(path: &Path) -> Result<File, LaunchError> {
     Ok(File::from(
@@ -739,6 +735,6 @@ fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), La
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "launch_context/tests.rs"]
 mod tests;

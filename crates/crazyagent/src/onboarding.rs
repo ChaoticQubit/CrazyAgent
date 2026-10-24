@@ -11,7 +11,7 @@ pub(crate) mod draft;
 pub(crate) mod graph;
 pub mod service;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 const PROJECT_ID_BYTES_MAX: usize = 64;

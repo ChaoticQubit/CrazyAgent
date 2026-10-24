@@ -129,7 +129,7 @@ impl Harnesses {
 
     /// The harness list with a catalog already known.
     /// Input: the entries. Output: the screen.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn with(entries: Vec<HarnessEntry>) -> Self {
         let mut screen = Self::new();
         screen.entries = entries;
@@ -419,5 +419,5 @@ impl Screen for Harnesses {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

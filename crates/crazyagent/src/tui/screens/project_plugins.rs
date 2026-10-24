@@ -722,5 +722,5 @@ pub(in crate::tui) fn exact_lines(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

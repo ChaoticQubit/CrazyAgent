@@ -4,7 +4,9 @@ use crate::protocol::*;
 use crate::routing::{
     ApprovalMode, QueueEntry, ResourceBudget, RouteRequest, SchedulingPolicy, order_queue,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -214,6 +216,7 @@ pub enum OwnerAction {
     RemoveLink { link_id: RequestId },
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(

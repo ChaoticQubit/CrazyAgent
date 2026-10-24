@@ -1,64 +1,44 @@
 use super::EngineError;
 use super::bootstrap::NativeProfileUse;
+use crate::adapters::NativeAction;
+#[cfg(unix)]
+use crate::adapters::NativeHarness;
+#[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
-use crate::adapters::{NativeAction, NativeHarness};
-use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
+#[cfg(unix)]
+use crate::protocol::FRAME_BYTES_MAX;
+use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
+#[cfg(unix)]
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::mpsc::{SyncSender, sync_channel};
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::sync::{mpsc, oneshot, watch};
 
 #[cfg(unix)]
 mod process;
 
-#[cfg(not(unix))]
-mod process {
-    use super::{ClaudeHostLimits, Status, Turn};
-    use crate::adapters::claude::ClaudeProtocol;
-    use crate::adapters::events::ObservedEvent;
-    use crate::engine::bootstrap::NativeProfileUse;
-    use crate::sandbox::InstalledSandbox;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::Receiver;
-    use tokio::sync::{mpsc, watch};
-
-    pub(super) struct Channels {
-        pub(super) input: Receiver<Turn>,
-        pub(super) output: mpsc::Sender<ObservedEvent>,
-        pub(super) report: watch::Sender<Status>,
-        pub(super) stop: Arc<AtomicBool>,
-    }
-
-    /// Never runs: a master turn needs a native profile lease, which cannot exist where
-    /// native profile custody is unavailable. Takes the turn's command, boundary, lease,
-    /// protocol, limits and channels. Returns nothing.
-    pub(super) fn run(
-        _command: Command,
-        _sandbox: InstalledSandbox,
-        profile: NativeProfileUse,
-        _protocol: ClaudeProtocol,
-        _limits: ClaudeHostLimits,
-        _channels: Channels,
-    ) {
-        match profile {}
-    }
-}
-
+#[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
+#[cfg(unix)]
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
+#[cfg(unix)]
 const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) run_time: Duration,
@@ -68,6 +48,7 @@ pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) events: usize,
 }
 
+#[cfg(unix)]
 impl ClaudeHostLimits {
     fn validate(&self) -> Result<(), EngineError> {
         if self.run_time.is_zero()
@@ -209,6 +190,7 @@ pub(in crate::engine) fn launch_command(
     Err(failure("claude_host_unavailable"))
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     Host(&'static str),
@@ -216,6 +198,7 @@ enum Fault {
     Exit(Option<i32>),
 }
 
+#[cfg(unix)]
 impl Fault {
     fn error(self) -> EngineError {
         match self {
@@ -226,6 +209,7 @@ impl Fault {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     Starting,
@@ -234,18 +218,21 @@ enum Phase {
     Retired,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 struct Status {
     phase: Phase,
     fault: Option<Fault>,
 }
 
+#[cfg(unix)]
 struct Turn {
     request_id: RequestId,
     text: String,
     reply: oneshot::Sender<Result<(), Fault>>,
 }
 
+#[cfg(unix)]
 pub(in crate::engine) struct ClaudeHost {
     turns: SyncSender<Turn>,
     events: mpsc::Receiver<ObservedEvent>,
@@ -255,6 +242,7 @@ pub(in crate::engine) struct ClaudeHost {
     expires: tokio::time::Instant,
 }
 
+#[cfg(unix)]
 impl ClaudeHost {
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -414,9 +402,56 @@ impl ClaudeHost {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ClaudeHost {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// Stands in for the Claude Code master host where native profile custody is unavailable.
+/// It has no values: `spawn` needs a native profile lease, which cannot exist here, so no
+/// turn, event, cancel or close call can be reached.
+#[cfg(not(unix))]
+pub(in crate::engine) enum ClaudeHost {}
+
+#[cfg(not(unix))]
+impl ClaudeHost {
+    /// Never starts: takes the command, boundary, uninhabited profile lease, action,
+    /// account and budget. Returns nothing because the lease cannot exist.
+    pub(in crate::engine) async fn spawn(
+        _command: Command,
+        _sandbox: InstalledSandbox,
+        profile: NativeProfileUse,
+        _action: NativeAction,
+        _account_ref: CredentialRef,
+        _budget: ResourceBudget,
+    ) -> Result<Self, EngineError> {
+        match profile {}
+    }
+
+    /// Never sends a turn: takes the request and text. Unreachable without a host value.
+    pub(in crate::engine) async fn start_turn(
+        &mut self,
+        _request_id: RequestId,
+        _text: &str,
+    ) -> Result<(), EngineError> {
+        match *self {}
+    }
+
+    /// Never yields an event: takes the host. Unreachable without a host value.
+    pub(in crate::engine) async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
+        match *self {}
+    }
+
+    /// Never cancels: takes the host. Unreachable without a host value.
+    pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
+        match *self {}
+    }
+
+    /// Never closes: takes the host. Unreachable without a host value.
+    pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
+        match *self {}
     }
 }
 
@@ -424,6 +459,7 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
+#[cfg(unix)]
 fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(), Fault> {
     let home = profile
         .profile_path()
@@ -468,6 +504,6 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "claude_host/tests.rs"]
 mod tests;

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::{engine::Client, protocol::*};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;

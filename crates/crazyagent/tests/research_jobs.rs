@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};

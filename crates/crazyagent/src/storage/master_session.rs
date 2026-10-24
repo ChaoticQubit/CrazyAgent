@@ -32,6 +32,7 @@ use crate::worktrees::{LeaseState, WorktreeLease};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -55,7 +56,7 @@ fn database_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), Engine
 }
 
 pub(crate) enum MasterRuntimeCommand {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     RegisterRcliProfile {
         host: HostStamp,
         project_id: ProjectId,
@@ -118,14 +119,14 @@ pub(crate) struct PreparedMasterTurn {
 }
 
 pub(crate) enum MasterRuntimeResult {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
     Profile(Box<NativeProfileUse>),
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct MasterStopBinding {
     db_instance: String,
@@ -136,7 +137,7 @@ pub(crate) struct MasterStopBinding {
     provenance: OwnerProvenance,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl MasterStopBinding {
     pub(crate) fn from_fresh_submit(
         host: &HostStamp,
@@ -212,12 +213,14 @@ struct ConfiguredRegistration {
     database_identity: (u64, u64),
 }
 
+#[cfg(unix)]
 const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL UNIQUE CHECK(length(session) BETWEEN 1 AND 128),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
 
+#[cfg(unix)]
 const SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -226,8 +229,11 @@ const SESSIONS: &str = "CREATE TABLE master_sessions (
     phase TEXT NOT NULL CHECK(phase IN ('configured','closed')),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
+#[cfg(unix)]
 const CURRENT: &str = "CREATE UNIQUE INDEX master_current_project ON master_sessions(project) WHERE phase='configured'";
+#[cfg(unix)]
 const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(project,created DESC)";
+#[cfg(unix)]
 const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -238,8 +244,10 @@ const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
+#[cfg(unix)]
 const LEGACY_OUTSTANDING: &str =
     "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase='queued'";
+#[cfg(unix)]
 const TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -250,7 +258,9 @@ const TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
+#[cfg(unix)]
 const OUTSTANDING: &str = "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain')";
+#[cfg(unix)]
 const PREPARATIONS: &str = "CREATE TABLE master_preparations (
     session TEXT NOT NULL,
     turn TEXT NOT NULL,
@@ -261,6 +271,7 @@ const PREPARATIONS: &str = "CREATE TABLE master_preparations (
 const SESSION_COLUMNS: &str = "CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,CASE WHEN length(CAST(project AS BLOB))<=128 THEN project END,created,version,CASE WHEN length(phase)<=10 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 const TURN_COLUMNS: &str = "CASE WHEN length(CAST(session AS BLOB))<=128 THEN session END,ordinal,CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,input,CASE WHEN length(phase)<=16 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 
+#[cfg(unix)]
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
     let expected: BTreeMap<_, _> = [
@@ -845,7 +856,7 @@ fn load_runtime_turn(
     Ok((session, turn))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn settle_stopped_commit(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2561,7 +2572,7 @@ pub(super) fn runtime(
     path: &Path,
     command: MasterRuntimeCommand,
 ) -> Result<MasterRuntimeResult, EngineError> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let MasterRuntimeCommand::RegisterRcliProfile {
         host,
         project_id,
@@ -2592,7 +2603,7 @@ pub(super) fn runtime(
     provision_bootstrap(db, config, sources, custody, path, &command)?;
     let tx = db.transaction().map_err(error)?;
     let (host, project_id, session_id, turn_id) = match &command {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
         MasterRuntimeCommand::Route {
             host,
@@ -2629,7 +2640,7 @@ pub(super) fn runtime(
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     match command {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
         MasterRuntimeCommand::Route { ref host, .. } => {
             if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {
@@ -3210,10 +3221,10 @@ pub(super) fn read(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod brief_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod rcli_configured_tests {
     use super::*;
 

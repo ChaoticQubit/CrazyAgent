@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::conversation::{
     ConversationContent, ConversationEntry, ConversationMutation, ConversationPage,
 };

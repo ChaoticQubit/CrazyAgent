@@ -6,7 +6,7 @@ use crate::onboarding::OnboardingView;
 use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crate::protocol::CredentialRef;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 /// One projects home, add project, onboarding or GitHub request a TUI screen sends.

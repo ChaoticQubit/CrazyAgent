@@ -1,10 +1,13 @@
+#[cfg(unix)]
+use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
-    self, AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
 };
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -21,13 +24,16 @@ pub const PROMPT_BYTES_MAX: usize = 32 * 1024;
 pub const LAST_TEXT_BYTES_MAX: usize = 1024;
 const AGENTS: &str = "agents";
 const POLL: Duration = Duration::from_millis(50);
+#[cfg(unix)]
 const MONITOR_POLL: Duration = Duration::from_millis(250);
 const REPLY_WAIT: Duration = Duration::from_secs(40);
+#[cfg(unix)]
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
 const RESTARTS_MAX: usize = LIST_MAX;
+#[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     id TEXT PRIMARY KEY CHECK(length(id) = 32),
     project TEXT NOT NULL,
@@ -434,6 +440,7 @@ enum Live {
         thread: Option<JoinHandle<()>>,
         busy: Arc<AtomicBool>,
     },
+    #[cfg(unix)]
     Reattached {
         group: u32,
         probe: Arc<File>,
@@ -570,6 +577,7 @@ impl Agents {
         self.root.join(AGENTS).join(id)
     }
 
+    #[cfg(unix)]
     fn recover(&self) -> Result<(), LaunchError> {
         let running: Vec<(String, Option<i64>)> = {
             let db = self.db()?;
@@ -619,11 +627,6 @@ impl Agents {
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    fn probe(&self, _id: &str) -> Option<File> {
-        None
-    }
-
     #[cfg(unix)]
     fn probe(&self, id: &str) -> Option<File> {
         let path = self.folder(id).join(launch::DURABLE_OUTPUT);
@@ -641,6 +644,7 @@ impl Agents {
         .then_some(file)
     }
 
+    #[cfg(unix)]
     fn watch(&self, id: String, group: u32, probe: File, attempt: u32) -> Result<(), LaunchError> {
         let probe = Arc::new(probe);
         let quit = Arc::new(AtomicBool::new(false));
@@ -793,12 +797,11 @@ impl Agents {
         if folder.exists() {
             std::fs::remove_dir_all(&folder).map_err(|_| failure("agent_state_unavailable"))?;
         }
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        builder.mode(0o700);
-        builder
-            .create(&folder)
-            .map_err(|_| failure("agent_state_unavailable"))?;
+        let created = std::fs::DirBuilder::new().mode(0o700).create(&folder);
+        #[cfg(not(unix))]
+        let created = std::fs::DirBuilder::new().create(&folder);
+        created.map_err(|_| failure("agent_state_unavailable"))?;
         let request = spec.request(key)?;
         let context = if spec.context {
             Some(crate::launch_context::for_project(
@@ -914,6 +917,7 @@ impl Agents {
                     TrySendError::Disconnected(_) => failure("agent_not_running"),
                 })
             }
+            #[cfg(unix)]
             Some(Live::Reattached { .. }) => Err(failure("agent_reconnected_read_only")),
             Some(Live::Hosted { .. }) => Err(failure("agent_hosted")),
             None => Err(failure("agent_not_running")),
@@ -1232,6 +1236,7 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
                 let _ = thread.join();
             }
         }
+        #[cfg(unix)]
         Live::Reattached {
             group,
             probe,
@@ -1251,11 +1256,6 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
         }
     }
 }
-
-/// Signals nothing where no agent process group can exist, since `Agents::open` refuses
-/// on this platform. Takes the group and its holder probe, both unused.
-#[cfg(not(unix))]
-fn kill_group(_group: u32, _probe: &File) {}
 
 #[cfg(unix)]
 fn kill_group(group: u32, probe: &File) {
@@ -1439,6 +1439,6 @@ impl Stored {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "agents/tests.rs"]
 pub(crate) mod tests;

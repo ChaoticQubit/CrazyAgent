@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::resolve_config;
 use crazyagent::engine::bootstrap::EngineService;
 use rusqlite::{Connection, OpenFlags};

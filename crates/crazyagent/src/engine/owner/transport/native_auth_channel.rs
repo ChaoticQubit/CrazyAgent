@@ -3,20 +3,26 @@ use super::*;
 #[path = "../../native_auth_host/claude_auth/channel.rs"]
 pub(crate) mod claude;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "native_auth_channel/rcli_registry_tests.rs"]
 mod rcli_registry_tests;
-use crate::engine::bootstrap::{
-    NativeBinding, NativeProfileUse, NativeProfileUsePurpose, runner_binding,
-};
+#[cfg(unix)]
+use crate::engine::bootstrap::NativeProfileUse;
+use crate::engine::bootstrap::runner_binding;
+#[cfg(unix)]
+use crate::engine::bootstrap::{NativeBinding, NativeProfileUsePurpose};
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
-use crate::engine::native_auth_host::custody::{Retirement, cleanup_direct_child};
+#[cfg(unix)]
+use crate::engine::native_auth_host::custody::Retirement;
+use crate::engine::native_auth_host::custody::cleanup_direct_child;
 use crate::engine::owner::native_auth::{CodexAuthObservation, apply_codex_presentation};
 use crate::storage::{NativeAuthDispatch, NativeAuthWork};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
-use std::process::{Child, ExitStatus};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::ExitStatus;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
@@ -31,6 +37,7 @@ fn operation_bound(fact: &NativeAuthFact) -> Duration {
     }
 }
 
+#[cfg(unix)]
 fn purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
     match fact.action {
         NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
@@ -38,6 +45,7 @@ fn purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
     }
 }
 
+#[cfg(unix)]
 fn fact_host(fact: &NativeAuthFact) -> HostStamp {
     HostStamp {
         db_instance: fact.binding.database_instance.clone(),
@@ -94,12 +102,17 @@ pub(super) struct NativeAuthHostRegistration {
 }
 
 pub(crate) struct NativeAuthDispatchHost {
+    #[cfg(unix)]
     engine: Arc<Engine>,
+    #[cfg(unix)]
     authority: Weak<Authority>,
+    #[cfg(unix)]
     fact: NativeAuthFact,
+    #[cfg(unix)]
     admission: Admission,
 }
 
+#[cfg(unix)]
 impl NativeAuthDispatchHost {
     fn authority(&self) -> Result<Arc<Authority>, EngineError> {
         let authority = self
@@ -246,17 +259,20 @@ impl NativeAuthDispatchHost {
 }
 
 impl NativeAuthSlot {
+    #[cfg(unix)]
     pub(super) fn session_is_live(&self) -> bool {
         self.live.load(Ordering::SeqCst)
     }
 }
 
+#[cfg(unix)]
 pub(crate) struct NativeAuthCustodyLaunch {
     token: [u8; 32],
     authority: Weak<Authority>,
     delivered: bool,
 }
 
+#[cfg(unix)]
 impl NativeAuthCustodyLaunch {
     pub(crate) fn write_bootstrap(
         mut self,
@@ -270,6 +286,7 @@ impl NativeAuthCustodyLaunch {
     }
 }
 
+#[cfg(unix)]
 impl Drop for NativeAuthCustodyLaunch {
     fn drop(&mut self) {
         if !self.delivered
@@ -286,6 +303,7 @@ impl Drop for NativeAuthCustodyLaunch {
     }
 }
 
+#[cfg(unix)]
 pub(crate) enum NativeAuthCustodyControl {
     Continue,
     Cancel,
@@ -586,9 +604,13 @@ impl OwnerRuntimeHandle {
         }
         let fact = work.fact().clone();
         let host = NativeAuthDispatchHost {
+            #[cfg(unix)]
             engine: self.engine.clone(),
+            #[cfg(unix)]
             authority: Arc::downgrade(&self.authority),
+            #[cfg(unix)]
             fact: fact.clone(),
+            #[cfg(unix)]
             admission: admission.clone(),
         };
         *current = Some(NativeAuthSlot {
@@ -639,7 +661,7 @@ impl OwnerRuntimeHandle {
             .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn prepare_native_auth_custody(
         &self,
         work: NativeAuthWork,
@@ -855,6 +877,7 @@ impl Authority {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn reserve_native_auth(
         self: &Arc<Self>,
         dispatch: NativeAuthDispatch,
@@ -1661,6 +1684,7 @@ async fn serve_session(
     }
 }
 
+#[cfg(unix)]
 pub(crate) struct NativeAuthCustodyChannel {
     stream: Option<UnixStream>,
     binding: NativeBinding,
@@ -1673,6 +1697,7 @@ pub(crate) struct NativeAuthCustodyChannel {
     sealed: bool,
 }
 
+#[cfg(unix)]
 impl NativeAuthCustodyChannel {
     pub(crate) async fn connect(input: &Path, token: [u8; 32]) -> Result<Self, EngineError> {
         let entered = Instant::now();
@@ -2041,7 +2066,7 @@ impl NativeAuthCustodyChannel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod auth_observation_tests {
     use super::*;
     use crate::adapters::codex::{AuthControl, CodexProtocol, Event, LoginChallenge};

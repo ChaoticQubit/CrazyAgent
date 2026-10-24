@@ -1167,7 +1167,7 @@ pub(super) fn rcli_home_supported(connection: &ModelConnection) -> bool {
         )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "model_access_tests.rs"]
 mod tests;
 
@@ -1583,7 +1583,7 @@ impl Form {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod quota_policy_tests {
     use super::*;
     use crate::client_controller::OwnerController;

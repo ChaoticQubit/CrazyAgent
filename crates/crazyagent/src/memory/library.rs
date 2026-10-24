@@ -3,7 +3,9 @@ use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::{FRAME_BYTES_MAX, Outcome, ProjectId, RequestId};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -21,6 +23,7 @@ const RENDER_HEADER_BYTES_MAX: usize = 1024;
 const RESEARCH_ROWS_MAX: i64 = 4096;
 const FORGET_ROWS_MAX: i64 = 16384;
 
+#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_library (
     ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -335,6 +338,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
@@ -1043,5 +1047,5 @@ pub(crate) fn approved_for_project(
     Ok(memories)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

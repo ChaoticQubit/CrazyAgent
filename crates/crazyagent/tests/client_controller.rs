@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::Client;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{

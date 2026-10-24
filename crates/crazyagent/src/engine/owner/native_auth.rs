@@ -214,6 +214,7 @@ pub(crate) enum CodexObservedAccount {
 }
 
 impl CodexObservedAccount {
+    #[cfg(unix)]
     fn from_native(account: crate::adapters::codex::AuthAccount) -> Self {
         use crate::adapters::codex::AuthAccount;
         match account {
@@ -239,6 +240,7 @@ impl CodexObservedAccount {
 }
 
 impl CodexAuthObservation {
+    #[cfg(unix)]
     pub(crate) fn from_native(
         event: crate::adapters::codex::AuthControl,
     ) -> Result<Self, EngineError> {

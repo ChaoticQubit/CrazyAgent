@@ -5,7 +5,7 @@ use super::new_project::{
 use super::new_project_input::{TextInput, cells, char_cells};
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -34,7 +34,7 @@ impl Look {
     /// Builds the NO_COLOR look: modifiers only, Unicode glyphs.
     /// Takes nothing.
     /// Returns the look.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn plain() -> Self {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         Self {
@@ -213,7 +213,7 @@ impl Row {
     /// Gives the row's text without styles.
     /// Takes the row.
     /// Returns the text.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn text(&self) -> String {
         self.0.iter().map(|span| span.content.as_ref()).collect()
     }

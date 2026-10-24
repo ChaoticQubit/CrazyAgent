@@ -48,7 +48,7 @@ impl Connection {
     /// Queues one Settings > Accounts request on the paired owner connection. The reply
     /// arrives later as `OwnerEvent::Accounts`. Input: the request. Output: queued or why not.
     #[cfg_attr(
-        not(test),
+        not(all(test, unix)),
         expect(dead_code, reason = "called by the Settings > Accounts view")
     )]
     pub(in crate::tui) fn accounts(&mut self, request: AccountsRequest) -> Result<(), String> {
@@ -100,7 +100,7 @@ impl NativeOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::accounts::{Provider, SignInMethod};

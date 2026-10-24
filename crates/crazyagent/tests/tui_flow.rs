@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::protocol::{Cursor, Outcome, RequestId, WireReply};
 use crazyagent::tui::app::{App, Focus, UiEvent};
 use crazyagent::tui::views::safe_text;

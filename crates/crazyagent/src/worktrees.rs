@@ -4,16 +4,23 @@ use crate::protocol::{ProjectId, SessionId, TaskId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
+#[cfg(unix)]
 const FILES_MAX: usize = 128;
+#[cfg(unix)]
 const TREE_BYTES_MAX: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +349,7 @@ fn verify(admission: &Admission) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -788,6 +796,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn tree_entries(
     repository: &Path,
     head: &str,
@@ -943,6 +952,7 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     let mut statement = connection
         .prepare("SELECT body FROM worktree_leases LIMIT 129")
@@ -971,7 +981,7 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

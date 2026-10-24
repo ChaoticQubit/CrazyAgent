@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 mod research_support;
 
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};

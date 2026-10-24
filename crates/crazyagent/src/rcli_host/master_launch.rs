@@ -11,13 +11,18 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 const CONFIG_BYTES_MAX: u64 = 65_536;
+#[cfg(unix)]
 const ARTIFACT_BYTES_MAX: u64 = 536_870_912;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "configured_selection_tests.rs"]
 mod configured_selection_tests;
 
@@ -257,6 +262,7 @@ fn private_directory(path: &Path) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn canonical_path(path: &Path) -> Result<(), ProtocolError> {
     if !path.is_absolute()
         || path.parent().is_none()

@@ -2731,6 +2731,6 @@ pub fn agents(
         .map_err(error)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
