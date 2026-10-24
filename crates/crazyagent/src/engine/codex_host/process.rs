@@ -18,8 +18,7 @@ const COMMAND_QUEUE_MAX: usize = 16;
 
 pub(super) enum CodexHostOutput {
     Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Exited(ExitStatus),
+    Exited,
 }
 
 pub(super) struct WriteRequest {
@@ -159,6 +158,14 @@ impl CodexHostProcess {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn exit_status(&self) -> Option<ExitStatus> {
+        match self.shared.state.lock() {
+            Ok(state) => state.status,
+            Err(poisoned) => poisoned.into_inner().status,
+        }
+    }
+
     pub(super) async fn send(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
         if bytes.is_empty() || bytes.len() > FRAME_BYTES_MAX + 1 {
             return Err(EngineError("codex_host_input_limit".into()));
@@ -228,7 +235,7 @@ impl CodexHostProcess {
                 if state.complete {
                     return state
                         .status
-                        .map(CodexHostOutput::Exited)
+                        .map(|_| CodexHostOutput::Exited)
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }

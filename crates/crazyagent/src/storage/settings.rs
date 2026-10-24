@@ -153,7 +153,7 @@ impl SourceFile {
     }
 }
 
-pub(super) struct SettingsSources {
+pub(crate) struct SettingsSources {
     global: SourceFile,
     project: SourceFile,
     lease: std::fs::File,

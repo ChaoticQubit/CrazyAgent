@@ -228,7 +228,7 @@ fn open(
                     expected_config_id: config.id.clone(),
                     expected_source_hash: settings::verified_source_hash(config, Some(sources))
                         .unwrap(),
-                    selection: selection(),
+                    selection: Box::new(selection()),
                 },
             },
         },
@@ -260,6 +260,7 @@ fn open(
     else {
         panic!("actual master Open must produce a persisted session");
     };
+    let session = *session;
     assert_eq!(session.owner, opened.provenance);
     session
 }

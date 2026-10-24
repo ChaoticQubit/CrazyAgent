@@ -245,7 +245,7 @@ fn retained_guard_revalidates_exact_scope_and_is_non_clone() {
     }
     impl<T: ?Sized> AmbiguousIfClone<()> for T {}
     struct IfClone;
-    impl<T: ?Sized + Clone> AmbiguousIfClone<IfClone> for T {}
+    impl<T: Clone> AmbiguousIfClone<IfClone> for T {}
     let _ = <NativeProfileUse as AmbiguousIfClone<_>>::check;
     let mut case = UseCase::new();
     let guard = case.acquire();

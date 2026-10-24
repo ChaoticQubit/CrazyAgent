@@ -102,10 +102,11 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        if !self.settled && !self.cleanup() {
-            if let Some(work) = self.work.take() {
-                std::mem::forget(work);
-            }
+        if !self.settled
+            && !self.cleanup()
+            && let Some(work) = self.work.take()
+        {
+            std::mem::forget(work);
         }
     }
 }
@@ -221,10 +222,11 @@ fn perform(
             }
             drain(&output, &mut stdout, &mut stdout_eof, 4100)?;
             drain_errors(&errors, &mut stderr_bytes, &mut stderr_eof)?;
-            if let Some(status) = child.try_wait().map_err(|_| unknown())? {
-                if stdout_eof && stderr_eof {
-                    return Ok(status.success() && sent == frame.len() && stderr_bytes == 0);
-                }
+            if let Some(status) = child.try_wait().map_err(|_| unknown())?
+                && stdout_eof
+                && stderr_eof
+            {
+                return Ok(status.success() && sent == frame.len() && stderr_bytes == 0);
             }
             std::thread::sleep(Duration::from_millis(5));
         }

@@ -102,10 +102,10 @@ impl CodexHost {
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
-        if self.protocol.state() == State::Active {
-            if let Ok(bytes) = self.protocol.interrupt() {
-                return self.process.send(&bytes).await;
-            }
+        if self.protocol.state() == State::Active
+            && let Ok(bytes) = self.protocol.interrupt()
+        {
+            return self.process.send(&bytes).await;
         }
         self.process.request_stop();
         Ok(())
@@ -153,8 +153,7 @@ impl CodexHost {
                 assert!(self.events.len() <= EVENTS_MAX);
                 assert!(self.auth.len() <= EVENTS_MAX);
             }
-            CodexHostOutput::Stderr(_) => {}
-            CodexHostOutput::Exited(_) => {
+            CodexHostOutput::Exited => {
                 self.events.push_back(self.protocol.disconnect());
                 self.disconnected = true;
             }

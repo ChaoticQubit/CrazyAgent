@@ -52,10 +52,12 @@ roles = ["leader"]
 fallback_allowed = false
 "#;
 
+type FenceRow = (String, String, i64, String, String, String, String, i64);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     facts: Vec<NativeAuthFact>,
-    fences: Vec<(String, String, i64, String, String, String, String, i64)>,
+    fences: Vec<FenceRow>,
 }
 
 struct ChannelCase {
@@ -467,7 +469,7 @@ async fn native_auth_channel_requires_committed_work_and_exact_origin() {
         fn evidence() {}
     }
     impl<T: ?Sized> NonClone<()> for T {}
-    impl<T: ?Sized + Clone> NonClone<u8> for T {}
+    impl<T: Clone> NonClone<u8> for T {}
     let _ = <NativeAuthCustodyLaunch as NonClone<_>>::evidence;
     let _ = <NativeAuthCustodyChannel as NonClone<_>>::evidence;
     channel_case(|case| async move {

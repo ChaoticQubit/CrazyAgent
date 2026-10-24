@@ -842,7 +842,8 @@ impl TeamRuntime {
         if pending > 0 {
             return Ok(());
         }
-        let ready: Vec<(i64, String, String, Option<String>, Option<String>)> = {
+        type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+        let ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
@@ -1327,10 +1328,7 @@ impl TeamRuntime {
     fn collect(&mut self) -> Result<(), EngineError> {
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         for id in ids {
-            loop {
-                let Some(worker) = self.workers.get(&id) else {
-                    break;
-                };
+            while let Some(worker) = self.workers.get(&id) {
                 let report = match worker.reports.try_recv() {
                     Ok(report) => report,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,

@@ -359,7 +359,7 @@ fn local_receipt(
     assert_eq!(receipt.connection, expected.connection);
     assert_eq!(receipt.config_id, expected.basis.config_id);
     assert_eq!(receipt.source_hash, expected.basis.source_hash);
-    receipt.clone()
+    (**receipt).clone()
 }
 
 #[tokio::test]

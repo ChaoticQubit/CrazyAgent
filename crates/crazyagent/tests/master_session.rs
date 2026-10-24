@@ -275,7 +275,7 @@ impl Fixture {
                 project_id: project(name),
                 expected_config_id,
                 expected_source_hash,
-                selection,
+                selection: Box::new(selection),
             },
         )
     }
@@ -305,6 +305,7 @@ impl Fixture {
         let OwnerData::ProjectMaster { session } = state.data else {
             panic!("actual master view missing");
         };
+        let session = session.map(|session| *session);
         session
     }
 

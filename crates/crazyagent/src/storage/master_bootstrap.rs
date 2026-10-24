@@ -162,7 +162,7 @@ fn committed_open(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(
                     project_id: session.project_id.clone(),
                     expected_config_id: session.config_id.clone(),
                     expected_source_hash: session.source_hash.clone(),
-                    selection: session.selection.clone(),
+                    selection: Box::new(session.selection.clone()),
                 },
             },
         },

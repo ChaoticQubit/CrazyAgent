@@ -767,7 +767,7 @@ impl AccountDetails {
         let list = self
             .list
             .take()
-            .map_or_else(|| Box::new(Accounts::new()), |list| list);
+            .unwrap_or_else(|| Box::new(Accounts::new()));
         Flow::Replace(list)
     }
 

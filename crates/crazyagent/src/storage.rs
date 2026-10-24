@@ -3139,7 +3139,6 @@ fallback_allowed = false
         pub(crate) generation: u64,
         pub(crate) host: HostStamp,
         pub(crate) session: MasterSessionView,
-        pub(crate) database_path: PathBuf,
         pub(crate) global_path: PathBuf,
         pub(crate) profile_home: PathBuf,
         storage: Storage,
@@ -3282,7 +3281,7 @@ fallback_allowed = false
                     project_id: project.clone(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Rcli,
                         pool_ref: reference("configured-pool"),
                         target_profile_ref: reference("configured-profile"),
@@ -3294,7 +3293,7 @@ fallback_allowed = false
                             budget_ref: reference("conversation-budget"),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             },
         )
@@ -3313,6 +3312,7 @@ fallback_allowed = false
         else {
             panic!("actual configured fixture committed session missing");
         };
+        let session = *session;
         apply(
             &storage,
             &started,
@@ -3340,6 +3340,7 @@ fallback_allowed = false
         else {
             panic!("actual configured fixture queued session missing");
         };
+        let session = *session;
         let (send, receive) = oneshot::channel();
         storage
             .sender
@@ -3420,7 +3421,6 @@ fallback_allowed = false
             generation,
             host: started.host,
             session,
-            database_path,
             global_path,
             profile_home,
             storage,

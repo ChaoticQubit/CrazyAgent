@@ -146,7 +146,7 @@ where
                 }
                 Some((root, AccountPick::Account { account, .. })) => {
                     let _ = jobs.resume_waiting(&project, &harness);
-                    runs.extend(runner.spawn_ready(project, &harness, root, Some(account)));
+                    runs.extend(runner.spawn_ready(project, &harness, root, Some(*account)));
                 }
             }
         }

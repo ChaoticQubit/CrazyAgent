@@ -69,6 +69,7 @@ async fn queue(case: &mut Fixture, text: &str) -> OwnerRequest {
     let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
         panic!("actual submitted session required");
     };
+    let session = *session;
     let state = owner_read(&case.storage, &case.started, OwnerRead::ProjectMasterTurns {
         project_id: session.project_id.clone(), session_id: session.session_id.clone(),
         cursor: None, limit: 8,
@@ -125,6 +126,7 @@ async fn visible(case: &Fixture) -> (MasterSessionView, MasterTurnView) {
     let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
         panic!("actual persisted owner-visible session required");
     };
+    let session = *session;
     let state = owner_read(&case.storage, &case.started, OwnerRead::ProjectMasterTurns {
         project_id: session.project_id.clone(), session_id: session.session_id.clone(),
         cursor: None, limit: 8,

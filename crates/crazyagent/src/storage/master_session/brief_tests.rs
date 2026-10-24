@@ -96,6 +96,7 @@ async fn session(client: &OwnerClient, project: &ProjectId) -> MasterSessionView
     else {
         panic!("actual persisted master session required");
     };
+    let session = *session;
     assert_eq!(session.project_id, *project);
     session
 }
@@ -121,7 +122,7 @@ async fn open(client: &OwnerClient, project: &ProjectId, id: &str) -> MasterSess
                 project_id: project.clone(),
                 expected_config_id: basis.config_id,
                 expected_source_hash: source_hash,
-                selection: MasterSelection {
+                selection: Box::new(MasterSelection {
                     backend: MasterBackend::Rcli,
                     pool_ref: CredentialRef::new("brief-pool").unwrap(),
                     target_profile_ref: target.clone(),
@@ -133,7 +134,7 @@ async fn open(client: &OwnerClient, project: &ProjectId, id: &str) -> MasterSess
                         budget_ref: CredentialRef::new("brief-budget").unwrap(),
                         resources: ResourceBudget::unit(),
                     },
-                },
+                }),
             },
         },
     )

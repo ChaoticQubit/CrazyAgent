@@ -73,10 +73,10 @@ fn a_mixed_pool_gives_codex_its_first_signed_in_managed_account() {
         pick_account(&access, "project-a", "codex", signed_in),
         AccountPick::Account {
             connection: CredentialRef::new("codex-connection").unwrap(),
-            account: ResearchAccount::ManagedCodex {
+            account: Box::new(ResearchAccount::ManagedCodex {
                 connection: connection(&access, "codex-connection"),
                 model: None,
-            },
+            }),
         }
     );
 }
@@ -88,20 +88,20 @@ fn a_signed_out_managed_account_falls_through_to_a_keyless_endpoint() {
         pick_account(&access, "project-a", "codex", signed_out),
         AccountPick::Account {
             connection: CredentialRef::new("local-connection").unwrap(),
-            account: ResearchAccount::Endpoint {
+            account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
-            },
+            }),
         }
     );
     assert_eq!(
         pick_account(&access, "project-remote", "codex", signed_out),
         AccountPick::Account {
             connection: CredentialRef::new("remote-connection").unwrap(),
-            account: ResearchAccount::Endpoint {
+            account: Box::new(ResearchAccount::Endpoint {
                 base_url: "https://models.example.test/v1".into(),
                 model: "big-model".into(),
-            },
+            }),
         }
     );
 }
@@ -154,10 +154,10 @@ fn the_settings_resolver_reads_live_pool_assignment_and_the_project_folder() {
         pick,
         AccountPick::Account {
             connection: CredentialRef::new("local-connection").unwrap(),
-            account: ResearchAccount::Endpoint {
+            account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
-            },
+            }),
         }
     );
     assert!(resolver.resolve("project-missing", "codex").is_none());
@@ -174,18 +174,18 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
         pick_account(&access, "project-claude", "claude", signed_in),
         AccountPick::Account {
             connection: CredentialRef::new("claude-connection").unwrap(),
-            account: ResearchAccount::ManagedClaude {
+            account: Box::new(ResearchAccount::ManagedClaude {
                 connection: connection(&access, "claude-connection"),
                 model: None,
-            },
+            }),
         }
     );
     let anthropic = AccountPick::Account {
         connection: CredentialRef::new("anthropic-local-connection").unwrap(),
-        account: ResearchAccount::AnthropicEndpoint {
+        account: Box::new(ResearchAccount::AnthropicEndpoint {
             base_url: "http://127.0.0.1:11434".into(),
             model: "qwen2.5:0.5b".into(),
-        },
+        }),
     };
     assert_eq!(
         pick_account(&access, "project-anthropic", "claude", signed_out),
@@ -203,10 +203,10 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
         pick_account(&access, "project-anthropic", "codex", signed_out),
         AccountPick::Account {
             connection: CredentialRef::new("local-connection").unwrap(),
-            account: ResearchAccount::Endpoint {
+            account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
-            },
+            }),
         }
     );
     assert_eq!(

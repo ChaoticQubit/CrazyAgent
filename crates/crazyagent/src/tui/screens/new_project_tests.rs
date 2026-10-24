@@ -321,7 +321,7 @@ fn the_harness_picker_lists_everything_but_picks_only_installed_harnesses() {
         wizard
             .harness_choices()
             .iter()
-            .map(|h| (h.name.as_str(), h.state.clone()))
+            .map(|h| (h.name.as_str(), h.state))
             .collect::<Vec<_>>(),
         [
             ("rcli", HarnessState::Unknown),

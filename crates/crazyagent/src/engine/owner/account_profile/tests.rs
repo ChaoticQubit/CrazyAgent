@@ -153,7 +153,7 @@ fn imp1035_receipt_is_configured_only_and_contains_none_profile_join() {
         database_instance: "a".repeat(64),
         engine_epoch: "d".repeat(64),
         outcome: AccountProfileOutcome::ConfiguredOnly {
-            receipt: AccountProfileReceipt {
+            receipt: Box::new(AccountProfileReceipt {
                 config_id: request.scope.expected_config_id,
                 source_hash: request.scope.expected_source_hash,
                 connection,
@@ -161,7 +161,7 @@ fn imp1035_receipt_is_configured_only_and_contains_none_profile_join() {
                 custody_id: "e".repeat(64),
                 profile_config_sha256: "f".repeat(64),
                 profile_generation: 1,
-            },
+            }),
             historical_replay: true,
         },
     };

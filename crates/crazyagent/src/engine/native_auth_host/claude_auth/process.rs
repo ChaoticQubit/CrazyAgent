@@ -155,15 +155,16 @@ async fn drive(
             ) {
                 return Err(failure("native_auth_cancelled"));
             }
-            if accepts_code && !submitted {
-                if let Some(secret) = session.take_claude_input(channel).await? {
-                    input = Some(PrivateInput {
-                        bytes: completion_bytes(secret)?,
-                        sent: 0,
-                        deadline: Instant::now() + Duration::from_secs(2),
-                    });
-                    submitted = true;
-                }
+            if accepts_code
+                && !submitted
+                && let Some(secret) = session.take_claude_input(channel).await?
+            {
+                input = Some(PrivateInput {
+                    bytes: completion_bytes(secret)?,
+                    sent: 0,
+                    deadline: Instant::now() + Duration::from_secs(2),
+                });
+                submitted = true;
             }
             checked = Instant::now();
         }
@@ -204,13 +205,14 @@ async fn drive(
             }
         }
         let exit = session.child_mut()?.try_wait().map_err(io_error)?;
-        if let Some(exit) = exit {
-            if pipes.output.eof && pipes.errors.eof {
-                return Ok(ChildOutput {
-                    stdout,
-                    exit: exit.code(),
-                });
-            }
+        if let Some(exit) = exit
+            && pipes.output.eof
+            && pipes.errors.eof
+        {
+            return Ok(ChildOutput {
+                stdout,
+                exit: exit.code(),
+            });
         }
         tokio::time::sleep(POLL).await;
     }

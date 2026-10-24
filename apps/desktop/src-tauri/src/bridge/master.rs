@@ -47,6 +47,7 @@ impl NativeBridge {
         let OwnerData::ProjectMaster { session } = state.data else {
             return Err(failure("unexpected_reply"));
         };
+        let session = session.map(|session| *session);
         if session
             .as_ref()
             .is_some_and(|value| value.project_id != project_id)
@@ -377,7 +378,7 @@ fallback_allowed = false
             project_id: project_id.clone(),
             expected_config_id: basis.config_id,
             expected_source_hash: source_hash,
-            selection: MasterSelection {
+            selection: Box::new(MasterSelection {
                 backend: MasterBackend::Rcli,
                 pool_ref: CredentialRef::new("configured-pool").unwrap(),
                 target_profile_ref: CredentialRef::new("configured-profile").unwrap(),
@@ -389,7 +390,7 @@ fallback_allowed = false
                     budget_ref: CredentialRef::new("conversation-budget").unwrap(),
                     resources: ResourceBudget::unit(),
                 },
-            },
+            }),
         };
         let stale = bridge.apply_master("0", open.clone(), 1).await.unwrap_err();
         assert_eq!(stale.code, "stale_selection");
@@ -435,6 +436,7 @@ fallback_allowed = false
         let OwnerData::ProjectMaster { session } = actual.data else {
             return Err("actual master session read required".into());
         };
+        let session = session.map(|session| *session);
         assert_eq!(
             serde_json::to_value(&read.session).unwrap(),
             serde_json::to_value(&session).unwrap()

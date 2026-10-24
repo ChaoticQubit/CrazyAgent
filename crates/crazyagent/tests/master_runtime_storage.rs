@@ -160,7 +160,7 @@ impl Fixture {
                     project_id: project(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Codex,
                         pool_ref: reference("master-pool"),
                         target_profile_ref: reference("master-profile"),
@@ -172,7 +172,7 @@ impl Fixture {
                             budget_ref: reference("planning-budget"),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             },
         )
@@ -194,6 +194,7 @@ impl Fixture {
         else {
             panic!("actual committed master session missing");
         };
+        let session = *session;
         assert_eq!(session.project_id, project());
         assert_eq!(session.version, state.revision);
         session

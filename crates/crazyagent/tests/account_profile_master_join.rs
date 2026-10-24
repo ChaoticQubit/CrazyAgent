@@ -352,12 +352,12 @@ impl Fixture {
         assert!(!receipt.custody_id.is_empty());
         assert_eq!(receipt.profile_config_sha256.len(), 64);
         assert!(receipt.profile_generation > 0);
-        let receipt = receipt.clone();
+        let receipt = (**receipt).clone();
         let replay = client.read_account_profile(request.clone()).await.unwrap();
         assert!(
             matches!(replay.outcome, AccountProfileOutcome::ConfiguredOnly {
             receipt: actual, historical_replay: true,
-        } if actual == receipt)
+        } if *actual == receipt)
         );
         self.assert_no_projects().await;
         self.assert_no_execution();
@@ -461,7 +461,7 @@ impl Fixture {
                     project_id: project_id.clone(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Rcli,
                         pool_ref: pool().id,
                         target_profile_ref: receipt.profile_ref.clone(),
@@ -473,7 +473,7 @@ impl Fixture {
                             budget_ref: reference("conversation-budget"),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             },
         )
@@ -492,6 +492,7 @@ impl Fixture {
         else {
             panic!("actual committed master session required");
         };
+        let session = *session;
         assert_eq!(session.config_id, state.config_id);
         session
     }

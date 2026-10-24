@@ -207,7 +207,8 @@ mod tests {
     #[test]
     fn every_field_is_bounded() {
         profile().validate().unwrap();
-        let cases: Vec<(fn(&mut OwnerProfile), &str)> = vec![
+        type Case = (fn(&mut OwnerProfile), &'static str);
+        let cases: Vec<Case> = vec![
             (|p| p.name = "  ".into(), "owner_profile_name"),
             (|p| p.name = "a".repeat(101), "owner_profile_name"),
             (|p| p.name = "a\nb".into(), "owner_profile_name"),

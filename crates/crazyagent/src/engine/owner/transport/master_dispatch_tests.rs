@@ -243,7 +243,7 @@ impl DispatchFixture {
                     project_id: ProjectId::new("p").unwrap(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: selection(self.backend),
+                    selection: Box::new(selection(self.backend)),
                 },
             )
             .await;
@@ -259,6 +259,7 @@ impl DispatchFixture {
         else {
             panic!("actual configured master session missing");
         };
+        let session = *session;
         (request, reply, session)
     }
 

@@ -570,6 +570,7 @@ async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through
         else {
             panic!("open master session required")
         };
+        let session = *session;
         apply(
             &mut controller,
             &mut generation,
