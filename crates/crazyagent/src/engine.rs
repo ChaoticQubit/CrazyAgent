@@ -1,4 +1,7 @@
 use crate::config::{EffectiveConfig, validate_settings};
+#[cfg(unix)]
+use crate::platform::unix_socket::UnixListener;
+use crate::platform::unix_socket::UnixStream;
 use crate::protocol::*;
 use crate::storage::{Job, Storage};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,16 +11,19 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(unix)]
+mod native_auth_host;
+#[cfg(not(unix))]
+#[path = "engine/native_auth_host_unavailable.rs"]
 mod native_auth_host;
 pub mod owner;
 
+#[cfg(unix)]
 pub use native_auth_host::{
     run_native_auth_custodian, run_native_auth_custodian_with_claude,
     run_native_auth_custodian_with_codex,
@@ -366,6 +372,13 @@ fn verify_endpoint(path: &Path) -> Result<(), EngineError> {
     assert!(metadata.file_type().is_socket());
     assert_eq!(metadata.mode() & 0o077, 0);
     Ok(())
+}
+
+/// Checks the peer of a stream where Unix domain sockets do not exist.
+/// Takes the stream, which cannot exist here. Unreachable by construction.
+#[cfg(not(unix))]
+fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
+    match *stream {}
 }
 
 #[cfg(unix)]

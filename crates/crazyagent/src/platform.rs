@@ -3,6 +3,56 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+pub(crate) mod unix_socket;
+
+#[cfg(unix)]
+pub(crate) use std::os::unix::fs::FileExt;
+
+/// Positional whole-buffer file reads and writes on Windows, matching the Unix `FileExt`
+/// names. Built on the standard `seek_read` and `seek_write`, which also move the file
+/// cursor; callers read and write whole small files at fixed offsets, so that is harmless.
+#[cfg(windows)]
+pub(crate) trait FileExt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl FileExt for std::fs::File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt as _;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(read) => {
+                    let rest = buf;
+                    buf = &mut rest[read..];
+                    offset += read as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt as _;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(written) => {
+                    buf = &buf[written..];
+                    offset += written as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The most text one clipboard copy takes, so a copy never holds a large buffer.
 pub const CLIPBOARD_BYTES_MAX: usize = 64 * 1024;
 

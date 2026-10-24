@@ -1357,7 +1357,7 @@ async fn check(engine: &Engine, session: &Session) -> Result<NativeAuthFact, Eng
 }
 
 async fn read_custody_frame(
-    reader: &mut tokio::net::unix::ReadHalf<'_>,
+    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
     timeout: Duration,
 ) -> Result<(Vec<u8>, Instant), EngineError> {
     let first = [reader.read_u8().await.map_err(io_error)?];
@@ -1528,7 +1528,7 @@ async fn custody_reply(
     engine: &Engine,
     session: &Session,
     request: &Request,
-    reader: &mut tokio::net::unix::ReadHalf<'_>,
+    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
 ) -> Result<Reply, EngineError> {
     session.validate()?;
     let retirement = matches!(

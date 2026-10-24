@@ -5,10 +5,10 @@ use crate::engine::owner::{
     NativeAuthStart, OwnerClientKind, failure,
 };
 use crate::engine::{Engine, EngineError, io_error, read_frame, verify_peer};
+use crate::platform::unix_socket::UnixStream;
 use crate::protocol::encode_frame;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 
 impl OwnerClient {
     pub async fn start_native_auth(
