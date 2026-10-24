@@ -820,10 +820,12 @@ impl ResearchRunner {
                 format!("-{launch}")
             };
             let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
-            let worktree = root.join("worktrees").join(format!(
-                "research-{}-{}-{}{suffix}",
-                job.kind, job.id, job.attempts
-            ));
+            let worktree = crate::projects_home::state_folder(root)
+                .join("worktrees")
+                .join(format!(
+                    "research-{}-{}-{}{suffix}",
+                    job.kind, job.id, job.attempts
+                ));
             let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
             if !taken(&self.state.join("agents").join(&name)) && !taken(&worktree) {
                 return Ok((name, worktree));
@@ -1373,7 +1375,7 @@ pub(crate) fn add_worktree(
     let _setup = REPOSITORY_SETUP
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let worktrees = sandbox.project_root().join("worktrees");
+    let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
@@ -1543,7 +1545,7 @@ fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
 }
 
 fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
-    let context = root.join("context");
+    let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -1673,7 +1675,7 @@ fn links_in(text: &str) -> Vec<String> {
 
 fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
     assert!(valid_kind(kind));
-    let context = root.join("context");
+    let context = crate::projects_home::state_folder(root).join("context");
     let research = context.join("research");
     for directory in [&context, &research] {
         match fs::DirBuilder::new().mode(0o755).create(directory) {

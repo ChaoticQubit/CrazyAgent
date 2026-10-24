@@ -352,6 +352,27 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
+impl StoredSetup {
+    /// The folder holding this project's context and agent worktrees:
+    /// `.crazyagent/` inside the project for projects in the projects home,
+    /// or the project folder itself for projects made before it.
+    pub fn state_folder(&self) -> PathBuf {
+        crate::projects_home::state_folder(Path::new(&self.folder))
+    }
+
+    /// The project's own folder: the recorded folder, or the folder holding
+    /// it when onboarding recorded the project's `.crazyagent/` folder.
+    pub fn project_folder(&self) -> PathBuf {
+        let folder = Path::new(&self.folder);
+        match folder.parent() {
+            Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+                parent.to_path_buf()
+            }
+            _ => folder.to_path_buf(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectCatalog {
