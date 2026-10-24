@@ -29,22 +29,39 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(parent).map_err(error)
 }
 
+/// Lists the set-up projects for the found list. An onboarded project keeps its setup in
+/// `<folder>/.crazyagent`, so its folder is the one above it, and it shows as onboarding
+/// while its graph or mapping step still waits or runs.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let mut statement = tx
-        .prepare("SELECT body FROM project_setups ORDER BY project LIMIT ?1")
+        .prepare(
+            "SELECT s.body, EXISTS(SELECT 1 FROM onboarding o WHERE o.project=s.project
+               AND (o.graph_state IN ('waiting','running') OR o.mapping_state IN ('waiting','running')))
+             FROM project_setups s ORDER BY s.project LIMIT ?1",
+        )
         .map_err(error)?;
-    let bodies = statement
-        .query_map([REGISTERED_MAX as i64], |row| row.get::<_, String>(0))
+    let rows = statement
+        .query_map([REGISTERED_MAX as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })
         .map_err(error)?;
     let mut projects = Vec::new();
-    for body in bodies {
+    for row in rows {
+        let (body, onboarding) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
-            serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+            serde_json::from_str(&body).map_err(error)?;
+        let folder = PathBuf::from(stored.folder);
+        let folder = match folder.parent() {
+            Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+                parent.to_path_buf()
+            }
+            _ => folder,
+        };
         projects.push(Registered {
             project_id: stored.project_id,
             name: stored.name,
-            folder: PathBuf::from(stored.folder),
-            onboarding: false,
+            folder,
+            onboarding,
         });
     }
     assert!(projects.len() <= REGISTERED_MAX);
