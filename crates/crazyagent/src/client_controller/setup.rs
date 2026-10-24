@@ -60,20 +60,21 @@ impl OwnerController {
         self.send_pending().await
     }
 
-    /// Moves every project folder from the current projects home into another
-    /// folder and makes that folder the home.
-    /// Takes the absolute folder path and the client generation.
+    /// Makes another folder the projects home; with `move_projects` every project
+    /// folder moves from the current home into it, without it nothing moves.
+    /// Takes the absolute folder path, whether to move and the client generation.
     /// Returns the actual owner response; a rejection carries a plain code.
     pub async fn move_projects_home(
         &mut self,
         path: String,
+        move_projects: bool,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.projects_home().await?;
         self.begin_mutation(
             OwnerMutation::MoveProjectsHome {
                 path,
-                move_projects: true,
+                move_projects,
             },
             generation,
         )?;

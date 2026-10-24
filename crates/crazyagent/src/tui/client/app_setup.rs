@@ -125,14 +125,13 @@ impl NativeOwner {
                 path,
                 move_projects,
                 generation,
-            } => {
-                let reply = if move_projects {
-                    controller.move_projects_home(path, generation).await
-                } else {
-                    controller.set_projects_home(path, generation).await
-                };
-                AppSetupEvent::HomeSet(applied(reply, "home_outcome_unknown", lost))
-            }
+            } => AppSetupEvent::HomeSet(applied(
+                controller
+                    .move_projects_home(path, move_projects, generation)
+                    .await,
+                "home_outcome_unknown",
+                lost,
+            )),
             AppSetupJob::FolderSize { path } => {
                 let size = controller
                     .folder_size(path.clone())
