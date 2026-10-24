@@ -197,6 +197,29 @@ impl AgentContext {
         Ok(self)
     }
 
+    /// Adds the names of the project's approved skills and MCP servers for a team master
+    /// whose own tools are off, so it plans the team's work with them. No secret value,
+    /// command, URL or file of a server is read or given. Input: a connection to the
+    /// engine's `engine.db` and the project. Output: the context, or a plain code.
+    pub fn with_team_index(
+        self,
+        connection: &Connection,
+        project: &ProjectId,
+    ) -> Result<Self, LaunchError> {
+        let root = engine_root(connection)?;
+        let tx = connection.unchecked_transaction().map_err(unavailable)?;
+        let plugins = crate::storage::plugins::effective(&tx, &root, project)
+            .map_err(|problem| LaunchError(problem.0))?;
+        drop(tx);
+        Ok(self.with_index(&plugins))
+    }
+
+    fn with_index(mut self, plugins: &EffectivePlugins) -> Self {
+        self.instructions.push_str(&team_index(plugins));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        self
+    }
+
     /// Reports whether any MCP secret value occurs in `text`, so launchers can prove a
     /// command line or environment never carries one.
     pub fn exposes_secret(&self, text: &[u8]) -> bool {

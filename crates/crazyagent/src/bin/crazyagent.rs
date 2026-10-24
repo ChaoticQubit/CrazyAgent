@@ -359,12 +359,26 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     if !writable || executables.is_empty() {
                         return Ok((research, None));
                     }
+                    let agents = match service
+                        .owner_runtime()
+                        .map(|handle| handle.agents())
+                        .transpose()
+                    {
+                        Ok(agents) => agents,
+                        Err(error) => {
+                            if let Some(research) = research {
+                                research.stop();
+                            }
+                            return Err(error.0);
+                        }
+                    };
                     match crazyagent::team::runtime::start_for_engine(
                         runtime_dir,
                         Path::new(&args[2]),
                         Path::new(&args[3]),
                         executables,
                         std::env::current_exe().ok().as_deref(),
+                        agents,
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {

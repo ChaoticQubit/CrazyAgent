@@ -250,3 +250,44 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         "launch_context_team_tool_taken"
     );
 }
+
+#[test]
+fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let skill = root.join("meal-tips");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: meal-tips\ndescription: Gives meal planning tips.\n---\n\nSay tips.\n",
+    )
+    .unwrap();
+    let plugins = EffectivePlugins {
+        skills: vec![EffectiveSkill {
+            name: "meal-tips".into(),
+            folder: skill,
+        }],
+        servers: vec![],
+    };
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+    }
+    .with_index(&plugins);
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+
+    let installed = context.install("codex", &home, false).unwrap();
+
+    let config: toml::Table = fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let told = config["developer_instructions"].as_str().unwrap();
+    assert!(told.starts_with("# Project context from CrazyAgent\n"));
+    assert!(told.contains("Your own tools are off"));
+    assert!(told.contains("- Skill meal-tips: Gives meal planning tips.\n"));
+    assert!(config.get("mcp_servers").is_none());
+    assert!(!home.join("skills").join("crazyagent").exists());
+    drop(installed);
+}
