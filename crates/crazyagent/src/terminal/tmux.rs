@@ -22,6 +22,7 @@ const HOLDER: &str = "_crazyagent";
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
+const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
 const SEARCH: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const VERSION_MIN: (u32, u32) = (3, 2);
 const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
@@ -506,9 +507,11 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
     );
     line.push_str(" -- ");
     line.push_str(ENV_PROGRAM);
-    if !command.env.iter().any(|(name, _)| name == "TERM") {
-        line.push(' ');
-        line.push_str(&quote(&format!("TERM={TERMINAL_TYPE}")));
+    for (default, value) in TERMINAL_DEFAULTS {
+        if !command.env.iter().any(|(name, _)| name == default) {
+            line.push(' ');
+            line.push_str(&quote(&format!("{default}={value}")));
+        }
     }
     for (name, value) in &command.env {
         line.push(' ');
