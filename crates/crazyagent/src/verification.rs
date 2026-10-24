@@ -1,7 +1,9 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::*;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -406,6 +408,7 @@ fn safe_path(path: &str) -> bool {
 /// Creates additive authority tables inside the existing storage actor.
 /// Takes an engine connection and returns schema initialization status.
 /// Existing tables and records remain unchanged.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch("CREATE TABLE IF NOT EXISTS verification_baselines
         (id TEXT PRIMARY KEY, project TEXT NOT NULL, body TEXT NOT NULL,
@@ -998,6 +1001,7 @@ fn accept(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     fn candidate() -> Candidate {
         let snapshot = CandidateSnapshot {

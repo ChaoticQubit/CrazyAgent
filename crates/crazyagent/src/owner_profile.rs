@@ -12,6 +12,7 @@ pub const STACK_ITEM_BYTES_MAX: usize = 40;
 pub const PREFACE_BYTES_MAX: usize = 2048;
 const BODY_BYTES_MAX: usize = 8192;
 
+#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS user_profile (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 2 AND 8192)
@@ -140,6 +141,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute_batch(TABLE).map_err(error)
 }

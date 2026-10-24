@@ -4,7 +4,9 @@ use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+#[cfg(unix)]
+use rusqlite::OpenFlags;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -21,14 +23,14 @@ pub(crate) use master_session::{
     native_sign_in, validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
 mod settings;
@@ -54,6 +56,7 @@ pub(crate) enum Job {
         Box<MasterRuntimeCommand>,
         oneshot::Sender<Result<MasterRuntimeResult, EngineError>>,
     ),
+    #[cfg(unix)]
     NativeAuthDispatch(
         Box<NativeAuthWork>,
         oneshot::Sender<Result<NativeAuthDispatch, EngineError>>,
@@ -105,6 +108,7 @@ pub(crate) enum Job {
         Box<worker_dispatch::DispatchJob>,
         oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>,
     ),
+    #[cfg(unix)]
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
     OwnerControl(
@@ -262,6 +266,7 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        #[cfg(unix)]
                         Job::NativeAuthDispatch(work, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
@@ -418,6 +423,7 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        #[cfg(unix)]
                         Job::OwnerStart(reply) => {
                             let result = if readonly || owner_runtime.is_some() {
                                 Err(error("owner_runtime_unavailable_or_busy"))
@@ -701,7 +707,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Opens private engine storage and initializes additive authority schemas.
 /// Takes a database path and read-only mode and returns connection ownership.
 /// Rejects unsafe filesystem metadata and competing engine ownership.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
     let opened = open_actor_database(path, readonly)?;
     Ok((opened.connection, opened.lock))
@@ -787,6 +793,7 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
     })
 }
 
+#[cfg(unix)]
 pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
@@ -1011,6 +1018,7 @@ fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
+#[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -1562,6 +1570,7 @@ pub(crate) fn store_config(
     Ok(())
 }
 
+#[cfg(unix)]
 const OWNER_META: &str = "CREATE TABLE owner_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     schema_version INTEGER NOT NULL CHECK(schema_version = 1),
@@ -1569,12 +1578,14 @@ const OWNER_META: &str = "CREATE TABLE owner_meta (
     engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
     runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active'))
 )";
+#[cfg(unix)]
 const OWNER_IDENTITIES: &str = "CREATE TABLE owner_identities (
     owner_id TEXT NOT NULL PRIMARY KEY CHECK(length(owner_id) = 64),
     client_kind TEXT NOT NULL UNIQUE CHECK(client_kind IN ('tui', 'desktop')),
     owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
     status TEXT NOT NULL CHECK(status IN ('active', 'revoked'))
 )";
+#[cfg(unix)]
 const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     origin TEXT NOT NULL CHECK(origin IN ('native_owner', 'trusted_host')),
     owner_id TEXT NOT NULL,
@@ -1589,8 +1600,10 @@ const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     event_cursor INTEGER CHECK(event_cursor IS NULL OR event_cursor >= 1),
     PRIMARY KEY(origin, owner_id, operation_id)
 )";
+#[cfg(unix)]
 const OWNER_EVENT: &str = "CREATE UNIQUE INDEX owner_operation_event ON owner_operations(event_cursor) WHERE event_cursor IS NOT NULL";
 
+#[cfg(unix)]
 fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     let expected = [
         ("owner_meta", OWNER_META),
@@ -1623,6 +1636,7 @@ fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     Ok(true)
 }
 
+#[cfg(unix)]
 fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -2466,7 +2480,7 @@ fn read_owner_page(
     Ok(OwnerData::Page { items, next })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod owner_actor_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -3069,7 +3083,7 @@ mod owner_actor_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod knowledge_storage_tests {
     use super::*;
     use crate::memory::*;
@@ -3211,7 +3225,7 @@ mod knowledge_storage_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod database_lock_tests {
     use super::*;
 
@@ -3234,12 +3248,12 @@ mod database_lock_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use configured_conversation_fixture::{
     ConfiguredInitialConversationFixture, configured_initial_conversation_fixture,
 };
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod configured_conversation_fixture {
     use super::*;
     use crate::master_session::{

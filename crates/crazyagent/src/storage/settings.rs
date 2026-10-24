@@ -4,6 +4,7 @@ use crate::config::{edit_model_access, resolve_config_bytes};
 use rustix::fs::{AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -35,6 +36,7 @@ impl SourceState {
 }
 
 struct SourceFile {
+    #[cfg(unix)]
     parent: std::fs::File,
     path: PathBuf,
     identity: (u64, u64),
@@ -178,8 +180,11 @@ impl SourceFile {
 pub(crate) struct SettingsSources {
     global: SourceFile,
     project: SourceFile,
+    #[cfg(unix)]
     lease: std::fs::File,
+    #[cfg(unix)]
     lease_name: OsString,
+    #[cfg(unix)]
     source_id: String,
 }
 
@@ -367,6 +372,7 @@ struct Pending {
     new_identity: Option<(u64, u64)>,
 }
 
+#[cfg(unix)]
 fn save_pending(db: &Connection, pending: &Pending) -> Result<(), EngineError> {
     let body = serde_json::to_vec(pending).map_err(error)?;
     if body.len() > SETTINGS_JOURNAL_MAX {
@@ -852,5 +858,5 @@ pub(super) fn read(
     Ok(reply)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod source_access_tests;
