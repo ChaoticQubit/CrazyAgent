@@ -24,6 +24,9 @@ const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const SEARCH: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const VERSION_MIN: (u32, u32) = (3, 2);
+const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
+const CAPTURE_WRITTEN: &str = "-p -e -N -T";
+const CAPTURE_TRIMMED: &str = "-p -e";
 const REPLY_TIME: Duration = Duration::from_secs(10);
 const CLOSE_TIME: Duration = Duration::from_secs(2);
 const LINE_BYTES_MAX: usize = 1024 * 1024;
@@ -50,6 +53,7 @@ struct Control {
     child: Mutex<Option<Child>>,
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
+    capture: &'static str,
 }
 
 #[derive(Default)]
@@ -185,10 +189,11 @@ impl Tmux {
             ..State::default()
         }));
         let reader = state.clone();
-        let control = Control {
+        let mut control = Control {
             child: Mutex::new(Some(child)),
             input: Mutex::new(Some(input)),
             state,
+            capture: CAPTURE_TRIMMED,
         };
         if std::thread::Builder::new()
             .name("terminal-tmux".into())
@@ -201,13 +206,13 @@ impl Tmux {
         let version = control
             .run("display-message -p '#{version}'")
             .map_err(|_| failure("terminal_unavailable"))?;
-        if !version
+        let Some(capture) = version
             .first()
-            .and_then(|line| supported(&String::from_utf8_lossy(line)))
-            .unwrap_or(false)
-        {
+            .and_then(|line| capture_flags(&String::from_utf8_lossy(line)))
+        else {
             return Err(failure("terminal_tmux_unsupported"));
-        }
+        };
+        control.capture = capture;
         for option in [
             format!("set-option -g default-terminal {TERMINAL_TYPE}"),
             "set-option -gw allow-rename off".into(),
@@ -391,13 +396,31 @@ fn private_folder(folder: &Path) -> Result<(), HostError> {
     Ok(())
 }
 
-fn supported(version: &str) -> Option<bool> {
+fn release(version: &str) -> Option<(u32, u32)> {
     let version = version.trim();
     let version = version.strip_prefix("next-").unwrap_or(version);
     let (major, rest) = version.split_once('.')?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    let found = (major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?);
-    Some(found >= VERSION_MIN)
+    Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
+}
+
+fn supported(version: &str) -> Option<bool> {
+    release(version).map(|found| found >= VERSION_MIN)
+}
+
+/// Picks the `capture-pane` flags for the screen sent on attach. From tmux 3.4 the screen
+/// keeps every cell the program wrote, trailing spaces included, and no unused cell; older
+/// tmux trims trailing spaces and the cursor position still shows where the program is.
+/// Takes the tmux version report. Returns the flags, or none for an unsupported tmux.
+fn capture_flags(version: &str) -> Option<&'static str> {
+    if !supported(version)? {
+        return None;
+    }
+    Some(if release(version)? >= CAPTURE_WRITTEN_MIN {
+        CAPTURE_WRITTEN
+    } else {
+        CAPTURE_TRIMMED
+    })
 }
 
 fn quote(text: &str) -> String {
@@ -742,7 +765,8 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
-            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane -p -e -t {target}"
+            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane {} -t {target}",
+            control.capture
         );
         let (reply, answer) = sync_channel(1);
         control.send(
