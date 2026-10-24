@@ -46,10 +46,11 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
 }
 
 /** One research suggestion rewritten in the owner's words before it is saved, like the TUI's
- * edit key. Inputs: the suggestion, whether a save is running, and the save and cancel
- * actions. Output: the inline editor, starting from the suggested text. */
-export function SuggestionEditor({ suggestion, pending, onSave, onCancel }: {
+ * edit key. Inputs: the suggestion, an optional field label, whether a save is running, and
+ * the save and cancel actions. Output: the inline editor, starting from the suggested text. */
+export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel }: {
   suggestion: Suggestion;
+  label?: string;
   pending: boolean;
   onSave: (text: string) => void;
   onCancel: () => void;
@@ -64,7 +65,7 @@ export function SuggestionEditor({ suggestion, pending, onSave, onCancel }: {
   };
   return <form className="stack-small grow" onSubmit={(event) => { event.preventDefault(); save(); }}
     onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } }}>
-    <TextArea id={id} label={`Edit before saving (from ${suggestion.project_name})`} value={text} onValue={setText} rows={3}
+    <TextArea id={id} label={label ?? `Edit before saving (from ${suggestion.project_name})`} value={text} onValue={setText} rows={3}
       maxLength={MEMORY_TEXT_BYTES_MAX} counterAt={MEMORY_TEXT_BYTES_MAX - 400} error={error} />
     <span className="row">
       <Button type="submit" variant="primary" size="small" icon="brain" pending={pending} pendingLabel="Saving...">Save edited</Button>
