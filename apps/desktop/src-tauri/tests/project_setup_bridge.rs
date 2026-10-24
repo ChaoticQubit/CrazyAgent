@@ -1,4 +1,5 @@
-use crazyagent::config::resolve_config;
+mod engine_support;
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::memory::{KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
@@ -83,6 +84,7 @@ fn setup(documents: Vec<String>) -> ProjectSetup {
 async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
     let catalog = bridge
         .project_catalog(None, vec![ResearchKind::MarketResearch])
         .await?;
@@ -134,6 +136,10 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>(),
         [ContextKind::Brief, ContextKind::Document]
     );
+    assert_eq!(
+        Path::new(&context.folder),
+        Path::new(&stored.folder).join(".crazyagent")
+    );
     let chunk = bridge
         .project_context_item(&id, "context/documents/brief.txt".into(), 0)
         .await?;
@@ -148,7 +154,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     );
 
     std::fs::write(
-        Path::new(&stored.folder).join("context/research/market_research.md"),
+        Path::new(&context.folder).join("context/research/market_research.md"),
         "# Market\n\nSmall but loyal. [Ref](https://example.org)\n",
     )?;
     let saved = bridge
@@ -231,9 +237,15 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     );
 
     std::os::unix::fs::symlink(sources.join("brief.txt"), sources.join("link.txt"))?;
+    let taken = bridge.setup_project(spec, setup(vec![]), 8).await?;
+    assert!(matches!(taken.outcome, ActionOutcome::Rejected));
+    assert_eq!(taken.rejection, Some("home_destination_exists"));
     let rejected = bridge
         .setup_project(
-            spec,
+            ProjectSpec {
+                name: "Chore board copy".into(),
+                repositories: vec![],
+            },
             setup(vec![sources.join("link.txt").to_str().unwrap().to_owned()]),
             8,
         )
@@ -312,7 +324,11 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .iter()
             .all(|row| row.id != id)
     );
-    assert!(Path::new(&stored.folder).join("context/brief.md").is_file());
+    assert!(
+        Path::new(&context.folder)
+            .join("context/brief.md")
+            .is_file()
+    );
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }
@@ -326,7 +342,7 @@ async fn desktop_creates_a_project_folder_and_reads_its_context_through_the_real
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let sources = tempfile::tempdir().unwrap();
     std::fs::write(sources.path().join("brief.txt"), "Owner notes.").unwrap();
-    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = engine_support::engine_config(root.path());
     let (_cancel, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
