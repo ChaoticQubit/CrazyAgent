@@ -10,7 +10,6 @@ use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, installed};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -47,15 +46,16 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crazyagent::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 
@@ -66,20 +66,21 @@ struct Engine {
 
 impl Engine {
     fn start(runtime: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(runtime)
-            .arg(runtime.join("global.toml"))
-            .arg(runtime.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .arg("--codex-executable")
-            .arg(codex())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(runtime)
+                .arg(runtime.join("global.toml"))
+                .arg(runtime.join("project.toml"))
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .arg("--codex-executable")
+                .arg(codex())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -120,11 +121,13 @@ impl Engine {
 
     fn stop(mut self) -> String {
         assert!(
-            Command::new("/bin/kill")
-                .args(["-s", "TERM", &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
+            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+                "-s",
+                "TERM",
+                &self.child.id().to_string()
+            ]))
+            .unwrap()
+            .success()
         );
         let deadline = Instant::now() + Duration::from_secs(40);
         let status = loop {
@@ -153,7 +156,7 @@ impl Drop for Engine {
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
-    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(

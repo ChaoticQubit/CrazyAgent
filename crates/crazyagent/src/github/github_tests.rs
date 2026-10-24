@@ -105,19 +105,20 @@ fn wait_for(account: &GitHub, done: impl Fn(&GitHubStatus) -> bool) -> GitHubSta
 }
 
 fn git(args: &[&str], directory: &Path) {
-    let status = Command::new("/usr/bin/git")
-        .args(args)
-        .current_dir(directory)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", directory)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(directory)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+    )
+    .unwrap();
     assert!(status.success(), "git {args:?} failed");
 }
 

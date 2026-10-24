@@ -53,12 +53,13 @@ struct Process {
 
 impl Process {
     fn spawn(command: &mut Command) -> Self {
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let (stdout, out_reader) = capture(child.stdout.take().unwrap());
         let (stderr, err_reader) = capture(child.stderr.take().unwrap());
         Self {
@@ -131,11 +132,12 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = Command::new("/bin/kill")
-                .args(["-s", "TERM", &self.child.id().to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crazyagent::spawn_gate::status(
+                Command::new("/bin/kill")
+                    .args(["-s", "TERM", &self.child.id().to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
             let deadline = Instant::now() + Duration::from_secs(10);
             while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));

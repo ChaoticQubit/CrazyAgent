@@ -382,7 +382,7 @@ pub(in crate::engine) async fn run(
         return Err(failure("native_auth_cancelled"));
     }
     let home = session.profile_path()?;
-    let child = command(executable, &home)?.spawn().map_err(io_error)?;
+    let child = crate::spawn_gate::spawn(&mut command(executable, &home)?).map_err(io_error)?;
     let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     if let Err((error, mut child)) = session.retain_child(child) {

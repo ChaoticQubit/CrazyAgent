@@ -20,17 +20,18 @@ struct OwnedCli {
 
 impl OwnedCli {
     fn start(root: &Path) -> Self {
-        let child = ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .args(["engine"])
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .args(["engine"])
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg("engine.sock")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         Self { child }
     }
 

@@ -29,8 +29,7 @@ pub(super) struct HostProcess {
 
 impl HostProcess {
     pub(super) fn spawn(mut command: Command) -> Result<Self, ProtocolError> {
-        let mut child = command
-            .spawn()
+        let mut child = crate::spawn_gate::spawn(&mut command)
             .map_err(|_| error("rcli_master_spawn_failed"))?;
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
@@ -347,11 +346,12 @@ mod tests {
             .process_group(0);
         let mut process = HostProcess::spawn(command).unwrap();
         let group = i32::try_from(process.child.id()).unwrap();
-        let mut member = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .process_group(group)
-            .spawn()
-            .unwrap();
+        let mut member = crate::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .process_group(group),
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rustix::process::test_kill_process_group(process.group())
             != Err(rustix::io::Errno::PERM)

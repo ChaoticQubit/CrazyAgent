@@ -9,20 +9,24 @@ fn private() -> tempfile::TempDir {
 }
 
 fn git_in(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-        ])
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "git {args:?} failed");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }

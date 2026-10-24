@@ -365,28 +365,29 @@ impl LockProcess {
             "l{}.sock",
             SOCKET_ID.fetch_add(1, Ordering::Relaxed),
         ));
-        let readiness = UnixDatagram::bind(&socket).unwrap();
+        let readiness = crazyagent::spawn_gate::bind_unix_datagram_std(&socket).unwrap();
         readiness
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let child = Command::new("/usr/bin/python3")
-            .env_clear()
-            .args(["-I", "-S", "-c", LOCK_PROCESS])
-            .arg(&path)
-            .arg(&socket)
-            .arg(mode)
-            .args([
-                stamp.dev().to_string(),
-                stamp.ino().to_string(),
-                stamp.uid().to_string(),
-                stamp.mode().to_string(),
-                stamp.nlink().to_string(),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("real lock fixture process required");
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new("/usr/bin/python3")
+                .env_clear()
+                .args(["-I", "-S", "-c", LOCK_PROCESS])
+                .arg(&path)
+                .arg(&socket)
+                .arg(mode)
+                .args([
+                    stamp.dev().to_string(),
+                    stamp.ino().to_string(),
+                    stamp.uid().to_string(),
+                    stamp.mode().to_string(),
+                    stamp.nlink().to_string(),
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("real lock fixture process required");
         let mut process = Self {
             child,
             readiness,

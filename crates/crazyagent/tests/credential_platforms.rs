@@ -63,23 +63,24 @@ fn token() -> String {
 fn git_credential(helper: &str, operation: &str, request: &str, home: &Path) -> Output {
     let config = home.join("gitconfig");
     std::fs::write(&config, "").unwrap();
-    let mut child = Command::new("git")
-        .arg("-c")
-        .arg("credential.helper=")
-        .arg("-c")
-        .arg(format!("credential.helper={helper}"))
-        .arg("credential")
-        .arg(operation)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", &config)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("HOME", home)
-        .current_dir(home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect(GIT_PREREQUISITE);
+    let mut child = crazyagent::spawn_gate::spawn(
+        Command::new("git")
+            .arg("-c")
+            .arg("credential.helper=")
+            .arg("-c")
+            .arg(format!("credential.helper={helper}"))
+            .arg("credential")
+            .arg(operation)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("HOME", home)
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .expect(GIT_PREREQUISITE);
     child
         .stdin
         .take()
@@ -90,19 +91,20 @@ fn git_credential(helper: &str, operation: &str, request: &str, home: &Path) -> 
 }
 
 fn engine_helper(namespace: &str, item: &str, operation: &str) -> Output {
-    Command::new(ENGINE)
-        .args([
-            GIT_HELPER_COMMAND,
-            namespace,
-            item,
-            "x-access-token",
-            operation,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap()
+    crazyagent::spawn_gate::output(
+        Command::new(ENGINE)
+            .args([
+                GIT_HELPER_COMMAND,
+                namespace,
+                item,
+                "x-access-token",
+                operation,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap()
 }
 
 #[test]

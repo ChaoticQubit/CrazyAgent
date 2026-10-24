@@ -237,8 +237,7 @@ pub(super) async fn run_child(
     }
     let command = auth_command(executable.verified_path()?, home, action)?;
     let mut command = command;
-    let child = command
-        .spawn()
+    let child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_auth_claude_launch_failed"))?;
     if let Err((error, mut child)) = session.retain_child(child) {
         let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);

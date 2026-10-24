@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,14 +21,15 @@ impl Service {
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let executable = env!("CARGO_BIN_EXE_crazyagent-runner");
-        let process = Command::new(executable)
-            .arg("serve")
-            .arg(root.path().canonicalize().unwrap())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(root.path().join("stderr.log")).unwrap())
-            .spawn()
-            .unwrap();
+        let process = crazyagent::spawn_gate::spawn(
+            Command::new(executable)
+                .arg("serve")
+                .arg(root.path().canonicalize().unwrap())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(fs::File::create(root.path().join("stderr.log")).unwrap()),
+        )
+        .unwrap();
         let mut service = Self { root, process };
         service.wait_ready();
         service
@@ -43,7 +43,9 @@ impl Service {
                 "runner exited before ready: {}",
                 fs::read_to_string(self.root.path().join("stderr.log")).unwrap()
             );
-            if UnixStream::connect(self.root.path().join("control.sock")).is_ok() {
+            if crazyagent::spawn_gate::connect_unix_std(self.root.path().join("control.sock"))
+                .is_ok()
+            {
                 let status = self.status();
                 assert_eq!(status["kind"], "status");
                 assert_eq!(status["identity"]["pid"], self.process.id());
@@ -72,19 +74,20 @@ impl Service {
     fn restart(&mut self) {
         self.process.kill().unwrap();
         self.process.wait().unwrap();
-        self.process = Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
-            .arg("serve")
-            .arg(self.root.path().canonicalize().unwrap())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(
-                fs::OpenOptions::new()
-                    .append(true)
-                    .open(self.root.path().join("stderr.log"))
-                    .unwrap(),
-            )
-            .spawn()
-            .unwrap();
+        self.process = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
+                .arg("serve")
+                .arg(self.root.path().canonicalize().unwrap())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(self.root.path().join("stderr.log"))
+                        .unwrap(),
+                ),
+        )
+        .unwrap();
         self.wait_ready();
     }
 }
@@ -99,7 +102,7 @@ impl Drop for Service {
 }
 
 fn exchange(root: &std::path::Path, command: Value) -> Value {
-    let mut stream = UnixStream::connect(root.join("control.sock")).unwrap();
+    let mut stream = crazyagent::spawn_gate::connect_unix_std(root.join("control.sock")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -146,7 +149,8 @@ fn private_control_service_survives_controller_disconnect() {
     let service = Service::start();
     let before = service.status();
     assert_eq!(service.claim("engine-1", 0)["kind"], "claimed");
-    let client = UnixStream::connect(service.root.path().join("control.sock")).unwrap();
+    let client =
+        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
     drop(client);
     assert_eq!(service.claim("engine-2", 1)["kind"], "claimed");
     let after = service.status();
@@ -271,7 +275,8 @@ fn unqualified_child_cancellation_never_reports_child_quiescence() {
 #[test]
 fn oversized_frames_are_rejected_without_disrupting_other_clients() {
     let service = Service::start();
-    let mut stream = UnixStream::connect(service.root.path().join("control.sock")).unwrap();
+    let mut stream =
+        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -326,12 +331,13 @@ fn graceful_termination_removes_the_owned_control_endpoint() {
     let mut service = Service::start();
     assert_eq!(service.status()["kind"], "status");
     assert!(
-        Command::new("/bin/kill")
-            .arg("-TERM")
-            .arg(service.process.id().to_string())
-            .status()
-            .unwrap()
-            .success()
+        crazyagent::spawn_gate::status(
+            Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(service.process.id().to_string())
+        )
+        .unwrap()
+        .success()
     );
     assert!(wait_exit(&mut service.process).success());
     assert!(!service.root.path().join("control.sock").exists());
@@ -353,17 +359,18 @@ fn control_service_survives_actual_controller_peer_process_death() {
     }
     let service = Service::start();
     let identity = service.status()["identity"].clone();
-    let mut peer = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "control_service_survives_actual_controller_peer_process_death",
-        ])
-        .env("T03_CONTROLLER_PEER_ROOT", service.root.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut peer = crazyagent::spawn_gate::spawn(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "control_service_survives_actual_controller_peer_process_death",
+            ])
+            .env("T03_CONTROLLER_PEER_ROOT", service.root.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     while service.status()["controller_epoch"] != "doomed-peer" {
         if Instant::now() >= deadline || peer.try_wait().unwrap().is_some() {
@@ -381,14 +388,15 @@ fn control_service_survives_actual_controller_peer_process_death() {
 }
 
 fn reject_start(root: &std::path::Path, reason: &str) {
-    let mut process = Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
-        .arg("serve")
-        .arg(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut process = crazyagent::spawn_gate::spawn(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
+            .arg("serve")
+            .arg(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Some(status) = process.try_wait().unwrap() {
@@ -528,12 +536,13 @@ fn changed_endpoint_is_never_deleted_by_graceful_cleanup() {
     fs::rename(&path, service.root.path().join("moved.sock")).unwrap();
     fs::write(&path, b"replacement endpoint canary").unwrap();
     assert!(
-        Command::new("/bin/kill")
-            .arg("-TERM")
-            .arg(service.process.id().to_string())
-            .status()
-            .unwrap()
-            .success()
+        crazyagent::spawn_gate::status(
+            Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(service.process.id().to_string())
+        )
+        .unwrap()
+        .success()
     );
     assert!(!wait_exit(&mut service.process).success());
     assert_eq!(fs::read(path).unwrap(), b"replacement endpoint canary");
@@ -595,7 +604,10 @@ fn concurrent_controller_claims_have_one_compare_and_swap_winner() {
 fn timed_out_incomplete_clients_release_bounded_connection_capacity() {
     let service = Service::start();
     let peers: Vec<_> = (0..16)
-        .map(|_| UnixStream::connect(service.root.path().join("control.sock")).unwrap())
+        .map(|_| {
+            crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
+                .unwrap()
+        })
         .collect();
     assert_eq!(service.status()["kind"], "status");
     assert_eq!(peers.len(), 16);
@@ -606,7 +618,8 @@ fn receipt_is_retained_when_requester_disconnects_before_acknowledgement() {
     let service = Service::start();
     assert_eq!(service.claim("engine-1", 0)["kind"], "claimed");
     let runner = service.status()["identity"]["runner_id"].clone();
-    let mut stream = UnixStream::connect(service.root.path().join("control.sock")).unwrap();
+    let mut stream =
+        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
     stream
         .write_all(
             &encode_frame(&json!({"protocol_version":1,

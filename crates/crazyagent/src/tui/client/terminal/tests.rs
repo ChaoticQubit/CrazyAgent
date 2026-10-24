@@ -17,15 +17,16 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Process::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crate::spawn_gate::status(
+            Process::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 

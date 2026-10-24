@@ -3303,30 +3303,34 @@ fallback_allowed = false
     }
 
     fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-        let output = Command::new("/usr/bin/git")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args([
-                "-c",
-                "user.name=Master storage fixture",
-                "-c",
-                "user.email=master-storage@example.invalid",
-            ])
-            .arg("-C")
-            .arg(repository)
-            .args(arguments)
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args([
+                    "-c",
+                    "user.name=Master storage fixture",
+                    "-c",
+                    "user.email=master-storage@example.invalid",
+                ])
+                .arg("-C")
+                .arg(repository)
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
         assert!(
             output.status.success(),
             "actual Git fixture failed: {output:?}"

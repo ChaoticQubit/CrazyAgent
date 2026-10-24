@@ -30,15 +30,17 @@ pub fn parse_offset(text: &str) -> Option<i64> {
 /// Input: none. Output: seconds east of UTC; 0 when the command fails.
 pub fn local_offset() -> i64 {
     *OFFSET.get_or_init(|| {
-        std::process::Command::new("/bin/date")
-            .arg("+%z")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|text| parse_offset(&text))
-            .unwrap_or(0)
+        crate::spawn_gate::output(
+            std::process::Command::new("/bin/date")
+                .arg("+%z")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped()),
+        )
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| parse_offset(&text))
+        .unwrap_or(0)
     })
 }
 

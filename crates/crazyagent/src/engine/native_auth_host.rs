@@ -214,7 +214,7 @@ pub(in crate::engine) async fn dispatch(
             .arg("--claude-sha256")
             .arg(claude.verified_sha256()?);
     }
-    let mut child = command.spawn().map_err(io_error)?;
+    let mut child = crate::spawn_gate::spawn(&mut command).map_err(io_error)?;
     let Some(input) = child.stdin.take() else {
         custody::cleanup_direct_child(
             &mut child,
@@ -246,6 +246,8 @@ pub(in crate::engine) async fn dispatch(
 
 pub(in crate::engine) mod claude_auth;
 
+#[cfg(test)]
+mod bootstrap_pipe_tests;
 pub(in crate::engine) mod codex_auth;
 pub(super) mod custody;
 #[cfg(test)]

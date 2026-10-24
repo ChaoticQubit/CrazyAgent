@@ -73,15 +73,19 @@ fn sample(folder: &Path) {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(folder)
-        .args(["-c", "init.defaultBranch=main"])
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(["-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -350,7 +354,7 @@ fn special_files_are_refused_and_nothing_is_left_behind() {
     let case = case();
     let source = case.sources.join("socketed");
     sample(&source);
-    let _listener = std::os::unix::net::UnixListener::bind(source.join("agent.sock")).unwrap();
+    let _listener = crazyagent::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
     let before = names(&source);
 
     let refused = plan_add(&case.home, &case.engine, text(&source), AddMode::Copy)

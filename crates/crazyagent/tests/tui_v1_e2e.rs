@@ -42,18 +42,22 @@ fn codex_executable() -> PathBuf {
 fn v1_tui_runs_from_first_run_to_research_and_a_master_reply_on_a_managed_codex_account() {
     let home = managed_codex_home();
     let codex = codex_executable();
-    let output = Command::new("python3")
-        .env_remove("PYTHONOPTIMIZE")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/qualification/tui_v1_flow.py"
-        ))
-        .arg(env!("CARGO_BIN_EXE_crazyagent"))
-        .arg(&codex)
-        .arg(&home)
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("python3")
+            .env_remove("PYTHONOPTIMIZE")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/qualification/tui_v1_flow.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_crazyagent"))
+            .arg(&codex)
+            .arg(&home)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),

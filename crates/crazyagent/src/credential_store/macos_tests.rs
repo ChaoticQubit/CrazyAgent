@@ -155,15 +155,18 @@ fn keychain_git_helper_answers_get_from_the_store_with_no_secret_in_its_text() {
     assert!(!helper.contains(&value));
     let home = tempfile::tempdir().unwrap();
     let run = |action: &str| {
-        Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("{} {action}", &helper[1..]))
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", home.path())
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+        crate::spawn_gate::output(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{} {action}", &helper[1..]))
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home.path())
+                .stdin(Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap()
     };
     let answered = run("get");
     assert!(answered.status.success());

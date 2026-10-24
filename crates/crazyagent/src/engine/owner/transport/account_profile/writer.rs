@@ -185,7 +185,7 @@ fn perform(
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home.as_path()));
-    let child = command.spawn().map_err(|_| unknown())?;
+    let child = crate::spawn_gate::spawn(&mut command).map_err(|_| unknown())?;
     let group = Pid::from_raw(i32::try_from(child.id()).expect("OS child PID range"))
         .expect("positive child PID");
     process.group = Some(group);
@@ -330,11 +330,12 @@ mod tests {
 
     #[test]
     fn exited_unreaped_writer_group_settles_cleanly() {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .process_group(0),
+        )
+        .unwrap();
         let group = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
         let deadline = WallInstant::now() + Duration::from_secs(5);
         while rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::PERM) {

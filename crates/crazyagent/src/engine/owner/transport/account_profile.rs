@@ -158,7 +158,7 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = UnixStream::connect(self.root.path.join(SOCKET))
+            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("account_profile_owner_unavailable"))?;
             verify_peer(&stream)?;

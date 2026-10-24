@@ -6,15 +6,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 fn git(root: &Path, args: &[&str]) -> String {
-    let output = Process::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["-C", root.to_str().unwrap()])
-        .args(args)
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Process::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-C", root.to_str().unwrap()])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "{:?}", output);
     String::from_utf8(output.stdout).unwrap()
 }
@@ -707,17 +711,18 @@ async fn interrupted_allocation_is_retained() {
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     engine.close().await.unwrap();
-    let mut child = Process::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "interrupted_allocation_is_retained",
-            "--nocapture",
-        ])
-        .env("CRAZYAGENT_T6_INTERRUPT_ROOT", &root)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = crazyagent::spawn_gate::spawn(
+        Process::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "interrupted_allocation_is_retained",
+                "--nocapture",
+            ])
+            .env("CRAZYAGENT_T6_INTERRUPT_ROOT", &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
     let db = rusqlite::Connection::open_with_flags(
         root.join("db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

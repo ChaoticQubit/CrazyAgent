@@ -11,17 +11,18 @@ fn failure() -> EngineError {
 }
 
 fn security(home: &Path, args: &[&std::ffi::OsStr]) -> Result<(), EngineError> {
-    let mut child = Command::new(SECURITY)
-        .args(args)
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| failure())?;
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(SECURITY)
+            .args(args)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|_| failure())?;
     let deadline = Instant::now() + STEP_TIME;
     loop {
         if let Some(status) = child.try_wait().map_err(|_| failure())? {
@@ -105,13 +106,17 @@ mod tests {
     use super::*;
 
     fn read(home: &Path, args: &[&str]) -> String {
-        let output = Command::new(SECURITY)
-            .args(args)
-            .env_clear()
-            .env("HOME", home)
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::output(
+            Command::new(SECURITY)
+                .args(args)
+                .env_clear()
+                .env("HOME", home)
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
         assert!(output.status.success(), "security {args:?} failed");
         String::from_utf8(output.stdout).unwrap()
     }
@@ -131,22 +136,23 @@ mod tests {
         assert!(
             read(&home, &["default-keychain", "-d", "user"]).contains(keychain.to_str().unwrap())
         );
-        let stored = Command::new(SECURITY)
-            .args([
-                "add-generic-password",
-                "-U",
-                "-a",
-                "probe",
-                "-s",
-                "crazyagent-keychain-test",
-                "-w",
-                "value",
-            ])
-            .env_clear()
-            .env("HOME", &home)
-            .env("PATH", "/usr/bin:/bin")
-            .status()
-            .unwrap();
+        let stored = crate::spawn_gate::status(
+            Command::new(SECURITY)
+                .args([
+                    "add-generic-password",
+                    "-U",
+                    "-a",
+                    "probe",
+                    "-s",
+                    "crazyagent-keychain-test",
+                    "-w",
+                    "value",
+                ])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin"),
+        )
+        .unwrap();
         assert!(stored.success());
         assert_eq!(
             read(

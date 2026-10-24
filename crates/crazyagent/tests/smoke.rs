@@ -16,7 +16,6 @@ use crazyagent::terminal::{AgentId, FOLDER, TerminalFrame};
 use e2e_support::{ENGINE, Engine, Owner, Survivors, TMUX, hex, scratch, stop_tmux};
 use std::collections::BTreeSet;
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -37,14 +36,17 @@ struct Server {
 
 impl Server {
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .args(args)
-            .env_remove("TMUX")
-            .stdin(Stdio::null())
-            .output()
-            .expect(TMUX)
+        crazyagent::spawn_gate::output(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .args(args)
+                .env_remove("TMUX")
+                .stdin(Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .expect(TMUX)
     }
 
     fn checked(&self, args: &[&str]) -> String {
@@ -69,11 +71,14 @@ impl Drop for Server {
 }
 
 fn processes(root: &Path) -> Vec<String> {
-    let output = Command::new("ps")
-        .args(["axww", "-o", "pid=,command="])
-        .stdin(Stdio::null())
-        .output()
-        .expect(PS);
+    let output = crazyagent::spawn_gate::output(
+        Command::new("ps")
+            .args(["axww", "-o", "pid=,command="])
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .expect(PS);
     assert!(output.status.success(), "{PS}");
     let root = root.to_str().unwrap();
     String::from_utf8_lossy(&output.stdout)
@@ -92,13 +97,14 @@ fn settled(what: &str, check: impl Fn() -> bool) {
 }
 
 fn running(pid: u32) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success()
+    crazyagent::spawn_gate::status(
+        Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap()
+    .success()
 }
 
 fn generations(root: &Path) -> Vec<String> {
@@ -188,7 +194,7 @@ async fn the_engine_starts_answers_a_plain_read_and_stops_with_nothing_left() {
         );
     }
     assert!(generations(&root).is_empty(), "{:?}", generations(&root));
-    assert!(UnixStream::connect(root.join("engine.sock")).is_err());
+    assert!(crazyagent::spawn_gate::connect_unix_std(root.join("engine.sock")).is_err());
     settled("no process runs from the engine root after stop", || {
         processes(&root).is_empty()
     });
@@ -245,12 +251,15 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
 
     let private = server.checked(&["list-panes", "-a", "-F", "#{pane_start_command}"]);
     assert!(private.contains(&marker), "{private}");
-    let default = Command::new(&server.tmux)
-        .args(["list-panes", "-a", "-F", "#{pane_start_command}"])
-        .env_remove("TMUX")
-        .stdin(Stdio::null())
-        .output()
-        .expect(TMUX);
+    let default = crazyagent::spawn_gate::output(
+        Command::new(&server.tmux)
+            .args(["list-panes", "-a", "-F", "#{pane_start_command}"])
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .expect(TMUX);
     assert!(
         !String::from_utf8_lossy(&default.stdout).contains(&marker),
         "the engine's pane never shows on the default tmux socket"

@@ -17,17 +17,18 @@ struct Engine {
 
 impl Engine {
     async fn start(root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg("engine.sock")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             assert!(child.try_wait().unwrap().is_none(), "engine exited early");

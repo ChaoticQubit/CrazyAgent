@@ -20,14 +20,15 @@ fn archive(dir: &Path, line: &str) -> (PathBuf, String) {
     let source = dir.join("source");
     script(&source.join("uv-test/uv"), line);
     let archive = dir.join("uv-test.tar.gz");
-    let status = Command::new("/usr/bin/tar")
-        .arg("-czf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&source)
-        .arg("uv-test")
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(
+        Command::new("/usr/bin/tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("uv-test"),
+    )
+    .unwrap();
     assert!(status.success());
     let sha256 = file_sha256(&archive).unwrap();
     (archive, sha256)

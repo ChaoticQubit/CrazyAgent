@@ -46,25 +46,29 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     if !probe.exists() {
         std::fs::write(probe, "fn main() { std::process::exit(7); }\n").unwrap();
     }
-    let output = std::process::Command::new(env!("CARGO"))
-        .current_dir(root.path())
-        .args([
-            "run",
-            "--offline",
-            "--",
-            "qualification",
-            "report",
-            "--source-revision",
-            "entrypoint-check",
-            "--profile-id",
-            "local-profile",
-        ])
-        .env(
-            "CARGO_TARGET_DIR",
-            workspace.join(".local-state/cargo-entrypoint-target"),
-        )
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        std::process::Command::new(env!("CARGO"))
+            .current_dir(root.path())
+            .args([
+                "run",
+                "--offline",
+                "--",
+                "qualification",
+                "report",
+                "--source-revision",
+                "entrypoint-check",
+                "--profile-id",
+                "local-profile",
+            ])
+            .env(
+                "CARGO_TARGET_DIR",
+                workspace.join(".local-state/cargo-entrypoint-target"),
+            )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

@@ -7,7 +7,6 @@ use crazyagent::project_setup::ProjectSetup;
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
 use std::io::Read;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -229,13 +228,13 @@ pub fn hanging_endpoint() -> (u16, std::thread::JoinHandle<()>) {
 /// request, so a test can wait until an agent is mid-run, waiting on its model.
 /// Returns the port, the serving thread and the count.
 pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let requests = Arc::new(AtomicUsize::new(0));
     let counted = requests.clone();
     let handle = std::thread::spawn(move || {
         let mut held = Vec::new();
-        for stream in listener.incoming().take(64) {
+        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
             let Ok(mut stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
             let mut buffer = [0_u8; 4096];
@@ -251,14 +250,16 @@ pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<Atom
 /// The ids of the live processes whose command line contains `marker`, such
 /// as a research agent whose `-o` report path sits in `<state>/agents/`.
 pub fn processes_with(marker: &Path) -> Vec<u32> {
-    let output = Command::new("/usr/bin/pgrep")
-        .env_clear()
-        .arg("-f")
-        .arg(marker)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/pgrep")
+            .env_clear()
+            .arg("-f")
+            .arg(marker)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
     String::from_utf8_lossy(&output.stdout)
         .lines()

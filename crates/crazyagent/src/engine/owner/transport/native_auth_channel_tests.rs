@@ -323,9 +323,10 @@ impl ChannelCase {
     }
 
     async fn raw(&self, packet: &[u8; 37]) -> UnixStream {
-        let mut stream = UnixStream::connect(self.host.authority.root.path.join(SOCKET))
-            .await
-            .unwrap();
+        let mut stream =
+            crate::spawn_gate::connect_unix(self.host.authority.root.path.join(SOCKET))
+                .await
+                .unwrap();
         stream.write_all(packet).await.unwrap();
         stream
     }
@@ -501,14 +502,15 @@ async fn native_auth_channel_bootstrap_writes_exact_token_length_and_closes_chil
     channel_case(|case| async move {
         let (_, launch) = case.launch("bootstrap-token-pipe").await;
         let before = case.snapshot();
-        let mut child = ProcessCommand::new("/usr/bin/wc")
-            .arg("-c")
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crate::spawn_gate::spawn(
+            ProcessCommand::new("/usr/bin/wc")
+                .arg("-c")
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let delivered = launch.write_bootstrap(child.stdin.take().unwrap());
         reap(&mut child);
         delivered.unwrap();
@@ -1110,13 +1112,14 @@ async fn native_auth_channel_any_real_child_effect_forbids_no_effect_retirement(
         let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
         assert!(channel.revalidate(&guard).await.is_ok());
         let mut session = CustodySession::new(guard);
-        let mut child = ProcessCommand::new("/usr/bin/true")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crate::spawn_gate::spawn(
+            ProcessCommand::new("/usr/bin/true")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         reap(&mut child);
         session.retain_child(child).unwrap();
         let before = case.snapshot();

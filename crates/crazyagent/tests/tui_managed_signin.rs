@@ -151,25 +151,26 @@ impl Driver {
         private_file(&output, b"");
         private_file(&error, b"");
         let logs = |path| fs::OpenOptions::new().append(true).open(path).unwrap();
-        let child = Command::new("/usr/bin/python3")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", root.join("home-empty"))
-            .env("TERM", "xterm-256color")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .args(["-B", "-c", DRIVER])
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/qualification"
-            ))
-            .arg(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg(root)
-            .stdin(Stdio::null())
-            .stdout(logs(&output))
-            .stderr(logs(&error))
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new("/usr/bin/python3")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", root.join("home-empty"))
+                .env("TERM", "xterm-256color")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .args(["-B", "-c", DRIVER])
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/qualification"
+                ))
+                .arg(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg(root)
+                .stdin(Stdio::null())
+                .stdout(logs(&output))
+                .stderr(logs(&error))
+                .process_group(0),
+        )
+        .unwrap();
         assert!(child.id() > 1);
         Self {
             child,
@@ -205,11 +206,12 @@ impl Driver {
 
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1 && matches!(signal, "-TERM" | "-KILL"));
-    let _ = Command::new("/bin/kill")
-        .args([signal, "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crazyagent::spawn_gate::status(
+        Command::new("/bin/kill")
+            .args([signal, "--", &format!("-{group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
 }
 
 impl Drop for Driver {

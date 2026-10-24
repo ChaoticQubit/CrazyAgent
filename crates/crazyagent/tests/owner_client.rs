@@ -12,7 +12,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
 fn request(client: &str, operation: &str, command: Command) -> WireRequest {
@@ -784,7 +783,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         .unwrap();
     let (stop, rx) = oneshot::channel();
     let task = tokio::spawn(server.run(rx));
-    let mut absent = UnixStream::connect(root.path().join("owner.sock"))
+    let mut absent = crazyagent::spawn_gate::connect_unix(root.path().join("owner.sock"))
         .await
         .unwrap();
     absent
@@ -796,7 +795,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         tokio::time::timeout(Duration::from_secs(1), absent.read(&mut byte)).await,
         Ok(Ok(0)) | Ok(Err(_))
     ));
-    let mut wrong = UnixStream::connect(root.path().join("owner.sock"))
+    let mut wrong = crazyagent::spawn_gate::connect_unix(root.path().join("owner.sock"))
         .await
         .unwrap();
     let mut packet = [0; 37];
@@ -813,7 +812,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         vec![0, 0],
         ((FRAME_BYTES_MAX + 1) as u32).to_be_bytes().to_vec(),
     ] {
-        let mut stream = UnixStream::connect(root.path().join("owner.sock"))
+        let mut stream = crazyagent::spawn_gate::connect_unix(root.path().join("owner.sock"))
             .await
             .unwrap();
         stream.write_all(&packet).await.unwrap();
@@ -1715,7 +1714,7 @@ async fn worker_socket_rejects_owner_namespace_before_mutation() {
             },
         },
     );
-    let mut stream = UnixStream::connect(&socket).await.unwrap();
+    let mut stream = crazyagent::spawn_gate::connect_unix(&socket).await.unwrap();
     stream
         .write_all(&encode_frame(&forged).unwrap())
         .await
