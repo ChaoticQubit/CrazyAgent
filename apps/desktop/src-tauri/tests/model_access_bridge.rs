@@ -435,10 +435,14 @@ async fn desktop_reports_actual_source_conflict_without_losing_the_engine_reason
 }
 
 fn sqlite(root: &std::path::Path, sql: &str) -> TestResult<String> {
-    let result = std::process::Command::new("/usr/bin/sqlite3")
-        .arg(root.join("engine.db"))
-        .arg(sql)
-        .output()?;
+    let result = crazyagent::spawn_gate::output(
+        std::process::Command::new("/usr/bin/sqlite3")
+            .arg(root.join("engine.db"))
+            .arg(sql)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )?;
     if !result.status.success() {
         return Err("actual SQLite command failed".into());
     }

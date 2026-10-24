@@ -172,9 +172,19 @@ fn read_output(output: &Output) -> Result<Pick, BridgeError> {
 /// Input: one of the fixed scripts. Output: the owner's pick, `picker_unavailable` or
 /// `picker_failed`.
 pub async fn choose(script: &'static str) -> Result<Pick, BridgeError> {
-    let mut command = chooser_command(script)?;
-    command.stdin(Stdio::null());
-    let output = tokio::task::spawn_blocking(move || command.output())
+    run_chooser(chooser_command(script)?).await
+}
+
+/// Starts one chooser command through the engine's spawn gate, so it inherits no owner socket
+/// or pipe another thread is creating, with no input and its output captured, and reads its
+/// reply without blocking the async runtime. Input: the chooser command. Output: the owner's
+/// pick or `picker_failed`.
+pub async fn run_chooser(mut command: Command) -> Result<Pick, BridgeError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = tokio::task::spawn_blocking(move || crazyagent::spawn_gate::output(&mut command))
         .await
         .map_err(|_| failure("picker_failed"))?
         .map_err(|_| failure("picker_failed"))?;

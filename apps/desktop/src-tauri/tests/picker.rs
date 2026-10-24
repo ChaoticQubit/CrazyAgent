@@ -1,8 +1,10 @@
 #![cfg(unix)]
 
 use crazyagent_desktop::bridge::picker::{
-    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, Pick, chooser_command, read_reply,
+    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, Pick, chooser_command, read_reply, run_chooser,
 };
+use std::process::Command;
+use std::time::Duration;
 
 #[test]
 fn a_chosen_folder_is_returned_as_one_absolute_path_without_the_trailing_slash() {
@@ -118,4 +120,64 @@ fn linux_choosers_use_zenity_or_kdialog_from_a_fixed_folder() {
     }
     let crlf = read_reply(true, b"/home/owner/skills/\r\n", b"").unwrap();
     assert_eq!(crlf, Pick::Paths(vec!["/home/owner/skills".into()]));
+}
+
+fn shell(script: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", script, "sh"]);
+    command
+}
+
+#[tokio::test]
+async fn a_chooser_reply_is_read_from_the_real_child_it_starts() {
+    let pick = run_chooser(shell(
+        "printf '/tmp/owner/brief.pdf\\n/tmp/owner/skills/\\n'",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        pick,
+        Pick::Paths(vec![
+            "/tmp/owner/brief.pdf".into(),
+            "/tmp/owner/skills".into()
+        ])
+    );
+    let canceled = run_chooser(shell(
+        "echo 'execution error: User canceled. (-128)' >&2; exit 1",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(canceled, Pick::Canceled);
+    let failed = run_chooser(shell("echo 'execution error: boom (-1743)' >&2; exit 2"))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code, "picker_failed");
+}
+
+#[tokio::test]
+async fn a_chooser_does_not_start_while_another_thread_holds_the_spawn_gate() {
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("started");
+    let (held, ready) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        crazyagent::spawn_gate::guarded(|| {
+            held.send(()).unwrap();
+            let _ = wait.recv();
+        })
+    });
+    ready.recv().unwrap();
+    let mut command = shell(": > \"$1\"");
+    command.arg(&marker);
+    let pick = tokio::spawn(run_chooser(command));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started_while_held = marker.exists();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(
+        !started_while_held,
+        "the chooser started inside another thread's spawn gate"
+    );
+    assert_eq!(pick.await.unwrap().unwrap(), Pick::Canceled);
+    assert!(marker.exists());
 }
