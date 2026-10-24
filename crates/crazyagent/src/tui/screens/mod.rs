@@ -1,23 +1,21 @@
+pub mod add_folder;
+pub mod add_project;
 pub mod app_setup;
+pub mod clone_repo;
 pub mod home;
+pub mod home_folder;
+pub(in crate::tui) mod intake;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
+pub mod onboarding;
 pub mod profile_form;
 pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "v1-tui-projects plugs the live research view into the project screen"
-    )
-)]
-pub(in crate::tui) mod project_research;
 #[cfg_attr(
     not(test),
     expect(
@@ -35,8 +33,11 @@ pub mod settings_harnesses;
 pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
+pub mod team;
 pub mod welcome;
 
+#[cfg(test)]
+mod intake_tests;
 #[cfg(test)]
 mod new_project_frames;
 #[cfg(test)]
@@ -167,6 +168,21 @@ pub enum Place {
     Setup {
         first_run: bool,
     },
+    Team {
+        id: ProjectId,
+        name: String,
+    },
+    HomeFolder {
+        first_run: bool,
+    },
+    AddProject,
+    AddFolder,
+    CloneRepo,
+    Onboarding {
+        path: String,
+        name: String,
+        project: Option<ProjectId>,
+    },
 }
 
 /// What the shell does after a screen handled a key or an arrival.
@@ -239,6 +255,12 @@ pub trait Screen {
         false
     }
 
+    /// True while an agent terminal has focus: every key, Ctrl-C and Esc
+    /// included, goes to the screen and the shell's own keys wait.
+    fn raw(&self) -> bool {
+        false
+    }
+
     /// Handles one key the shell did not take as a global key.
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow;
 
@@ -254,6 +276,9 @@ pub trait Screen {
 
     /// Called when the screen comes to the top of the stack, to refresh data.
     fn shown(&mut self, _ctx: &mut Ctx) {}
+
+    /// Called when the window size changed while the screen is on top.
+    fn resized(&mut self, _ctx: &mut Ctx) {}
 
     /// Draws the body and returns the cursor position for a focused field.
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position>;
@@ -301,6 +326,20 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
+        Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
+        Place::AddProject => Box::new(add_project::AddProject::new()),
+        Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
+        Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
+        Place::Onboarding {
+            path,
+            name,
+            project,
+        } => Box::new(onboarding::OnboardingPage::new(
+            path.clone(),
+            name.clone(),
+            project.clone(),
+        )),
         Place::Project { id, name, tab } => Box::new(project_page::ProjectPage::new(
             id.clone(),
             name.clone(),

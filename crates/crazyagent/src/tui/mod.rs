@@ -13,6 +13,7 @@ mod run;
 mod screens;
 mod seam;
 mod shell;
+mod terminal_pane;
 mod text;
 mod theme;
 mod widgets;

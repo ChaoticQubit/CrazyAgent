@@ -19,6 +19,7 @@ pub mod memory;
 pub mod model_gateway;
 pub mod onboarding;
 pub mod owner_profile;
+pub mod platform;
 pub mod plugins;
 pub mod pools;
 pub mod project_setup;

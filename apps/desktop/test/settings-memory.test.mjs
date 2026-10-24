@@ -5,14 +5,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { MemoryView, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
+const { MemoryView, SuggestionEditor, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const names = new Map([["project-harbor", "Harbor Notes"]]);
 const saved = (patch = {}) => ({ id: "memory-1", text: "The owner prefers Rust for engines.", scope: "global", project_id: null, origin: "written", from_project_id: null, ...patch });
 const suggestion = (patch = {}) => ({ project_id: "project-harbor", project_name: "Harbor Notes", id: "entry-1", version: 3, text: "Competitors charge per seat.", ...patch });
 const props = (patch = {}) => ({ saved: { kind: "ok", value: { items: [saved()], next: null } }, suggested: { kind: "ok", value: [] }, scope: "", projects: [{ id: "project-harbor", name: "Harbor Notes" }],
-  search: "", failure: "", busy: null, onSearch: forbidden, onScope: forbidden, onAdd: forbidden, onSave: forbidden, onDismiss: forbidden, onDelete: forbidden, onMore: forbidden, onRetry: forbidden, ...patch });
+  search: "", failure: "", busy: null, onSearch: forbidden, onScope: forbidden, onAdd: forbidden, onSave: forbidden, onSaveEdited: forbidden, onDismiss: forbidden, onDelete: forbidden, onMore: forbidden, onRetry: forbidden, ...patch });
 const render = (patch) => renderToStaticMarkup(createElement(MemoryView, props(patch)));
 
 test("each saved memory says where it applies and where it came from, in plain words", () => {
@@ -32,6 +32,7 @@ test("suggestions from project research offer Save to memory and Dismiss with th
   assert.match(markup, /Competitors charge per seat\./);
   assert.match(markup, /From Harbor Notes/);
   assert.match(markup, /Save to memory/);
+  assert.match(markup, />Edit</);
   assert.match(markup, /Dismiss/);
   assert.doesNotMatch(markup, /entry-1|project-harbor/);
 });
@@ -70,4 +71,32 @@ test("memory refusals read as the engine's plain sentences", () => {
 test("memory calls outside the desktop shell report the engine as unreachable", async () => {
   assert.equal((await api.savedMemories(null, "")).code, "engine_unreachable");
   assert.equal((await api.saveSuggestion(suggestion())).code, "engine_unreachable");
+});
+
+test("a suggestion opens for editing with its own text before it is saved", () => {
+  const markup = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: false, onSave: forbidden, onCancel: forbidden }));
+  assert.match(markup, /Edit before saving \(from Harbor Notes\)/);
+  assert.match(markup, /<textarea[^>]*>Competitors charge per seat\.<\/textarea>/);
+  assert.match(markup, /maxlength="4096"/);
+  assert.match(markup, />Save edited</);
+  assert.match(markup, />Cancel</);
+  assert.doesNotMatch(markup, /entry-1/);
+  const saving = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: true, onSave: forbidden, onCancel: forbidden }));
+  assert.match(saving, /Saving\.\.\./);
+});
+
+test("an edited memory follows the engine's text rules", () => {
+  assert.equal(api.MEMORY_TEXT_BYTES_MAX, 4096);
+  assert.deepEqual(api.memoryEdit("  Competitors charge per team.  "), { kind: "ok", text: "Competitors charge per team." });
+  assert.deepEqual(api.memoryEdit("   "), { kind: "invalid", reason: "Write something to remember." });
+  assert.deepEqual(api.memoryEdit("a\0b"), { kind: "invalid", reason: "Remove the empty characters from the memory." });
+  assert.equal(api.memoryEdit("x".repeat(4096)).kind, "ok");
+  assert.deepEqual(api.memoryEdit("x".repeat(4097)), { kind: "invalid", reason: "Too long: 4097 of 4096 bytes." });
+  assert.deepEqual(api.memoryEdit("\u00e9".repeat(2049)), { kind: "invalid", reason: "Too long: 4098 of 4096 bytes." });
+  assert.equal(api.plainError("invalid_knowledge_text"), "Write the memory as text, up to 4096 bytes.");
+});
+
+test("saving an edited suggestion refuses bad text before the engine and needs the desktop shell", async () => {
+  assert.deepEqual(await api.saveEditedSuggestion(suggestion(), " "), { kind: "error", code: "invalid_knowledge_text", message: "Write something to remember." });
+  assert.equal((await api.saveEditedSuggestion(suggestion(), "Competitors charge per team.")).code, "engine_unreachable");
 });

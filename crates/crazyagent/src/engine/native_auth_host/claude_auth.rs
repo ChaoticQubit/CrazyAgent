@@ -4,6 +4,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "macos")]
 mod keychain;
 mod process;
 mod transcript;
@@ -184,6 +185,7 @@ pub(in crate::engine) async fn run(
         return Err(EngineError("native_auth_cancelled".into()));
     }
     let home = session.profile_path()?;
+    #[cfg(target_os = "macos")]
     if let Err(error) = keychain::prepare_profile_keychain(&home) {
         return finish_failure(session, channel, error).await;
     }

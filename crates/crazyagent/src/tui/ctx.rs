@@ -5,6 +5,7 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
@@ -144,11 +145,24 @@ impl Ctx {
         self.theme = Theme::new(self.depth, colors, appearance);
     }
 
-    /// Queues one engine request; duplicates of a queued read are dropped.
-    /// Input: the request. Output: none; the queue holds at most 32 requests.
+    /// Queues one engine request; duplicates of a queued read are dropped and
+    /// keystrokes for the agent terminal already waiting at the back join it.
+    /// Input: the request. Output: none; the queue holds at most 32 requests,
+    /// a joined terminal input at most the engine's terminal input limit.
     pub fn request(&mut self, request: Request) {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
+            return;
+        }
+        if let Request::TerminalInput { agent, bytes } = &request
+            && let Some(Request::TerminalInput {
+                agent: waiting,
+                bytes: queued,
+            }) = self.requests.back_mut()
+            && waiting == agent
+            && queued.len() + bytes.len() <= INPUT_BYTES_MAX
+        {
+            queued.extend_from_slice(bytes);
             return;
         }
         let read = matches!(
@@ -190,6 +204,14 @@ impl Ctx {
     /// Input: none. Output: the oldest request, if any.
     pub fn next_request(&mut self) -> Option<Request> {
         self.requests.pop_front()
+    }
+
+    /// Takes the oldest queued agent terminal request, ahead of requests
+    /// waiting for the engine connection, so typing never waits on a read.
+    /// Input: none. Output: the request, if one waits.
+    pub fn next_terminal_request(&mut self) -> Option<Request> {
+        let index = self.requests.iter().position(Request::is_terminal)?;
+        self.requests.remove(index)
     }
 
     /// Takes a pending reconnect ask; it goes ahead of queued requests,
@@ -285,6 +307,37 @@ mod tests {
         assert!(matches!(ctx.next_request(), Some(Request::Projects)));
         ctx.request(Request::Projects);
         assert_eq!(ctx.queued(), 2, "a sent read may be asked for again");
+    }
+
+    #[test]
+    fn terminal_requests_jump_the_engine_queue_in_their_own_order() {
+        let mut ctx = ctx();
+        let agent = crate::terminal::AgentId::team(1).unwrap();
+        ctx.request(Request::Projects);
+        ctx.request(Request::TerminalInput {
+            agent: agent.clone(),
+            bytes: b"l".to_vec(),
+        });
+        ctx.request(Request::TerminalInput {
+            agent: agent.clone(),
+            bytes: b"s".to_vec(),
+        });
+        ctx.request(Request::Pools);
+        ctx.request(Request::TerminalDetach {
+            agent: agent.clone(),
+        });
+        assert_eq!(ctx.queued(), 4, "typed keys join one input");
+        assert!(matches!(
+            ctx.next_terminal_request(),
+            Some(Request::TerminalInput { bytes, .. }) if bytes == b"ls"
+        ));
+        assert!(matches!(
+            ctx.next_terminal_request(),
+            Some(Request::TerminalDetach { .. })
+        ));
+        assert!(ctx.next_terminal_request().is_none());
+        assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+        assert!(matches!(ctx.next_request(), Some(Request::Pools)));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::sandbox::{InstalledSandbox, SANDBOX_EXEC};
+use crate::sandbox::InstalledSandbox;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
@@ -116,7 +116,7 @@ pub(super) fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
     let child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {

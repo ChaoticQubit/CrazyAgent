@@ -26,6 +26,10 @@
   --text-3: #625e55;
   --accent: #e5482d;
   --brand: #e5482d;
+  --terminal-bg: #161513;
+  --terminal-fg: #eeeae2;
+  --terminal-cursor: #ff6a45;
+  --terminal-selection: rgba(255, 106, 69, 0.32);
   --accent-solid: #c23a20;
   --accent-hover: #a93119;
   --accent-text: #a8341c;

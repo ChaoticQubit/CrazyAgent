@@ -1,7 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox};
-use crazyagent::sandbox::{ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::{
+    InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::net::TcpListener;
@@ -289,4 +291,25 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true
         })
     );
+}
+
+#[test]
+fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
+    let case = case();
+    let profiles = case.outside.join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    let installed = InstalledSandbox::install(
+        policy(&case, SandboxNetwork::Open),
+        &profiles.join("agent.sb"),
+    )
+    .unwrap();
+    let launcher = installed.launcher().to_path_buf();
+    assert!(
+        launcher.ends_with("crazyagent-landlock")
+            || BWRAP_PATHS.iter().any(|path| launcher == Path::new(path)),
+        "{}",
+        launcher.display()
+    );
+    let output = run(&installed, &case, &boundary_script(&case));
+    assert_boundary(&case, &output);
 }

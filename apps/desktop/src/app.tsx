@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { SessionContext, useSession, type Session } from "./state";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -9,15 +9,37 @@ import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, useRoute, type Route } from "./ui";
+import { GoToLayer } from "./ui/go-to";
+
+/** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
+ * size and the time, never paths, accounts or secrets. Inputs: the window size and the time.
+ * Output: plain text lines. */
+export function supportDetails(width: number, height: number, now: Date): string {
+  return `CrazyAgent desktop\nEngine: not running\nProblem: engine_unreachable\nWindow: ${Math.round(width)}x${Math.round(height)}\nTime: ${now.toISOString()}\n`;
+}
 
 function EngineDown({ onRetry }: { onRetry: () => void }) {
+  const [copied, setCopied] = useState<"idle" | "copied" | { failed: string }>("idle");
+  async function copy() {
+    const details = supportDetails(window.innerWidth, window.innerHeight, new Date());
+    try {
+      await navigator.clipboard.writeText(details);
+      setCopied("copied");
+    } catch {
+      setCopied({ failed: details });
+    }
+  }
   return <main id="main" className="full-state">
     <div className="box">
       <BrandMark />
       <Icon name="wifi-off" size={28} />
       <h1>CrazyAgent's engine isn't running</h1>
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
-      <span><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
+      <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
+        <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
+      {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
+      {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
+        <pre className="support-details">{copied.failed}</pre></>}
     </div>
   </main>;
 }
@@ -62,6 +84,7 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
         We couldn't confirm your last change. Check it and save again.
       </Banner>}
       <Screen route={route} session={session} />
+      <GoToLayer projects={projects ?? []} />
     </AppShell>
   </SessionContext.Provider>;
 }

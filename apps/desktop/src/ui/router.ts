@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "memory", "profile"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "pack", "home", "github", "memory", "profile"] as const;
 export const PROJECT_TABS = ["overview", "conversation", "agents", "context", "settings"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new"] as const;
@@ -43,7 +43,7 @@ export function parseRoute(hash: string): Route {
   }
   if (parts[0] === "projects" && parts[1] === "add" && parts.length === 3) {
     const way = ADD_PROJECT_WAYS.find((choice) => choice === parts[2]);
-    return way ? { name: "add-project", way } : { name: "home" };
+    if (way) return { name: "add-project", way };
   }
   if (parts[0] === "projects" && parts.length >= 2 && parts.length <= 3) {
     let id: string;
