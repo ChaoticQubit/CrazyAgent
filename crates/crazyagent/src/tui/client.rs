@@ -23,6 +23,7 @@ const MASTER_READ_ATTEMPTS: u32 = 4;
 mod account_profile;
 pub(super) mod accounts;
 pub(super) mod agents;
+pub(super) mod app_setup;
 mod claude_code;
 mod project_setup;
 pub(super) mod settings;

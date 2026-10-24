@@ -51,6 +51,117 @@ pub struct AccountRow {
     pub status: String,
 }
 
+/// The problem code a request gets while the engine has no support for it yet.
+/// Screens show "Not ready yet" for it instead of a failure.
+pub const NOT_READY: &str = "engine_support_not_ready";
+
+/// The kind of one node in a project's team graph.
+/// Input: from the engine's TeamGraph read. Output: the tree draws the master
+/// first, then one group per harness, each with its agents.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeKind {
+    Master,
+    HarnessGroup,
+    Agent,
+}
+
+/// What one agent is doing, as the engine reads it from the harness session.
+/// Input: from the engine's TeamGraph read. Output: a status glyph and word.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Working,
+    Idle,
+    Waiting,
+    Failed,
+}
+
+/// One node of a project's team graph: the master, a harness group or an agent.
+/// Input: from the engine's TeamGraph read; `harness` ties agents to their
+/// group, `agents` is a group's agent count. Output: one tree row.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphNode {
+    pub id: String,
+    pub kind: NodeKind,
+    pub label: String,
+    pub harness: Option<String>,
+    pub status: Option<AgentState>,
+    pub account: Option<String>,
+    pub agents: Option<u8>,
+}
+
+/// Where one handed-out task stands.
+/// Input: from the engine's TeamGraph read. Output: a status glyph and word.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeState {
+    Sent,
+    Running,
+    Done,
+    Failed,
+}
+
+/// One task the master handed to an agent, from node id to node id.
+/// Input: from the engine's TeamGraph read. Output: one task line under the
+/// tree; `text` and `reply` show when the owner opens it.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub task_id: String,
+    pub text: String,
+    pub state: EdgeState,
+    pub reply: Option<String>,
+}
+
+/// The live team of one project: its nodes and the tasks between them.
+/// Input: from the engine's TeamGraph read. Output: the Team view tree.
+#[expect(
+    dead_code,
+    reason = "the client builds team graphs from track B1's TeamGraph read"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// One piece of an attached agent terminal's stream.
+/// Input: from the engine's terminal stream. Output: `Screen` replaces the
+/// pane with the captured screen and its zero-based (row, column) cursor,
+/// `Output` is raw bytes to parse, `Closed` ends the stream with a problem code.
+#[expect(
+    dead_code,
+    reason = "the client builds terminal chunks from track B1's terminal stream"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalChunk {
+    Screen {
+        bytes: Vec<u8>,
+        cursor: Option<(u16, u16)>,
+    },
+    Output(Vec<u8>),
+    Closed(String),
+}
+
 /// One engine request a screen asks the shell to send.
 /// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
 /// time on the owner connection; the reply comes back as an `Arrival`.
@@ -71,6 +182,11 @@ pub enum Request {
     Master(Box<master_session::Job>),
     Wire { command: Command, revision: Cursor },
     Settings(Box<super::client::settings::SettingsJob>),
+    TeamGraph { project: ProjectId },
+    TerminalAttach { agent: String },
+    TerminalInput { agent: String, bytes: Vec<u8> },
+    TerminalResize { agent: String, cols: u16, rows: u16 },
+    TerminalDetach { agent: String },
     Reconnect,
 }
 
@@ -89,6 +205,11 @@ impl std::fmt::Debug for Request {
             Self::Master(_) => "Master",
             Self::Wire { .. } => "Wire",
             Self::Settings(_) => "Settings",
+            Self::TeamGraph { .. } => "TeamGraph",
+            Self::TerminalAttach { .. } => "TerminalAttach",
+            Self::TerminalInput { .. } => "TerminalInput",
+            Self::TerminalResize { .. } => "TerminalResize",
+            Self::TerminalDetach { .. } => "TerminalDetach",
             Self::Reconnect => "Reconnect",
         })
     }
@@ -142,6 +263,14 @@ pub enum Arrival {
     PoolEdited(Result<(), String>),
     Owner(Box<OwnerEvent>),
     Wire(Result<crate::protocol::WireReply, String>),
+    TeamGraph {
+        project: ProjectId,
+        result: Result<TeamGraph, String>,
+    },
+    Terminal {
+        agent: String,
+        chunk: TerminalChunk,
+    },
 }
 
 /// Research progress of one project, counted by status.
