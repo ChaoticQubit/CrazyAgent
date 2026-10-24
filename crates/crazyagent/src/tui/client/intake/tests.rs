@@ -43,20 +43,23 @@ fn a_started_onboarding_is_named_like_the_engine_names_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine() {
     let root = private_root("ca-tintake-");
-    let home = root.path().join("Projects");
+    let work = private_root("ca-tintake-work-");
+    let home = std::fs::canonicalize(work.path()).unwrap().join("Projects");
     std::fs::create_dir(&home).unwrap();
     std::fs::create_dir(home.join("notes")).unwrap();
     std::fs::write(home.join("notes").join("README.md"), "notes\n").unwrap();
-    let outside = root.path().join("outside");
+    let outside = home.parent().unwrap().join("outside");
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("plan.txt"), "12345").unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let mut native = NativeOwner::new(root.path().join("e.sock"), Duration::from_secs(2));
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
 

@@ -202,6 +202,20 @@ pub(super) async fn serve(
     stream.write_all(&frame).await.map_err(io_error)
 }
 
+/// The engine root the GitHub sign-in lives under: the parent of the owner runtime's
+/// per-start generation folder, so the saved sign-in and its credential store namespace
+/// stay the same across engine restarts. Input: the authority. Output: the engine root,
+/// or `github_store_unavailable`.
+fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
+    authority.root.verify()?;
+    authority
+        .root
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| failure("github_store_unavailable"))
+}
+
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -218,7 +232,7 @@ async fn handle(
         Action::Clone { .. } => Some(projects_home(engine, admission).await?),
         _ => None,
     };
-    let root = authority.root.path.clone();
+    let root = engine_root(authority)?;
     tokio::task::spawn_blocking(move || -> Result<Reply, EngineError> {
         let account = GitHub::open(&root)?;
         Ok(match action {
