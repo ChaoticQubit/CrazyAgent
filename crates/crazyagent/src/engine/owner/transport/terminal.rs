@@ -15,6 +15,7 @@ const REQUESTS_QUEUED: usize = 16;
 /// An owner's live view of one agent terminal: its size at attach, then output and controls.
 /// `output` gives the screen and then live output in order; `control` types, resizes and detaches.
 /// Drive each half from one task: a frame read dropped part way loses the connection.
+/// Dropping `control` closes the viewer's side, which the engine takes as a detach.
 pub struct TerminalSession {
     pub agent: AgentId,
     pub cols: u16,
