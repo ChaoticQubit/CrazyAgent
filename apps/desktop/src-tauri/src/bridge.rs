@@ -20,6 +20,7 @@ mod account_setup;
 mod accounts;
 mod agents;
 mod harnesses;
+pub mod intake;
 pub mod master;
 pub mod memory;
 mod model_access;
@@ -478,6 +479,10 @@ impl NativeBridge {
             OwnerMutation::RemoveProject { project_id } => {
                 ("project_remove", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::SetProjectsHome { .. } => ("projects_home", None, None),
+            OwnerMutation::MoveProjectsHome { .. } => ("move_projects_home", None, None),
+            OwnerMutation::AddExistingFolder { .. } => ("add_existing_folder", None, None),
+            OwnerMutation::StartOnboarding { .. } => ("start_onboarding", None, None),
             OwnerMutation::CancelResearch { project_id, .. } => (
                 "research_cancel",
                 Some(project_id.as_str().to_owned()),
@@ -963,6 +968,20 @@ fn rejection_code(code: &str) -> &'static str {
         "research_job_missing" => "research_job_missing",
         "research_job_finished" => "research_job_finished",
         "research_job_not_retryable" => "research_job_not_retryable",
+        "projects_home_unset" => "projects_home_unset",
+        "projects_home_path_invalid" => "projects_home_path_invalid",
+        "projects_home_unwritable" => "projects_home_unwritable",
+        "home_source_invalid" => "home_source_invalid",
+        "folder_missing" => "folder_missing",
+        "folder_not_a_directory" => "folder_not_a_directory",
+        "folder_inside_home" => "folder_inside_home",
+        "folder_contains_home" => "folder_contains_home",
+        "folder_name_taken" => "folder_name_taken",
+        "folder_move_failed" => "folder_move_failed",
+        "folder_copy_failed" => "folder_copy_failed",
+        "onboarding_path_invalid" => "onboarding_path_invalid",
+        "onboarding_running" => "onboarding_running",
+        "onboarding_missing" => "onboarding_missing",
         _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),
     }
 }

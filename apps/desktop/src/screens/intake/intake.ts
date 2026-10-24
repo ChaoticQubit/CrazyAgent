@@ -1,7 +1,7 @@
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, OnboardingStarted, OnboardingStep,
-  OnboardingView, PackEntry, ProjectsHome, SetupStatus,
+  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, OnboardingStep,
+  OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, SetupStatus,
 } from "../../engine-client";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
@@ -141,7 +141,7 @@ export function repoMeta(repo: GitHubRepo): string {
 /** Badge word, tone and failure line for one onboarding step.
  * Input: the step. Output: the fixed status word, its tone and the reason when it failed. */
 export function stepView(step: OnboardingStep): { word: string; tone: Tone; line: string | null } {
-  switch (step.kind) {
+  switch (step.state) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
@@ -164,7 +164,7 @@ export function missingLabels(missing: string[]): string[] {
 export function onboardingDraft(view: OnboardingView, stored: StoredSetup): ProjectDraft {
   return {
     ...draftOf(stored),
-    name: view.name?.trim() || stored.name,
+    name: view.name.trim() || stored.name,
     about: view.draft.about,
     stack: [...view.draft.tech_stack],
     platforms: [...view.draft.platforms],
@@ -175,23 +175,23 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
 /** Tells whether the graph and mapping steps have stopped changing.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
-  const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  const done = (step: OnboardingStep) => step.state === "done" || step.state === "failed";
+  return done(view.mapping) || (view.graph.state === "failed" && view.mapping.state === "waiting");
 }
 
 /** Says whether the owner can confirm yet and what to do.
  * Input: the onboarding view. Output: ready and one sentence. */
 export function confirmReady(view: OnboardingView): { ready: boolean; line: string } {
-  if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
-  if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
-  if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
-  if (view.graph.kind !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
+  if (view.mapping.state === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
+  if (view.mapping.state === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
+  if (view.graph.state === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
+  if (view.graph.state !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 
 /** Reads a Start setup receipt. Input: the receipt. Output: started with the project id, rejected
  * with a code, or unconfirmed when it is pending or carries no id. */
-export function startedProject(receipt: OnboardingStarted): { kind: "started"; id: string } | { kind: "rejected"; code: string } | { kind: "unconfirmed" } {
+export function startedProject(receipt: IntentReceipt): { kind: "started"; id: string } | { kind: "rejected"; code: string } | { kind: "unconfirmed" } {
   const state = receiptState(receipt);
   if (state.kind !== "applied") return state;
   return receipt.project_id ? { kind: "started", id: receipt.project_id } : { kind: "unconfirmed" };
@@ -206,7 +206,7 @@ const DEPENDENCY_ABOUT: Record<DependencyName, string> = {
 /** Badge word, tone and detail line for a tool or pack entry state.
  * Input: the state. Output: the fixed word, its tone and one line or null. */
 export function stateView(state: DependencyState): { word: string; tone: Tone; line: string | null } {
-  switch (state.kind) {
+  switch (state.state) {
     case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
     case "installing": return { word: "Installing", tone: "info", line: null };
@@ -217,12 +217,49 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
 
 /** One tool row for setup. Input: the dependency. Output: its name, what it is for and its state. */
 export function dependencyView(dependency: Dependency): { title: string; about: string; word: string; tone: Tone; line: string | null } {
-  return { title: dependency.name, about: DEPENDENCY_ABOUT[dependency.name] ?? "", ...stateView(dependency.state) };
+  return { title: displayText(dependency.label.trim() || dependency.name), about: DEPENDENCY_ABOUT[dependency.name] ?? "", ...stateView(dependency.state) };
 }
 
-/** The name a pack entry shows. Input: the entry. Output: its name, or its id. */
+/** Badge word, tone and detail line for a default-pack entry state.
+ * Input: the state. Output: the fixed word, its tone and one line or null. */
+export function packStateView(state: PackState): { word: string; tone: Tone; line: string | null } {
+  switch (state.state) {
+    case "on": return { word: "On", tone: "ok", line: null };
+    case "off": return { word: "Off", tone: "neutral", line: null };
+    case "installing": return { word: "Installing", tone: "info", line: null };
+    case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
+    default: return { word: "Not installed", tone: "neutral", line: null };
+  }
+}
+
+/** Tells whether a pack entry is installed, so Settings can switch or remove it.
+ * Input: the entry. Output: true when it is on or off. */
+export function installed(entry: PackEntry): boolean {
+  return entry.state.state === "on" || entry.state.state === "off";
+}
+
+/** The name a pack entry shows. Input: the entry. Output: its id as plain text. */
 export function entryName(entry: PackEntry): string {
-  return displayText(entry.name?.trim() || entry.id);
+  return displayText(entry.id);
+}
+
+export const PACK_GROUPS: { group: PackGroup; title: string; about: string }[] = [
+  { group: "always", title: "Always on", about: "Every project needs these." },
+  { group: "workflow", title: "Workflow skills", about: "How agents plan, build, test and review." },
+  { group: "design", title: "Design skills", about: "Taste and explainers for front ends and docs." },
+  { group: "reply_style", title: "Reply style", about: "Change how every agent writes its replies." },
+  { group: "context", title: "Context plugins", about: "MCP servers that keep agents' context small." },
+  { group: "optional", title: "Optional", about: "Off unless you turn them on. Some need their own accounts." },
+];
+
+/** Groups the pack the way the setup screen lists it, keeping pack order inside each group.
+ * Input: the pack. Output: the groups that have entries, with their titles. */
+export function packGroups(pack: PackEntry[]): { group: PackGroup; title: string; about: string; entries: PackEntry[] }[] {
+  const known = new Set(PACK_GROUPS.map((item) => item.group));
+  const groups = PACK_GROUPS.map((item) => ({ ...item, entries: pack.filter((entry) => entry.group === item.group) }));
+  const other = pack.filter((entry) => !known.has(entry.group));
+  if (other.length > 0) groups.push({ group: "optional", title: "Other", about: "", entries: other });
+  return groups.filter((item) => item.entries.length > 0);
 }
 
 /** The pack entries ticked before the owner changes anything: the ones on by default.
@@ -239,7 +276,17 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
   return `Continuing lets your agents run these MCP servers: ${servers.join(", ")}. You can turn any of them off later.`;
 }
 
-/** Tells whether anything in setup is still installing. Input: the status. Output: true while busy. */
+/** Tells whether setup is still working. Input: the status. Output: true while it runs or
+ * anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
-  return [...status.dependencies.map((item) => item.state), ...status.pack.map((item) => item.state)].some((state) => state.kind === "installing");
+  return status.running || status.dependencies.some((item) => item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
+}
+
+/** Counts setup progress for the progress line: every tool and every ticked pack entry.
+ * Inputs: the status and the ticked ids. Output: how many are settled, of how many, and how many failed. */
+export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
+  const states = [...status.dependencies.map((item) => item.state.state),
+    ...status.pack.filter((item) => ticked.includes(item.id) || item.group === "always").map((item) => item.state.state)];
+  const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
+  return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }

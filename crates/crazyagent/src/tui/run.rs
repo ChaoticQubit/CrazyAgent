@@ -309,6 +309,7 @@ fn send(
             terminals.handle(request);
             Ok(())
         }
+        Request::Intake(job) => connection.intake(*job),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)
