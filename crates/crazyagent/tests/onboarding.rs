@@ -833,3 +833,55 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
     );
     bench.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_onboarded_folder_in_the_home_shows_as_onboarding_then_ready() {
+    let mut bench = Bench::start(|_| {}).await;
+    let home = bench.repo.parent().unwrap().to_str().unwrap().to_owned();
+    bench.generation += 1;
+    let set = bench
+        .owner
+        .set_projects_home(home, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&set), None, "{set:?}");
+    let listed = |found: &[FoundProject]| {
+        found
+            .iter()
+            .filter(|entry| entry.name == PROJECT)
+            .map(|entry| (entry.state, entry.project_id.clone(), entry.known))
+            .collect::<Vec<_>>()
+    };
+    let before = bench.owner.found_projects().await.unwrap();
+    assert_eq!(listed(&before), vec![(FoundState::Found, None, false)]);
+
+    let project = bench.start_onboarding().await;
+    let onboarding = bench.owner.found_projects().await.unwrap();
+    assert_eq!(
+        listed(&onboarding),
+        vec![(FoundState::Onboarding, Some(project.clone()), true)]
+    );
+    assert!(
+        onboarding
+            .iter()
+            .all(|entry| entry.state != FoundState::Missing),
+        "{onboarding:?}"
+    );
+
+    let (runner, _) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef| None,
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    let settled = bench.owner.found_projects().await.unwrap();
+    assert_eq!(
+        listed(&settled),
+        vec![(FoundState::Ready, Some(project), true)]
+    );
+    bench.stop().await;
+}
