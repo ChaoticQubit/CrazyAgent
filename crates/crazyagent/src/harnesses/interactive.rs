@@ -15,6 +15,7 @@ pub const KEY_FILE: &str = ".crazyagent-key";
 pub const CLAUDE_PROJECT_NAME_MAX: usize = 200;
 #[cfg(unix)]
 const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
+#[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
 const KEY_SCRIPT: &str = "CRAZYAGENT_API_KEY=\"$(/bin/cat -- \"$1\")\" || exit 1; export CRAZYAGENT_API_KEY; shift; exec \"$@\"";

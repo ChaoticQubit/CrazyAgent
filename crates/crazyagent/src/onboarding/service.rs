@@ -1,6 +1,8 @@
+#[cfg(unix)]
+use super::MappingFacts;
 use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
-use super::{MappingFacts, Step, now_ms};
+use super::{Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 #[cfg(unix)]
