@@ -161,7 +161,13 @@ impl TerminalSession {
             turn: false,
             exited: false,
             stopped: false,
-            record: PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid),
+            record: PaneRecord::new(
+                &command.transcript,
+                &command.cwd,
+                since,
+                pane.pid,
+                key.as_ref().map(|key| key.0.as_path()),
+            ),
             _key: key,
             _context: installed,
         })

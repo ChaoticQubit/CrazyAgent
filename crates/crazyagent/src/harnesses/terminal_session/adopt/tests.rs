@@ -2,7 +2,6 @@ use super::*;
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -68,7 +67,7 @@ impl Fixture {
         };
         let since = SystemTime::now();
         let pane = host.spawn(agent, &command).unwrap();
-        PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid).unwrap()
+        PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
     }
 }
 
@@ -202,12 +201,21 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         cwd: PathBuf::from("/private/tmp/project/worktrees/agent-3"),
         since_ms: 1_793_000_000_000,
         pid: 4242,
+        key: Some(PathBuf::from("/private/tmp/home/.key")),
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);
+    let mut relative_key = record.clone();
+    relative_key.key = Some(PathBuf::from("home/.key"));
+    assert_eq!(PaneRecord::decode(&relative_key.encode().unwrap()), None);
+    let mut older = record.clone();
+    older.key = None;
+    let without_key = older.encode().unwrap().replace(",\"key\":null", "");
+    assert!(!without_key.contains("key"));
+    assert_eq!(PaneRecord::decode(&without_key), Some(older));
     let mut no_process = record.clone();
     no_process.pid = 0;
     assert_eq!(PaneRecord::decode(&no_process.encode().unwrap()), None);
@@ -220,9 +228,40 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
             &Transcript::Unavailable,
             Path::new("/tmp"),
             SystemTime::now(),
-            1
+            1,
+            None
         ),
         None
     );
-    let _ = std::io::sink().write_all(b"");
+}
+
+#[test]
+fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(5).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
+    let key = fixture.root.path().join("key");
+    std::fs::write(&key, "synthetic-test-key").unwrap();
+    let mut record = fixture.spawn(&host, &agent, "exec cat", &file);
+    record.key = Some(key.clone());
+
+    let session = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    session.leave();
+    assert!(key.is_file(), "a pane left running keeps the key it reads");
+
+    let session =
+        TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
+    assert_eq!(session.stop(), None);
+    assert!(
+        !key.exists(),
+        "stopping the adopted pane removes its key file"
+    );
+    assert!(host.alive().unwrap().is_empty());
 }

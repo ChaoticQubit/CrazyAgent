@@ -1,11 +1,11 @@
-use super::{AgentSession, TerminalSession, host_failure};
+use super::{AgentSession, KeyFile, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ pub enum RecordSource {
 
 /// What the engine keeps about one agent's live pane, so a later engine can adopt it
 /// without starting the harness again: the session record, the working folder, when the
-/// harness started and the pane's first process.
+/// harness started, the pane's first process and the key file the harness reads, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -33,17 +33,20 @@ pub struct PaneRecord {
     pub cwd: PathBuf,
     pub since_ms: u64,
     pub pid: u32,
+    #[serde(default)]
+    pub key: Option<PathBuf>,
 }
 
 impl PaneRecord {
     /// Describes a pane the engine just started. Takes the harness's session record,
-    /// its canonical working folder, the start time and the pane's first process.
-    /// Returns none for a harness with no session record, which can never be adopted.
+    /// its canonical working folder, the start time, the pane's first process and the
+    /// key file written for it. Returns none for a harness with no session record.
     pub fn new(
         transcript: &Transcript,
-        cwd: &std::path::Path,
+        cwd: &Path,
         since: SystemTime,
         pid: u32,
+        key: Option<&Path>,
     ) -> Option<Self> {
         let source = match transcript {
             Transcript::CodexRollouts { sessions } => RecordSource::CodexRollouts {
@@ -60,6 +63,7 @@ impl PaneRecord {
             cwd: cwd.to_path_buf(),
             since_ms: u64::try_from(since_ms).ok()?,
             pid,
+            key: key.map(Path::to_path_buf),
         })
     }
 
@@ -82,7 +86,8 @@ impl PaneRecord {
             RecordSource::CodexRollouts { sessions } => sessions,
             RecordSource::ClaudeSession { file } => file,
         };
-        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0).then_some(record)
+        let key = record.key.as_deref().is_none_or(Path::is_absolute);
+        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0 && key).then_some(record)
     }
 
     fn transcript(&self) -> Transcript {
@@ -98,6 +103,13 @@ impl PaneRecord {
 
     fn since(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(self.since_ms)
+    }
+
+    fn key_file(&self) -> Option<KeyFile> {
+        let path = self.key.as_ref()?;
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+            .then(|| KeyFile(path.clone()))
     }
 }
 
@@ -131,9 +143,9 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work; the session then waits idle for the next prompt.
-    /// Takes the host, the pane name, the stored record and the session limits.
-    /// Returns the idle session, or a plain code when the pane is gone or does not settle.
+    /// longer be matched to the engine's work; the session then waits idle for the next prompt
+    /// and removes the pane's key file when it stops. Takes the host, the pane name, the
+    /// stored record and the limits. Returns the session, or a plain code when it cannot.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
@@ -178,7 +190,7 @@ impl TerminalSession {
             exited: false,
             stopped: false,
             record: Some(record.clone()),
-            _key: None,
+            _key: record.key_file(),
             _context: None,
         })
     }
