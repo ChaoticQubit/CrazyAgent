@@ -362,17 +362,19 @@ impl TeamRuntime {
 
     /// Runs every team agent whose harness has an interactive app in a pane of `host` named
     /// `team-<id>`, where the owner can watch and type. Panes an earlier engine left are
-    /// taken over when their agent is still in the team plan on a usable account, so the
-    /// agent goes on without a relaunch; every other team pane ends and its project hears
-    /// why. Takes the host. Returns the runtime, or the host's plain code.
+    /// taken over, oldest agent first, when their agent is still in the team plan on a usable
+    /// account, so the agent goes on without a relaunch; every other team pane ends and its
+    /// project hears why. Takes the host. Returns the runtime, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, EngineError> {
         let records = self.pane_records()?;
         self.terminal = Some(host.clone());
         let access = (self.access)().unwrap_or_default();
-        for agent in host.alive()? {
-            let Some(id) = agent.team_agent() else {
-                continue;
-            };
+        let panes: BTreeMap<i64, AgentId> = host
+            .alive()?
+            .into_iter()
+            .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
+            .collect();
+        for (id, agent) in panes {
             let refusal = match records.get(&id) {
                 Some(record) => self.adopt(&host, id, record, &access)?.err(),
                 None => Some("the engine has no record of it".to_owned()),
