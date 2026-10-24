@@ -6,6 +6,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -126,6 +131,7 @@ impl SandboxRemote {
 #[derive(Debug)]
 pub enum SandboxError {
     Invalid(String),
+    Unavailable(String),
     Io(io::Error),
 }
 
@@ -133,6 +139,7 @@ impl fmt::Display for SandboxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
+            Self::Unavailable(reason) => write!(f, "sandbox unavailable: {reason}"),
             Self::Io(error) => write!(f, "sandbox I/O: {error}"),
         }
     }
@@ -227,6 +234,29 @@ impl ProjectSandbox {
     /// The agent's managed temp directory.
     pub fn agent_tmp(&self) -> &Path {
         &self.agent_tmp
+    }
+
+    /// The extra read-only roots, such as harness install directories.
+    pub fn read_roots(&self) -> &[PathBuf] {
+        &self.read_roots
+    }
+
+    /// The network reach this sandbox grants the agent.
+    pub fn network(&self) -> &SandboxNetwork {
+        &self.network
+    }
+
+    /// Paths inside the project folder no agent may write although the folder is writable:
+    /// the `context/` folder, the git hooks, and the git config with its lock file. Every
+    /// platform boundary keeps these read-only.
+    pub fn protected_paths(&self) -> [PathBuf; 4] {
+        let git = self.project_root.join(".git");
+        [
+            self.project_root.join("context"),
+            git.join("hooks"),
+            git.join("config"),
+            git.join("config.lock"),
+        ]
     }
 
     /// Every folder this sandbox lets the agent write: the project folder, its own
@@ -410,6 +440,18 @@ impl ProjectSandbox {
     }
 }
 
+/// One operating system's process boundary for a project agent: Seatbelt on macOS, Landlock
+/// or bubblewrap on Linux, AppContainer with a job object on Windows. Each keeps the
+/// [`ProjectSandbox`] policy: writes only in its writable roots minus the protected paths,
+/// reads of system paths and its roots, and network per [`SandboxNetwork`].
+pub trait Sandbox: Send + Sync {
+    /// Rebuilds a harness launch command (absolute program, arguments, set environment,
+    /// working directory inside the project or a worktree) to start inside the boundary.
+    /// Output: the wrapped command, `Invalid` for an unsafe command, or `Unavailable` when
+    /// this machine cannot hold the boundary.
+    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError>;
+}
+
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
 /// Seatbelt boundary.
@@ -446,6 +488,12 @@ impl InstalledSandbox {
         let command = self.sandbox.wrap(&self.profile, harness)?;
         assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
         Ok(command)
+    }
+}
+
+impl Sandbox for InstalledSandbox {
+    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        InstalledSandbox::wrap(self, harness)
     }
 }
 

@@ -32,6 +32,7 @@ use tokio::time::Instant;
 mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
+mod github;
 mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
@@ -1650,6 +1651,9 @@ async fn serve_authenticated_owner(
         }
         if selector.get("accounts").is_some() {
             return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        if selector.get("github").is_some() {
+            return github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(

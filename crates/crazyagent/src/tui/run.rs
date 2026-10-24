@@ -3,7 +3,7 @@ use super::ctx::{Ctx, Link};
 use super::glyphs::Glyphs;
 use super::keys::Key;
 use super::prefs;
-use super::seam::{Arrival, Request, ShellEvent, ShellRequest};
+use super::seam::{Arrival, NOT_READY, Request, ShellEvent, ShellRequest, TerminalChunk};
 use super::shell::Shell;
 use super::theme::{self, Appearance, Colors};
 use super::{TerminalGuard, TuiError, bounded_area};
@@ -270,6 +270,23 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Master(job) => connection.master(*job),
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),
         Request::Settings(job) => connection.settings(*job),
+        Request::TeamGraph { project } => {
+            shell.arrive(Arrival::TeamGraph {
+                project,
+                result: Err(NOT_READY.into()),
+            });
+            Ok(())
+        }
+        Request::TerminalAttach { agent } => {
+            shell.arrive(Arrival::Terminal {
+                agent,
+                chunk: TerminalChunk::Closed(NOT_READY.into()),
+            });
+            Ok(())
+        }
+        Request::TerminalInput { .. }
+        | Request::TerminalResize { .. }
+        | Request::TerminalDetach { .. } => Ok(()),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

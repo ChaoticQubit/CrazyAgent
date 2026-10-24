@@ -1,4 +1,10 @@
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod pack;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod run;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use serde::{Deserialize, Serialize};
 
