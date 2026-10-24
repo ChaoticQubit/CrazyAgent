@@ -300,19 +300,19 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
-/// Refuses a `sandbox-exec` agent command, since Windows has neither Seatbelt nor process
-/// groups; Windows agents wait for the AppContainer boundary. Takes the profile, program
-/// and environments, all unused. Returns `Unavailable` with the AppContainer reason.
+/// Builds the one command every Windows agent process starts from: the boundary helper next
+/// to the engine's executable with `--profile <profile> -- <program>`, and a cleared
+/// environment holding exactly [`agent_env`]. Inputs: the installed boundary profile, the
+/// absolute program, the base variables and the harness's variables (None removes one).
+/// Output: the command, `Unavailable` without the helper, or `Invalid` for an unsafe input.
 #[cfg(target_os = "windows")]
 pub fn agent_command<'a>(
-    _profile: &Path,
-    _program: &Path,
-    _base: &[(&str, &OsStr)],
-    _harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
-    Err(SandboxError::Unavailable(
-        windows::APPCONTAINER_MISSING.into(),
-    ))
+    windows::agent_command(profile, program, base, harness)
 }
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on,
@@ -442,7 +442,7 @@ impl ProjectSandbox {
     /// root granted so far may hold or sit inside one of those secrets.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
-        let runtime = runtime.canonicalize()?;
+        let runtime = canonical(runtime)?;
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
@@ -680,14 +680,12 @@ impl ProjectSandbox {
         Ok(())
     }
 
-    /// Refuses to write a Seatbelt profile, which Windows cannot load; Windows agents wait
-    /// for the AppContainer boundary. Takes the path, unused. Returns `Unavailable` with the
-    /// AppContainer reason.
+    /// Refuses to write a Seatbelt profile, which Windows cannot load; Windows agents start
+    /// through [`InstalledSandbox`] and the AppContainer boundary. Takes the path, unused.
+    /// Returns `Unavailable` with [`windows::SEATBELT_MISSING`].
     #[cfg(target_os = "windows")]
     pub fn install(&self, _path: &Path) -> Result<(), SandboxError> {
-        Err(SandboxError::Unavailable(
-            windows::APPCONTAINER_MISSING.into(),
-        ))
+        Err(SandboxError::Unavailable(windows::SEATBELT_MISSING.into()))
     }
 
     /// A command that runs `program` under the installed profile with a cleared
@@ -756,28 +754,35 @@ pub trait Sandbox: Send + Sync {
 
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
-/// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux. Windows has none yet,
-/// so installing one there is refused.
+/// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux, AppContainer with a job
+/// object on Windows.
 #[derive(Debug)]
 pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
+    #[cfg(target_os = "windows")]
+    windows: windows::WindowsSandbox,
 }
 
 impl InstalledSandbox {
-    /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]) and,
-    /// on Linux, picks the Landlock helper next to the engine's executable or bubblewrap.
-    /// Output: the sandbox bound to that profile, the install refusal, or `Unavailable`
-    /// where this system has no boundary.
+    /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]); on
+    /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
+    /// Windows, writes the boundary profile for the helper next to the engine's executable
+    /// (see [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that
+    /// profile, the install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(target_os = "windows")]
         {
-            let _ = (sandbox, profile);
-            Err(SandboxError::Unavailable(
-                windows::APPCONTAINER_MISSING.into(),
-            ))
+            let helper = std::env::current_exe()?.with_file_name(windows::HELPER_NAME);
+            let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile)?;
+            assert!(profile.is_file());
+            Ok(Self {
+                sandbox,
+                profile: profile.to_path_buf(),
+                windows,
+            })
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -798,13 +803,17 @@ impl InstalledSandbox {
     }
 
     /// The program every wrapped command starts: `sandbox-exec` on macOS, the Landlock
-    /// helper or bwrap on Linux.
+    /// helper or bwrap on Linux, the boundary helper on Windows.
     pub fn launcher(&self) -> &Path {
         #[cfg(target_os = "linux")]
         {
             self.linux.launcher()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            self.windows.launcher()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             Path::new(SANDBOX_EXEC)
         }
@@ -815,17 +824,20 @@ impl InstalledSandbox {
         &self.sandbox
     }
 
-    /// The installed profile file `sandbox-exec` loads.
+    /// The installed profile file: the one `sandbox-exec` loads, or the boundary profile the
+    /// Windows helper reads.
     pub fn profile(&self) -> &Path {
         &self.profile
     }
 
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
-    /// on macOS and [`linux::LinuxSandbox`] on Linux.
+    /// on macOS, [`linux::LinuxSandbox`] on Linux and [`windows::WindowsSandbox`] on Windows.
     pub fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         #[cfg(target_os = "linux")]
         let command = Sandbox::wrap(&self.linux, harness)?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        let command = Sandbox::wrap(&self.windows, harness)?;
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let command = {
             let command = self.sandbox.wrap(&self.profile, harness)?;
             assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
@@ -855,7 +867,7 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
     if !clean_absolute(&home) {
         return Err(invalid("owner home must be absolute"));
     }
-    Ok(home.canonicalize().unwrap_or(home))
+    Ok(canonical(&home).unwrap_or(home))
 }
 
 #[cfg(unix)]
@@ -873,7 +885,10 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
 fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
     OWNER_SECRET_PATHS
         .iter()
-        .map(move |path| owner.join(path))
+        .map(move |path| {
+            path.split('/')
+                .fold(owner.to_path_buf(), |at, part| at.join(part))
+        })
         .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
 }
 
@@ -888,7 +903,11 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 }
 
 fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    if !clean_absolute(root) || root.components().count() < 3 {
+    let depth = root
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    if !clean_absolute(root) || depth < 2 {
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
     if owner.starts_with(root) {
@@ -900,7 +919,7 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
         }
     }
     clear_of_secrets(root, secrets)?;
-    if !root.is_dir() || root.canonicalize()? != root {
+    if !root.is_dir() || canonical(root)? != root {
         return Err(invalid(
             "sandbox roots must be existing canonical directories",
         ));
@@ -908,6 +927,7 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn clean_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.as_os_str().len() <= PATH_BYTES_MAX
@@ -919,4 +939,125 @@ fn clean_absolute(path: &Path) -> bool {
                 .chars()
                 .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
         })
+}
+
+/// Tells whether a Windows path is absolute and plain: a drive prefix such as `C:` (never a
+/// UNC, verbatim or device prefix), then folder names joined by `\`, as
+/// [`windows_clean_text`] checks. Input: the path. Output: true when plain.
+#[cfg(target_os = "windows")]
+fn clean_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|component| match component {
+            Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            Component::RootDir | Component::Normal(_) => true,
+            Component::CurDir | Component::ParentDir => false,
+        })
+        && path.to_str().is_some_and(windows_clean_text)
+}
+
+/// Checks Windows path text on any system: a drive letter, `:\`, then nonempty folder names
+/// joined by `\`, each neither `.` nor `..` nor ending in a space or dot, without control
+/// characters, quotes, `/`, `:` or the characters Windows forbids in names, at most 1024
+/// bytes. Input: the text. Output: true when plain.
+#[cfg(any(target_os = "windows", test))]
+fn windows_clean_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if text.len() > PATH_BYTES_MAX
+        || bytes.len() < 4
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || bytes[2] != b'\\'
+    {
+        return false;
+    }
+    text[3..].split('\\').all(|part| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.ends_with(' ')
+            && !part.ends_with('.')
+            && !part.chars().any(|c| {
+                c.is_control() || matches!(c, '"' | '\'' | '/' | ':' | '<' | '>' | '|' | '?' | '*')
+            })
+    })
+}
+
+/// The canonical form of an existing path. On Windows the verbatim `\\?\` prefix that
+/// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
+/// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
+/// Output: the canonical path, or the I/O error.
+pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
+    let resolved = path.canonicalize()?;
+    #[cfg(target_os = "windows")]
+    if let Some(plain) = resolved
+        .to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+        && plain.as_bytes().get(1) == Some(&b':')
+    {
+        return Ok(PathBuf::from(plain));
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod windows_path_tests {
+    use super::windows_clean_text;
+
+    #[test]
+    fn a_plain_drive_path_is_clean_on_every_system() {
+        for text in [
+            r"C:\Users\owner\project",
+            r"d:\work\agent home\tmp",
+            r"C:\a",
+        ] {
+            assert!(windows_clean_text(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn unc_verbatim_device_and_relative_paths_are_refused() {
+        for text in [
+            r"\\server\share\project",
+            r"\\?\C:\project",
+            r"\\?\UNC\server\share",
+            r"\\.\PhysicalDrive0",
+            r"C:project",
+            r"project\folder",
+            r"\project",
+            "C:/project",
+            r"C:\",
+        ] {
+            assert!(!windows_clean_text(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn dots_quotes_streams_and_aliases_are_refused() {
+        for text in [
+            r"C:\project\..\owner",
+            r"C:\project\.\context",
+            r"C:\project\context.",
+            r"C:\project\context ",
+            r"C:\project\\context",
+            r"C:\project\",
+            r"C:\project\file.txt:stream",
+            "C:\\project\\it's",
+            "C:\\project\\\"quoted\"",
+            "C:\\project\\line\nbreak",
+            r"C:\project\a/b",
+            r"C:\project\*",
+            r"C:\project\a?b",
+            r"C:\project\a|b",
+        ] {
+            assert!(!windows_clean_text(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_path_longer_than_the_limit_is_refused() {
+        let long = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX));
+        assert!(!windows_clean_text(&long));
+        let fits = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX - 3));
+        assert!(windows_clean_text(&fits));
+    }
 }
