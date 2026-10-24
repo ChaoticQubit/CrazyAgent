@@ -13,6 +13,11 @@ mod macos;
 mod windows;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "credential_store/os_keyring.rs"]
+mod os_keyring;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use os_keyring::{GIT_HELPER_COMMAND, OsKeyring, answer_git_credential};
 
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 63;
