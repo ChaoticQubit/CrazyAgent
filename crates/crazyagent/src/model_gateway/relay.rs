@@ -483,21 +483,25 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {
 }
 
 /// Finds the placeholder the harness sent: `x-api-key: <token>` or
-/// `authorization: Bearer <token>`, compared in constant time.
+/// `authorization: Bearer <token>`, compared in constant time. When a harness sends both,
+/// as Claude Code's key helper does, `x-api-key` wins, since provider keys go there.
 /// Output: which header carried it, or none when the token is missing or wrong.
 pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> {
     let matches = |value: &str| bool::from(value.as_bytes().ct_eq(token.as_bytes()));
-    incoming
-        .headers
-        .iter()
-        .find_map(|(name, value)| match name.as_str() {
-            "x-api-key" if matches(value) => Some(KeyHeader::XApiKey),
-            "authorization" => value
-                .strip_prefix("Bearer ")
-                .filter(|presented| matches(presented))
-                .map(|_| KeyHeader::Bearer),
-            _ => None,
-        })
+    let presented = |wanted: &'static str| {
+        incoming
+            .headers
+            .iter()
+            .filter(move |(name, _)| name == wanted)
+            .map(|(_, value)| value.as_str())
+    };
+    if presented("x-api-key").any(matches) {
+        return Some(KeyHeader::XApiKey);
+    }
+    presented("authorization")
+        .filter_map(|value| value.strip_prefix("Bearer "))
+        .any(matches)
+        .then_some(KeyHeader::Bearer)
 }
 
 /// Keeps the agent inside the provider base path: the target's path must be the base path

@@ -230,6 +230,24 @@ fn bearer_placeholder_is_replaced_in_the_same_form() {
 }
 
 #[test]
+fn both_headers_from_a_key_helper_forward_only_the_real_x_api_key() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let auth = format!(
+        "Authorization: Bearer {token}\r\nX-Api-Key: {token}",
+        token = relay.token()
+    );
+    assert_eq!(
+        send(relay.port(), &post("/v1/messages", &auth, "{}")).0,
+        200
+    );
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(header(&seen[0], "x-api-key"), Some(KEY));
+    assert_eq!(header(&seen[0], "authorization"), None);
+}
+
+#[test]
 fn wrong_or_missing_token_is_refused_without_reaching_the_provider() {
     let provider = Provider::json();
     let relay = Relay::start(&provider.origin(), key()).unwrap();
