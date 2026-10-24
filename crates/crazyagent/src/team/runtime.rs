@@ -12,12 +12,14 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody};
-use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Session};
+use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest};
+use crate::harnesses::terminal_session::AgentSession;
 use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{ResearchAccount, add_worktree, ensure_repository, model_remote};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::terminal::{AgentId, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -103,7 +105,8 @@ struct Grant {
 }
 
 /// Everything about an agent's harness launch except the account, so a managed agent
-/// can start a fresh process for each turn.
+/// can start a fresh process for each turn. `pane` is the terminal host and the agent's
+/// pane name when the agent runs its interactive app in a pane.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -112,6 +115,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     limits: LaunchLimits,
+    pane: Option<(Arc<dyn Host>, AgentId)>,
 }
 
 impl Plan {
@@ -205,6 +209,7 @@ pub struct TeamRuntime {
     custody: Result<NativeProfileCustody, EngineError>,
     delegation_tool: Option<PathBuf>,
     agents: Option<Arc<Agents>>,
+    terminal: Option<Arc<dyn Host>>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -294,6 +299,7 @@ impl TeamRuntime {
             custody,
             delegation_tool: None,
             agents: None,
+            terminal: None,
         })
     }
 
@@ -303,6 +309,25 @@ impl TeamRuntime {
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
         self
+    }
+
+    /// Runs every team agent whose harness has an interactive app in a pane of `host` named
+    /// `team-<id>`, where the owner can watch and type. Panes an earlier engine left end
+    /// here, since opening the runtime already returned their work to the queue.
+    /// Takes the host. Returns the runtime, or the host's plain code.
+    pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, EngineError> {
+        for agent in host.alive()? {
+            if agent.team_agent().is_none() {
+                continue;
+            }
+            match host.kill(&agent) {
+                Ok(()) => {}
+                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+                Err(problem) => return Err(problem.into()),
+            }
+        }
+        self.terminal = Some(host);
+        Ok(self)
     }
 
     /// Gives every team master with tools on the engine's `delegate` tool, served by `executable`.
@@ -1454,6 +1479,7 @@ impl TeamRuntime {
                 output_bytes: self.limits.output_bytes,
                 events: SESSION_EVENTS_MAX,
             },
+            pane: self.terminal.clone().zip(AgentId::team(id).ok()),
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -1934,13 +1960,7 @@ fn work(
 ) {
     let problem = match mode {
         Mode::Kept { account, context } => kept(
-            plan.request(account),
-            context,
-            &orders,
-            &reports,
-            &cancel,
-            &interrupt,
-            turn_time,
+            &plan, account, context, &orders, &reports, &cancel, &interrupt, turn_time,
         ),
         Mode::PerTurn { home } => per_turn(
             &plan, &home, &orders, &reports, &cancel, &interrupt, turn_time,
@@ -1960,7 +1980,7 @@ enum Next {
 fn next_turn(
     orders: &Receiver<Order>,
     cancel: &AtomicBool,
-    mut idle: Option<&mut Session>,
+    mut idle: Option<&mut AgentSession>,
 ) -> Next {
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -1984,7 +2004,8 @@ fn next_turn(
 }
 
 fn kept(
-    request: LaunchRequest,
+    plan: &Plan,
+    account: AccountBinding,
     context: AgentContext,
     orders: &Receiver<Order>,
     reports: &Sender<Report>,
@@ -1992,7 +2013,8 @@ fn kept(
     interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
-    let mut session = match Session::start_with_context(request, context) {
+    let started = AgentSession::start(plan.request(account), context, plan.pane.clone());
+    let mut session = match started {
         Ok(session) => session,
         Err(problem) => return Some(format!("The agent could not start ({})", problem.0)),
     };
@@ -2054,7 +2076,7 @@ fn per_turn(
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
-        let mut session = match Session::start_with_context(request, context) {
+        let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
             Ok(session) => session,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
@@ -2082,7 +2104,7 @@ fn per_turn(
 }
 
 fn turn(
-    session: &mut Session,
+    session: &mut AgentSession,
     prompt: &str,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
@@ -2206,8 +2228,9 @@ impl Drop for TeamService {
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
 /// pool assignment read live from the engine's settings files on every tick.
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
-/// engine executable that serves masters their `delegate` tool and the engine's agent register
-/// that lists every team agent with its owner controls. Returns the service, or a plain reason.
+/// engine executable that serves masters their `delegate` tool, the engine's agent register
+/// that lists every team agent with its owner controls and the terminal host agents run in.
+/// Returns the service, or a plain reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -2215,6 +2238,7 @@ pub fn start_for_engine(
     executables: BTreeMap<&'static str, PathBuf>,
     engine: Option<&Path>,
     agents: Option<Arc<Agents>>,
+    terminal: Option<Arc<dyn Host>>,
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
@@ -2242,6 +2266,10 @@ pub fn start_for_engine(
     };
     let runtime = match agents {
         Some(agents) => runtime.with_agents(agents),
+        None => runtime,
+    };
+    let runtime = match terminal {
+        Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
     Ok(TeamService::start(runtime, Duration::from_millis(250)))

@@ -345,6 +345,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         Path::new(&args[3]),
                         executable,
                         claude.as_deref(),
+                        None,
                     )
                     .map(Some),
                 })
@@ -379,6 +380,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         executables,
                         std::env::current_exe().ok().as_deref(),
                         agents,
+                        None,
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {
