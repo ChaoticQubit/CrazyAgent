@@ -128,6 +128,7 @@ const COPY: Record<string, string> = {
   setup_request_bounds: "Setup couldn't take this request. Pick fewer entries and try again.",
   setup_request_invalid: "Setup couldn't read this request. Reload and try again.",
   setup_reply_bounds: "Setup's reply was too large to show. Reload and try again.",
+  owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
 
 /** Plain sentence for one intake, GitHub or setup failure code.

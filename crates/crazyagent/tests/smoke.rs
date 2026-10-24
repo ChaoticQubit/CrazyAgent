@@ -283,7 +283,7 @@ async fn setup_status_projects_home_and_an_empty_team_graph_read_on_a_fresh_engi
     let mut engine = Engine::start("ca-smoke-reads-");
     let mut owner = Owner::attach(&engine).await;
 
-    let status = owner.controller.setup_status().await.unwrap();
+    let status = owner.setup_checked().await;
     assert!(!status.running);
     assert_eq!(
         status

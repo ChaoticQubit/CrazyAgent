@@ -1921,7 +1921,7 @@ async fn serve_authenticated_owner(
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
         let result = engine.dispatch_owner(a, request, None).await;
-        let result = setup::after_owner(&engine, &authority, &submitted, result).await;
+        let result = setup::after_owner(&engine, &authority, &submitted, result, deadline).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),

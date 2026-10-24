@@ -47,6 +47,9 @@ pub fn setup_plain(code: &str) -> &'static str {
             "CrazyAgent is not connected to the engine right now."
         }
         "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "owner_outcome_unknown_reconcile_same_identity" => {
+            "CrazyAgent did not answer in time. Try again."
+        }
         _ => plain_reason(code),
     }
 }
@@ -82,6 +85,7 @@ fn pack_word(state: &PackState) -> &'static str {
 
 fn tool_word(state: &DependencyState) -> String {
     match state {
+        DependencyState::Checking => "Checking".into(),
         DependencyState::Missing => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
