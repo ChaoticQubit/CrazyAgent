@@ -7,7 +7,8 @@ use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::path::{Path, PathBuf};
@@ -15,9 +16,44 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:7b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 const ENGINE_STOP_WAIT: Duration = Duration::from_secs(30);
+const MODEL: &str = "qwen2.5:7b";
+const OLLAMA: &str = "127.0.0.1:11434";
+const OLLAMA_TIME: Duration = Duration::from_secs(10);
+const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
+
+/// Fails the test with the command that fixes it unless the local Ollama serves the pool
+/// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+fn require_model() {
+    assert_eq!(
+        CATALOG
+            .matches(&format!("model = {{ id = \"{MODEL}\""))
+            .count(),
+        2
+    );
+    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+        stream.set_read_timeout(Some(OLLAMA_TIME))?;
+        stream.set_write_timeout(Some(OLLAMA_TIME))?;
+        stream.write_all(
+            format!("GET /api/tags HTTP/1.1\r\nHost: {OLLAMA}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )?;
+        let mut reply = String::new();
+        stream
+            .take(OLLAMA_TAGS_BYTES_MAX)
+            .read_to_string(&mut reply)?;
+        Ok(reply)
+    });
+    let reply = listed.unwrap_or_else(|problem| {
+        panic!("the local Ollama at {OLLAMA} is required and did not answer: {problem}")
+    });
+    assert!(
+        reply.contains(&format!("\"name\":\"{MODEL}\"")),
+        "the local Ollama does not have {MODEL}; run: ollama pull {MODEL}"
+    );
+}
 
 /// Creates `project-cafe` in the runtime's projects home through the owner
 /// client of the running engine binary, retrying the attach until the owner
@@ -195,6 +231,7 @@ fn runtime(name: &str, catalog: &str) -> PathBuf {
 
 #[test]
 fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
+    require_model();
     let runtime = runtime("q", CATALOG);
     let engine = Engine::start(&runtime);
     let projects = runtime.join("projects");
