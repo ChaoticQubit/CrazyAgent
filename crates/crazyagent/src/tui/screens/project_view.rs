@@ -4,11 +4,14 @@ use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
 use super::project::{
-    MasterStatus, ProjectScreen, Speaker, Tab, Transcript, memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, Speaker, Tab, Transcript,
+    memory_source, research_kind,
 };
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
-use crate::project_setup::{ContextItem, ContextKind, ResearchJob, ResearchStatus};
+use crate::project_setup::{
+    ContextItem, ContextKind, Platform, ResearchJob, ResearchKind, ResearchStatus,
+};
 use ratatui::style::Style;
 
 const SPINNER: &str = "\u{283c}";
@@ -116,6 +119,85 @@ pub(in crate::tui) fn project_screen(
             help,
             status: header_status(running, look),
         };
+    }
+    if let Some(adding) = &screen.adding {
+        let field = 52;
+        let (_, (_, column)) = adding.input.wrap(4096);
+        let value: Vec<char> = adding.input.value().chars().collect();
+        let start = column.saturating_sub(field - 1);
+        let shown: String = value.iter().skip(start).take(field).collect();
+        let mut body: Vec<Row> = wrap_words(
+            "Type the full path of a file on this computer. It is copied into the project's documents.",
+            56,
+        )
+        .into_iter()
+        .map(|line| Row::of(line, look.muted))
+        .collect();
+        body.push(Row::default());
+        let at = body.len();
+        body.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(Row::of(shown, look.fg).pad(field))
+                .push(" ", Style::new())
+                .push("]", look.accent),
+        );
+        body.push(Row::default());
+        body.extend(
+            adding
+                .error
+                .iter()
+                .flat_map(|error| wrap_words(error, 56))
+                .map(|line| Row::of(line, look.error)),
+        );
+        body.push(if adding.busy {
+            Row::of(format!("{SPINNER} Adding..."), look.running)
+        } else {
+            Row::of("[> Add file ]", look.selection).push("   [ Cancel ]", look.fg)
+        });
+        let top = 4;
+        let box_left = width.saturating_sub(62) / 2;
+        rows = modal(&rows, width, 62, "Add file", body, top, look);
+        help = if adding.busy {
+            vec![("Esc", "Close")]
+        } else {
+            vec![("Enter", "Add file"), ("Esc", "Cancel")]
+        };
+        let cursor = (!adding.busy).then(|| {
+            (
+                (box_left + 4 + column - start) as u16,
+                (top + 1 + at) as u16,
+            )
+        });
+        return Screen {
+            rows,
+            cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if screen.confirm_remove {
+        let mut body = vec![Row::of(
+            format!("Remove {} from CrazyAgent?", screen.name),
+            look.fg,
+        )];
+        body.extend(
+            wrap_words(
+                "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+                50,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+        body.push(Row::default());
+        body.push(
+            Row::of("[ Remove project ]", look.fg)
+                .push("   ", Style::new())
+                .push("[> Keep project ]", look.selection),
+        );
+        rows = modal(&rows, width, 56, "Remove project", body, 5, look);
+        help = vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")];
     }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -899,7 +981,12 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
         ResearchStatus::Done => None,
     }));
-    help.extend([("Enter", "Open report"), TABS, ("Esc", "Home")]);
+    help.extend([
+        ("Enter", "Open report"),
+        ("t", "Team"),
+        TABS,
+        ("Esc", "Home"),
+    ]);
     let Some(jobs) = &screen.jobs else {
         lines.push(Row::of("Loading...", look.muted));
         return (lines, None, help);
@@ -1265,6 +1352,7 @@ fn context(
     }
     let help = vec![
         ("Enter", "Open"),
+        ("a", "Add file"),
         ("o", "Open in editor"),
         ("d", "Delete"),
         ("m", "Save to memory"),
@@ -1321,7 +1409,129 @@ fn context(
     (lines, None, help)
 }
 
+const LABEL: usize = 13;
+
+/// Draws the General form: text fields, then platform and research switches
+/// in two columns, then the refusal or the saving note.
+/// Takes the form, the content width and the look.
+/// Returns the rows, the text cursor and the help keys.
+fn general_form(general: &GeneralEdit, content: usize, look: &Look) -> Drawn {
+    let field = content.saturating_sub(LABEL + 4).max(8);
+    let mut lines = vec![Row::of("Edit project", look.accent), Row::default()];
+    let mut cursor = None;
+    for (index, label, input, note) in [
+        (0, "Name", &general.name, None),
+        (1, "Description", &general.about, None),
+        (
+            2,
+            "Stack",
+            &general.stack,
+            Some("Separate items with commas."),
+        ),
+    ] {
+        let (_, (_, column)) = input.wrap(16_384);
+        let value = input.value();
+        let last = value.rsplit('\n').next().unwrap_or(value);
+        let typed: Vec<char> = last.chars().collect();
+        let column = column.min(typed.len());
+        let start = column.saturating_sub(field - 1);
+        let shown: String = typed.iter().skip(start).take(field).collect();
+        let focused = general.cursor == index;
+        if focused {
+            cursor = Some((LABEL + 2 + column - start, lines.len()));
+        }
+        let style = if focused { look.accent } else { look.muted };
+        lines.push(
+            Row::of(label, if focused { look.accent } else { look.muted })
+                .pad(LABEL)
+                .push("[", style)
+                .push(" ", Style::new())
+                .cat(Row::of(shown, look.fg).pad(field))
+                .push(" ", Style::new())
+                .push("]", style),
+        );
+        if let Some(note) = note.filter(|_| focused) {
+            lines.push(Row::default().pad(LABEL).push(note, look.muted));
+        }
+    }
+    lines.push(Row::default());
+    let switch = |index: usize, label: &str, on: bool| {
+        let row = Row::of(format!("[{}] {label}", if on { "x" } else { " " }), look.fg).pad(24);
+        if general.cursor == index {
+            row.restyle(look.selection)
+        } else {
+            row
+        }
+    };
+    let platforms: Vec<Row> = Platform::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(at, platform)| {
+            switch(
+                3 + at,
+                platform.label(),
+                general.platforms.contains(&platform),
+            )
+        })
+        .collect();
+    let research: Vec<Row> = ResearchKind::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(at, kind)| {
+            switch(
+                3 + Platform::ALL.len() + at,
+                kind.label(),
+                general.research.contains(&kind),
+            )
+        })
+        .collect();
+    for (label, switches) in [("Platforms", platforms), ("Research", research)] {
+        for (pair, chunk) in switches.chunks(2).enumerate() {
+            let mut row = Row::of(if pair == 0 { label } else { "" }, look.muted).pad(LABEL);
+            for item in chunk {
+                row = row.cat(item.clone()).push("  ", Style::new());
+            }
+            lines.push(row);
+        }
+    }
+    lines.push(Row::default());
+    if general.busy {
+        lines.push(Row::of(format!("{SPINNER} Saving..."), look.running));
+    } else if let Some(error) = &general.error {
+        lines.extend(
+            wrap_words(error, content)
+                .into_iter()
+                .map(|line| Row::of(line, look.error)),
+        );
+    } else {
+        lines.extend(
+            wrap_words(
+                "Turning research off stops its agent. Turning it on starts one when the project has a pool.",
+                content,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+    }
+    assert!(general.cursor < GENERAL_FIELDS);
+    let mut help = vec![("Enter", "Save"), ("Tab", "Next")];
+    if matches!(
+        Field::at(general.cursor),
+        Field::Platform(_) | Field::Research(_)
+    ) {
+        help.push(("Space", "Switch"));
+    }
+    if general.cursor == 1 {
+        help.push(("Ctrl-J", "New line"));
+    }
+    help.push(("Esc", "Cancel"));
+    (lines, cursor.filter(|_| !general.busy), help)
+}
+
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
+    if let Some(general) = &screen.general {
+        return general_form(general, content, look);
+    }
     let entry = |label: &str, value: Row| Row::of(label, look.muted).pad(10).cat(value);
     let pool = match &screen.pool {
         _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
@@ -1337,8 +1547,14 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
     let mut lines = vec![
         Row::of("Project settings", look.accent),
         Row::default(),
-        entry("Name", Row::of(screen.name.clone(), look.fg)),
-        entry("Folder", Row::of(folder(screen), look.fg)),
+        entry(
+            "Name",
+            Row::of(screen.name.clone(), look.fg).push("   g Edit details", look.muted),
+        ),
+        entry(
+            "Folder",
+            Row::of(folder(screen), look.fg).push("   x Remove project", look.muted),
+        ),
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
         Row::default(),
