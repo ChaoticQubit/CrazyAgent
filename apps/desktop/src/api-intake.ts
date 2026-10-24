@@ -1,4 +1,4 @@
-import { classifyFailure, plainError, type Result } from "./api";
+import { classifyFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -261,17 +261,17 @@ export function loadSetupStatus(): Promise<Result<SetupStatus>> {
  * the owner's approval of them. Input: the ticked pack ids. Output: the status as the run starts. */
 export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
   if (pack.length > SETUP_PACK_MAX) throw new Error(`setup pack holds at most ${SETUP_PACK_MAX} entries`);
-  return wrap(() => startSetup(pack));
+  return wrap(() => startSetup(pack, nextGeneration()));
 }
 
 /** Switches one installed pack entry on or off for every project.
  * Inputs: its id and the state. Output: the new setup status. */
 export function setPackEntry(id: string, on: boolean): Promise<Result<SetupStatus>> {
-  return wrap(() => switchEntry(id, on));
+  return wrap(() => switchEntry(id, on, nextGeneration()));
 }
 
 /** Removes one installed pack entry and the skill or server it added.
  * Input: its id. Output: the new setup status. */
 export function removePackEntry(id: string): Promise<Result<SetupStatus>> {
-  return wrap(() => removeEntry(id));
+  return wrap(() => removeEntry(id, nextGeneration()));
 }

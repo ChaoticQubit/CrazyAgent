@@ -203,6 +203,13 @@ export function errorMessage(error: unknown): string {
     plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
     plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
+    setup_busy: "Setup is already running.",
+    setup_store_unavailable: "CrazyAgent can't write its app data folder.",
+    setup_outcome_unknown: "The setup request did not finish. Refresh before continuing.",
+    pack_unknown: "This entry is not in the default pack.",
+    pack_required: "This entry is always on and can't be removed.",
+    pack_not_installed: "This entry is not installed yet. Run setup first.",
+    pack_name_taken: "A skill or server with this name already exists.",
     agent_not_found: "This agent was not found. Refresh the list.",
     agent_not_running: "This agent is not running. Refresh the list.",
     agent_not_busy: "This agent is not working on anything to interrupt.",
@@ -300,7 +307,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -924,19 +931,19 @@ export function setupStatus(): Promise<SetupStatus> {
 }
 
 /** Starts setup with the ticked pack entries; the ticked MCP servers count as approved.
- * Input: the ticked ids. Output: the status as the run starts. */
-export function runSetup(pack: string[]): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_run_setup", { pack });
+ * Inputs: the ticked ids and a generation. Output: the status as the run starts. */
+export function runSetup(pack: string[], generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
 }
 
-/** Switches one installed pack entry on or off. Inputs: its id and the state. */
-export function setPackEntry(id: string, on: boolean): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on });
+/** Switches one installed pack entry on or off. Inputs: its id, the state and a generation. */
+export function setPackEntry(id: string, on: boolean, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, generation });
 }
 
-/** Removes one installed pack entry and what it added. Input: its id. */
-export function removePackEntry(id: string): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_remove_pack_entry", { id });
+/** Removes one installed pack entry and what it added. Inputs: its id and a generation. */
+export function removePackEntry(id: string, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, generation });
 }
 
 /** What one node of a project's team graph stands for: the master, one harness with its
