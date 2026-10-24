@@ -237,7 +237,7 @@ impl Fixture {
                         project_id: project(),
                         expected_config_id: catalog.config_id,
                         expected_source_hash: source_hash,
-                        selection: MasterSelection {
+                        selection: Box::new(MasterSelection {
                             backend: MasterBackend::Rcli,
                             pool_ref: reference("local-pool"),
                             target_profile_ref: reference("local-profile"),
@@ -249,7 +249,7 @@ impl Fixture {
                                 budget_ref: reference("conversation-budget"),
                                 resources: ResourceBudget::unit(),
                             },
-                        },
+                        }),
                     },
                 },
                 2,
@@ -269,6 +269,7 @@ impl Fixture {
         else {
             panic!("actual committed master session missing");
         };
+        let session = *session;
         assert_eq!(session.owner, opened.provenance);
         assert_eq!(session.phase, MasterSessionPhase::Configured);
         assert_eq!(session.current_turn, None);
@@ -318,9 +319,11 @@ impl Fixture {
 
     fn registration_count(&self) -> i64 {
         self.db()
-            .query_row("SELECT COUNT(*) FROM configured_master_profiles", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM configured_master_profiles",
+                [],
+                |row| row.get(0),
+            )
             .unwrap()
     }
 
@@ -346,7 +349,9 @@ impl Fixture {
             "bootstrap_workspaces",
         ] {
             let count: i64 = db
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(count, 0, "registration allocated {table}");
         }
@@ -390,7 +395,10 @@ impl Fixture {
             request.mutation_hash().unwrap()
         );
         assert_eq!(operation.provenance.owner_id, session.owner.owner_id);
-        assert_eq!(operation.provenance.engine_epoch, session.owner.engine_epoch);
+        assert_eq!(
+            operation.provenance.engine_epoch,
+            session.owner.engine_epoch
+        );
         assert_eq!(
             operation.provenance.admitted_epoch,
             session.owner.resulting_epoch
@@ -458,7 +466,10 @@ async fn rcli_profile_registration_uses_real_owner_and_committed_session() {
         let operation = applied(controller.send_pending().await.unwrap());
         assert!(!operation.historical_replay);
         assert!(controller.pending().is_none());
-        assert_eq!(operation.provenance.revision_before, exact.expected_revision);
+        assert_eq!(
+            operation.provenance.revision_before,
+            exact.expected_revision
+        );
         assert_eq!(
             operation.provenance.revision_after.value(),
             exact.expected_revision.value() + 1
@@ -479,7 +490,7 @@ async fn rcli_profile_registration_uses_real_owner_and_committed_session() {
         assert_eq!(
             read.data,
             OwnerData::ProjectMaster {
-                session: Some(session)
+                session: Some(Box::new(session))
             }
         );
         fixture.assert_no_execution();
@@ -526,13 +537,17 @@ async fn rcli_profile_registration_reconciles_exact_pending_request_once() {
     assert_eq!(replay.result, first.result);
     fixture.assert_receipt(&session, &connection, &exact, &replay);
     assert_eq!(fixture.registration_count(), 1);
-    assert_eq!(fixture.registration_body(&session.session_id), original_body);
+    assert_eq!(
+        fixture.registration_body(&session.session_id),
+        original_body
+    );
     let absent_home = fixture.root.path().join("never-selected-home");
     let mut changed = exact.clone();
     let OwnerOperation::Apply {
-        mutation: OwnerMutation::ProjectMaster {
-            action: MasterOwnerAction::RegisterRcliProfile { registration },
-        },
+        mutation:
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::RegisterRcliProfile { registration },
+            },
     } = &mut changed.operation
     else {
         panic!("retained registration action changed");
@@ -545,7 +560,10 @@ async fn rcli_profile_registration_reconciles_exact_pending_request_once() {
     ));
     assert!(!absent_home.exists());
     assert_eq!(fixture.registration_count(), 1);
-    assert_eq!(fixture.registration_body(&session.session_id), original_body);
+    assert_eq!(
+        fixture.registration_body(&session.session_id),
+        original_body
+    );
     fixture.assert_no_execution();
     fixture.close().await;
 }
@@ -593,7 +611,8 @@ async fn rcli_profile_registration_rejects_stale_scope_and_physical_replacement(
                 intent.expected_session.owner.owner_id = changed_hex(&session.owner.owner_id)
             }
             "epoch" => {
-                intent.expected_session.owner.engine_epoch = changed_hex(&session.owner.engine_epoch)
+                intent.expected_session.owner.engine_epoch =
+                    changed_hex(&session.owner.engine_epoch)
             }
             "owner_epoch" => intent.expected_session.owner.resulting_epoch += 1,
             "profile" => {
@@ -708,7 +727,10 @@ async fn rcli_profile_registration_rejects_stale_scope_and_physical_replacement(
         .await;
     rejected(owner.request(request).await.unwrap());
     assert_eq!(fixture.registration_count(), 1);
-    assert_eq!(fixture.registration_body(&session.session_id), original_body);
+    assert_eq!(
+        fixture.registration_body(&session.session_id),
+        original_body
+    );
     assert_eq!(std::fs::read(config_path).unwrap(), original_config);
     fixture.assert_no_execution();
     fixture.close().await;

@@ -442,14 +442,14 @@ async fn verify_registration(root: &Path, mode: &str) {
         .unwrap();
     let registrations: Vec<_> = records
         .into_iter()
-        .filter_map(
-            |(id, hash, body)| match serde_json::from_slice::<OwnerResult>(&body).unwrap() {
+        .filter_map(|(id, hash, body)| {
+            match serde_json::from_slice::<OwnerResult>(&body).unwrap() {
                 OwnerResult::RcliProfileRegistered { registration } => {
                     Some((id, hash, registration))
                 }
                 _ => None,
-            },
-        )
+            }
+        })
         .collect();
     assert_eq!(registrations.len(), 1);
     let (operation, hash, metadata) = &registrations[0];
@@ -496,6 +496,7 @@ async fn verify_actual_receipt(
     else {
         panic!("Actual registered master is missing");
     };
+    let session = *session;
     assert_eq!(session.session_id, metadata.session_id);
     assert_eq!(session.phase, MasterSessionPhase::Configured);
     assert!(session.current_turn.is_none());

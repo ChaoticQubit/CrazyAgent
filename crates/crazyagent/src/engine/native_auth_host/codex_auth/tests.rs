@@ -115,7 +115,10 @@ impl Case {
 #[test]
 fn native_auth_codex_profile_path_is_the_held_physical_home() {
     let case = Case::new();
-    assert_eq!(case.session.as_ref().unwrap().profile_path().unwrap(), case.home);
+    assert_eq!(
+        case.session.as_ref().unwrap().profile_path().unwrap(),
+        case.home
+    );
     assert!(case.home.is_dir());
 }
 
@@ -159,7 +162,13 @@ fn native_auth_codex_retirement_accepts_a_reaped_child_and_absent_group() {
         rustix::process::test_kill_process_group(direct),
         Err(rustix::io::Errno::SRCH)
     );
-    assert!(case.session.take().unwrap().seal_after_child_reaped().is_ok());
+    assert!(
+        case.session
+            .take()
+            .unwrap()
+            .seal_after_child_reaped()
+            .is_ok()
+    );
 }
 
 #[test]
@@ -214,7 +223,10 @@ fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() 
         .get_envs()
         .map(|(name, value)| (name.to_owned(), value.unwrap().to_owned()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(environment[std::ffi::OsStr::new("CODEX_HOME")], case.home.as_os_str());
+    assert_eq!(
+        environment[std::ffi::OsStr::new("CODEX_HOME")],
+        case.home.as_os_str()
+    );
     assert!(!environment.contains_key(std::ffi::OsStr::new("OPENAI_API_KEY")));
     assert!(!environment.contains_key(std::ffi::OsStr::new("CHATGPT_API_KEY")));
     assert_eq!(command.get_current_dir(), Some(case.home.as_path()));

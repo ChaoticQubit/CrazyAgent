@@ -1,4 +1,4 @@
-use super::{failure, EngineError, OwnerRuntimeHandle};
+use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
 use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
@@ -280,8 +280,13 @@ impl OwnerRuntimeHandle {
         session_id: &SessionId,
         turn_id: &RequestId,
     ) -> Result<MasterTurnView, EngineError> {
-        let routed = self.route_master_turn(project_id, session_id, turn_id).await?;
-        if !matches!(routed.phase, MasterTurnPhase::Queued | MasterTurnPhase::Prepared) {
+        let routed = self
+            .route_master_turn(project_id, session_id, turn_id)
+            .await?;
+        if !matches!(
+            routed.phase,
+            MasterTurnPhase::Queued | MasterTurnPhase::Prepared
+        ) {
             return Ok(routed);
         }
         let prepared = match self
@@ -290,7 +295,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::ConfiguredProfile(_) => {
+            MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
+            #[cfg(test)]
+            MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));
             }
         };
@@ -565,7 +572,7 @@ impl OwnerRuntimeHandle {
                 EventKind::TurnFinished { .. }
                 | EventKind::Disconnected
                 | EventKind::ProtocolFailure { .. } => {
-                    return Err(failure("master_capture_incomplete"))
+                    return Err(failure("master_capture_incomplete"));
                 }
                 EventKind::ApprovalRequired { .. }
                 | EventKind::UnsupportedRequest { .. }
@@ -646,9 +653,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
 mod tests {
     use super::*;
     use crate::config::resolve_config;
+    use crate::engine::EngineError;
     use crate::engine::bootstrap::EngineService;
     use crate::engine::owner::transport::OwnerRuntimeHandle;
-    use crate::engine::EngineError;
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;

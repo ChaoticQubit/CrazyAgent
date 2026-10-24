@@ -102,10 +102,10 @@ impl CodexHost {
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
-        if self.protocol.state() == State::Active {
-            if let Ok(bytes) = self.protocol.interrupt() {
-                return self.process.send(&bytes).await;
-            }
+        if self.protocol.state() == State::Active
+            && let Ok(bytes) = self.protocol.interrupt()
+        {
+            return self.process.send(&bytes).await;
         }
         self.process.request_stop();
         Ok(())
@@ -153,8 +153,7 @@ impl CodexHost {
                 assert!(self.events.len() <= EVENTS_MAX);
                 assert!(self.auth.len() <= EVENTS_MAX);
             }
-            CodexHostOutput::Stderr(_) => {}
-            CodexHostOutput::Exited(_) => {
+            CodexHostOutput::Exited => {
                 self.events.push_back(self.protocol.disconnect());
                 self.disconnected = true;
             }
@@ -192,11 +191,16 @@ fn prepare_command(
     }
     let args: Vec<_> = command.get_args().collect();
     if !args.windows(2).any(|pair| {
-        pair[0] == OsStr::new("-c")
-            && pair[1] == OsStr::new("cli_auth_credentials_store=\"file\"")
-    }) || args.iter().filter(|arg| {
-        arg.to_str().is_some_and(|value| value.contains("cli_auth_credentials_store"))
-    }).count() != 1 {
+        pair[0] == OsStr::new("-c") && pair[1] == OsStr::new("cli_auth_credentials_store=\"file\"")
+    }) || args
+        .iter()
+        .filter(|arg| {
+            arg.to_str()
+                .is_some_and(|value| value.contains("cli_auth_credentials_store"))
+        })
+        .count()
+        != 1
+    {
         return Err(EngineError("codex_host_file_auth_required".into()));
     }
     let home = profile.profile_path()?;

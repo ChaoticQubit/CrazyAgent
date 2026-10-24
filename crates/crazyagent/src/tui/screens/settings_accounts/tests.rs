@@ -450,6 +450,62 @@ fn list_keys_open_add_account_details_and_selection() {
 }
 
 #[test]
+fn p_opens_a_new_pool_with_the_selected_accounts_ticked() {
+    let (accounts, pools) = dataset(None);
+    let mut ctx = list_ctx(80, 24, pools);
+    let mut screen = Accounts::with(accounts);
+    assert!(!screen.hints(&ctx).iter().any(|item| item.key == "p"));
+    assert!(matches!(
+        screen.key(&Key::Char('p'), &mut ctx),
+        Flow::Handled
+    ));
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Select accounts with Space first."
+    );
+
+    screen.key(&Key::Char(' '), &mut ctx);
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char(' '), &mut ctx);
+    let mut picked: Vec<CredentialRef> = screen
+        .visible(&ctx)
+        .iter()
+        .take(2)
+        .map(|account| account.id.clone())
+        .collect();
+    picked.sort();
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .any(|item| item.key == "p" && item.label == "New pool from selected")
+    );
+    match screen.key(&Key::Char('p'), &mut ctx) {
+        Flow::Open(Place::NewPoolFrom(ids)) => assert_eq!(ids, picked),
+        other => panic!("new pool expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn p_with_more_than_fifteen_selected_says_the_pool_limit() {
+    let (accounts, pools) = dataset(None);
+    let mut ctx = list_ctx(80, 24, pools);
+    let mut screen = Accounts::with(accounts);
+    for _ in 0..16 {
+        screen.key(&Key::Char(' '), &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+    }
+    assert_eq!(ctx.message().unwrap().lead, "16 selected.");
+    assert!(matches!(
+        screen.key(&Key::Char('p'), &mut ctx),
+        Flow::Handled
+    ));
+    let message = ctx.message().unwrap();
+    assert_eq!(message.lead, "A pool holds at most 15 accounts.");
+    assert_eq!(message.rest, "Unselect some, then press p again.");
+}
+
+#[test]
 fn a_full_load_fills_the_list_and_the_shared_rows() {
     let (accounts, pools) = dataset(None);
     let mut shell = Shell::with(list_ctx(80, 24, pools), Box::new(Accounts::new()));

@@ -49,10 +49,17 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
     assert!(handlers.len() >= 34);
     assert_eq!(permissions.len(), handlers.len());
     for handler in &handlers {
-        assert_eq!(build.matches(&format!("\"{handler}\"")).count(), 1, "{handler} needs one build permission");
+        assert_eq!(
+            build.matches(&format!("\"{handler}\"")).count(),
+            1,
+            "{handler} needs one build permission"
+        );
         let allowed = format!("allow-{}", handler.replace('_', "-"));
         assert_eq!(
-            permissions.iter().filter(|permission| **permission == allowed.as_str()).count(),
+            permissions
+                .iter()
+                .filter(|permission| **permission == allowed.as_str())
+                .count(),
             1,
             "{handler} needs one main-window permission"
         );

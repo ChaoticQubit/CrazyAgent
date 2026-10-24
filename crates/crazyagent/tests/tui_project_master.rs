@@ -317,15 +317,14 @@ impl Drop for Driver {
                 .lines()
                 .filter_map(|line| line.strip_prefix("owned-group="))
             {
-                if let Ok(group) = group.parse::<u32>() {
-                    if !output
+                if let Ok(group) = group.parse::<u32>()
+                    && !output
                         .lines()
                         .any(|line| line == format!("reaped-group={group}"))
-                    {
-                        signal_group(group, "-TERM");
-                        signal_group(group, "-KILL");
-                        eprintln!("master686 TUI group={group} required failure cleanup");
-                    }
+                {
+                    signal_group(group, "-TERM");
+                    signal_group(group, "-KILL");
+                    eprintln!("master686 TUI group={group} required failure cleanup");
                 }
             }
         }
@@ -402,7 +401,7 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
                 expected_revision: session.owner.revision_before.clone(), operation: OwnerOperation::Apply {
                     mutation: OwnerMutation::ProjectMaster { action: MasterOwnerAction::Open {
                         project_id: session.project_id.clone(), expected_config_id: session.config_id.clone(),
-                        expected_source_hash: session.source_hash.clone(), selection: session.selection.clone(),
+                        expected_source_hash: session.source_hash.clone(), selection: Box::new(session.selection.clone()),
                     } },
                 } };
             assert_eq!(original.mutation_hash().unwrap(), session.owner.request_hash);
@@ -450,6 +449,7 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
         assert_eq!(submit.mutation_hash().unwrap(), input.provenance.request_hash);
         let readback = read_owner(&owner, OwnerRead::ProjectMaster { project_id: ProjectId::new("p").unwrap() }).await;
         let OwnerData::ProjectMaster { session } = readback.data else { panic!("actual restarted session absent"); };
+        let session = session.map(|session| *session);
         assert_eq!(session.as_ref(), sessions.last());
         for session in &sessions {
             let turns = read_owner(&owner, OwnerRead::ProjectMasterTurns {

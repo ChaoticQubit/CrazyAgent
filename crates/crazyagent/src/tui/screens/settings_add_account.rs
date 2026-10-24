@@ -1052,7 +1052,7 @@ impl AddAccount {
                     }
                 }
                 match view.phase {
-                    NativeAuthPhase::AuthenticatedObserved => return self.done_from_sign_in(ctx),
+                    NativeAuthPhase::AuthenticatedObserved => self.done_from_sign_in(ctx),
                     NativeAuthPhase::UnauthenticatedObserved
                     | NativeAuthPhase::Failed
                     | NativeAuthPhase::Cancelled
@@ -1418,16 +1418,16 @@ impl AddAccount {
                 done.selected = (done.selected + 1).min(pools.len().saturating_sub(1));
             }
             Key::Char(' ') if done.focus == DoneFocus::Pools => {
-                if let Some(pool) = pools.get(done.selected) {
-                    if !done.picked.remove(&pool.id) {
-                        if pool.members.len() >= POOL_MEMBERS_MAX {
-                            ctx.say(Message::warning(
-                                "A pool holds at most 15 accounts.",
-                                "Unselect one in the pool editor to add another.",
-                            ));
-                        } else {
-                            done.picked.insert(pool.id.clone());
-                        }
+                if let Some(pool) = pools.get(done.selected)
+                    && !done.picked.remove(&pool.id)
+                {
+                    if pool.members.len() >= POOL_MEMBERS_MAX {
+                        ctx.say(Message::warning(
+                            "A pool holds at most 15 accounts.",
+                            "Unselect one in the pool editor to add another.",
+                        ));
+                    } else {
+                        done.picked.insert(pool.id.clone());
                     }
                 }
             }

@@ -31,10 +31,12 @@ roles = ["leader"]
 fallback_allowed = false
 "#;
 
+type FenceRow = (String, String, i64, String, String, String, String, i64);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     facts: Vec<NativeAuthFact>,
-    fences: Vec<(String, String, i64, String, String, String, String, i64)>,
+    fences: Vec<FenceRow>,
 }
 
 struct LifetimeCase {
@@ -79,7 +81,10 @@ impl Drop for TestChild {
             }
             std::thread::yield_now();
         }
-        eprintln!("test direct-child cleanup uncertain for PID {}", self.0.id());
+        eprintln!(
+            "test direct-child cleanup uncertain for PID {}",
+            self.0.id()
+        );
     }
 }
 
@@ -218,10 +223,16 @@ where
     .await;
     drop(context);
     if timed_out || outcome.is_err() || !matches!(&cleanup, Ok(Ok(()))) {
-        eprintln!("dispatch lifetime evidence retained at {}", root.keep().display());
+        eprintln!(
+            "dispatch lifetime evidence retained at {}",
+            root.keep().display()
+        );
     }
     assert!(matches!(&cleanup, Ok(Ok(()))), "cleanup: {cleanup:?}");
-    assert!(authority.upgrade().is_none(), "dispatch retained a strong Authority cycle");
+    assert!(
+        authority.upgrade().is_none(),
+        "dispatch retained a strong Authority cycle"
+    );
     assert!(!timed_out, "dispatch lifetime case exceeded 30 seconds");
     if let Err(error) = outcome {
         if error.is_panic() {
@@ -298,9 +309,17 @@ impl LifetimeCase {
 
     fn retained_pid(&self) -> rustix::process::Pid {
         let slot = self.host.authority.native_auth.lock().unwrap();
-        let slot = slot.as_ref().expect("actual dispatch slot must remain owned");
-        assert!(slot.dispatch_task.is_some(), "actual dispatcher JoinHandle is absent");
-        let child = slot.child.as_ref().expect("actual custodian Child is absent");
+        let slot = slot
+            .as_ref()
+            .expect("actual dispatch slot must remain owned");
+        assert!(
+            slot.dispatch_task.is_some(),
+            "actual dispatcher JoinHandle is absent"
+        );
+        let child = slot
+            .child
+            .as_ref()
+            .expect("actual custodian Child is absent");
         rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap()
     }
 
@@ -331,18 +350,24 @@ impl LifetimeCase {
             .unwrap();
         rustix::process::test_kill_process(self.retained_pid()).unwrap();
         assert!(
-            rustix::fs::flock(&self.probe(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
-                .is_err()
+            rustix::fs::flock(
+                self.probe(),
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .is_err()
         );
         assert_eq!(self.snapshot().fences.len(), 1);
         (fact, checkpoint)
     }
 
     async fn drain(&self) {
-        tokio::time::timeout(Duration::from_secs(8), self.host.drain_native_auth_dispatch())
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            self.host.drain_native_auth_dispatch(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 
     async fn committed(&self, fact: &NativeAuthFact) -> NativeAuthFact {
@@ -354,7 +379,10 @@ impl LifetimeCase {
         assert_eq!(reply.fact.operation_id, fact.operation_id);
         assert_eq!(reply.fact.generation, fact.generation);
         assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
-        assert_eq!(reply.fact.code.as_deref(), Some("native_auth_host_unavailable"));
+        assert_eq!(
+            reply.fact.code.as_deref(),
+            Some("native_auth_host_unavailable")
+        );
         assert!(reply.account.is_none());
         assert!(reply.challenge.is_none());
         assert!(self.snapshot().fences.is_empty());
@@ -412,7 +440,10 @@ async fn native_auth_dispatch_lifetime_unregistered_embedded_host_is_never_dispa
             .await
             .unwrap();
         assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
-        assert_eq!(reply.fact.code.as_deref(), Some("native_auth_host_unavailable"));
+        assert_eq!(
+            reply.fact.code.as_deref(),
+            Some("native_auth_host_unavailable")
+        );
         assert!(reply.account.is_none());
         assert!(reply.challenge.is_none());
         assert!(case.snapshot().fences.is_empty());
@@ -429,7 +460,10 @@ async fn native_auth_dispatch_lifetime_runtime_dir_joins_actual_generation_and_e
         assert_ne!(root, case.host.authority.root.path);
         let (generation, identity, binding) = runner_binding(&root).unwrap();
         assert_eq!(generation, case.host.authority.root.path);
-        assert_eq!(identity.database_instance(), case.host.identity().db_instance);
+        assert_eq!(
+            identity.database_instance(),
+            case.host.identity().db_instance
+        );
         assert_eq!(identity.engine_epoch(), case.host.identity().engine_epoch);
         binding.verify().unwrap();
     })
@@ -507,8 +541,11 @@ async fn native_auth_dispatch_lifetime_actual_child_and_task_survive_retirement_
         rustix::process::kill_process(pid, rustix::process::Signal::CONT).unwrap();
         case.drain().await;
         assert_reaped(pid);
-        rustix::fs::flock(&case.probe(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .unwrap();
+        rustix::fs::flock(
+            case.probe(),
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
         assert!(case.host.authority.native_auth.lock().unwrap().is_none());
     })
     .await;
@@ -537,7 +574,10 @@ async fn native_auth_dispatch_lifetime_dropped_request_keeps_actual_child_and_ex
             tokio::pin!(pending);
             let mut context = Context::from_waker(Waker::noop());
             let observed = pending.as_mut().poll(&mut context);
-            assert!(matches!(&observed, Poll::Pending), "request poll: {observed:?}");
+            assert!(
+                matches!(&observed, Poll::Pending),
+                "request poll: {observed:?}"
+            );
             drop(requester);
         }
         assert_eq!(case.retained_pid(), pid);
@@ -574,8 +614,11 @@ async fn native_auth_dispatch_lifetime_invalidate_rolls_back_real_pending_retire
         assert_eq!(after.facts.len(), 1);
         assert_eq!(after.facts[0].operation_id, fact.operation_id);
         assert_ne!(after.facts[0].phase, NativeAuthPhase::Unavailable);
-        rustix::fs::flock(&case.probe(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .unwrap();
+        rustix::fs::flock(
+            case.probe(),
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
     })
     .await;
 }
@@ -629,7 +672,8 @@ async fn native_auth_dispatch_lifetime_original_owner_revoke_reaps_retained_comm
         rustix::process::kill_process(pid, rustix::process::Signal::STOP).unwrap();
         checkpoint.release().unwrap();
         case.committed(&fact).await;
-        case.revoke(OwnerClientKind::Tui, "revoke-original-dispatch-owner").await;
+        case.revoke(OwnerClientKind::Tui, "revoke-original-dispatch-owner")
+            .await;
         case.drain().await;
         assert_reaped(pid);
         assert!(case.snapshot().fences.is_empty());
@@ -645,7 +689,8 @@ async fn native_auth_dispatch_lifetime_unrelated_owner_revoke_keeps_actual_child
         rustix::process::kill_process(pid, rustix::process::Signal::STOP).unwrap();
         checkpoint.release().unwrap();
         case.committed(&fact).await;
-        case.revoke(OwnerClientKind::Desktop, "revoke-unrelated-desktop-owner").await;
+        case.revoke(OwnerClientKind::Desktop, "revoke-unrelated-desktop-owner")
+            .await;
         assert_eq!(case.retained_pid(), pid);
         rustix::process::test_kill_process(pid).unwrap();
         rustix::process::kill_process(pid, rustix::process::Signal::CONT).unwrap();
@@ -662,7 +707,8 @@ async fn native_auth_dispatch_lifetime_revoked_handoff_returns_untouched_committ
         let admission = case.admission();
         let (_, work) = case.work("revoked-before-synchronous-handoff").await;
         let before = case.snapshot();
-        case.revoke(OwnerClientKind::Tui, "revoke-before-handoff").await;
+        case.revoke(OwnerClientKind::Tui, "revoke-before-handoff")
+            .await;
         let work = match case.host.retain_native_auth_dispatch(admission, work) {
             Err((_error, work)) => work,
             Ok(()) => panic!("revoked owner handed off actual committed work"),
@@ -769,7 +815,9 @@ async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_preserves_f
                 .spawn()
                 .unwrap(),
         );
-        launch.write_bootstrap(child.0.stdin.take().unwrap()).unwrap();
+        launch
+            .write_bootstrap(child.0.stdin.take().unwrap())
+            .unwrap();
         let exited = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(status) = child.0.try_wait().unwrap() {

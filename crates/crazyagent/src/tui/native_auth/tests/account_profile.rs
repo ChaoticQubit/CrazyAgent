@@ -359,7 +359,7 @@ fn local_receipt(
     assert_eq!(receipt.connection, expected.connection);
     assert_eq!(receipt.config_id, expected.basis.config_id);
     assert_eq!(receipt.source_hash, expected.basis.source_hash);
-    receipt.clone()
+    (**receipt).clone()
 }
 
 #[tokio::test]
@@ -422,7 +422,11 @@ async fn local_none_commits_private_profile_and_recovers_original_receipt_withou
         assert_no_auth(&case);
         let focus = ui.app.focus();
         ui.key(KeyCode::BackTab);
-        assert_ne!(ui.app.focus(), focus, "a finished setup panel must not trap focus");
+        assert_ne!(
+            ui.app.focus(),
+            focus,
+            "a finished setup panel must not trap focus"
+        );
         assert!(!views::body(&ui.app).contains("Private profile setup"));
     })
     .await;

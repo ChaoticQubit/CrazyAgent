@@ -339,7 +339,9 @@ impl State {
             self.collection = ModelAccessCollection::Connections;
             self.managed_setup = None;
             self.notice = match self.open_profile() {
-                Ok(()) if api_key => "Account saved. Type the API key, then press Enter to finish setup".into(),
+                Ok(()) if api_key => {
+                    "Account saved. Type the API key, then press Enter to finish setup".into()
+                }
                 Ok(()) => "Account saved. Press Enter to finish local endpoint setup".into(),
                 Err(_) => concat!(
                     "Account and Unassigned pool saved. Enter reads the connection; ",

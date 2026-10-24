@@ -18,8 +18,7 @@ const COMMAND_QUEUE_MAX: usize = 16;
 
 pub(super) enum CodexHostOutput {
     Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Exited(ExitStatus),
+    Exited,
 }
 
 pub(super) struct WriteRequest {
@@ -45,7 +44,9 @@ pub(super) struct ProcessShared {
 
 impl ProcessShared {
     pub(super) fn lock(&self) -> Result<MutexGuard<'_, ProcessState>, EngineError> {
-        self.state.lock().map_err(|_| EngineError("codex_host_custody_poisoned".into()))
+        self.state
+            .lock()
+            .map_err(|_| EngineError("codex_host_custody_poisoned".into()))
     }
 
     pub(super) fn fail(&self, code: &'static str) {
@@ -157,6 +158,14 @@ impl CodexHostProcess {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn exit_status(&self) -> Option<ExitStatus> {
+        match self.shared.state.lock() {
+            Ok(state) => state.status,
+            Err(poisoned) => poisoned.into_inner().status,
+        }
+    }
+
     pub(super) async fn send(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
         if bytes.is_empty() || bytes.len() > FRAME_BYTES_MAX + 1 {
             return Err(EngineError("codex_host_input_limit".into()));
@@ -171,10 +180,17 @@ impl CodexHostProcess {
             }
         } else {
             let (done, reply) = oneshot::channel();
-            let request = WriteRequest { bytes: bytes.to_vec(), done };
-            self.input.try_send(request)
+            let request = WriteRequest {
+                bytes: bytes.to_vec(),
+                done,
+            };
+            self.input
+                .try_send(request)
                 .map_err(|_| EngineError("codex_host_input_unavailable".into()))?;
-            self.pending_input = Some(PendingInput { bytes: bytes.to_vec(), reply });
+            self.pending_input = Some(PendingInput {
+                bytes: bytes.to_vec(),
+                reply,
+            });
         }
         assert!(self.pending_input.is_some());
         let remaining = self.deadline.saturating_duration_since(Instant::now());
@@ -217,7 +233,9 @@ impl CodexHostProcess {
                     return Ok(output);
                 }
                 if state.complete {
-                    return state.status.map(CodexHostOutput::Exited)
+                    return state
+                        .status
+                        .map(|_| CodexHostOutput::Exited)
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }
@@ -240,7 +258,8 @@ impl CodexHostProcess {
                     return Err(EngineError(code.into()));
                 }
                 if state.complete {
-                    return state.status
+                    return state
+                        .status
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }

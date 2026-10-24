@@ -1,12 +1,13 @@
-import { call, nextGeneration } from "../../api";
+import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { failureCopy, loadResearchLog } from "../../api-projects";
+import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
+import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { nearBottom, researchRow, teamPanel } from "./research";
+import { changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
@@ -61,6 +62,8 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
   const [note, setNote] = useState("");
   const [logOpen, setLogOpen] = useState<number | null>(null);
+  const [busy, setBusy] = useState<number | null>(null);
+  const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
   const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
@@ -72,13 +75,24 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
 
+  function settle(result: Result<IntentReceipt>, done: string, missing: string) {
+    setBusy(null);
+    const outcome = changeOutcome(result, done, missing);
+    setNote(outcome.note);
+    if (outcome.toast) data.notify(outcome.toast);
+    if (outcome.reload) data.reload();
+  }
+
   async function stop(job: ResearchJob) {
     setStopping(null);
-    const result = await call<unknown>("desktop_cancel_research", { id: data.id, job: job.id, generation: nextGeneration() });
-    if (result.kind === "ok") {
-      setNote("");
-      data.reload();
-    } else setNote(result.kind === "not_ready" ? "Not ready yet: stopping an agent isn't in this build." : failureCopy(result.code));
+    setBusy(job.id);
+    const label = displayText(job.kind_label);
+    settle(await cancelResearch(data.id, job.id, nextGeneration()), job.status === "running" ? `Stopping ${label}.` : `${label} cancelled.`, "stopping research");
+  }
+
+  async function retry(job: ResearchJob) {
+    setBusy(job.id);
+    settle(await retryResearch(data.id, job.id, nextGeneration()), `${displayText(job.kind_label)} is queued again.`, "trying research again");
   }
 
   return <div className="pj-stack">
@@ -97,14 +111,16 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);
       const status = agentStatus(row);
+      const actions = researchActions(job);
       return <li className="pj-agent-row" key={job.id}>
         <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
         <span className="pj-secondary pj-small">{harnessName(harnesses, job.harness)}</span>
         <span><Badge word={status.word} tone={status.tone} /> <span className="pj-small pj-secondary">{displayText(row.progress)}</span></span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
-        <span className="pj-row">{job.started_ms !== null && <button type="button" className="btn" aria-expanded={logOpen === job.id} aria-controls={`pj-log-${job.id}`}
+        <span className="pj-row">{actions.log && <button type="button" className="btn" aria-expanded={logOpen === job.id} aria-controls={`pj-log-${job.id}`}
           onClick={() => setLogOpen(logOpen === job.id ? null : job.id)}>{logOpen === job.id ? "Hide log" : "View log"}</button>}
-          {job.status === "running" && !job.cancel_requested && <button type="button" className="btn danger-text" onClick={() => setStopping(job)}>Stop</button>}</span>
+          {actions.retry && <button type="button" className="btn" disabled={busy === job.id} onClick={() => void retry(job)}>Try again</button>}
+          {actions.stop && <button type="button" className="btn danger-text" disabled={busy === job.id} onClick={() => setStopping(job)}>{actions.stop}</button>}</span>
         <span className="pj-wt pj-small pj-muted">Writes <span className="pj-mono">{displayText(job.report_path)}</span>. Tools {job.tools ? "on" : "off"}.{job.attempts > 1 ? ` Attempt ${job.attempts}.` : ""}</span>
         {logOpen === job.id && <AgentLog data={data} job={job} />}
       </li>;
@@ -112,9 +128,10 @@ export function AgentsTab({ data }: { data: ProjectData }) {
       <ProjectEmpty title={filter === "running" && jobs.length ? "No agents running right now" : "No agents yet"}>
         Research agents start from the Work step, and the master starts agents when you ask it to build something.
       </ProjectEmpty>}
-    <ConfirmDialog open={stopping !== null} title={`Stop ${displayText(stopping?.kind_label ?? "this agent")}?`} confirmLabel="Stop agent" cancelLabel="Keep running"
+    <ConfirmDialog open={stopping !== null} title={`${waits ? "Cancel" : "Stop"} ${displayText(stopping?.kind_label ?? "this agent")}?`}
+      confirmLabel={waits ? "Cancel research" : "Stop agent"} cancelLabel={waits ? "Keep it" : "Keep running"}
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
-      Work so far stays in its working copy.
+      {waits ? "It won't start. Try again queues it later." : "Work so far stays in its working copy. Try again starts it over."}
     </ConfirmDialog>
   </div>;
 }

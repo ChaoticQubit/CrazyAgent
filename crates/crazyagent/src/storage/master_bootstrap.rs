@@ -88,7 +88,10 @@ fn current_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<
              WHERE id=?1 AND project=?2 AND phase='configured' AND version=?3 AND created=?4
              AND length(CAST(body AS BLOB)) BETWEEN 1 AND ?5",
             params![
-                session.session_id.as_str(), session.project_id.as_str(), version, created,
+                session.session_id.as_str(),
+                session.project_id.as_str(),
+                version,
+                created,
                 SESSION_BYTES_MAX,
             ],
             |row| row.get(0),
@@ -106,18 +109,28 @@ fn current_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<
         return Err(error("master_bootstrap_scope_conflict"));
     }
     let instance: String = tx
-        .query_row("SELECT db_instance FROM owner_meta WHERE singleton=1", [], |row| row.get(0))
+        .query_row(
+            "SELECT db_instance FROM owner_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
         .map_err(error)?;
-    check_owner_admission(tx, &Admission {
-        db_instance: instance,
-        engine_epoch: session.owner.engine_epoch.clone(),
-        owner_id: session.owner.owner_id.clone(),
-        owner_epoch: session.owner.resulting_epoch,
-    })?;
+    check_owner_admission(
+        tx,
+        &Admission {
+            db_instance: instance,
+            engine_epoch: session.owner.engine_epoch.clone(),
+            owner_id: session.owner.owner_id.clone(),
+            owner_epoch: session.owner.resulting_epoch,
+        },
+    )?;
     committed_open(tx, session)?;
     let task: bool = tx
-        .query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
-            [session.bootstrap_task_id.as_str()], |row| row.get(0))
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [session.bootstrap_task_id.as_str()],
+            |row| row.get(0),
+        )
         .map_err(error)?;
     if task {
         return Err(error("master_bootstrap_scope_conflict"));
@@ -130,8 +143,13 @@ fn current_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<
 fn committed_open(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(), EngineError> {
     let owner = &session.owner;
     let Some((actual, result)) = owner_lookup(
-        tx, "native_owner", &owner.owner_id, &owner.operation_id, Some(&owner.request_hash),
-    )? else {
+        tx,
+        "native_owner",
+        &owner.owner_id,
+        &owner.operation_id,
+        Some(&owner.request_hash),
+    )?
+    else {
         return Err(error("master_bootstrap_scope_conflict"));
     };
     let request = OwnerRequest {
@@ -144,7 +162,7 @@ fn committed_open(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(
                     project_id: session.project_id.clone(),
                     expected_config_id: session.config_id.clone(),
                     expected_source_hash: session.source_hash.clone(),
-                    selection: session.selection.clone(),
+                    selection: Box::new(session.selection.clone()),
                 },
             },
         },
@@ -163,7 +181,9 @@ fn committed_open(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(
 }
 
 fn declared_repository(
-    tx: &Transaction<'_>, session: &MasterSessionView, repository: &str,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    repository: &str,
 ) -> Result<(), EngineError> {
     if repository.is_empty() || repository.len() > 4096 || !Path::new(repository).is_absolute() {
         return Err(error("master_bootstrap_scope_conflict"));
@@ -177,12 +197,16 @@ fn declared_repository(
         )
         .optional()
         .map_err(error)?;
-    let project: StoredProject = serde_json::from_str(
-        &body.ok_or_else(|| error("master_bootstrap_scope_conflict"))?,
-    ).map_err(error)?;
+    let project: StoredProject =
+        serde_json::from_str(&body.ok_or_else(|| error("master_bootstrap_scope_conflict"))?)
+            .map_err(error)?;
     project.spec.validate().map_err(error)?;
     if project.project_id != session.project_id
-        || !project.spec.repositories.iter().any(|item| item == repository)
+        || !project
+            .spec
+            .repositories
+            .iter()
+            .any(|item| item == repository)
     {
         return Err(error("master_bootstrap_scope_conflict"));
     }
@@ -192,7 +216,9 @@ fn declared_repository(
 }
 
 fn admission_hash(
-    tx: &Transaction<'_>, session: &MasterSessionView, repository: &str,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    repository: &str,
 ) -> Result<Option<String>, EngineError> {
     let row: Option<Option<String>> = tx
         .query_row(
@@ -206,11 +232,13 @@ fn admission_hash(
     row.map(|body| {
         let body = body.ok_or_else(|| error("master_bootstrap_receipt_conflict"))?;
         Ok(format!("{:x}", Sha256::digest(body.as_bytes())))
-    }).transpose()
+    })
+    .transpose()
 }
 
 fn load_receipt(
-    tx: &Transaction<'_>, session: &MasterSessionView,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
 ) -> Result<Option<Receipt>, EngineError> {
     let row: Option<(Option<String>, Option<String>)> = tx
         .query_row(
@@ -226,19 +254,21 @@ fn load_receipt(
     row.map(|(allocation, body)| {
         let allocation = allocation.ok_or_else(|| error("master_bootstrap_receipt_conflict"))?;
         let body = body.ok_or_else(|| error("master_bootstrap_receipt_conflict"))?;
-        let receipt: Receipt = serde_json::from_str(&body)
-            .map_err(|_| error("master_bootstrap_receipt_conflict"))?;
+        let receipt: Receipt =
+            serde_json::from_str(&body).map_err(|_| error("master_bootstrap_receipt_conflict"))?;
         if receipt.allocation.as_str() != allocation {
             return Err(error("master_bootstrap_receipt_conflict"));
         }
         assert!(body.len() <= RECEIPT_BYTES_MAX);
         assert_eq!(receipt.allocation.as_str(), allocation);
         Ok(receipt)
-    }).transpose()
+    })
+    .transpose()
 }
 
 fn only_lease(
-    tx: &Transaction<'_>, session: &MasterSessionView,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
 ) -> Result<WorktreeLease, EngineError> {
     let Outcome::Worktrees { mut leases } = worktrees::leases(tx, &session.bootstrap_task_id)?
     else {
@@ -263,7 +293,9 @@ fn only_lease(
 }
 
 fn validate_receipt(
-    tx: &Transaction<'_>, session: &MasterSessionView, proof: &MasterBootstrapAuth,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    proof: &MasterBootstrapAuth,
     receipt: &Receipt,
 ) -> Result<WorktreeLease, EngineError> {
     if receipt.purpose != PURPOSE
@@ -277,7 +309,11 @@ fn validate_receipt(
         || receipt.at_revision.value() < session.owner.revision_after.value()
         || receipt.at_revision.value() > owner_revision(tx)?
         || receipt.lease.state != LeaseState::Reserved
-        || !receipt.allocation.as_str().strip_prefix("master-workspace-").is_some_and(is_hex_id)
+        || !receipt
+            .allocation
+            .as_str()
+            .strip_prefix("master-workspace-")
+            .is_some_and(is_hex_id)
     {
         return Err(error("master_bootstrap_receipt_conflict"));
     }
@@ -299,10 +335,16 @@ fn validate_receipt(
 }
 
 pub(super) fn reserve(
-    tx: &Transaction<'_>, runtime_dir: &Path, session: &MasterSessionView, repository: &str,
+    tx: &Transaction<'_>,
+    runtime_dir: &Path,
+    session: &MasterSessionView,
+    repository: &str,
     proof: impl Into<MasterBootstrapAuth>,
 ) -> Result<RequestId, EngineError> {
-    assert!(!tx.is_autocommit(), "bootstrap reservation requires an active transaction");
+    assert!(
+        !tx.is_autocommit(),
+        "bootstrap reservation requires an active transaction"
+    );
     let proof = proof.into();
     super::master_session::validate_bootstrap_auth(tx, session, &proof)?;
     current_session(tx, session)?;
@@ -310,9 +352,11 @@ pub(super) fn reserve(
     if load_receipt(tx, session)?.is_some() {
         return Err(error("master_bootstrap_receipt_conflict"));
     }
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| row.get(0),
-    ).map_err(error)?;
+    let count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
     if count >= RECEIPTS_MAX {
         return Err(error("master_bootstrap_capacity"));
     }
@@ -320,8 +364,12 @@ pub(super) fn reserve(
         require_applied(worktrees::admit(tx, &session.project_id, repository)?)?;
     }
     require_applied(worktrees::reserve_master_bootstrap(
-        tx, runtime_dir, &session.project_id, &session.bootstrap_task_id,
-        &session.session_id, repository,
+        tx,
+        runtime_dir,
+        &session.project_id,
+        &session.bootstrap_task_id,
+        &session.session_id,
+        repository,
     )?)?;
     let lease = only_lease(tx, session)?;
     if lease.state != LeaseState::Reserved || lease.repository != repository {
@@ -357,7 +405,9 @@ fn require_applied(outcome: Outcome) -> Result<(), EngineError> {
 }
 
 fn persist_receipt(
-    tx: &Transaction<'_>, session: &MasterSessionView, receipt: &Receipt,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    receipt: &Receipt,
 ) -> Result<(), EngineError> {
     let body = serde_json::to_string(receipt).map_err(error)?;
     if body.len() > RECEIPT_BYTES_MAX {
@@ -365,24 +415,35 @@ fn persist_receipt(
     }
     let lease = validate_receipt(tx, session, &receipt.proof, receipt)?;
     assert_eq!(lease.state, LeaseState::Reserved);
-    let inserted = tx.execute(
-        "INSERT INTO bootstrap_workspaces(session,allocation,body) VALUES (?1,?2,?3)",
-        params![session.session_id.as_str(), receipt.allocation.as_str(), body],
-    ).map_err(error)?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO bootstrap_workspaces(session,allocation,body) VALUES (?1,?2,?3)",
+            params![
+                session.session_id.as_str(),
+                receipt.allocation.as_str(),
+                body
+            ],
+        )
+        .map_err(error)?;
     assert_eq!(inserted, 1);
     assert!(load_receipt(tx, session)?.as_ref() == Some(receipt));
     Ok(())
 }
 
 pub(super) fn ready(
-    tx: &Transaction<'_>, session: &MasterSessionView, proof: impl Into<MasterBootstrapAuth>,
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    proof: impl Into<MasterBootstrapAuth>,
 ) -> Result<(RequestId, WorktreeLease), EngineError> {
-    assert!(!tx.is_autocommit(), "bootstrap receipt read requires an active transaction");
+    assert!(
+        !tx.is_autocommit(),
+        "bootstrap receipt read requires an active transaction"
+    );
     let proof = proof.into();
     super::master_session::validate_bootstrap_auth(tx, session, &proof)?;
     current_session(tx, session)?;
-    let receipt = load_receipt(tx, session)?
-        .ok_or_else(|| error("master_bootstrap_receipt_missing"))?;
+    let receipt =
+        load_receipt(tx, session)?.ok_or_else(|| error("master_bootstrap_receipt_missing"))?;
     let lease = validate_receipt(tx, session, &proof, &receipt)?;
     match &lease.state {
         LeaseState::Reserved => return Err(error("master_bootstrap_reserved")),

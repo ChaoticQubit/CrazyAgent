@@ -1033,9 +1033,16 @@ async fn ambiguous_worker_binding_cannot_block_a_valid_planning_allocation() {
 
 #[tokio::test]
 async fn imp1038_unassigned_and_partial_pools_cannot_persist_a_plan() {
-    for (projects, roles) in [("[]", "[]"), ("[]", "[\"worker\"]"), ("[\"project-a\"]", "[]")] {
+    for (projects, roles) in [
+        ("[]", "[]"),
+        ("[]", "[\"worker\"]"),
+        ("[\"project-a\"]", "[]"),
+    ] {
         let catalog = CATALOG
-            .replace("projects = [\"project-a\"]", &format!("projects = {projects}"))
+            .replace(
+                "projects = [\"project-a\"]",
+                &format!("projects = {projects}"),
+            )
             .replace("roles = [\"worker\"]", &format!("roles = {roles}"));
         rejected_pool(
             "project-a",

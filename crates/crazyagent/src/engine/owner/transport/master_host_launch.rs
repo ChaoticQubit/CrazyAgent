@@ -133,7 +133,10 @@ fn require_master_tool_policy() -> Result<(), EngineError> {
         "web_search=\"disabled\"",
         "mcp_servers={}",
     ];
-    if required.iter().all(|setting| MASTER_CONFIG.contains(setting)) {
+    if required
+        .iter()
+        .all(|setting| MASTER_CONFIG.contains(setting))
+    {
         Ok(())
     } else {
         Err(failure("master_runtime_backend_unsupported"))
@@ -275,7 +278,9 @@ pub(super) fn master_sandbox(
     Ok(installed)
 }
 
-pub(super) fn allocate_master_capture(root: &Root) -> Result<(RequestId, RequestId, File), EngineError> {
+pub(super) fn allocate_master_capture(
+    root: &Root,
+) -> Result<(RequestId, RequestId, File), EngineError> {
     for _ in 0..CAPTURE_ALLOCATION_ATTEMPTS {
         root.verify()?;
         let runtime_ref = RequestId::new(random_id()?).map_err(io_error)?;
@@ -451,8 +456,14 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(!args.iter().any(|arg| arg.starts_with("model=")), "{args:?}");
-        assert!(args.windows(2).any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""]));
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("model=")),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
+        );
         assert!(args.ends_with(&["app-server", "--listen", "stdio://"]));
     }
 

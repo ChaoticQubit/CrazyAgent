@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 fn ollama() -> AccountPick {
     AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
-        account: ResearchAccount::Endpoint {
+        account: Box::new(ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
-        },
+        }),
     }
 }
 
@@ -152,10 +152,10 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
                 project.clone(),
                 AccountPick::Account {
                     connection: CredentialRef::new("hanging-connection").unwrap(),
-                    account: ResearchAccount::Endpoint {
+                    account: Box::new(ResearchAccount::Endpoint {
                         base_url: format!("http://127.0.0.1:{port}/v1"),
                         model: "hanging-model".into(),
-                    },
+                    }),
                 },
             )
         })

@@ -3,31 +3,31 @@ pub mod bridge;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
+use bridge::memory::{MemoryList, MemoryNote};
+use bridge::picker::Pick;
+use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
 };
-use bridge::picker::Pick;
-use bridge::project_setup::{MemoryItem, ResearchLog};
-use bridge::memory::{MemoryList, MemoryNote};
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::AgentView;
 use crazyagent::config::ModelAccessEdit;
-use crazyagent::harnesses::HarnessEntry;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
 };
+use crazyagent::harnesses::HarnessEntry;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
-use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
-};
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;
+use crazyagent::project_setup::{
+    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::team::TeamStatus;
 use std::sync::Arc;
@@ -257,9 +257,7 @@ async fn desktop_project_memories(
     after: Option<String>,
 ) -> Result<Vec<MemoryItem>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
-        .project_memories(&id, after.as_deref())
-        .await
+    lock(&state)?.project_memories(&id, after.as_deref()).await
 }
 
 #[tauri::command]
@@ -948,7 +946,9 @@ async fn desktop_add_mcp_server(
     secrets: Vec<(String, String)>,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.add_mcp_server(scope, name, spec, secrets).await
+    lock(&state)?
+        .add_mcp_server(scope, name, spec, secrets)
+        .await
 }
 
 #[tauri::command]
@@ -1092,22 +1092,26 @@ async fn desktop_restart_agent(
 #[tauri::command]
 async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
-    Ok(match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
-        Pick::Canceled => None,
-        Pick::Paths(mut paths) => {
-            assert!(!paths.is_empty());
-            Some(paths.swap_remove(0))
-        }
-    })
+    Ok(
+        match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
+            Pick::Canceled => None,
+            Pick::Paths(mut paths) => {
+                assert!(!paths.is_empty());
+                Some(paths.swap_remove(0))
+            }
+        },
+    )
 }
 
 #[tauri::command]
 async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    Ok(match bridge::picker::choose(bridge::picker::DOCUMENTS_SCRIPT).await? {
-        Pick::Canceled => Vec::new(),
-        Pick::Paths(paths) => paths,
-    })
+    Ok(
+        match bridge::picker::choose(bridge::picker::DOCUMENTS_SCRIPT).await? {
+            Pick::Canceled => Vec::new(),
+            Pick::Paths(paths) => paths,
+        },
+    )
 }
 
 #[tauri::command]
@@ -1216,11 +1220,13 @@ async fn desktop_submit_claude_auth_code(
     let mut bridge = Arc::clone(&state.0)
         .try_lock_owned()
         .map_err(|_| BridgeError { code: "busy" })?;
-    tauri::async_runtime::spawn(async move {
-        bridge.submit_claude_auth_code(&ticket, secret).await
-    })
+    tauri::async_runtime::spawn(
+        async move { bridge.submit_claude_auth_code(&ticket, secret).await },
+    )
     .await
-    .map_err(|_| BridgeError { code: "native_auth_claude_input_outcome_unknown" })?
+    .map_err(|_| BridgeError {
+        code: "native_auth_claude_input_outcome_unknown",
+    })?
 }
 
 #[tauri::command]

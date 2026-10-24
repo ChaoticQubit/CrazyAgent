@@ -179,17 +179,16 @@ impl NativeBridge {
             operation.pending = true;
             return Err(failure("account_profile_identity_mismatch"));
         }
-        if let AccountProfileOutcome::ConfiguredOnly { receipt, .. } = &reply.outcome {
-            if receipt.connection != operation.connection
+        if let AccountProfileOutcome::ConfiguredOnly { receipt, .. } = &reply.outcome
+            && (receipt.connection != operation.connection
                 || receipt.config_id != scope.expected_config_id
                 || receipt.source_hash != scope.expected_source_hash
                 || receipt.custody_id.is_empty()
                 || receipt.profile_generation == 0
-                || receipt.profile_config_sha256.len() != 64
-            {
-                operation.pending = true;
-                return Err(failure("account_profile_identity_mismatch"));
-            }
+                || receipt.profile_config_sha256.len() != 64)
+        {
+            operation.pending = true;
+            return Err(failure("account_profile_identity_mismatch"));
         }
         assert_eq!(reply.request_id, operation.request.request_id);
         assert_eq!(operation.connection.id, scope.connection);

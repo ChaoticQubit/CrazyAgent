@@ -74,8 +74,11 @@ struct CodexProgress {
 
 impl NativeAuthSlot {
     fn cached(&self) -> bool {
-        self.committed && (self.progress.is_some() || self.claude_progress.is_some()) && self.dispatch_task.is_none()
-            && self.child.is_none() && !self.cleaning
+        self.committed
+            && (self.progress.is_some() || self.claude_progress.is_some())
+            && self.dispatch_task.is_none()
+            && self.child.is_none()
+            && !self.cleaning
     }
 }
 
@@ -388,7 +391,8 @@ impl OwnerRuntimeHandle {
             .native_auth_host
             .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        if registration.frozen || registration.disabled || registration.claude_executable.is_some() {
+        if registration.frozen || registration.disabled || registration.claude_executable.is_some()
+        {
             return Err(failure("native_auth_host_registration_frozen"));
         }
         registration.claude_executable = Some(Arc::new(host));
@@ -551,31 +555,34 @@ impl OwnerRuntimeHandle {
         &self,
         admission: Admission,
         work: NativeAuthWork,
-    ) -> Result<(), (EngineError, NativeAuthWork)> {
+    ) -> Result<(), (EngineError, Box<NativeAuthWork>)> {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
-            Err(_) => return Err((failure("native_auth_host_unavailable"), work)),
+            Err(_) => return Err((failure("native_auth_host_unavailable"), Box::new(work))),
         };
         let mut registration = match self.authority.native_auth_host.lock() {
             Ok(registration) => registration,
-            Err(_) => return Err((failure("native_auth_recovery_required"), work)),
+            Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
         registration.frozen = true;
         if registration.disabled || registration.executable.is_none() {
-            return Err((failure("native_auth_host_unavailable"), work));
+            return Err((failure("native_auth_host_unavailable"), Box::new(work)));
         }
-        if let Err(error) = self.authority.verify_native_auth_admission(&admission, work.fact()) {
-            return Err((error, work));
+        if let Err(error) = self
+            .authority
+            .verify_native_auth_admission(&admission, work.fact())
+        {
+            return Err((error, Box::new(work)));
         }
         let mut current = match self.authority.native_auth.lock() {
             Ok(current) => current,
-            Err(_) => return Err((failure("native_auth_recovery_required"), work)),
+            Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
         if current.as_ref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if current.is_some() {
-            return Err((failure("native_auth_host_busy"), work));
+            return Err((failure("native_auth_host_busy"), Box::new(work)));
         }
         let fact = work.fact().clone();
         let host = NativeAuthDispatchHost {
@@ -594,7 +601,9 @@ impl OwnerRuntimeHandle {
             live: Arc::new(AtomicBool::new(false)),
             expired: false,
             supervisor: None,
-            dispatch_task: Some(runtime.spawn(crate::engine::native_auth_host::dispatch(work, host))),
+            dispatch_task: Some(
+                runtime.spawn(crate::engine::native_auth_host::dispatch(work, host)),
+            ),
             child: None,
             retained: true,
             cleaning: false,
@@ -625,9 +634,12 @@ impl OwnerRuntimeHandle {
     }
 
     pub(crate) async fn drain_native_auth_dispatch(&self) -> Result<(), EngineError> {
-        self.authority.drain_native_auth_dispatch(&self.engine).await
+        self.authority
+            .drain_native_auth_dispatch(&self.engine)
+            .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_native_auth_custody(
         &self,
         work: NativeAuthWork,
@@ -675,7 +687,7 @@ impl OwnerRuntimeHandle {
                 Ok(()) => Ok(begun.reply),
                 Err((_error, work)) => self
                     .engine
-                    .native_auth_job(|reply| Job::NativeAuthFinish(admission, Box::new(work), reply))
+                    .native_auth_job(|reply| Job::NativeAuthFinish(admission, work, reply))
                     .await
                     .map_err(|error| {
                         if error.0 == "owner_queue_not_submitted" {
@@ -691,14 +703,28 @@ impl OwnerRuntimeHandle {
 
 impl Authority {
     fn native_auth_presentation(&self, reply: &mut NativeAuthReply) -> Result<(), EngineError> {
-        let current = self.native_auth.lock()
+        let current = self
+            .native_auth
+            .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        let Some(slot) = current.as_ref().filter(|slot| !slot.expired) else { return Ok(()); };
-        if self.claude_presentation(slot, reply)? { return Ok(()); }
-        let Some(progress) = slot.progress.as_ref().filter(|progress| progress.fact == reply.fact)
-            else { return Ok(()); };
-        self.verify_native_auth_origin(slot.dispatch.as_ref()
-            .ok_or_else(|| failure("native_auth_recovery_required"))?)?;
+        let Some(slot) = current.as_ref().filter(|slot| !slot.expired) else {
+            return Ok(());
+        };
+        if self.claude_presentation(slot, reply)? {
+            return Ok(());
+        }
+        let Some(progress) = slot
+            .progress
+            .as_ref()
+            .filter(|progress| progress.fact == reply.fact)
+        else {
+            return Ok(());
+        };
+        self.verify_native_auth_origin(
+            slot.dispatch
+                .as_ref()
+                .ok_or_else(|| failure("native_auth_recovery_required"))?,
+        )?;
         apply_codex_presentation(reply, progress.challenge.clone(), progress.account.clone())
     }
 
@@ -817,9 +843,7 @@ impl Authority {
         let (index, slot) = slots
             .iter()
             .enumerate()
-            .find(|(_, slot)| {
-                slot.registration.active && &slot.registration.admission == admission
-            })
+            .find(|(_, slot)| slot.registration.active && &slot.registration.admission == admission)
             .ok_or_else(|| failure("owner_grant_stale_or_revoked"))?;
         self.root
             .verify_key(KEYS[index], &slot.file, slot.identity)?;
@@ -882,7 +906,7 @@ impl Authority {
                 cleaning: false,
                 committed: false,
                 progress: None,
-            claude_progress: None,
+                claude_progress: None,
             });
         }
         assert!(
@@ -968,7 +992,11 @@ impl Authority {
     pub(super) fn native_auth_dispatch_pending(&self) -> bool {
         self.native_auth
             .lock()
-            .map(|current| current.as_ref().is_some_and(|slot| slot.dispatch_task.is_some()))
+            .map(|current| {
+                current
+                    .as_ref()
+                    .is_some_and(|slot| slot.dispatch_task.is_some())
+            })
             .unwrap_or(false)
     }
 
@@ -978,7 +1006,10 @@ impl Authority {
                 Ok(current) => current,
                 Err(_) => return Poll::Ready(Err(failure("native_auth_recovery_required"))),
             };
-            let Some(task) = current.as_mut().and_then(|slot| slot.dispatch_task.as_mut()) else {
+            let Some(task) = current
+                .as_mut()
+                .and_then(|slot| slot.dispatch_task.as_mut())
+            else {
                 return Poll::Ready(Ok(()));
             };
             let Poll::Ready(result) = Pin::new(task).poll(context) else {
@@ -1013,12 +1044,14 @@ impl Authority {
             slot.cleaning = true;
             (slot.fact.clone(), slot.child.take().unwrap())
         };
-        let result = cleanup_direct_child(
-            &mut child,
-            std::time::Instant::now() + CLEANUP_BOUND,
-        );
-        let mut current = self.native_auth.lock().unwrap_or_else(|error| error.into_inner());
-        let slot = current.as_mut().expect("native auth cleanup retains its slot");
+        let result = cleanup_direct_child(&mut child, std::time::Instant::now() + CLEANUP_BOUND);
+        let mut current = self
+            .native_auth
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let slot = current
+            .as_mut()
+            .expect("native auth cleanup retains its slot");
         assert_eq!(slot.fact, fact);
         assert!(slot.cleaning && slot.child.is_none());
         slot.cleaning = false;
@@ -1038,7 +1071,10 @@ impl Authority {
         result
     }
 
-    pub(super) async fn drain_native_auth_dispatch(&self, engine: &Engine) -> Result<(), EngineError> {
+    pub(super) async fn drain_native_auth_dispatch(
+        &self,
+        engine: &Engine,
+    ) -> Result<(), EngineError> {
         let mut task_error = None;
         let mut cleanup_deadline = None;
         loop {
@@ -1133,7 +1169,10 @@ fn custody_loss_undelivered(error: &EngineError) -> bool {
 
 impl Drop for Authority {
     fn drop(&mut self) {
-        let current = self.native_auth.get_mut().unwrap_or_else(|error| error.into_inner());
+        let current = self
+            .native_auth
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(slot) = current.as_mut() {
             slot.live.store(false, Ordering::SeqCst);
             if let Some(task) = &slot.supervisor {
@@ -1203,7 +1242,8 @@ struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     observation: Option<CodexAuthObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    claude_observation: Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthObservation>,
+    claude_observation:
+        Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthObservation>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -1340,7 +1380,8 @@ impl Session {
             || request.seq != *expected
             || (request.kind == RequestKind::ObserveCodex) != request.observation.is_some()
             || (request.kind == RequestKind::ObserveClaude) != request.claude_observation.is_some()
-            || (request.kind == RequestKind::TakeClaudeInput && fact.binding.connection.harness.as_str() != "claude")
+            || (request.kind == RequestKind::TakeClaudeInput
+                && fact.binding.connection.harness.as_str() != "claude")
         {
             return Err(failure("native_auth_frame_scope"));
         }
@@ -1368,7 +1409,7 @@ impl Session {
             slot.committed = true;
             if !after_child_reaped {
                 slot.progress = None;
-            slot.claude_progress = None;
+                slot.claude_progress = None;
             }
             if !slot.retained
                 && slot.dispatch_task.is_none()
@@ -1386,24 +1427,43 @@ impl Session {
     fn validate_observation(&self, event: &CodexAuthObservation) -> Result<(), EngineError> {
         event.validate()?;
         let owner = self.validate()?;
-        let current = owner.native_auth.lock()
+        let current = owner
+            .native_auth
+            .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        let slot = current.as_ref().filter(|slot| slot.dispatch.as_ref()
-            .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch)))
+        let slot = current
+            .as_ref()
+            .filter(|slot| {
+                slot.dispatch
+                    .as_ref()
+                    .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch))
+            })
             .ok_or_else(|| failure("native_auth_recovery_required"))?;
         if event.request_id().is_some_and(|id| {
-            id <= slot.progress.as_ref().map_or(0, |progress| progress.request_id)
+            id <= slot
+                .progress
+                .as_ref()
+                .map_or(0, |progress| progress.request_id)
         }) {
             return Err(failure("native_auth_observation_order"));
         }
         match event {
             CodexAuthObservation::LoginStarted { .. }
-                if slot.progress.as_ref().is_some_and(|progress| progress.login_id.is_some()) => {
+                if slot
+                    .progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.login_id.is_some()) =>
+            {
                 return Err(failure("native_auth_observation_order"));
             }
             CodexAuthObservation::LoginCompleted { login_id, .. }
-                if login_id.is_none() || login_id.as_deref() != slot.progress.as_ref()
-                    .and_then(|progress| progress.login_id.as_deref()) => {
+                if login_id.is_none()
+                    || login_id.as_deref()
+                        != slot
+                            .progress
+                            .as_ref()
+                            .and_then(|progress| progress.login_id.as_deref()) =>
+            {
                 return Err(failure("native_auth_observation_scope"));
             }
             _ => {}
@@ -1411,25 +1471,53 @@ impl Session {
         Ok(())
     }
 
-    fn record_observation(&self, event: &CodexAuthObservation, fact: NativeAuthFact) -> Result<(), EngineError> {
+    fn record_observation(
+        &self,
+        event: &CodexAuthObservation,
+        fact: NativeAuthFact,
+    ) -> Result<(), EngineError> {
         let owner = self.validate()?;
-        let mut current = owner.native_auth.lock()
+        let mut current = owner
+            .native_auth
+            .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        let slot = current.as_mut().filter(|slot| slot.dispatch.as_ref()
-            .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch)))
+        let slot = current
+            .as_mut()
+            .filter(|slot| {
+                slot.dispatch
+                    .as_ref()
+                    .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch))
+            })
             .ok_or_else(|| failure("native_auth_recovery_required"))?;
         let login_id = match event {
             CodexAuthObservation::LoginStarted { login_id, .. } => Some(login_id.clone()),
-            _ => slot.progress.as_ref().and_then(|progress| progress.login_id.clone()),
+            _ => slot
+                .progress
+                .as_ref()
+                .and_then(|progress| progress.login_id.clone()),
         };
         let request_id = event.request_id().unwrap_or_else(|| {
-            slot.progress.as_ref().map_or(0, |progress| progress.request_id)
+            slot.progress
+                .as_ref()
+                .map_or(0, |progress| progress.request_id)
         });
-        let challenge = if fact.phase == NativeAuthPhase::AwaitingOwner { event.challenge()? }
-            else { None };
-        let account = if fact.phase == NativeAuthPhase::AuthenticatedObserved { event.account()? }
-            else { None };
-        slot.progress = Some(CodexProgress { fact, login_id, request_id, challenge, account });
+        let challenge = if fact.phase == NativeAuthPhase::AwaitingOwner {
+            event.challenge()?
+        } else {
+            None
+        };
+        let account = if fact.phase == NativeAuthPhase::AuthenticatedObserved {
+            event.account()?
+        } else {
+            None
+        };
+        slot.progress = Some(CodexProgress {
+            fact,
+            login_id,
+            request_id,
+            challenge,
+            account,
+        });
         assert!(slot.progress.is_some());
         assert!(!slot.committed);
         Ok(())
@@ -1443,8 +1531,10 @@ async fn custody_reply(
     reader: &mut tokio::net::unix::ReadHalf<'_>,
 ) -> Result<Reply, EngineError> {
     session.validate()?;
-    let retirement = matches!(request.kind,
-        RequestKind::RetireNoEffect | RequestKind::RetireAfterChildReaped);
+    let retirement = matches!(
+        request.kind,
+        RequestKind::RetireNoEffect | RequestKind::RetireAfterChildReaped
+    );
     if let Some(event) = &request.observation {
         session.validate_observation(event)?;
     }
@@ -1466,17 +1556,31 @@ async fn custody_reply(
                 })
                 .await
         } else if let Some(event) = &request.observation {
-            engine.native_auth_job(|reply| Job::NativeAuthCustodyObserve(
-                NativeAuthCustodyObservation {
-                    dispatch: session.dispatch.clone(), live: session.live.clone(), event: claude::CustodyEvent::Codex(event.clone()),
-                }, reply,
-            )).await
+            engine
+                .native_auth_job(|reply| {
+                    Job::NativeAuthCustodyObserve(
+                        NativeAuthCustodyObservation {
+                            dispatch: session.dispatch.clone(),
+                            live: session.live.clone(),
+                            event: claude::CustodyEvent::Codex(event.clone()),
+                        },
+                        reply,
+                    )
+                })
+                .await
         } else if let Some(event) = &request.claude_observation {
-            engine.native_auth_job(|reply| Job::NativeAuthCustodyObserve(
-                NativeAuthCustodyObservation {
-                    dispatch: session.dispatch.clone(), live: session.live.clone(), event: claude::CustodyEvent::Claude(event.clone()),
-                }, reply,
-            )).await
+            engine
+                .native_auth_job(|reply| {
+                    Job::NativeAuthCustodyObserve(
+                        NativeAuthCustodyObservation {
+                            dispatch: session.dispatch.clone(),
+                            live: session.live.clone(),
+                            event: claude::CustodyEvent::Claude(event.clone()),
+                        },
+                        reply,
+                    )
+                })
+                .await
         } else {
             check(engine, session).await
         }
@@ -1500,7 +1604,10 @@ async fn custody_reply(
         if let Some(event) = &request.claude_observation {
             session.record_claude(event, fact.clone())?;
         }
-        if matches!(fact.phase, NativeAuthPhase::Cancelling | NativeAuthPhase::Cancelled) {
+        if matches!(
+            fact.phase,
+            NativeAuthPhase::Cancelling | NativeAuthPhase::Cancelled
+        ) {
             ReplyKind::Cancel
         } else {
             ReplyKind::Continue
@@ -1526,15 +1633,23 @@ async fn serve_session(
     loop {
         let (frame, deadline) = read_custody_frame(&mut reader, timeout).await?;
         let request = session.request(&frame, &mut expected)?;
-        let retirement = matches!(request.kind,
-            RequestKind::RetireNoEffect | RequestKind::RetireAfterChildReaped);
+        let retirement = matches!(
+            request.kind,
+            RequestKind::RetireNoEffect | RequestKind::RetireAfterChildReaped
+        );
         let exchange = async {
             let mut reply = custody_reply(engine, session, &request, &mut reader).await?;
-            let secret = if request.kind == RequestKind::TakeClaudeInput { session.take_claude_code(&reply.fact)? } else { None };
+            let secret = if request.kind == RequestKind::TakeClaudeInput {
+                session.take_claude_code(&reply.fact)?
+            } else {
+                None
+            };
             reply.claude_input = secret.is_some();
             let frame = encode_frame(&reply).map_err(io_error)?;
             writer.write_all(&frame).await.map_err(io_error)?;
-            if let Some(secret) = secret { claude::write_secret(&mut writer, secret).await?; }
+            if let Some(secret) = secret {
+                claude::write_secret(&mut writer, secret).await?;
+            }
             Ok(())
         };
         tokio::time::timeout_at(deadline, exchange)
@@ -1686,7 +1801,9 @@ impl NativeAuthCustodyChannel {
         }
         self.guard_or_close(guard)?;
         let observation = CodexAuthObservation::from_native(event)?;
-        let reply = self.exchange(RequestKind::ObserveCodex, Some(observation)).await?;
+        let reply = self
+            .exchange(RequestKind::ObserveCodex, Some(observation))
+            .await?;
         self.guard_or_close(guard)?;
         match reply.kind {
             ReplyKind::Continue => Ok(NativeAuthCustodyControl::Continue),
@@ -1735,11 +1852,19 @@ impl NativeAuthCustodyChannel {
         }
         self.sealed = true;
         self.retirement_after_child_or_close(&retirement)?;
-        let reply = self.exchange(RequestKind::RetireAfterChildReaped, None).await?;
+        let reply = self
+            .exchange(RequestKind::RetireAfterChildReaped, None)
+            .await?;
         self.retirement_after_child_or_close(&retirement)?;
-        if reply.kind != ReplyKind::Retired || !matches!(reply.fact.phase,
-            NativeAuthPhase::AuthenticatedObserved | NativeAuthPhase::UnauthenticatedObserved
-                | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled) {
+        if reply.kind != ReplyKind::Retired
+            || !matches!(
+                reply.fact.phase,
+                NativeAuthPhase::AuthenticatedObserved
+                    | NativeAuthPhase::UnauthenticatedObserved
+                    | NativeAuthPhase::Failed
+                    | NativeAuthPhase::Cancelled
+            )
+        {
             self.close();
             return Err(failure("native_auth_reply_invalid"));
         }
@@ -1748,10 +1873,16 @@ impl NativeAuthCustodyChannel {
         Ok(reply.fact)
     }
 
-    fn retirement_after_child_or_close(&mut self, retirement: &Retirement) -> Result<(), EngineError> {
+    fn retirement_after_child_or_close(
+        &mut self,
+        retirement: &Retirement,
+    ) -> Result<(), EngineError> {
         if let Err(error) = retirement.revalidate_after_child_reaped(
-            &fact_host(&self.fact), &self.fact.binding, &self.fact.operation_id,
-            self.fact.generation, purpose(&self.fact),
+            &fact_host(&self.fact),
+            &self.fact.binding,
+            &self.fact.operation_id,
+            self.fact.generation,
+            purpose(&self.fact),
         ) {
             self.close();
             return Err(error);
@@ -1805,27 +1936,53 @@ impl NativeAuthCustodyChannel {
             || reply.fact.generation != self.fact.generation
             || reply.fact.binding != self.fact.binding
             || reply.fact.action != self.fact.action
-            || (reply.claude_input && (request.kind != RequestKind::TakeClaudeInput || reply.kind != ReplyKind::Continue))
+            || (reply.claude_input
+                && (request.kind != RequestKind::TakeClaudeInput
+                    || reply.kind != ReplyKind::Continue))
         {
             return Err(failure("native_auth_reply_invalid"));
         }
         let valid = match reply.kind {
             ReplyKind::Continue => {
-                matches!(request.kind, RequestKind::Check | RequestKind::ObserveCodex | RequestKind::ObserveClaude | RequestKind::TakeClaudeInput)
-                    && matches!(reply.fact.phase, NativeAuthPhase::Starting
-                        | NativeAuthPhase::AwaitingOwner | NativeAuthPhase::CheckingAccount
-                        | NativeAuthPhase::AuthenticatedObserved | NativeAuthPhase::UnauthenticatedObserved
-                        | NativeAuthPhase::Failed)
+                matches!(
+                    request.kind,
+                    RequestKind::Check
+                        | RequestKind::ObserveCodex
+                        | RequestKind::ObserveClaude
+                        | RequestKind::TakeClaudeInput
+                ) && matches!(
+                    reply.fact.phase,
+                    NativeAuthPhase::Starting
+                        | NativeAuthPhase::AwaitingOwner
+                        | NativeAuthPhase::CheckingAccount
+                        | NativeAuthPhase::AuthenticatedObserved
+                        | NativeAuthPhase::UnauthenticatedObserved
+                        | NativeAuthPhase::Failed
+                )
             }
             ReplyKind::Cancel => {
-                matches!(request.kind, RequestKind::Check | RequestKind::ObserveCodex | RequestKind::ObserveClaude | RequestKind::TakeClaudeInput)
-                    && matches!(reply.fact.phase, NativeAuthPhase::Cancelling | NativeAuthPhase::Cancelled)
+                matches!(
+                    request.kind,
+                    RequestKind::Check
+                        | RequestKind::ObserveCodex
+                        | RequestKind::ObserveClaude
+                        | RequestKind::TakeClaudeInput
+                ) && matches!(
+                    reply.fact.phase,
+                    NativeAuthPhase::Cancelling | NativeAuthPhase::Cancelled
+                )
             }
             ReplyKind::Retired => {
-                (request.kind == RequestKind::RetireNoEffect && reply.fact.phase == NativeAuthPhase::Unavailable)
+                (request.kind == RequestKind::RetireNoEffect
+                    && reply.fact.phase == NativeAuthPhase::Unavailable)
                     || (request.kind == RequestKind::RetireAfterChildReaped
-                        && matches!(reply.fact.phase, NativeAuthPhase::AuthenticatedObserved
-                            | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled))
+                        && matches!(
+                            reply.fact.phase,
+                            NativeAuthPhase::AuthenticatedObserved
+                                | NativeAuthPhase::UnauthenticatedObserved
+                                | NativeAuthPhase::Failed
+                                | NativeAuthPhase::Cancelled
+                        ))
             }
         };
         if !valid {
@@ -1945,7 +2102,10 @@ fallback_allowed = false
             "platformFamily":"unix", "platformOs":"macos"
         }});
         let bytes = format!("{frame}\n");
-        assert_eq!(protocol.receive(bytes.as_bytes()).unwrap(), vec![Event::Initialized]);
+        assert_eq!(
+            protocol.receive(bytes.as_bytes()).unwrap(),
+            vec![Event::Initialized]
+        );
         protocol.initialized().unwrap();
         protocol
     }
@@ -1990,23 +2150,35 @@ fallback_allowed = false
             let config = crate::config::resolve_config(&global, &project).unwrap();
             let (_stop, stopped) = tokio::sync::watch::channel(false);
             let service = EngineService::start_with_settings_sources(
-                root.path(), "e.sock", &global, &project, &stopped,
-            ).await.unwrap();
+                root.path(),
+                "e.sock",
+                &global,
+                &project,
+                &stopped,
+            )
+            .await
+            .unwrap();
             let host = service.owner_runtime().unwrap();
             let client = OwnerClient::attach(
-                &host.authority.root.path, OwnerClientKind::Tui, Duration::from_secs(2),
-            ).unwrap();
-            let response = client.request(OwnerRequest {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: id("observation-source"),
-                expected_revision: Cursor::new(0),
-                operation: OwnerOperation::Read {
-                    query: OwnerRead::ModelAccessRecord {
-                        collection: ModelAccessCollection::Connections,
-                        id: CredentialRef::new("connection-a").unwrap(),
+                &host.authority.root.path,
+                OwnerClientKind::Tui,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let response = client
+                .request(OwnerRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: id("observation-source"),
+                    expected_revision: Cursor::new(0),
+                    operation: OwnerOperation::Read {
+                        query: OwnerRead::ModelAccessRecord {
+                            collection: ModelAccessCollection::Connections,
+                            id: CredentialRef::new("connection-a").unwrap(),
+                        },
                     },
-                },
-            }).await.unwrap();
+                })
+                .await
+                .unwrap();
             let OwnerResponse::Read { state } = response.response else {
                 panic!("actual owner did not return a source record")
             };
@@ -2036,70 +2208,128 @@ fallback_allowed = false
             let admission = host.authority.authenticate(&packet).unwrap();
             let command = match action {
                 NativeAuthAction::SignIn { method } => Command::Start(NativeAuthStart {
-                    request_id: id("observed-operation"), scope: scope.clone(), method,
+                    request_id: id("observed-operation"),
+                    scope: scope.clone(),
+                    method,
                 }),
                 NativeAuthAction::Logout => Command::Logout(NativeAuthLogout {
-                    request_id: id("observed-operation"), scope: scope.clone(),
+                    request_id: id("observed-operation"),
+                    scope: scope.clone(),
                 }),
             };
-            let begun = host.engine.native_auth_job(|reply| Job::NativeAuth(
-                admission, command, reply,
-            )).await.unwrap();
+            let begun = host
+                .engine
+                .native_auth_job(|reply| Job::NativeAuth(admission, command, reply))
+                .await
+                .unwrap();
             assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);
             let fact = begun.reply.fact;
-            let _launch = host.prepare_native_auth_custody(begun.work.unwrap()).await.unwrap();
+            let _launch = host
+                .prepare_native_auth_custody(begun.work.unwrap())
+                .await
+                .unwrap();
             let (_, _, binding) = runner_binding(root.path()).unwrap();
             let mut custody = binding.capture_native_profile_custody().unwrap();
-            let guard = custody.acquire_use(
-                &host.identity(), &fact.binding, &fact.operation_id, fact.generation, purpose(&fact),
-            ).unwrap();
-            let token = host.authority.native_auth.lock().unwrap().as_ref().unwrap().token;
-            let channel = NativeAuthCustodyChannel::connect(root.path(), token).await.unwrap();
-            Self { root, service, client, channel, guard: Some(guard), scope, fact }
+            let guard = custody
+                .acquire_use(
+                    &host.identity(),
+                    &fact.binding,
+                    &fact.operation_id,
+                    fact.generation,
+                    purpose(&fact),
+                )
+                .unwrap();
+            let token = host
+                .authority
+                .native_auth
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .token;
+            let channel = NativeAuthCustodyChannel::connect(root.path(), token)
+                .await
+                .unwrap();
+            Self {
+                root,
+                service,
+                client,
+                channel,
+                guard: Some(guard),
+                scope,
+                fact,
+            }
         }
 
         async fn observe(&mut self, event: AuthControl) -> NativeAuthCustodyControl {
-            self.channel.observe_codex(self.guard.as_ref().unwrap(), event).await.unwrap()
+            self.channel
+                .observe_codex(self.guard.as_ref().unwrap(), event)
+                .await
+                .unwrap()
         }
 
         async fn read(&self) -> NativeAuthReply {
-            self.client.read_native_auth(NativeAuthQuery {
-                request_id: id("read-observed-operation"), scope: self.scope.clone(),
-                operation_id: self.fact.operation_id.clone(),
-            }).await.unwrap()
+            self.client
+                .read_native_auth(NativeAuthQuery {
+                    request_id: id("read-observed-operation"),
+                    scope: self.scope.clone(),
+                    operation_id: self.fact.operation_id.clone(),
+                })
+                .await
+                .unwrap()
         }
 
         fn database(&self) -> Connection {
             let db = Connection::open_with_flags(
                 self.root.path().join("engine.db"),
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            ).unwrap();
+            )
+            .unwrap();
             db.busy_timeout(Duration::from_secs(1)).unwrap();
             db
         }
 
         fn fence_count(&self) -> i64 {
-            self.database().query_row("SELECT count(*) FROM native_auth_fences", [], |row| {
-                row.get(0)
-            }).unwrap()
+            self.database()
+                .query_row("SELECT count(*) FROM native_auth_fences", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
         }
 
         fn durable_payloads_are_redacted(&self) {
-            let (request, fact): (Vec<u8>, Vec<u8>) = self.database().query_row(
-                "SELECT request,fact FROM native_auth_operations WHERE id=?1",
-                [self.fact.operation_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
-            ).unwrap();
+            let (request, fact): (Vec<u8>, Vec<u8>) = self
+                .database()
+                .query_row(
+                    "SELECT request,fact FROM native_auth_operations WHERE id=?1",
+                    [self.fact.operation_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
             for secret in [URL, DEVICE_URL, USER_CODE, EMAIL, ERROR] {
-                assert!(!request.windows(secret.len()).any(|window| window == secret.as_bytes()));
-                assert!(!fact.windows(secret.len()).any(|window| window == secret.as_bytes()));
+                assert!(
+                    !request
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes())
+                );
+                assert!(
+                    !fact
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes())
+                );
             }
         }
 
         async fn retire(&mut self) -> NativeAuthFact {
             let mut session = CustodySession::new(self.guard.take().unwrap());
             let child = ProcessCommand::new("/usr/bin/true")
-                .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-                .process_group(0).spawn().unwrap();
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
             session.retain_child(child).unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -2109,16 +2339,23 @@ fallback_allowed = false
                     }
                     tokio::task::yield_now().await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let retirement = session.seal_after_child_reaped().unwrap();
-            self.channel.retire_after_child_reaped(retirement).await.unwrap()
+            self.channel
+                .retire_after_child_reaped(retirement)
+                .await
+                .unwrap()
         }
 
         async fn close(mut self) {
             drop(self.channel);
             drop(self.guard.take());
             tokio::time::timeout(Duration::from_secs(5), self.service.shutdown())
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
@@ -2127,27 +2364,38 @@ fallback_allowed = false
         tokio::time::timeout(Duration::from_secs(20), async {
             let mut case = Case::open(NativeAuthAction::SignIn {
                 method: NativeAuthMethod::CodexBrowser,
-            }).await;
+            })
+            .await;
             let mut protocol = protocol();
-            assert!(matches!(case.observe(challenge(&mut protocol, false)).await,
-                NativeAuthCustodyControl::Continue));
+            assert!(matches!(
+                case.observe(challenge(&mut protocol, false)).await,
+                NativeAuthCustodyControl::Continue
+            ));
             let waiting = case.read().await;
             assert_eq!(waiting.fact.phase, NativeAuthPhase::AwaitingOwner);
             assert!(matches!(waiting.challenge.unwrap().codex(),
                 LoginChallenge::Browser { auth_url, .. } if auth_url.expose() == URL));
             assert!(waiting.account.is_none());
             case.durable_payloads_are_redacted();
-            case.observe(control(&mut protocol, json!({"method":"account/login/completed",
-                "params":{"loginId":"observed-login","success":true}}))).await;
+            case.observe(control(
+                &mut protocol,
+                json!({"method":"account/login/completed",
+                "params":{"loginId":"observed-login","success":true}}),
+            ))
+            .await;
             let checking = case.read().await;
             assert_eq!(checking.fact.phase, NativeAuthPhase::CheckingAccount);
             assert!(checking.account.is_none());
             assert!(checking.challenge.is_none());
             protocol.read_account(false).unwrap();
-            case.observe(control(&mut protocol, json!({"id":3,"result":{
-                "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},
-                "requiresOpenaiAuth":true
-            }}))).await;
+            case.observe(control(
+                &mut protocol,
+                json!({"id":3,"result":{
+                    "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},
+                    "requiresOpenaiAuth":true
+                }}),
+            ))
+            .await;
             let observed = case.read().await;
             assert_eq!(observed.fact.phase, NativeAuthPhase::AuthenticatedObserved);
             assert!(matches!(&observed.account, Some(NativeAuthAccount::Codex(
@@ -2164,7 +2412,9 @@ fallback_allowed = false
             assert!(replay.account.is_some());
             case.durable_payloads_are_redacted();
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2172,7 +2422,8 @@ fallback_allowed = false
         tokio::time::timeout(Duration::from_secs(20), async {
             let mut case = Case::open(NativeAuthAction::SignIn {
                 method: NativeAuthMethod::CodexDeviceCode,
-            }).await;
+            })
+            .await;
             let mut protocol = protocol();
             case.observe(challenge(&mut protocol, true)).await;
             let waiting = case.read().await;
@@ -2185,16 +2436,36 @@ fallback_allowed = false
             let host = case.service.owner_runtime().unwrap();
             let (_, _, binding) = runner_binding(case.root.path()).unwrap();
             let mut custody = binding.capture_native_profile_custody().unwrap();
-            let foreign = custody.acquire_use(&host.identity(), &case.fact.binding,
-                &case.fact.operation_id, case.fact.generation + 1, purpose(&case.fact)).unwrap();
-            let completion = control(&mut protocol, json!({"method":"account/login/completed",
-                "params":{"loginId":"observed-login","success":true}}));
-            assert!(case.channel.observe_codex(&foreign, completion).await.is_err());
+            let foreign = custody
+                .acquire_use(
+                    &host.identity(),
+                    &case.fact.binding,
+                    &case.fact.operation_id,
+                    case.fact.generation + 1,
+                    purpose(&case.fact),
+                )
+                .unwrap();
+            let completion = control(
+                &mut protocol,
+                json!({"method":"account/login/completed",
+                "params":{"loginId":"observed-login","success":true}}),
+            );
+            assert!(
+                case.channel
+                    .observe_codex(&foreign, completion)
+                    .await
+                    .is_err()
+            );
             assert_eq!(case.fence_count(), 1);
-            assert_ne!(case.read().await.fact.phase, NativeAuthPhase::AuthenticatedObserved);
+            assert_ne!(
+                case.read().await.fact.phase,
+                NativeAuthPhase::AuthenticatedObserved
+            );
             drop(foreign);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2203,17 +2474,25 @@ fallback_allowed = false
             let mut case = Case::open(NativeAuthAction::Logout).await;
             let mut protocol = protocol();
             protocol.logout_account().unwrap();
-            case.observe(control(&mut protocol, json!({"id":2,"result":{}}))).await;
+            case.observe(control(&mut protocol, json!({"id":2,"result":{}})))
+                .await;
             let checking = case.read().await;
             assert_eq!(checking.fact.phase, NativeAuthPhase::CheckingAccount);
             assert!(checking.account.is_none());
             assert_eq!(case.fence_count(), 1);
             protocol.read_account(false).unwrap();
-            case.observe(control(&mut protocol, json!({"id":3,"result":{
-                "account":null,"requiresOpenaiAuth":true
-            }}))).await;
+            case.observe(control(
+                &mut protocol,
+                json!({"id":3,"result":{
+                    "account":null,"requiresOpenaiAuth":true
+                }}),
+            ))
+            .await;
             let observed = case.read().await;
-            assert_eq!(observed.fact.phase, NativeAuthPhase::UnauthenticatedObserved);
+            assert_eq!(
+                observed.fact.phase,
+                NativeAuthPhase::UnauthenticatedObserved
+            );
             assert!(observed.account.is_none());
             let retired = case.retire().await;
             assert_eq!(retired.phase, NativeAuthPhase::UnauthenticatedObserved);
@@ -2221,7 +2500,9 @@ fallback_allowed = false
             assert_eq!(case.fence_count(), 0);
             assert_eq!(case.read().await.fact, retired);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2229,14 +2510,22 @@ fallback_allowed = false
         tokio::time::timeout(Duration::from_secs(20), async {
             let mut case = Case::open(NativeAuthAction::SignIn {
                 method: NativeAuthMethod::CodexBrowser,
-            }).await;
+            })
+            .await;
             let mut protocol = protocol();
             case.observe(challenge(&mut protocol, false)).await;
-            case.observe(control(&mut protocol, json!({"method":"account/login/completed",
-                "params":{"loginId":"observed-login","success":false,"error":ERROR}}))).await;
+            case.observe(control(
+                &mut protocol,
+                json!({"method":"account/login/completed",
+                "params":{"loginId":"observed-login","success":false,"error":ERROR}}),
+            ))
+            .await;
             let failed = case.read().await;
             assert_eq!(failed.fact.phase, NativeAuthPhase::Failed);
-            assert_eq!(failed.fact.code.as_deref(), Some("native_auth_login_failed"));
+            assert_eq!(
+                failed.fact.code.as_deref(),
+                Some("native_auth_login_failed")
+            );
             assert!(failed.account.is_none());
             assert!(failed.challenge.is_none());
             assert!(!format!("{failed:?}").contains(ERROR));
@@ -2245,7 +2534,9 @@ fallback_allowed = false
             assert_eq!(case.retire().await.phase, NativeAuthPhase::Failed);
             assert_eq!(case.fence_count(), 0);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2253,18 +2544,31 @@ fallback_allowed = false
         tokio::time::timeout(Duration::from_secs(20), async {
             let mut case = Case::open(NativeAuthAction::SignIn {
                 method: NativeAuthMethod::CodexBrowser,
-            }).await;
+            })
+            .await;
             let mut protocol = protocol();
             case.observe(challenge(&mut protocol, false)).await;
-            let cancelling = case.client.cancel_native_auth(NativeAuthCancel {
-                request_id: id("cancel-observed-operation"), scope: case.scope.clone(),
-                operation_id: case.fact.operation_id.clone(),
-            }).await.unwrap();
+            let cancelling = case
+                .client
+                .cancel_native_auth(NativeAuthCancel {
+                    request_id: id("cancel-observed-operation"),
+                    scope: case.scope.clone(),
+                    operation_id: case.fact.operation_id.clone(),
+                })
+                .await
+                .unwrap();
             assert_eq!(cancelling.fact.phase, NativeAuthPhase::Cancelling);
             protocol.cancel_login("observed-login").unwrap();
-            assert!(matches!(case.observe(control(&mut protocol, json!({
-                "id":3,"result":{"status":"canceled"}
-            }))).await, NativeAuthCustodyControl::Cancel));
+            assert!(matches!(
+                case.observe(control(
+                    &mut protocol,
+                    json!({
+                        "id":3,"result":{"status":"canceled"}
+                    })
+                ))
+                .await,
+                NativeAuthCustodyControl::Cancel
+            ));
             let cancelled = case.read().await;
             assert_eq!(cancelled.fact.phase, NativeAuthPhase::Cancelled);
             assert!(cancelled.account.is_none());
@@ -2273,7 +2577,9 @@ fallback_allowed = false
             assert_eq!(case.retire().await.phase, NativeAuthPhase::Cancelled);
             assert_eq!(case.fence_count(), 0);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     const MASTER_CATALOG: &str = r#"
@@ -2309,7 +2615,12 @@ fallback_allowed = false
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(["-c", "user.name=Signed-in master fixture"])
             .args(["-c", "user.email=signed-in-master@example.invalid"])
             .arg("-C")
@@ -2317,7 +2628,10 @@ fallback_allowed = false
             .args(arguments)
             .output()
             .unwrap();
-        assert!(output.status.success(), "actual Git fixture failed: {output:?}");
+        assert!(
+            output.status.success(),
+            "actual Git fixture failed: {output:?}"
+        );
     }
 
     fn master_project() -> crate::protocol::ProjectId {
@@ -2341,7 +2655,9 @@ fallback_allowed = false
         }
     }
 
-    fn admitted(result: crate::storage::MasterRuntimeResult) -> Box<crate::storage::PreparedMasterTurn> {
+    fn admitted(
+        result: crate::storage::MasterRuntimeResult,
+    ) -> Box<crate::storage::PreparedMasterTurn> {
         match result {
             crate::storage::MasterRuntimeResult::Prepared(prepared) => {
                 assert!(prepared.attempt.request.previous_attempt.is_none());
@@ -2350,13 +2666,19 @@ fallback_allowed = false
                 prepared
             }
             crate::storage::MasterRuntimeResult::Turn(turn) => {
-                panic!("signed-in master turn was not admitted: {:?} {:?}", turn.phase, turn.reason)
+                panic!(
+                    "signed-in master turn was not admitted: {:?} {:?}",
+                    turn.phase, turn.reason
+                )
             }
             _ => panic!("actual master preparation returned an unexpected result"),
         }
     }
 
-    fn blocked(result: crate::storage::MasterRuntimeResult, reason: crate::master_session::MasterReason) {
+    fn blocked(
+        result: crate::storage::MasterRuntimeResult,
+        reason: crate::master_session::MasterReason,
+    ) {
         let crate::storage::MasterRuntimeResult::Turn(turn) = result else {
             panic!("actual master turn was admitted while it had to be blocked");
         };
@@ -2366,19 +2688,27 @@ fallback_allowed = false
 
     impl Case {
         async fn owner_state(&self, query: OwnerRead) -> crate::engine::owner::OwnerReadReply {
-            let reply = self.client.request(OwnerRequest {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: id("signed-in-master-read"),
-                expected_revision: Cursor::new(0),
-                operation: OwnerOperation::Read { query },
-            }).await.unwrap();
+            let reply = self
+                .client
+                .request(OwnerRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: id("signed-in-master-read"),
+                    expected_revision: Cursor::new(0),
+                    operation: OwnerOperation::Read { query },
+                })
+                .await
+                .unwrap();
             let OwnerResponse::Read { state } = reply.response else {
                 panic!("actual owner read failed")
             };
             state
         }
 
-        async fn owner_apply(&self, request_id: &str, mutation: crate::engine::owner::OwnerMutation) {
+        async fn owner_apply(
+            &self,
+            request_id: &str,
+            mutation: crate::engine::owner::OwnerMutation,
+        ) {
             let host = self.service.owner_runtime().unwrap();
             let revision = self.owner_state(OwnerRead::Capabilities).await.revision;
             let request = OwnerRequest {
@@ -2392,15 +2722,26 @@ fallback_allowed = false
             packet[..4].copy_from_slice(b"CAO1");
             packet[5..].copy_from_slice(&self.client.token);
             let admission = host.authority.authenticate(&packet).unwrap();
-            let operation = host.engine.owner_job(|reply| Job::OwnerApply(admission, request, reply))
-                .await.unwrap();
-            assert_eq!(operation.result, crate::engine::owner::OwnerResult::Applied, "{request_id}");
+            let operation = host
+                .engine
+                .owner_job(|reply| Job::OwnerApply(admission, request, reply))
+                .await
+                .unwrap();
+            assert_eq!(
+                operation.result,
+                crate::engine::owner::OwnerResult::Applied,
+                "{request_id}"
+            );
         }
 
         async fn model_access_basis(&self) -> (crate::protocol::ConfigId, String) {
-            let state = self.owner_state(OwnerRead::ModelAccessPage {
-                collection: ModelAccessCollection::Pools, cursor: None, limit: 16,
-            }).await;
+            let state = self
+                .owner_state(OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 16,
+                })
+                .await;
             let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
                 panic!("actual model source basis missing")
             };
@@ -2409,30 +2750,49 @@ fallback_allowed = false
 
         async fn edit_settings(&self, request_id: &str, edit: crate::config::ModelAccessEdit) {
             let (config_id, source_hash) = self.model_access_basis().await;
-            self.owner_apply(request_id, crate::engine::owner::OwnerMutation::ModelAccess {
-                expected_config_id: config_id.clone(), expected_source_hash: source_hash, edit,
-            }).await;
+            self.owner_apply(
+                request_id,
+                crate::engine::owner::OwnerMutation::ModelAccess {
+                    expected_config_id: config_id.clone(),
+                    expected_source_hash: source_hash,
+                    edit,
+                },
+            )
+            .await;
             assert_ne!(self.model_access_basis().await.0, config_id);
         }
 
         fn configured_connection(&self) -> crate::config::ModelConnection {
             let config = crate::config::resolve_config(
-                &self.root.path().join("g.toml"), &self.root.path().join("p.toml"),
-            ).unwrap();
+                &self.root.path().join("g.toml"),
+                &self.root.path().join("p.toml"),
+            )
+            .unwrap();
             config.settings.model_access.unwrap().connections[0].clone()
         }
 
         async fn complete_sign_in(&mut self) {
             let mut protocol = protocol();
             self.observe(challenge(&mut protocol, false)).await;
-            self.observe(control(&mut protocol, json!({"method":"account/login/completed",
-                "params":{"loginId":"observed-login","success":true}}))).await;
+            self.observe(control(
+                &mut protocol,
+                json!({"method":"account/login/completed",
+                "params":{"loginId":"observed-login","success":true}}),
+            ))
+            .await;
             protocol.read_account(false).unwrap();
-            self.observe(control(&mut protocol, json!({"id":3,"result":{
-                "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},
-                "requiresOpenaiAuth":true
-            }}))).await;
-            assert_eq!(self.retire().await.phase, NativeAuthPhase::AuthenticatedObserved);
+            self.observe(control(
+                &mut protocol,
+                json!({"id":3,"result":{
+                    "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},
+                    "requiresOpenaiAuth":true
+                }}),
+            ))
+            .await;
+            assert_eq!(
+                self.retire().await.phase,
+                NativeAuthPhase::AuthenticatedObserved
+            );
             assert_eq!(self.fence_count(), 0);
         }
 
@@ -2442,103 +2802,156 @@ fallback_allowed = false
             std::fs::create_dir(&repository).unwrap();
             std::fs::set_permissions(&repository, std::fs::Permissions::from_mode(0o700)).unwrap();
             master_git(root, &repository, &["init", "--initial-branch=trunk"]);
-            std::fs::write(repository.join("README"), b"Actual signed-in master workspace.\n").unwrap();
+            std::fs::write(
+                repository.join("README"),
+                b"Actual signed-in master workspace.\n",
+            )
+            .unwrap();
             master_git(root, &repository, &["add", "README"]);
-            master_git(root, &repository, &["commit", "-qm", "Initialize signed-in master fixture"]);
-            self.owner_apply("signed-in-master-project", crate::engine::owner::OwnerMutation::CreateProject {
-                project_id: master_project(),
-                spec: crate::protocol::ProjectSpec {
-                    name: "Signed-in master".into(),
-                    repositories: vec![repository.to_str().unwrap().into()],
-                },
-            }).await;
-            let (config_id, source_hash) = self.model_access_basis().await;
-            self.owner_apply("signed-in-master-open", crate::engine::owner::OwnerMutation::ProjectMaster {
-                action: crate::master_session::MasterOwnerAction::Open {
+            master_git(
+                root,
+                &repository,
+                &["commit", "-qm", "Initialize signed-in master fixture"],
+            );
+            self.owner_apply(
+                "signed-in-master-project",
+                crate::engine::owner::OwnerMutation::CreateProject {
                     project_id: master_project(),
-                    expected_config_id: config_id,
-                    expected_source_hash: source_hash,
-                    selection: master_selection(),
+                    spec: crate::protocol::ProjectSpec {
+                        name: "Signed-in master".into(),
+                        repositories: vec![repository.to_str().unwrap().into()],
+                    },
                 },
-            }).await;
+            )
+            .await;
+            let (config_id, source_hash) = self.model_access_basis().await;
+            self.owner_apply(
+                "signed-in-master-open",
+                crate::engine::owner::OwnerMutation::ProjectMaster {
+                    action: crate::master_session::MasterOwnerAction::Open {
+                        project_id: master_project(),
+                        expected_config_id: config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(master_selection()),
+                    },
+                },
+            )
+            .await;
         }
 
         async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
-            let state = self.owner_state(OwnerRead::ProjectMaster { project_id: master_project() }).await;
-            let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+            let state = self
+                .owner_state(OwnerRead::ProjectMaster {
+                    project_id: master_project(),
+                })
+                .await;
+            let OwnerData::ProjectMaster {
+                session: Some(session),
+            } = state.data
+            else {
                 panic!("actual master session missing")
             };
-            self.owner_apply(request_id, crate::engine::owner::OwnerMutation::ProjectMaster {
-                action: crate::master_session::MasterOwnerAction::Submit {
-                    project_id: session.project_id.clone(),
-                    session_id: session.session_id.clone(),
-                    text: "Describe the project without using tools.".into(),
+            let session = *session;
+            self.owner_apply(
+                request_id,
+                crate::engine::owner::OwnerMutation::ProjectMaster {
+                    action: crate::master_session::MasterOwnerAction::Submit {
+                        project_id: session.project_id.clone(),
+                        session_id: session.session_id.clone(),
+                        text: "Describe the project without using tools.".into(),
+                    },
                 },
-            }).await;
+            )
+            .await;
             let host = self.service.owner_runtime().unwrap();
             host.prepare_master_turn(&session.project_id, &session.session_id, &id(request_id))
-                .await.unwrap()
+                .await
+                .unwrap()
         }
     }
 
     #[tokio::test]
     async fn signed_in_master_survives_an_unrelated_settings_edit() {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
-                method: NativeAuthMethod::CodexBrowser,
-            }).await;
-            case.complete_sign_in().await;
-            case.edit_settings("rename-master-pool", crate::config::ModelAccessEdit::ReplacePool {
-                pool: crate::config::AccountPool {
-                    id: CredentialRef::new("pool-a").unwrap(),
-                    name: Some("Daily work".into()),
-                    members: vec![CredentialRef::new("connection-a").unwrap()],
-                    projects: vec![CredentialRef::new("project-a").unwrap()],
-                    roles: vec![CredentialRef::new("project_leader").unwrap()],
-                    fallback_allowed: false,
-                    provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
                 },
-            }).await;
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.edit_settings(
+                "rename-master-pool",
+                crate::config::ModelAccessEdit::ReplacePool {
+                    pool: crate::config::AccountPool {
+                        id: CredentialRef::new("pool-a").unwrap(),
+                        name: Some("Daily work".into()),
+                        members: vec![CredentialRef::new("connection-a").unwrap()],
+                        projects: vec![CredentialRef::new("project-a").unwrap()],
+                        roles: vec![CredentialRef::new("project_leader").unwrap()],
+                        fallback_allowed: false,
+                        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                    },
+                },
+            )
+            .await;
             case.open_master().await;
             let prepared = admitted(case.prepare_next_turn("first-signed-in-turn").await);
             let host = case.service.owner_runtime().unwrap();
-            let profile = host.acquire_master_profile(&prepared, &id("first-signed-in-turn"))
-                .await.unwrap();
+            let profile = host
+                .acquire_master_profile(&prepared, &id("first-signed-in-turn"))
+                .await
+                .unwrap();
             if let Err(error) = host.prepare_master_host(&prepared, &profile) {
                 assert_ne!(error.0, "master_runtime_binding");
             }
             drop(profile);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn signed_in_master_is_refused_after_its_connection_changes() {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
-                method: NativeAuthMethod::CodexBrowser,
-            }).await;
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+            )
+            .await;
             case.complete_sign_in().await;
             let mut connection = case.configured_connection();
             connection.model.id = "model-b".into();
-            case.edit_settings("change-master-model", crate::config::ModelAccessEdit::ReplaceConnection {
-                connection,
-            }).await;
+            case.edit_settings(
+                "change-master-model",
+                crate::config::ModelAccessEdit::ReplaceConnection { connection },
+            )
+            .await;
             case.open_master().await;
             blocked(
                 case.prepare_next_turn("turn-after-connection-change").await,
                 crate::master_session::MasterReason::ReadinessStale,
             );
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn blocked_first_master_turn_does_not_lock_out_the_turn_after_sign_in() {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let mut case = Case::open_with(MASTER_CATALOG, NativeAuthAction::SignIn {
-                method: NativeAuthMethod::CodexBrowser,
-            }).await;
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+            )
+            .await;
             case.open_master().await;
             blocked(
                 case.prepare_next_turn("turn-before-sign-in").await,
@@ -2547,6 +2960,8 @@ fallback_allowed = false
             case.complete_sign_in().await;
             admitted(case.prepare_next_turn("turn-after-sign-in").await);
             case.close().await;
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

@@ -114,7 +114,11 @@ fn validate_prepared(
         return Err(failure("master_runtime_binding"));
     }
     let admitted = {
-        let slots = host.authority.slots.lock().map_err(|_| failure("owner_runtime_stale"))?;
+        let slots = host
+            .authority
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_runtime_stale"))?;
         slots.iter().any(|slot| {
             let admission = &slot.registration.admission;
             slot.registration.active
@@ -148,8 +152,12 @@ mod tests {
         ModelAccessCollection, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation,
         OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerResult, PreparedNativeProfile,
     };
-    use crate::master_session::{MasterBackend, MasterOwnerAction, MasterSelection, MasterTurnPhase};
-    use crate::protocol::{CredentialRef, Cursor, ProjectId, ProjectSpec, RequestId, PROTOCOL_VERSION};
+    use crate::master_session::{
+        MasterBackend, MasterOwnerAction, MasterSelection, MasterTurnPhase,
+    };
+    use crate::protocol::{
+        CredentialRef, Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId,
+    };
     use crate::routing::{ResourceBudget, RouteRequest};
     use crate::storage::{Job, MasterRuntimeCommand, MasterRuntimeResult, PreparedMasterTurn};
     use std::collections::BTreeSet;
@@ -216,7 +224,12 @@ fallback_allowed = false
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args([
                 "-c",
                 "user.name=Master launch fixture",
@@ -228,7 +241,10 @@ fallback_allowed = false
             .args(arguments)
             .output()
             .unwrap();
-        assert!(output.status.success(), "actual Git fixture failed: {output:?}");
+        assert!(
+            output.status.success(),
+            "actual Git fixture failed: {output:?}"
+        );
     }
 
     async fn read(client: &OwnerClient, query: OwnerRead) -> OwnerReadReply {
@@ -311,10 +327,21 @@ fallback_allowed = false
             );
             let repository = root.path().join("repository");
             private_directory(&repository);
-            git(&repository, root.path(), &["init", "--initial-branch=trunk"]);
-            private_file(&repository.join("README"), b"Actual master launch workspace.\n");
+            git(
+                &repository,
+                root.path(),
+                &["init", "--initial-branch=trunk"],
+            );
+            private_file(
+                &repository.join("README"),
+                b"Actual master launch workspace.\n",
+            );
             git(&repository, root.path(), &["add", "README"]);
-            git(&repository, root.path(), &["commit", "-m", "Initialize master launch fixture"]);
+            git(
+                &repository,
+                root.path(),
+                &["commit", "-m", "Initialize master launch fixture"],
+            );
             let (_stop, stopped) = tokio::sync::watch::channel(false);
             let service = EngineService::start_with_settings_sources(
                 &state,
@@ -371,7 +398,7 @@ fallback_allowed = false
                         project_id: project_id.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: MasterSelection {
+                        selection: Box::new(MasterSelection {
                             backend: MasterBackend::Rcli,
                             pool_ref: reference("local-pool"),
                             target_profile_ref: reference("local-profile"),
@@ -383,15 +410,25 @@ fallback_allowed = false
                                 budget_ref: reference("conversation-budget"),
                                 resources: ResourceBudget::unit(),
                             },
-                        },
+                        }),
                     },
                 },
             )
             .await;
-            let state = read(&client, OwnerRead::ProjectMaster { project_id: project_id.clone() }).await;
-            let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+            let state = read(
+                &client,
+                OwnerRead::ProjectMaster {
+                    project_id: project_id.clone(),
+                },
+            )
+            .await;
+            let OwnerData::ProjectMaster {
+                session: Some(session),
+            } = state.data
+            else {
                 panic!("actual configured master session missing");
             };
+            let session = *session;
             let registered = host
                 .engine
                 .owner_job(|reply| {
@@ -407,7 +444,10 @@ fallback_allowed = false
                 })
                 .await
                 .unwrap();
-            assert!(matches!(registered, MasterRuntimeResult::ConfiguredProfile(_)));
+            assert!(matches!(
+                registered,
+                MasterRuntimeResult::ConfiguredProfile(_)
+            ));
             apply(
                 &host,
                 &client,
@@ -444,7 +484,10 @@ fallback_allowed = false
             let MasterRuntimeResult::Prepared(prepared) = result else {
                 panic!("genuine Core prepared master turn required");
             };
-            let profile = host.acquire_master_profile(&prepared, &turn.id).await.unwrap();
+            let profile = host
+                .acquire_master_profile(&prepared, &turn.id)
+                .await
+                .unwrap();
             profile
                 .revalidate(
                     &host.identity(),
@@ -456,7 +499,14 @@ fallback_allowed = false
                 .unwrap();
             assert_eq!(profile.profile_path().unwrap(), home);
             assert!(!home.join(".backboard/keys.json").exists());
-            Self { root, service, host, prepared: *prepared, profile, home }
+            Self {
+                root,
+                service,
+                host,
+                prepared: *prepared,
+                profile,
+                home,
+            }
         }
 
         fn names(&self) -> BTreeSet<std::ffi::OsString> {
@@ -505,7 +555,9 @@ fallback_allowed = false
             std::fs::Permissions::from_mode(0o750),
         )
         .unwrap();
-        let result = case.host.prepare_rcli_master_host(&case.prepared, &case.profile);
+        let result = case
+            .host
+            .prepare_rcli_master_host(&case.prepared, &case.profile);
         std::fs::set_permissions(
             &case.host.authority.root.path,
             std::fs::Permissions::from_mode(0o700),
@@ -522,7 +574,10 @@ fallback_allowed = false
             }
             prepared.profile = PreparedNativeProfile::from_binding(binding);
             assert_eq!(
-                case.host.prepare_rcli_master_host(&prepared, &case.profile).unwrap_err().0,
+                case.host
+                    .prepare_rcli_master_host(&prepared, &case.profile)
+                    .unwrap_err()
+                    .0,
                 "owner_runtime_stale"
             );
         }
@@ -538,8 +593,13 @@ fallback_allowed = false
             let mut prepared = copy_prepared(&case.prepared);
             match field {
                 0 => prepared.session.current_turn = None,
-                1 => prepared.attempt.request.project_id = ProjectId::new("foreign-project").unwrap(),
-                2 => prepared.lease.owner_session = crate::protocol::SessionId::new("foreign-session").unwrap(),
+                1 => {
+                    prepared.attempt.request.project_id = ProjectId::new("foreign-project").unwrap()
+                }
+                2 => {
+                    prepared.lease.owner_session =
+                        crate::protocol::SessionId::new("foreign-session").unwrap()
+                }
                 3 => prepared.lease.path = case.root.path().to_str().unwrap().into(),
                 4 => prepared.lease.repository = case.home.to_str().unwrap().into(),
                 5 => prepared.lease.state = crate::worktrees::LeaseState::Reserved,
@@ -550,7 +610,10 @@ fallback_allowed = false
                 _ => unreachable!(),
             }
             assert_eq!(
-                case.host.prepare_rcli_master_host(&prepared, &case.profile).unwrap_err().0,
+                case.host
+                    .prepare_rcli_master_host(&prepared, &case.profile)
+                    .unwrap_err()
+                    .0,
                 "master_runtime_binding",
                 "prepared provenance field {field} was not rejected"
             );
@@ -569,7 +632,9 @@ fallback_allowed = false
         std::fs::rename(&sdk, &retained).unwrap();
         private_directory(&sdk);
         private_file(&sdk.join("config.json"), &bytes);
-        let result = case.host.prepare_rcli_master_host(&case.prepared, &case.profile);
+        let result = case
+            .host
+            .prepare_rcli_master_host(&case.prepared, &case.profile);
         std::fs::remove_file(sdk.join("config.json")).unwrap();
         std::fs::remove_dir(&sdk).unwrap();
         std::fs::rename(&retained, &sdk).unwrap();
@@ -584,11 +649,18 @@ fallback_allowed = false
         let case = Fixture::start().await;
         let before = case.names();
         assert_eq!(
-            case.host.registered_rcli_master_executable().err().unwrap().0,
+            case.host
+                .registered_rcli_master_executable()
+                .err()
+                .unwrap()
+                .0,
             "native_auth_host_unavailable"
         );
         assert_eq!(
-            case.host.prepare_rcli_master_host(&case.prepared, &case.profile).unwrap_err().0,
+            case.host
+                .prepare_rcli_master_host(&case.prepared, &case.profile)
+                .unwrap_err()
+                .0,
             "native_auth_host_unavailable"
         );
         assert_eq!(case.names(), before);
@@ -618,7 +690,9 @@ fallback_allowed = false
         let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
         changed["model"]["model"] = "changed-model".into();
         private_file(&config, &serde_json::to_vec(&changed).unwrap());
-        let result = case.host.prepare_rcli_master_host(&case.prepared, &case.profile);
+        let result = case
+            .host
+            .prepare_rcli_master_host(&case.prepared, &case.profile);
         assert_eq!(result.unwrap_err().0, "rcli_profile_config_changed");
         assert_eq!(
             case.profile.revalidate_retained().unwrap_err().0,

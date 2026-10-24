@@ -992,7 +992,7 @@ fn kept_research(
             entries.push(entry);
         }
     }
-    entries.sort_by(|a, b| b.revision.value().cmp(&a.revision.value()));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.revision.value()));
     assert!(entries.iter().all(|e| &e.project_id == project));
     Ok(entries)
 }

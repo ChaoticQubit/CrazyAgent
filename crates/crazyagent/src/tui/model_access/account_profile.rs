@@ -27,7 +27,8 @@ impl SecretBuffer {
             return Err("API key accepts at most 8192 literal UTF-8 bytes".into());
         }
         let mut encoded = [0; 4];
-        self.0.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+        self.0
+            .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
         encoded.fill(0);
         assert!(self.0.len() <= SECRET_BYTES_MAX);
         Ok(())
@@ -97,7 +98,9 @@ impl State {
         };
         let connection = connection.clone();
         if self.items.get(self.selected)
-            != Some(&ModelAccessRecord::Connection { connection: connection.clone() })
+            != Some(&ModelAccessRecord::Connection {
+                connection: connection.clone(),
+            })
         {
             return Err("Read the selected connection again before private setup".into());
         }
@@ -141,7 +144,8 @@ impl State {
                 "Panel closed; original outcome retained; Ctrl-R reads it without a key"
             } else {
                 "Private setup closed; hidden buffer discarded"
-            }.into();
+            }
+            .into();
             return Ok(true);
         }
         if self.profile.has_pending() {
@@ -149,10 +153,15 @@ impl State {
             return Ok(true);
         }
         if matches!(event, UiEvent::FocusNext | UiEvent::FocusPrevious)
-            && self.profile.panel.as_ref().is_some_and(|panel| panel.receipt.is_some())
+            && self
+                .profile
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.receipt.is_some())
         {
             self.profile.panel = None;
-            self.notice = "Account ready. Next: create a project with its folder (Projects, N)".into();
+            self.notice =
+                "Account ready. Next: create a project with its folder (Projects, N)".into();
             return Ok(false);
         }
         let result = match event {
@@ -174,7 +183,10 @@ impl State {
     fn profile_character(&mut self, character: char) -> Result<(), String> {
         let panel = self.profile.panel.as_mut().unwrap();
         if !panel.attempted
-            && matches!(panel.submission.connection.auth, ModelAuthentication::ApiKey { .. })
+            && matches!(
+                panel.submission.connection.auth,
+                ModelAuthentication::ApiKey { .. }
+            )
         {
             panel.secret.character(character)
         } else {
@@ -233,7 +245,9 @@ impl State {
         let Some(submission) = &self.profile.pending else {
             return false;
         };
-        self.job = Some(Job::AccountProfileRead { submission: submission.clone() });
+        self.job = Some(Job::AccountProfileRead {
+            submission: submission.clone(),
+        });
         self.notice = "Reading the original profile request; no key is retained or replayed".into();
         true
     }
@@ -263,10 +277,10 @@ impl State {
         }
         match result {
             Ok(reply) if capability_matches(&submission, &reply) => {
-                if let ProducerCapability::Unavailable { code } = &reply.configured {
-                    if self.profile.pending.is_none() {
-                        self.notice = public_problem(code).into();
-                    }
+                if let ProducerCapability::Unavailable { code } = &reply.configured
+                    && self.profile.pending.is_none()
+                {
+                    self.notice = public_problem(code).into();
                 }
                 panel.capability = Some(reply.configured);
             }
@@ -294,7 +308,7 @@ impl State {
                 match &reply.outcome {
                     AccountProfileOutcome::ConfiguredOnly { receipt, .. } => {
                         if let Some(panel) = &mut self.profile.panel {
-                            panel.receipt = Some(receipt.clone());
+                            panel.receipt = Some((**receipt).clone());
                         }
                         self.notice =
                             "ConfiguredOnly; authentication and model availability unknown".into();
@@ -305,7 +319,8 @@ impl State {
                             "Profile outcome pending; Ctrl-R reads original without replaying a key"
                         } else {
                             "NotRecorded; close and reopen for a new explicit private setup"
-                        }.into();
+                        }
+                        .into();
                         if !retained {
                             self.profile.pending = None;
                         }
@@ -343,11 +358,14 @@ impl State {
         ];
         if matches!(connection.auth, ModelAuthentication::ApiKey { .. }) {
             lines.push("API key (hidden)".into());
-            lines.push(if panel.secret.0.is_empty() {
-                "Key buffer: empty"
-            } else {
-                "Key buffer: hidden"
-            }.into());
+            lines.push(
+                if panel.secret.0.is_empty() {
+                    "Key buffer: empty"
+                } else {
+                    "Key buffer: hidden"
+                }
+                .into(),
+            );
         } else {
             lines.push("No API key".into());
         }
@@ -358,7 +376,10 @@ impl State {
             });
         }
         if let Some(receipt) = &panel.receipt {
-            lines.push(format!("ConfiguredOnly | generation {}", receipt.profile_generation));
+            lines.push(format!(
+                "ConfiguredOnly | generation {}",
+                receipt.profile_generation
+            ));
         }
         if self.profile.has_pending() {
             lines.push(format!(
@@ -370,7 +391,7 @@ impl State {
             lines.push("Esc closes | reopen k for a new explicit attempt".into());
         } else {
             lines.push(
-                "Enter configures locally | Esc cancels | no sign-in or model request".into()
+                "Enter configures locally | Esc cancels | no sign-in or model request".into(),
             );
         }
         lines.join("\n")
@@ -391,7 +412,9 @@ pub(in crate::tui) fn validate_connection(connection: &ModelConnection) -> Resul
         || endpoint.password().is_some()
         || endpoint.query().is_some()
         || endpoint.fragment().is_some()
-        || url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+        || url
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
     {
         return Err("account_profile_endpoint_invalid".into());
     }
@@ -442,14 +465,21 @@ fn profile_matches(
                 && receipt.profile_generation > 0
                 && !receipt.custody_id.is_empty()
                 && receipt.profile_config_sha256.len() == 64
-                && receipt.profile_config_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && receipt
+                    .profile_config_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
         }
         AccountProfileOutcome::NotRecorded => true,
     }
 }
 
 fn visible(value: &str) -> String {
-    value.chars().take(4096).flat_map(char::escape_default).collect()
+    value
+        .chars()
+        .take(4096)
+        .flat_map(char::escape_default)
+        .collect()
 }
 
 pub(in crate::tui) fn public_problem(problem: &str) -> &'static str {

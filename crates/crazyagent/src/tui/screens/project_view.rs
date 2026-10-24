@@ -49,7 +49,7 @@ pub(in crate::tui) fn project_screen(
     let (lines, cursor, help) = match screen.tab {
         Tab::Overview => overview(screen, width, content, look),
         Tab::Conversation => conversation(screen, content, room, look),
-        Tab::Agents => agents(screen, width, content, look),
+        Tab::Agents => agents(screen, width, content, room, look),
         Tab::Context => {
             if screen.reading
                 && width < 100
@@ -62,7 +62,7 @@ pub(in crate::tui) fn project_screen(
             }
             context(screen, width, content, room, look)
         }
-        Tab::Settings => settings(screen, content, look),
+        Tab::Settings => settings(screen, content, room, look),
     };
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
@@ -129,6 +129,31 @@ pub(in crate::tui) fn project_screen(
         ];
         rows = modal(&rows, width, 46, "Delete file", body, 5, look);
         help = vec![("y", "Delete"), ("n", "Keep"), ("Esc", "Keep")];
+    }
+    if let Some(job) = screen.confirm_stop {
+        let name = screen
+            .jobs
+            .iter()
+            .flatten()
+            .find(|known| known.id == job)
+            .map_or_else(
+                || "this research".to_owned(),
+                |known| known.kind_label.clone(),
+            );
+        let body = vec![
+            Row::of(format!("Stop {name}?"), look.fg),
+            Row::of("The agent ends. You can retry it later.", look.muted),
+            Row::default(),
+            Row::of("[ Stop ]", look.fg)
+                .push("   ", Style::new())
+                .push("[> Keep running ]", look.selection),
+        ];
+        rows = modal(&rows, width, 46, "Stop agent", body, 5, look);
+        help = vec![
+            ("y", "Stop"),
+            ("n", "Keep running"),
+            ("Esc", "Keep running"),
+        ];
     }
     if let Some(cursor) = screen.pool_picker {
         let mut body = vec![
@@ -835,7 +860,7 @@ fn input_row(screen: &ProjectScreen, look: &Look) -> Row {
         .push(last.to_owned(), look.fg)
 }
 
-fn agents(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -> Drawn {
+fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, look: &Look) -> Drawn {
     let wide = width >= 100;
     let (running, waiting, failed, done) = screen.counts();
     let mut title = Row::of("Agents", look.accent);
@@ -856,12 +881,15 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -> 
     if wide {
         lines.push(Row::default());
     }
-    let help = vec![
-        ("\u{2191}\u{2193}", "Move"),
-        ("Enter", "Open report"),
-        TABS,
-        ("Esc", "Home"),
-    ];
+    let mut help = vec![("\u{2191}\u{2193}", "Move")];
+    help.extend(screen.focused_job().and_then(|job| match job.status {
+        ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running => {
+            Some(("x", "Stop"))
+        }
+        ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
+        ResearchStatus::Done => None,
+    }));
+    help.extend([("Enter", "Open report"), TABS, ("Esc", "Home")]);
     let Some(jobs) = &screen.jobs else {
         lines.push(Row::of("Loading...", look.muted));
         return (lines, None, help);
@@ -976,8 +1004,36 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -> 
             let at = at.map(|at| clock(at, screen.offset)).unwrap_or_default();
             lines.push(Row::of(at, look.muted).pad(7).push(text, style));
         }
+        let left = room.saturating_sub(lines.len());
+        lines.extend(
+            output_lines(screen, job, look)
+                .into_iter()
+                .rev()
+                .take(left)
+                .rev()
+                .map(|(text, style)| Row::default().pad(7).push(text, style).pad(content)),
+        );
     }
     (lines, None, help)
+}
+
+/// Gives the agent output shown under Activity for the focused job.
+/// Takes the screen, the job and the look; only lines the engine read for this job are used.
+/// Returns the lines oldest first, a plain note while reading or when nothing was written, or nothing for a job that never started.
+fn output_lines(screen: &ProjectScreen, job: &ResearchJob, look: &Look) -> Vec<(String, Style)> {
+    let log = screen.log.as_ref().filter(|log| log.job == job.id);
+    match log.map(|log| log.lines.as_deref()) {
+        Some(Some(lines)) if !lines.is_empty() => {
+            lines.iter().map(|line| (line.clone(), look.fg)).collect()
+        }
+        Some(None) => vec![(
+            "The agent's output could not be read.".to_owned(),
+            look.warning,
+        )],
+        _ if job.started_ms.is_none() => Vec::new(),
+        Some(Some(_)) => vec![("No output yet.".to_owned(), look.muted)],
+        None => vec![("Reading the agent's output...".to_owned(), look.muted)],
+    }
 }
 
 /// Lists what the engine recorded for one research job, oldest first.
@@ -1255,7 +1311,7 @@ fn context(
     (lines, None, help)
 }
 
-fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
+fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     let entry = |label: &str, value: Row| Row::of(label, look.muted).pad(10).cat(value);
     let pool = match &screen.pool {
         _ if !screen.pool_ready => Row::of("Not ready yet", look.muted),
@@ -1268,7 +1324,7 @@ fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
             .push("   Enter Assign", look.muted),
         None => Row::of("No pool yet", look.warning).push("   Enter Pick a pool", look.muted),
     };
-    let lines = vec![
+    let mut lines = vec![
         Row::of("Project settings", look.accent),
         Row::default(),
         entry("Name", Row::of(screen.name.clone(), look.fg)),
@@ -1276,30 +1332,25 @@ fn settings(screen: &ProjectScreen, content: usize, look: &Look) -> Drawn {
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
         Row::default(),
-        spread(
-            content,
-            Row::of("Skills", look.heading),
-            Row::of("From Settings, plus this project", look.muted),
-        ),
-        Row::of(
-            "  Not ready yet. Project skills come with the plugins and skills update.",
-            look.muted,
-        ),
-        Row::default(),
-        Row::of("MCP servers", look.heading),
-        Row::of(
-            "  Not ready yet. Project MCP servers come with the same update.",
-            look.muted,
-        ),
     ];
+    let (plugins, mut help) = screen
+        .plugins
+        .rows(content, room.saturating_sub(lines.len()), look);
+    lines.extend(plugins);
     let pool_key = match &screen.pool {
         _ if !screen.pool_ready => None,
         Some(pool) if pool.assigned => Some("Change pool"),
         Some(_) => Some("Assign pool"),
         None => Some("Pick a pool"),
     };
-    let mut help: Help = pool_key.map(|label| ("Enter", label)).into_iter().collect();
-    help.extend([("o", "Open folder"), TABS, ("Esc", "Home")]);
+    if let Some(at) = help.iter().position(|item| *item == TABS) {
+        help.insert(at, ("o", "Open folder"));
+        if let Some(label) = pool_key
+            && help.iter().all(|(key, _)| *key != "Enter")
+        {
+            help.insert(0, ("Enter", label));
+        }
+    }
     let _ = cells;
     (lines, None, help)
 }

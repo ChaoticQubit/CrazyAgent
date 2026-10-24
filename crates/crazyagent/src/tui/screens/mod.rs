@@ -8,13 +8,6 @@ pub(in crate::tui) mod project;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "v1-tui-projects plugs the project plugins view into the project Settings tab"
-    )
-)]
 pub(in crate::tui) mod project_plugins;
 #[cfg_attr(
     not(test),
@@ -162,6 +155,7 @@ pub enum Place {
     Settings(SettingsSection),
     AddAccount,
     NewPool,
+    NewPoolFrom(Vec<CredentialRef>),
     EditPool(CredentialRef),
     NewProject,
     Project {
@@ -297,6 +291,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Settings(section) => settings::open(*section, ctx),
         Place::AddAccount => settings::open_add_account(ctx),
         Place::NewPool => Box::new(settings::pool_editor::PoolEditor::new(None, ctx)),
+        Place::NewPoolFrom(ids) => {
+            Box::new(settings::pool_editor::PoolEditor::with_members(ids, ctx))
+        }
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Project { id, name, tab } => Box::new(project_page::ProjectPage::new(

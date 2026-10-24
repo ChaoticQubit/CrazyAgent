@@ -120,7 +120,10 @@ pub(super) fn lock(file: &File) -> Result<(), EngineError> {
 }
 
 impl ConfiguredRcliUse {
-    fn capture(path: &Path, connection: &ModelConnection) -> Result<(Directory, Self), EngineError> {
+    fn capture(
+        path: &Path,
+        connection: &ModelConnection,
+    ) -> Result<(Directory, Self), EngineError> {
         validate_connection(connection)?;
         if !path.is_absolute()
             || path.as_os_str().len() > 4096
@@ -145,7 +148,8 @@ impl ConfiguredRcliUse {
             file: anchor.directory.try_clone().map_err(unsafe_custody)?,
             identity: anchor.identity,
         };
-        let sdk = Directory::open(&home.file, OsStr::new(".backboard")).map_err(configuration_missing)?;
+        let sdk =
+            Directory::open(&home.file, OsStr::new(".backboard")).map_err(configuration_missing)?;
         let config = File::from(
             rustix::fs::openat(
                 &sdk.file,
@@ -163,7 +167,9 @@ impl ConfiguredRcliUse {
         );
         let stamp = ConfigStamp::of(&config.metadata().map_err(unsafe_custody)?)?;
         let mut bytes = vec![0; stamp.length as usize];
-        config.read_exact_at(&mut bytes, 0).map_err(unsafe_custody)?;
+        config
+            .read_exact_at(&mut bytes, 0)
+            .map_err(unsafe_custody)?;
         let identity = ConfiguredHomeIdentity {
             path: anchor.path.clone(),
             home: home.identity,
@@ -206,16 +212,20 @@ impl ConfiguredRcliUse {
             false,
         )?;
         let named = self.identity.path.join(".backboard/config.json");
-        if ConfigStamp::of(&self.config.metadata().map_err(unsafe_custody)?)? != self.identity.config
+        if ConfigStamp::of(&self.config.metadata().map_err(unsafe_custody)?)?
+            != self.identity.config
             || ConfigStamp::of(&std::fs::symlink_metadata(&named).map_err(unsafe_custody)?)?
                 != self.identity.config
         {
             return Err(failure("rcli_profile_config_changed"));
         }
         let mut bytes = vec![0; self.identity.config.length as usize];
-        self.config.read_exact_at(&mut bytes, 0).map_err(unsafe_custody)?;
+        self.config
+            .read_exact_at(&mut bytes, 0)
+            .map_err(unsafe_custody)?;
         if digest(&bytes) != self.identity.config_sha256
-            || ConfigStamp::of(&self.config.metadata().map_err(unsafe_custody)?)? != self.identity.config
+            || ConfigStamp::of(&self.config.metadata().map_err(unsafe_custody)?)?
+                != self.identity.config
             || ConfigStamp::of(&std::fs::symlink_metadata(&named).map_err(unsafe_custody)?)?
                 != self.identity.config
         {
@@ -300,7 +310,8 @@ impl NativeProfileCustody {
             return Err(failure("native_profile_identity_changed"));
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
-        let profile = Directory::open(&root.file, OsStr::new(&key)).map_err(configuration_missing)?;
+        let profile =
+            Directory::open(&root.file, OsStr::new(&key)).map_err(configuration_missing)?;
         let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
         let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("rcli_profile_binding_conflict"))?;

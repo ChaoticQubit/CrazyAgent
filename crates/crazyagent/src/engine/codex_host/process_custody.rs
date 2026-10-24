@@ -1,6 +1,4 @@
-use super::process::{
-    CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest,
-};
+use super::process::{CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest};
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -83,7 +81,9 @@ fn start(
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
     if let Some(profile) = &profile {
-        profile.revalidate_retained().map_err(|_| "codex_host_profile_invalid")?;
+        profile
+            .revalidate_retained()
+            .map_err(|_| "codex_host_profile_invalid")?;
     }
     if shared.stop.load(Ordering::Acquire) {
         return Err("codex_host_start_cancelled");
@@ -150,17 +150,20 @@ impl OwnedChild {
             while input.try_recv().is_ok() {}
             return;
         }
-        if self.pending.is_none() {
-            if let Ok(request) = input.try_recv() {
-                if let Some(profile) = &self.profile {
-                    if let Err(error) = profile.revalidate_retained() {
-                        let _ = request.done.send(Err(error));
-                        self.shared.fail("codex_host_profile_invalid");
-                        return;
-                    }
-                }
-                self.pending = Some(PendingWrite { request, written: 0 });
+        if self.pending.is_none()
+            && let Ok(request) = input.try_recv()
+        {
+            if let Some(profile) = &self.profile
+                && let Err(error) = profile.revalidate_retained()
+            {
+                let _ = request.done.send(Err(error));
+                self.shared.fail("codex_host_profile_invalid");
+                return;
             }
+            self.pending = Some(PendingWrite {
+                request,
+                written: 0,
+            });
         }
         self.write_pending();
         if self.shared.close_stdin.load(Ordering::Acquire)
@@ -184,15 +187,17 @@ impl OwnedChild {
             Ok(count) => {
                 pending.written += count;
                 assert!(pending.written <= pending.request.bytes.len());
-                if pending.written == pending.request.bytes.len() {
-                    if let Some(done) = self.pending.take() {
-                        let _ = done.request.done.send(Ok(()));
-                    }
+                if pending.written == pending.request.bytes.len()
+                    && let Some(done) = self.pending.take()
+                {
+                    let _ = done.request.done.send(Ok(()));
                 }
             }
-            Err(error) if matches!(
-                error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
             Err(_) => self.write_failed(),
         }
     }
@@ -200,16 +205,27 @@ impl OwnedChild {
     fn write_failed(&mut self) {
         self.shared.fail("codex_host_input_failed");
         if let Some(pending) = self.pending.take() {
-            let _ = pending.request.done.send(Err(EngineError("codex_host_input_failed".into())));
+            let _ = pending
+                .request
+                .done
+                .send(Err(EngineError("codex_host_input_failed".into())));
         }
     }
 
     fn read_output(&mut self, limit: u64) {
         let stdout = read_pipe(
-            &mut self.stdout, &mut self.stdout_eof, false, &self.shared, limit,
+            &mut self.stdout,
+            &mut self.stdout_eof,
+            false,
+            &self.shared,
+            limit,
         );
         let stderr = read_pipe(
-            &mut self.stderr, &mut self.stderr_eof, true, &self.shared, limit,
+            &mut self.stderr,
+            &mut self.stderr_eof,
+            true,
+            &self.shared,
+            limit,
         );
         if stdout.is_err() || stderr.is_err() {
             self.accounting_failed = true;
@@ -258,10 +274,10 @@ impl OwnedChild {
     fn publish_completion(&self) {
         assert!(self.complete());
         assert!(self.status.is_some());
-        if let Some(profile) = &self.profile {
-            if profile.revalidate_retained().is_err() {
-                self.shared.fail("codex_host_profile_invalid");
-            }
+        if let Some(profile) = &self.profile
+            && profile.revalidate_retained().is_err()
+        {
+            self.shared.fail("codex_host_profile_invalid");
         }
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
@@ -273,13 +289,13 @@ impl OwnedChild {
 
 impl Drop for Custody {
     fn drop(&mut self) {
-        if let Some(mut retained) = self.0.take() {
-            if !retained.complete() {
-                retained.stop();
-                retained.observe_exit();
-                retained.shared.accounting_failed();
-                std::mem::forget(retained);
-            }
+        if let Some(mut retained) = self.0.take()
+            && !retained.complete()
+        {
+            retained.stop();
+            retained.observe_exit();
+            retained.shared.accounting_failed();
+            std::mem::forget(retained);
         }
     }
 }
@@ -299,7 +315,9 @@ fn read_pipe<R: Read>(
     if *eof {
         return Ok(());
     }
-    let reader = pipe.as_mut().ok_or_else(|| EngineError("codex_host_pipe_missing".into()))?;
+    let reader = pipe
+        .as_mut()
+        .ok_or_else(|| EngineError("codex_host_pipe_missing".into()))?;
     let mut bytes = [0; READ_BYTES];
     for _ in 0..READS_PER_POLL {
         match reader.read(&mut bytes) {
@@ -324,8 +342,13 @@ fn record_output(
     limit: u64,
 ) -> Result<(), EngineError> {
     let mut state = shared.lock()?;
-    let count = if stderr { &mut state.observed.1 } else { &mut state.observed.0 };
-    *count = count.checked_add(bytes.len() as u64)
+    let count = if stderr {
+        &mut state.observed.1
+    } else {
+        &mut state.observed.0
+    };
+    *count = count
+        .checked_add(bytes.len() as u64)
         .ok_or_else(|| EngineError("codex_host_output_accounting".into()))?;
     let total = state.observed.0.checked_add(state.observed.1);
     if total.is_none_or(|total| total > limit) {
@@ -341,12 +364,12 @@ fn record_output(
         shared.stop.store(true, Ordering::Release);
         return Ok(());
     }
-    let output = if stderr {
-        CodexHostOutput::Stderr(bytes.to_vec())
-    } else {
-        CodexHostOutput::Stdout(bytes.to_vec())
-    };
-    state.output.push_back(output);
+    if stderr {
+        return Ok(());
+    }
+    state
+        .output
+        .push_back(CodexHostOutput::Stdout(bytes.to_vec()));
     assert!(state.output.len() <= OUTPUT_QUEUE_MAX);
     Ok(())
 }

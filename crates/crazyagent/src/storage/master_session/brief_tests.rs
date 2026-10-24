@@ -75,67 +75,102 @@ async fn apply(client: &OwnerClient, id: &str, mutation: OwnerMutation) {
     };
     assert_eq!(operation.result, OwnerResult::Applied);
     assert_eq!(operation.provenance.operation_id, request.request_id);
-    assert_eq!(operation.provenance.request_hash, request.mutation_hash().unwrap());
+    assert_eq!(
+        operation.provenance.request_hash,
+        request.mutation_hash().unwrap()
+    );
     assert!(!operation.historical_replay);
 }
 
 async fn session(client: &OwnerClient, project: &ProjectId) -> MasterSessionView {
-    let state = read(client, OwnerRead::ProjectMaster { project_id: project.clone() }).await;
-    let OwnerData::ProjectMaster { session: Some(session) } = state.data else {
+    let state = read(
+        client,
+        OwnerRead::ProjectMaster {
+            project_id: project.clone(),
+        },
+    )
+    .await;
+    let OwnerData::ProjectMaster {
+        session: Some(session),
+    } = state.data
+    else {
         panic!("actual persisted master session required");
     };
+    let session = *session;
     assert_eq!(session.project_id, *project);
     session
 }
 
 async fn open(client: &OwnerClient, project: &ProjectId, id: &str) -> MasterSessionView {
-    let basis = read(client, OwnerRead::ModelAccessRecord {
-        collection: ModelAccessCollection::Pools,
-        id: CredentialRef::new("brief-pool").unwrap(),
-    }).await;
+    let basis = read(
+        client,
+        OwnerRead::ModelAccessRecord {
+            collection: ModelAccessCollection::Pools,
+            id: CredentialRef::new("brief-pool").unwrap(),
+        },
+    )
+    .await;
     let OwnerData::ModelAccessRecord { source_hash, .. } = basis.data else {
         panic!("actual current pool/source basis required");
     };
     let target = CredentialRef::new("brief-profile").unwrap();
-    apply(client, id, OwnerMutation::ProjectMaster {
-        action: MasterOwnerAction::Open {
-            project_id: project.clone(),
-            expected_config_id: basis.config_id,
-            expected_source_hash: source_hash,
-            selection: MasterSelection {
-                backend: MasterBackend::Rcli,
-                pool_ref: CredentialRef::new("brief-pool").unwrap(),
-                target_profile_ref: target.clone(),
-                route: RouteRequest {
-                    preferred_target: Some(target.clone()),
-                    required_target: Some(target),
-                    required_capabilities: vec![],
-                    account_ref: CredentialRef::new("brief-account").unwrap(),
-                    budget_ref: CredentialRef::new("brief-budget").unwrap(),
-                    resources: ResourceBudget::unit(),
-                },
+    apply(
+        client,
+        id,
+        OwnerMutation::ProjectMaster {
+            action: MasterOwnerAction::Open {
+                project_id: project.clone(),
+                expected_config_id: basis.config_id,
+                expected_source_hash: source_hash,
+                selection: Box::new(MasterSelection {
+                    backend: MasterBackend::Rcli,
+                    pool_ref: CredentialRef::new("brief-pool").unwrap(),
+                    target_profile_ref: target.clone(),
+                    route: RouteRequest {
+                        preferred_target: Some(target.clone()),
+                        required_target: Some(target),
+                        required_capabilities: vec![],
+                        account_ref: CredentialRef::new("brief-account").unwrap(),
+                        budget_ref: CredentialRef::new("brief-budget").unwrap(),
+                        resources: ResourceBudget::unit(),
+                    },
+                }),
             },
         },
-    }).await;
+    )
+    .await;
     let session = session(client, project).await;
     assert_eq!(session.phase, MasterSessionPhase::Configured);
     session
 }
 
-async fn submit(client: &OwnerClient, opened: &MasterSessionView, id: &str) -> (MasterSessionView, MasterTurnView) {
-    apply(client, id, OwnerMutation::ProjectMaster {
-        action: MasterOwnerAction::Submit {
+async fn submit(
+    client: &OwnerClient,
+    opened: &MasterSessionView,
+    id: &str,
+) -> (MasterSessionView, MasterTurnView) {
+    apply(
+        client,
+        id,
+        OwnerMutation::ProjectMaster {
+            action: MasterOwnerAction::Submit {
+                project_id: opened.project_id.clone(),
+                session_id: opened.session_id.clone(),
+                text: USER_MESSAGE.into(),
+            },
+        },
+    )
+    .await;
+    let state = read(
+        client,
+        OwnerRead::ProjectMasterTurns {
             project_id: opened.project_id.clone(),
             session_id: opened.session_id.clone(),
-            text: USER_MESSAGE.into(),
+            cursor: None,
+            limit: 8,
         },
-    }).await;
-    let state = read(client, OwnerRead::ProjectMasterTurns {
-        project_id: opened.project_id.clone(),
-        session_id: opened.session_id.clone(),
-        cursor: None,
-        limit: 8,
-    }).await;
+    )
+    .await;
     let OwnerData::ProjectMasterTurns { mut page } = state.data else {
         panic!("actual persisted submitted turn required");
     };
@@ -157,7 +192,8 @@ fn database(root: &Path) -> Connection {
     let db = Connection::open_with_flags(
         root.join("engine.db"),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    ).unwrap();
+    )
+    .unwrap();
     db.busy_timeout(Duration::from_secs(1)).unwrap();
     db
 }
@@ -170,77 +206,160 @@ fn assembled(root: &Path, session: &MasterSessionView, turn: &MasterTurnView) ->
 
 #[tokio::test]
 async fn current_project_brief_reaches_master_prompt_after_restart() {
-    let root = tempfile::Builder::new().prefix("ca-pb17-").tempdir_in("/private/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("ca-pb17-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let repository = root.path().join("repository");
     std::fs::create_dir(&repository).unwrap();
-    std::fs::write(repository.join("README.md"), "Declared master brief repository\n").unwrap();
+    std::fs::write(
+        repository.join("README.md"),
+        "Declared master brief repository\n",
+    )
+    .unwrap();
     let global = root.path().join("global.toml");
     let project_settings = root.path().join("project.toml");
     std::fs::write(&global, CATALOG).unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (_shutdown, stopped) = watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
-        root.path(), "e.sock", &global, &project_settings, &stopped,
-    ).await.unwrap();
-    let (client, identity) = OwnerClient::discover(
-        root.path(), OwnerClientKind::Tui, Duration::from_secs(3),
-    ).await.unwrap();
-    apply(&client, "create-master-brief-project", OwnerMutation::CreateProject {
-        project_id: ProjectId::new("brief-project").unwrap(),
-        spec: ProjectSpec {
-            name: "Master brief project".into(),
-            repositories: vec![repository.to_str().unwrap().into()],
+        root.path(),
+        "e.sock",
+        &global,
+        &project_settings,
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (client, identity) =
+        OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+            .await
+            .unwrap();
+    apply(
+        &client,
+        "create-master-brief-project",
+        OwnerMutation::CreateProject {
+            project_id: ProjectId::new("brief-project").unwrap(),
+            spec: ProjectSpec {
+                name: "Master brief project".into(),
+                repositories: vec![repository.to_str().unwrap().into()],
+            },
         },
-    }).await;
-    let projects = read(&client, OwnerRead::Page {
-        view: OwnerView::Projects, cursor: None, limit: 16,
-    }).await;
-    let OwnerData::Page { mut items, next: None } = projects.data else {
+    )
+    .await;
+    let projects = read(
+        &client,
+        OwnerRead::Page {
+            view: OwnerView::Projects,
+            cursor: None,
+            limit: 16,
+        },
+    )
+    .await;
+    let OwnerData::Page {
+        mut items,
+        next: None,
+    } = projects.data
+    else {
         panic!("actual committed project page required");
     };
     assert_eq!(items.len(), 1);
-    let OwnerSummary::Project { project_id: project, name, repository_count } = items.remove(0) else {
+    let OwnerSummary::Project {
+        project_id: project,
+        name,
+        repository_count,
+    } = items.remove(0)
+    else {
         panic!("actual committed project identity required");
     };
     assert_eq!(name, "Master brief project");
     assert_eq!(repository_count, 1);
-    apply(&client, "master-brief-v1", OwnerMutation::Conversation {
-        mutation: ConversationMutation::ReplaceBrief {
-            project_id: project.clone(), expected_version: 0, text: FIRST_BRIEF.into(),
+    apply(
+        &client,
+        "master-brief-v1",
+        OwnerMutation::Conversation {
+            mutation: ConversationMutation::ReplaceBrief {
+                project_id: project.clone(),
+                expected_version: 0,
+                text: FIRST_BRIEF.into(),
+            },
         },
-    }).await;
+    )
+    .await;
     let opened = open(&client, &project, "open-master-brief").await;
     let (active, first_turn) = submit(&client, &opened, "submit-master-brief").await;
     let initial = assembled(root.path(), &active, &first_turn);
-    apply(&client, "master-brief-v2", OwnerMutation::Conversation {
-        mutation: ConversationMutation::ReplaceBrief {
-            project_id: project.clone(), expected_version: 1, text: CURRENT_BRIEF.into(),
+    apply(
+        &client,
+        "master-brief-v2",
+        OwnerMutation::Conversation {
+            mutation: ConversationMutation::ReplaceBrief {
+                project_id: project.clone(),
+                expected_version: 1,
+                text: CURRENT_BRIEF.into(),
+            },
         },
-    }).await;
+    )
+    .await;
     let edited = assembled(root.path(), &active, &first_turn);
-    let before_restart = read(&client, OwnerRead::CurrentBrief { project_id: project.clone() }).await;
-    let OwnerData::CurrentBrief { brief: Some(expected), .. } = before_restart.data else {
+    let before_restart = read(
+        &client,
+        OwnerRead::CurrentBrief {
+            project_id: project.clone(),
+        },
+    )
+    .await;
+    let OwnerData::CurrentBrief {
+        brief: Some(expected),
+        ..
+    } = before_restart.data
+    else {
         panic!("actual current brief required");
     };
     assert_eq!(expected.content, ConversationContent::Brief { version: 2 });
     assert_eq!(expected.text, CURRENT_BRIEF);
-    apply(&client, "close-master-brief", OwnerMutation::ProjectMaster {
-        action: MasterOwnerAction::Close {
-            project_id: project.clone(), session_id: opened.session_id.clone(),
+    apply(
+        &client,
+        "close-master-brief",
+        OwnerMutation::ProjectMaster {
+            action: MasterOwnerAction::Close {
+                project_id: project.clone(),
+                session_id: opened.session_id.clone(),
+            },
         },
-    }).await;
-    assert_eq!(session(&client, &project).await.phase, MasterSessionPhase::Closed);
+    )
+    .await;
+    assert_eq!(
+        session(&client, &project).await.phase,
+        MasterSessionPhase::Closed
+    );
     drop(client);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
 
     let mut service = EngineService::start_with_settings_sources(
-        root.path(), "e.sock", &global, &project_settings, &stopped,
-    ).await.unwrap();
+        root.path(),
+        "e.sock",
+        &global,
+        &project_settings,
+        &stopped,
+    )
+    .await
+    .unwrap();
     let (client, current_identity) = OwnerClient::discover(
-        root.path(), OwnerClientKind::Desktop, Duration::from_secs(3),
-    ).await.unwrap();
-    assert_eq!(current_identity.database_instance(), identity.database_instance());
+        root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        current_identity.database_instance(),
+        identity.database_instance()
+    );
     assert_ne!(current_identity.engine_epoch(), identity.engine_epoch());
     let closed = session(&client, &project).await;
     assert_eq!(closed.session_id, opened.session_id);
@@ -250,30 +369,60 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
     assert_eq!(reopened.project_id, opened.project_id);
     assert_eq!(reopened.selection, opened.selection);
     assert_eq!(reopened.owner.engine_epoch, current_identity.engine_epoch());
-    let after_restart = read(&client, OwnerRead::CurrentBrief {
-        project_id: reopened.project_id.clone(),
-    }).await;
-    let OwnerData::CurrentBrief { brief: Some(actual), .. } = after_restart.data else {
+    let after_restart = read(
+        &client,
+        OwnerRead::CurrentBrief {
+            project_id: reopened.project_id.clone(),
+        },
+    )
+    .await;
+    let OwnerData::CurrentBrief {
+        brief: Some(actual),
+        ..
+    } = after_restart.data
+    else {
         panic!("actual reopened current brief required");
     };
     assert_eq!(actual, expected);
-    let (reopened_active, reopened_turn) = submit(&client, &reopened, "resubmit-master-brief").await;
+    let (reopened_active, reopened_turn) =
+        submit(&client, &reopened, "resubmit-master-brief").await;
     drop(client);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
     let restored = assembled(root.path(), &reopened_active, &reopened_turn);
     let mut db = database(root.path());
     let tx = db.transaction().unwrap();
-    let OwnerData::CurrentBrief { brief: Some(selected), .. } =
-        crate::conversation::current_brief(&tx, &project).unwrap()
+    let OwnerData::CurrentBrief {
+        brief: Some(selected),
+        ..
+    } = crate::conversation::current_brief(&tx, &project).unwrap()
     else {
         panic!("existing transactional current brief selector required");
     };
     assert_eq!(selected, expected);
-    for table in ["model_gateway_attempts", "native_auth_operations", "configured_master_profiles", "master_preparations", "worktree_leases"] {
-        let count: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
-        assert_eq!(count, 0, "no fabricated admission or physical runtime fixture: {table}");
+    for table in [
+        "model_gateway_attempts",
+        "native_auth_operations",
+        "configured_master_profiles",
+        "master_preparations",
+        "worktree_leases",
+    ] {
+        let count: i64 = tx
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "no fabricated admission or physical runtime fixture: {table}"
+        );
     }
-    assert!(edited.contains(CURRENT_BRIEF), "current persisted project brief is missing from the shared master prompt: {edited:?}");
+    assert!(
+        edited.contains(CURRENT_BRIEF),
+        "current persisted project brief is missing from the shared master prompt: {edited:?}"
+    );
     assert_eq!(edited.matches(CURRENT_BRIEF).count(), 1);
     assert!(edited.contains(USER_MESSAGE));
     assert!(!edited.contains(FIRST_BRIEF));

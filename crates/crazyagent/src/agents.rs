@@ -25,6 +25,8 @@ const REPLY_WAIT: Duration = Duration::from_secs(40);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
+const HOST_WAIT: Duration = Duration::from_secs(10);
+const RESTARTS_MAX: usize = LIST_MAX;
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     id TEXT PRIMARY KEY CHECK(length(id) = 32),
     project TEXT NOT NULL,
@@ -44,7 +46,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     ended_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS agent_runs_project ON agent_runs(project, started_ms);";
-const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms";
+const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":'";
 
 fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
@@ -280,6 +282,142 @@ pub struct AgentView {
     pub ended_ms: Option<u64>,
 }
 
+/// Which engine part drives a hosted agent, and that part's own reference for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostedSpec {
+    host: String,
+    reference: String,
+}
+
+/// What the register shows for one agent that another engine part starts and drives,
+/// such as a team agent: its project, role, owner-facing label and harness, the host's
+/// name and the host's own reference for it, handed back with every owner restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedAgent {
+    pub project: ProjectId,
+    pub role: AgentRole,
+    pub label: String,
+    pub harness: String,
+    pub host: &'static str,
+    pub reference: String,
+}
+
+/// What the owner asked of a hosted agent. A restart also stops it; once it ends, the
+/// restart is handed to its host through `Agents::take_restarts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedRequest {
+    Stop,
+    Restart,
+}
+
+/// One restart the owner asked for a hosted agent that is no longer running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedRestart {
+    pub id: String,
+    pub host: String,
+    pub reference: String,
+}
+
+#[derive(Default)]
+struct Control {
+    stop: AtomicBool,
+    restart: AtomicBool,
+    busy: AtomicBool,
+    interrupt: Arc<AtomicBool>,
+}
+
+/// A hosted agent's place in the register, kept by the engine part that drives it.
+/// The host reads the owner's stop and restart with `requested`, gives `interrupt_flag`
+/// to the thread that drives the harness and records the end with `finish`. Dropping it
+/// records the agent as "Stopped when CrazyAgent closed".
+pub struct Hosted {
+    id: String,
+    control: Arc<Control>,
+    recorder: Recorder,
+    agents: Arc<Agents>,
+    ended: bool,
+}
+
+impl Hosted {
+    /// Returns the agent's register id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Reads what the owner asked of the agent. Output: a restart, a stop, or none.
+    pub fn requested(&self) -> Option<HostedRequest> {
+        if self.control.restart.load(Ordering::Acquire) {
+            Some(HostedRequest::Restart)
+        } else if self.control.stop.load(Ordering::Acquire) {
+            Some(HostedRequest::Stop)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the flag the owner's interrupt sets. The thread that drives the harness
+    /// clears it before each turn and interrupts the turn once it is set.
+    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        self.control.interrupt.clone()
+    }
+
+    /// Records whether the agent is working on a turn; only then can the owner interrupt it.
+    pub fn set_busy(&self, busy: bool) {
+        self.control.busy.store(busy, Ordering::Release);
+    }
+
+    /// Records the process group of the agent's current harness process. Input: the group.
+    pub fn started(&self, group: u32) {
+        assert!(group > 1);
+        if let Ok(db) = self.recorder.db.lock() {
+            let _ = db.execute(
+                "UPDATE agent_runs SET process_group=?4 WHERE id=?1 AND epoch=?2 AND attempt=?3 AND state='running'",
+                params![
+                    self.id,
+                    self.recorder.epoch,
+                    self.recorder.attempt,
+                    i64::from(group)
+                ],
+            );
+        }
+    }
+
+    /// Records the agent's last reply, clipped to `LAST_TEXT_BYTES_MAX` bytes.
+    pub fn text(&self, text: &str) {
+        self.recorder.text(text);
+    }
+
+    /// Records how the agent ended and hands an owner restart to its host.
+    /// Input: `Stopped`, `Exited` or `Failed`, and a plain reason.
+    pub fn finish(mut self, state: AgentState, reason: Option<&str>) {
+        assert!(state != AgentState::Running && state != AgentState::Closed);
+        self.end(state, reason);
+    }
+
+    fn end(&mut self, state: AgentState, reason: Option<&str>) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        self.recorder.finish(state, None, reason);
+        if let Ok(mut live) = self.agents.live.lock()
+            && matches!(live.get(&self.id), Some(Live::Hosted { control }) if Arc::ptr_eq(control, &self.control))
+        {
+            live.remove(&self.id);
+        }
+        if self.control.restart.load(Ordering::Acquire) {
+            let _ = self.agents.queue_restart(&self.id);
+        }
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        self.end(AgentState::Closed, None);
+    }
+}
+
 enum Command {
     Send(String, SyncSender<Result<(), LaunchError>>),
     Interrupt(SyncSender<Result<(), LaunchError>>),
@@ -297,6 +435,9 @@ enum Live {
         probe: Arc<File>,
         quit: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
+    },
+    Hosted {
+        control: Arc<Control>,
     },
 }
 
@@ -353,6 +494,8 @@ pub struct Agents {
     db: Arc<Mutex<Connection>>,
     live: Mutex<HashMap<String, Live>>,
     keys: Mutex<HashMap<String, Secret>>,
+    restarts: Mutex<Vec<HostedRestart>>,
+    hosts: Mutex<Vec<String>>,
 }
 
 impl Agents {
@@ -390,6 +533,8 @@ impl Agents {
             db: Arc::new(Mutex::new(connection)),
             live: Mutex::new(HashMap::new()),
             keys: Mutex::new(HashMap::new()),
+            restarts: Mutex::new(Vec::new()),
+            hosts: Mutex::new(Vec::new()),
         };
         agents.recover()?;
         Ok(agents)
@@ -672,12 +817,13 @@ impl Agents {
                 .collect::<Result<_, _>>()
                 .map_err(database)?
         };
+        let served = self.served();
         let live = self.live()?;
         let views: Vec<AgentView> = rows
             .into_iter()
             .map(|row| {
                 let entry = live.get(&row.id);
-                row.view(entry)
+                row.view(entry, served)
             })
             .collect();
         assert!(views.len() <= limit);
@@ -699,8 +845,9 @@ impl Agents {
             .optional()
             .map_err(database)?
             .ok_or_else(|| failure("agent_not_found"))?;
+        let served = self.served();
         let live = self.live()?;
-        Ok(row.view(live.get(id)))
+        Ok(row.view(live.get(id), served))
     }
 
     /// Sends one more prompt to a live agent. Input: id and text. Output: Ok, or
@@ -720,6 +867,13 @@ impl Agents {
     /// Interrupts the current turn of one agent through its harness protocol; the
     /// process keeps running. Input: id. Output: Ok, or `agent_not_busy`.
     pub fn interrupt(&self, id: &str) -> Result<(), LaunchError> {
+        if let Some(control) = self.hosted(id)? {
+            if !control.busy.load(Ordering::Acquire) {
+                return Err(failure("agent_not_busy"));
+            }
+            control.interrupt.store(true, Ordering::Release);
+            return Ok(());
+        }
         let (reply, answer) = sync_channel(1);
         self.command(id, Command::Interrupt(reply))?;
         wait(answer).map_err(|error| match error.0.as_str() {
@@ -740,6 +894,7 @@ impl Agents {
                 })
             }
             Some(Live::Reattached { .. }) => Err(failure("agent_reconnected_read_only")),
+            Some(Live::Hosted { .. }) => Err(failure("agent_hosted")),
             None => Err(failure("agent_not_running")),
         }
     }
@@ -747,6 +902,11 @@ impl Agents {
     /// Stops one agent: its whole process group gets TERM, then KILL after the grace
     /// time. Other agents are untouched. Input: id. Output: the stopped agent.
     pub fn stop(&self, id: &str) -> Result<AgentView, LaunchError> {
+        if let Some(control) = self.hosted(id)? {
+            control.stop.store(true, Ordering::Release);
+            self.await_host(id, &control);
+            return self.view(id);
+        }
         let live = self.take(id)?.ok_or_else(|| failure("agent_not_running"))?;
         end(live, AgentState::Stopped, self.recorder(id)?);
         self.view(id)
@@ -769,6 +929,9 @@ impl Agents {
             .optional()
             .map_err(database)?
             .ok_or_else(|| failure("agent_not_found"))?;
+        if let Ok(hosted) = serde_json::from_str::<HostedSpec>(&encoded) {
+            return self.restart_hosted(id, &hosted);
+        }
         let spec: AgentSpec =
             serde_json::from_str(&encoded).map_err(|_| failure("agent_spec_invalid"))?;
         let key = self
@@ -800,6 +963,193 @@ impl Agents {
         }
         self.start(id, &spec, key, next)?;
         self.view(id)
+    }
+
+    /// Records one agent that `agent.host` starts and drives itself, so the owner sees and
+    /// controls it with every other agent. Inputs: what to show, and the id of an earlier
+    /// run of the same host and reference to continue as its next attempt. Output: the
+    /// handle the host keeps while the agent lives.
+    pub fn host(
+        self: &Arc<Self>,
+        agent: HostedAgent,
+        again: Option<&str>,
+    ) -> Result<Hosted, LaunchError> {
+        if agent.label.trim().is_empty()
+            || agent.label.len() > LABEL_BYTES_MAX
+            || agent.label.chars().any(char::is_control)
+        {
+            return Err(failure("agent_label_invalid"));
+        }
+        let spec = serde_json::to_string(&HostedSpec {
+            host: agent.host.to_owned(),
+            reference: agent.reference.clone(),
+        })
+        .map_err(|_| failure("agent_spec_invalid"))?;
+        let now = now_ms() as i64;
+        let db = self.db()?;
+        let mut run = None;
+        if let Some(id) = again.filter(|id| valid_id(id)) {
+            let attempt: Option<u32> = db
+                .query_row(
+                    "SELECT attempt FROM agent_runs WHERE id=?1 AND spec=?2 AND state<>'running'",
+                    params![id, spec],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(database)?;
+            if let Some(next) = attempt.and_then(|attempt| attempt.checked_add(1)) {
+                let changed = db
+                    .execute(
+                        "UPDATE agent_runs SET state='running',reattached=0,process_group=NULL,attempt=?3,epoch=?4,
+                         exit_code=NULL,reason=NULL,last_text=NULL,started_ms=?5,ended_ms=NULL
+                         WHERE id=?1 AND spec=?2 AND state<>'running'",
+                        params![id, spec, next, self.epoch, now],
+                    )
+                    .map_err(database)?;
+                if changed == 1 {
+                    run = Some((id.to_owned(), next));
+                }
+            }
+        }
+        let (id, attempt) = match run {
+            Some(run) => run,
+            None => {
+                let id = new_id()?;
+                db.execute(
+                    "INSERT INTO agent_runs(id,project,role,label,harness,spec,state,reattached,attempt,epoch,started_ms)
+                     VALUES(?1,?2,?3,?4,?5,?6,'running',0,1,?7,?8)",
+                    params![
+                        id,
+                        agent.project.as_str(),
+                        agent.role.as_str(),
+                        agent.label,
+                        agent.harness,
+                        spec,
+                        self.epoch,
+                        now
+                    ],
+                )
+                .map_err(database)?;
+                (id, 1)
+            }
+        };
+        drop(db);
+        let control = Arc::new(Control::default());
+        self.live()?.insert(
+            id.clone(),
+            Live::Hosted {
+                control: control.clone(),
+            },
+        );
+        Ok(Hosted {
+            recorder: Recorder {
+                db: self.db.clone(),
+                id: id.clone(),
+                epoch: self.epoch.clone(),
+                attempt,
+            },
+            id,
+            control,
+            agents: self.clone(),
+            ended: false,
+        })
+    }
+
+    /// Hands one host the restarts the owner asked for its agents that no longer run, and
+    /// from then on accepts such restarts for it. Input: the host name. Output: each
+    /// restart with the agent's register id and the host's own reference.
+    pub fn take_restarts(&self, host: &str) -> Vec<HostedRestart> {
+        if let Ok(mut hosts) = self.hosts.lock()
+            && !hosts.iter().any(|known| known == host)
+        {
+            hosts.push(host.to_owned());
+        }
+        let Ok(mut restarts) = self.restarts.lock() else {
+            return Vec::new();
+        };
+        let (taken, kept): (Vec<HostedRestart>, Vec<HostedRestart>) =
+            std::mem::take(&mut *restarts)
+                .into_iter()
+                .partition(|restart| restart.host == host);
+        *restarts = kept;
+        assert!(restarts.len() <= RESTARTS_MAX);
+        taken
+    }
+
+    fn served(&self) -> bool {
+        self.hosts.lock().is_ok_and(|hosts| !hosts.is_empty())
+    }
+
+    fn queue_restart(&self, id: &str) -> Result<(), LaunchError> {
+        let encoded: String = self
+            .db()?
+            .query_row("SELECT spec FROM agent_runs WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(database)?;
+        let spec: HostedSpec =
+            serde_json::from_str(&encoded).map_err(|_| failure("agent_spec_invalid"))?;
+        let mut restarts = self
+            .restarts
+            .lock()
+            .map_err(|_| failure("agent_registry_unavailable"))?;
+        if restarts.iter().any(|restart| restart.id == id) {
+            return Ok(());
+        }
+        if restarts.len() >= RESTARTS_MAX {
+            return Err(failure("agent_restart_limit"));
+        }
+        restarts.push(HostedRestart {
+            id: id.to_owned(),
+            host: spec.host,
+            reference: spec.reference,
+        });
+        Ok(())
+    }
+
+    fn restart_hosted(&self, id: &str, spec: &HostedSpec) -> Result<AgentView, LaunchError> {
+        if let Some(control) = self.hosted(id)? {
+            control.restart.store(true, Ordering::Release);
+            control.stop.store(true, Ordering::Release);
+            self.await_host(id, &control);
+            return self.view(id);
+        }
+        let served = self
+            .hosts
+            .lock()
+            .map_err(|_| failure("agent_registry_unavailable"))?
+            .contains(&spec.host);
+        if !served {
+            return Err(failure("agent_restart_unavailable"));
+        }
+        self.queue_restart(id)?;
+        self.view(id)
+    }
+
+    fn hosted(&self, id: &str) -> Result<Option<Arc<Control>>, LaunchError> {
+        if !valid_id(id) {
+            return Err(failure("agent_not_found"));
+        }
+        Ok(match self.live()?.get(id) {
+            Some(Live::Hosted { control }) => Some(control.clone()),
+            _ => None,
+        })
+    }
+
+    fn await_host(&self, id: &str, control: &Arc<Control>) {
+        let deadline = Instant::now() + HOST_WAIT;
+        while Instant::now() < deadline {
+            let held = match self.live() {
+                Ok(live) => {
+                    matches!(live.get(id), Some(Live::Hosted { control: current }) if Arc::ptr_eq(current, control))
+                }
+                Err(_) => return,
+            };
+            if !held {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     fn take(&self, id: &str) -> Result<Option<Live>, LaunchError> {
@@ -872,6 +1222,10 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
                 let _ = thread.join();
             }
             kill_group(group, &probe);
+            recorder.finish(state, None, None);
+        }
+        Live::Hosted { control } => {
+            control.stop.store(true, Ordering::Release);
             recorder.finish(state, None, None);
         }
     }
@@ -977,6 +1331,7 @@ struct Stored {
     last_text: Option<String>,
     started_ms: u64,
     ended_ms: Option<u64>,
+    hosted: bool,
 }
 
 fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
@@ -1002,14 +1357,24 @@ fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
         last_text: row.get(10)?,
         started_ms: u64::try_from(started).unwrap_or(0),
         ended_ms: ended.and_then(|ended| u64::try_from(ended).ok()),
+        hosted: row.get::<_, i64>(13)? == 1,
     })
 }
 
 impl Stored {
-    fn view(self, live: Option<&Live>) -> AgentView {
+    fn view(self, live: Option<&Live>, served: bool) -> AgentView {
         let running = self.state == AgentState::Running;
-        let owned = matches!(live, Some(Live::Owned { .. }));
-        let busy = matches!(live, Some(Live::Owned { busy, .. }) if busy.load(Ordering::Acquire));
+        let driven = matches!(live, Some(Live::Owned { .. } | Live::Hosted { .. }));
+        let busy = match live {
+            Some(Live::Owned { busy, .. }) => busy.load(Ordering::Acquire),
+            Some(Live::Hosted { control }) => control.busy.load(Ordering::Acquire),
+            _ => false,
+        };
+        let can_restart = if self.hosted {
+            live.is_some() || (!running && served)
+        } else {
+            !running || live.is_some()
+        };
         let status = match self.state {
             AgentState::Running if self.reattached => {
                 "Running, reconnected after CrazyAgent restarted".to_owned()
@@ -1036,8 +1401,8 @@ impl Stored {
             busy,
             attempt: self.attempt,
             can_stop: running && live.is_some(),
-            can_interrupt: running && owned && busy,
-            can_restart: !running || live.is_some(),
+            can_interrupt: running && driven && busy,
+            can_restart,
             exit_code: self.exit_code,
             reason: self.reason,
             last_text: self.last_text,

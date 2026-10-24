@@ -53,7 +53,7 @@ pub struct AccountProfileReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AccountProfileOutcome {
     ConfiguredOnly {
-        receipt: AccountProfileReceipt,
+        receipt: Box<AccountProfileReceipt>,
         historical_replay: bool,
     },
     NotRecorded,
@@ -111,7 +111,10 @@ pub(crate) fn authorize_account_profile_scope(
     if scope.connection != connection.id {
         return Err(EngineError("account_profile_connection_changed".into()));
     }
-    if !matches!(connection.auth, ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}) {
+    if !matches!(
+        connection.auth,
+        ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
+    ) {
         return Err(EngineError("account_profile_auth_unsupported".into()));
     }
     if connection.harness.as_str() != "rcli" {
@@ -120,9 +123,15 @@ pub(crate) fn authorize_account_profile_scope(
     let crate::config::ModelEndpoint::Http { url } = &connection.endpoint else {
         return Err(EngineError("account_profile_endpoint_unsupported".into()));
     };
-    let url = url::Url::parse(url).map_err(|_| EngineError("account_profile_endpoint_unsupported".into()))?;
-    if !matches!(url.scheme(), "http" | "https") || !url.has_host()
-        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+    let url = url::Url::parse(url)
+        .map_err(|_| EngineError("account_profile_endpoint_unsupported".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.has_host()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(EngineError("account_profile_endpoint_unsupported".into()));
     }
     if matches!(connection.auth, ModelAuthentication::None {}) {
@@ -132,12 +141,14 @@ pub(crate) fn authorize_account_profile_scope(
             Some(url::Host::Domain(domain)) => domain == "localhost",
             None => false,
         };
-        if !local { return Err(EngineError("account_profile_endpoint_unsupported".into())); }
+        if !local {
+            return Err(EngineError("account_profile_endpoint_unsupported".into()));
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod signature_checks;
+#[cfg(test)]
+mod tests;

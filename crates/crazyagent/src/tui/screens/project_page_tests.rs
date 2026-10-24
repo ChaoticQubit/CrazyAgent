@@ -76,62 +76,64 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
             shell.arrive(owner_arrival(event));
             moved = true;
         }
-        if !connection.busy() && shell.ctx.link == crate::tui::ctx::Link::Ready {
-            if let Some(request) = shell.ctx.next_request() {
-                moved = true;
-                match request {
-                    Request::Pools => {
-                        sent.push("pools");
-                        connection.shell(ShellRequest::Pools).unwrap();
-                    }
-                    Request::PoolProjects => {
-                        sent.push("pool projects");
-                        connection.shell(ShellRequest::PoolProjects).unwrap();
-                    }
-                    Request::Projects => {
-                        sent.push("projects");
-                        connection.shell(ShellRequest::Projects).unwrap();
-                    }
-                    Request::EditPool { change } => {
-                        sent.push("edit pool");
-                        let generation = shell.ctx.next_generation();
-                        connection
-                            .shell(ShellRequest::EditPool { change, generation })
-                            .unwrap();
-                    }
-                    Request::Creation(job) => {
-                        sent.push("create");
-                        connection.creation(*job).unwrap();
-                    }
-                    Request::Master(job) => {
-                        sent.push("master");
-                        connection.master(*job).unwrap();
-                    }
-                    Request::Settings(job) => {
-                        sent.push(match job.as_ref() {
-                            SettingsJob::Harnesses => "harnesses",
-                            _ => "settings",
-                        });
-                        connection.settings(*job).unwrap();
-                    }
-                    Request::Setup(query) => {
-                        sent.push(match &query {
-                            SetupQuery::Catalog { .. } => "catalog",
-                            SetupQuery::Setup { .. } => "setup",
-                            SetupQuery::Jobs { .. } => "jobs",
-                            SetupQuery::Context { .. } => "context",
-                            SetupQuery::Item { .. } => "item",
-                            SetupQuery::Memories { .. } => "memories",
-                            SetupQuery::Change { .. } => "change",
-                            SetupQuery::ReviewMemory { .. } => "review",
-                            SetupQuery::Team { .. } => "team",
-                            SetupQuery::TeamChange { .. } => "team change",
-                            SetupQuery::Library(_) => "library",
-                        });
-                        connection.project_setup(query).unwrap();
-                    }
-                    other => panic!("project pages never send {other:?}"),
+        if !connection.busy()
+            && shell.ctx.link == crate::tui::ctx::Link::Ready
+            && let Some(request) = shell.ctx.next_request()
+        {
+            moved = true;
+            match request {
+                Request::Pools => {
+                    sent.push("pools");
+                    connection.shell(ShellRequest::Pools).unwrap();
                 }
+                Request::PoolProjects => {
+                    sent.push("pool projects");
+                    connection.shell(ShellRequest::PoolProjects).unwrap();
+                }
+                Request::Projects => {
+                    sent.push("projects");
+                    connection.shell(ShellRequest::Projects).unwrap();
+                }
+                Request::EditPool { change } => {
+                    sent.push("edit pool");
+                    let generation = shell.ctx.next_generation();
+                    connection
+                        .shell(ShellRequest::EditPool { change, generation })
+                        .unwrap();
+                }
+                Request::Creation(job) => {
+                    sent.push("create");
+                    connection.creation(*job).unwrap();
+                }
+                Request::Master(job) => {
+                    sent.push("master");
+                    connection.master(*job).unwrap();
+                }
+                Request::Settings(job) => {
+                    sent.push(match job.as_ref() {
+                        SettingsJob::Harnesses => "harnesses",
+                        _ => "settings",
+                    });
+                    connection.settings(*job).unwrap();
+                }
+                Request::Setup(query) => {
+                    sent.push(match &query {
+                        SetupQuery::Catalog { .. } => "catalog",
+                        SetupQuery::Setup { .. } => "setup",
+                        SetupQuery::Jobs { .. } => "jobs",
+                        SetupQuery::Context { .. } => "context",
+                        SetupQuery::Item { .. } => "item",
+                        SetupQuery::Memories { .. } => "memories",
+                        SetupQuery::Change { .. } => "change",
+                        SetupQuery::ReviewMemory { .. } => "review",
+                        SetupQuery::Team { .. } => "team",
+                        SetupQuery::TeamChange { .. } => "team change",
+                        SetupQuery::Library(_) => "library",
+                        SetupQuery::Log { .. } => "log",
+                    });
+                    connection.project_setup(query).unwrap();
+                }
+                other => panic!("project pages never send {other:?}"),
             }
         }
         quiet = if moved || connection.busy() {

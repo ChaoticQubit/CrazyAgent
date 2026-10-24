@@ -47,7 +47,9 @@ impl ClaudeHostLimits {
     }
 
     fn from_budget(budget: &ResourceBudget) -> Result<Self, EngineError> {
-        budget.validate().map_err(|_| failure("claude_host_invalid_budget"))?;
+        budget
+            .validate()
+            .map_err(|_| failure("claude_host_invalid_budget"))?;
         let limits = Self {
             run_time: Duration::from_millis(budget.wall_time_ms.min(600_000)),
             cleanup_time: Duration::from_secs(5),
@@ -81,12 +83,14 @@ pub(in crate::engine) fn launch_command(
         || model.is_empty()
         || model.len() > 256
         || model.starts_with('-')
-        || model.chars().any(|character| character.is_control() || character.is_whitespace())
+        || model
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
     {
         return Err(failure("claude_host_invalid_launch"));
     }
-    let project = std::fs::metadata(project_root)
-        .map_err(|_| failure("claude_host_project_unavailable"))?;
+    let project =
+        std::fs::metadata(project_root).map_err(|_| failure("claude_host_project_unavailable"))?;
     let home = std::fs::symlink_metadata(profile_home)
         .map_err(|_| failure("claude_host_profile_unavailable"))?;
     if !project.is_dir()
@@ -123,22 +127,21 @@ pub(in crate::engine) fn launch_command(
     if model != ACCOUNT_DEFAULT_MODEL {
         command.args(["--model", model]);
     }
-    command
-        .args([
-            "--tools",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            "{\"mcpServers\":{}}",
-            "--setting-sources",
-            "",
-            "--settings",
-            "{\"disableAllHooks\":true}",
-            "--disable-slash-commands",
-            "--no-session-persistence",
-            "--max-turns",
-            "1",
-        ]);
+    command.args([
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"disableAllHooks\":true}",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--max-turns",
+        "1",
+    ]);
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
     }
@@ -236,7 +239,12 @@ impl ClaudeHost {
                     profile,
                     protocol,
                     limits,
-                    process::Channels { input, output, report, stop },
+                    process::Channels {
+                        input,
+                        output,
+                        report,
+                        stop,
+                    },
                 );
             })
             .map_err(|_| failure("claude_host_custodian_unavailable"))?;
@@ -272,15 +280,18 @@ impl ClaudeHost {
         }
         let (reply, mut response) = oneshot::channel();
         self.turns
-            .try_send(Turn { request_id, text: text.to_owned(), reply })
+            .try_send(Turn {
+                request_id,
+                text: text.to_owned(),
+                reply,
+            })
             .map_err(|_| failure("claude_host_input_unavailable"))?;
         loop {
             let current = *self.status.borrow();
             if current.phase != Phase::Running {
-                return Err(current.fault.map_or_else(
-                    || failure("claude_host_input_closed"),
-                    Fault::error,
-                ));
+                return Err(current
+                    .fault
+                    .map_or_else(|| failure("claude_host_input_closed"), Fault::error));
             }
             tokio::select! {
                 result = &mut response => {
@@ -362,8 +373,11 @@ fn failure(code: &'static str) -> EngineError {
 }
 
 fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(), Fault> {
-    let home = profile.profile_path().map_err(|_| Fault::Host("claude_host_profile_changed"))?;
-    let directory = command.get_current_dir()
+    let home = profile
+        .profile_path()
+        .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
+    let directory = command
+        .get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
     let args: Vec<_> = command.get_args().collect();
     let model = match args.iter().position(|arg| *arg == OsStr::new("--model")) {
@@ -391,12 +405,12 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
         instructions,
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
-    if command.get_args().ne(expected.get_args())
-        || command.get_envs().ne(expected.get_envs())
-    {
+    if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
         return Err(Fault::Host("claude_host_unapproved_command"));
     }
-    profile.revalidate_retained().map_err(|_| Fault::Host("claude_host_profile_changed"))?;
+    profile
+        .revalidate_retained()
+        .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
     assert!(directory.is_absolute());
     assert_eq!(args.len(), expected.get_args().count());
     Ok(())

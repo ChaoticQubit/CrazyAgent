@@ -23,7 +23,7 @@ pub enum AccountPick {
     NoUsableAccount,
     Account {
         connection: CredentialRef,
-        account: ResearchAccount,
+        account: Box<ResearchAccount>,
     },
 }
 
@@ -59,7 +59,7 @@ pub fn pick_account(
         if let Some((connection, account)) = pool_account(access, pool, harness, &signed_in) {
             return AccountPick::Account {
                 connection,
-                account,
+                account: Box::new(account),
             };
         }
     }

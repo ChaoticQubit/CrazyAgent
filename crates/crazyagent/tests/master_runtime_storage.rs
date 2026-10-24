@@ -112,10 +112,11 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let owner = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
-            .await
-            .unwrap()
-            .0;
+        let owner =
+            OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(3))
+                .await
+                .unwrap()
+                .0;
         assert!(root.path().join("engine.db").is_file());
         assert!(service.owner_runtime().is_some());
         Self {
@@ -159,7 +160,7 @@ impl Fixture {
                     project_id: project(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
-                    selection: MasterSelection {
+                    selection: Box::new(MasterSelection {
                         backend: MasterBackend::Codex,
                         pool_ref: reference("master-pool"),
                         target_profile_ref: reference("master-profile"),
@@ -171,7 +172,7 @@ impl Fixture {
                             budget_ref: reference("planning-budget"),
                             resources: ResourceBudget::unit(),
                         },
-                    },
+                    }),
                 },
             },
         )
@@ -193,6 +194,7 @@ impl Fixture {
         else {
             panic!("actual committed master session missing");
         };
+        let session = *session;
         assert_eq!(session.project_id, project());
         assert_eq!(session.version, state.revision);
         session
@@ -269,7 +271,9 @@ fn probe_phase(
             assert_eq!(stored, phase);
             Ok(())
         }
-        Err(error) => Err(format!("actual SQLite rejected master phase {phase}: {error}")),
+        Err(error) => Err(format!(
+            "actual SQLite rejected master phase {phase}: {error}"
+        )),
     };
     tx.rollback().unwrap();
     assert!(db.is_autocommit());

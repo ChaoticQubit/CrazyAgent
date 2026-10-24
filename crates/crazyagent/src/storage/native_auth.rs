@@ -1,8 +1,7 @@
 use super::*;
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
-    CodexAuthObservation, Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX,
-    decode_fact, encode_fact,
+    Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
 };
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyObservation, NativeAuthCustodyRetirement,
@@ -177,9 +176,14 @@ pub(crate) fn check_native_auth_custody(
     let fact = validate_dispatch(&tx, config, sources, dispatch)?;
     if !matches!(
         fact.phase,
-        NativeAuthPhase::Starting | NativeAuthPhase::Cancelling | NativeAuthPhase::AwaitingOwner
-            | NativeAuthPhase::CheckingAccount | NativeAuthPhase::AuthenticatedObserved
-            | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled
+        NativeAuthPhase::Starting
+            | NativeAuthPhase::Cancelling
+            | NativeAuthPhase::AwaitingOwner
+            | NativeAuthPhase::CheckingAccount
+            | NativeAuthPhase::AuthenticatedObserved
+            | NativeAuthPhase::UnauthenticatedObserved
+            | NativeAuthPhase::Failed
+            | NativeAuthPhase::Cancelled
     ) {
         return Err(error("native_auth_recovery_required"));
     }
@@ -330,10 +334,18 @@ fn commit_native_auth_custody(
     let dispatch = retirement.dispatch();
     let mut fact = validate_dispatch(&tx, config, sources, dispatch)?;
     let valid = if retirement.after_child_reaped() {
-        matches!(fact.phase, NativeAuthPhase::AuthenticatedObserved
-            | NativeAuthPhase::UnauthenticatedObserved | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled)
+        matches!(
+            fact.phase,
+            NativeAuthPhase::AuthenticatedObserved
+                | NativeAuthPhase::UnauthenticatedObserved
+                | NativeAuthPhase::Failed
+                | NativeAuthPhase::Cancelled
+        )
     } else {
-        matches!(fact.phase, NativeAuthPhase::Starting | NativeAuthPhase::Cancelling)
+        matches!(
+            fact.phase,
+            NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+        )
     };
     if !valid {
         return Err(error("native_auth_recovery_required"));
@@ -366,7 +378,6 @@ fn commit_native_auth_custody(
 pub(crate) enum NativeAuthHostUpdate {
     CustodyUncertain,
     Unavailable,
-    Codex(CodexAuthObservation),
 }
 
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
@@ -751,7 +762,6 @@ fn apply_update(
     update: NativeAuthHostUpdate,
 ) -> Result<(), EngineError> {
     match update {
-        NativeAuthHostUpdate::Codex(observation) => observation.apply(fact)?,
         NativeAuthHostUpdate::CustodyUncertain => {
             fact.phase = NativeAuthPhase::Uncertain;
             fact.code = Some("native_auth_recovery_required".into());
@@ -840,7 +850,8 @@ fn validate_method(
 ) -> Result<(), EngineError> {
     let valid = match command {
         Command::Start(request) => match request.method {
-            NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode
+            NativeAuthMethod::CodexBrowser
+            | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => connection.harness.as_str() == "codex",
             NativeAuthMethod::ClaudeOfficial => connection.harness.as_str() == "claude",
         },

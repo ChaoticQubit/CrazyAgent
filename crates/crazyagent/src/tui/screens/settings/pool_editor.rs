@@ -83,6 +83,20 @@ impl PoolEditor {
         }
     }
 
+    /// A new pool with accounts already ticked, as "New pool from selected" on
+    /// Settings, Accounts opens it. Inputs: at most 15 account ids, repeats
+    /// allowed, and the context. Output: the editor with the name field focused;
+    /// the ticked accounts count as unsaved work.
+    pub fn with_members(ids: &[CredentialRef], ctx: &Ctx) -> Self {
+        let mut editor = Self::new(None, ctx);
+        editor.members = ids.iter().cloned().collect();
+        assert!(
+            editor.members.len() <= POOL_MEMBERS_MAX,
+            "a new pool starts with at most 15 accounts"
+        );
+        editor
+    }
+
     fn title(&self) -> &'static str {
         if self.id.is_some() {
             "Edit pool"
@@ -760,6 +774,40 @@ mod tests {
             }
             other => panic!("unexpected request {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_new_pool_from_selected_accounts_starts_with_them_ticked() {
+        let mut ctx = ctx(6);
+        let picked = [account(4).id, account(1).id, account(4).id];
+        let mut editor = PoolEditor::with_members(&picked, &ctx);
+        assert_eq!(editor.crumbs(), ["Settings", "Pools", "New pool"]);
+        assert_eq!(editor.place(), Some(Place::NewPool));
+        assert_eq!(editor.focus, Focus::Name);
+        assert_eq!(editor.members.len(), 2, "a repeated id ticks one row");
+        assert!(editor.draft(), "ticked accounts are unsaved work");
+
+        typed(&mut editor, "Review team", &mut ctx);
+        editor.key(&Key::Tab, &mut ctx);
+        editor.key(&Key::Enter, &mut ctx);
+        editor.key(&Key::Enter, &mut ctx);
+        match ctx.next_request() {
+            Some(Request::EditPool {
+                change: PoolChange::Create { name, members },
+            }) => {
+                assert_eq!(name, "Review team");
+                assert_eq!(members, vec![account(1).id, account(4).id]);
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a new pool starts with at most 15 accounts")]
+    fn a_new_pool_never_starts_with_more_than_fifteen_accounts() {
+        let ctx = ctx(16);
+        let picked: Vec<CredentialRef> = (0..16).map(|index| account(index).id).collect();
+        PoolEditor::with_members(&picked, &ctx);
     }
 
     #[test]

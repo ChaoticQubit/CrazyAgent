@@ -4,8 +4,9 @@ pub(crate) mod native_auth;
 pub(crate) mod transport;
 
 pub use account_profile::{
-    AccountAuthCapabilitiesReply, AccountProfileOutcome, AccountProfileReceipt, AccountProfileReply,
-    AccountProfileRequest, AccountSecret, ManagedAuthCapability, ProducerCapability,
+    AccountAuthCapabilitiesReply, AccountProfileOutcome, AccountProfileReceipt,
+    AccountProfileReply, AccountProfileRequest, AccountSecret, ManagedAuthCapability,
+    ProducerCapability,
 };
 
 pub use crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge;
@@ -770,12 +771,18 @@ impl OwnerRequest {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerResult {
     Applied,
-    DispatchPrepared { dispatch_id: RequestId },
-    VerificationUnavailable { attempt_id: RequestId },
+    DispatchPrepared {
+        dispatch_id: RequestId,
+    },
+    VerificationUnavailable {
+        attempt_id: RequestId,
+    },
     RcliProfileRegistered {
         registration: Box<crate::master_session::RcliProfileRegistrationMetadata>,
     },
-    Rejected { code: String },
+    Rejected {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,7 +849,7 @@ pub enum OwnerSummary {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
     ProjectMaster {
-        session: Option<crate::master_session::MasterSessionView>,
+        session: Option<Box<crate::master_session::MasterSessionView>>,
     },
     ProjectMasterTurns {
         page: crate::master_session::MasterTurnPage,

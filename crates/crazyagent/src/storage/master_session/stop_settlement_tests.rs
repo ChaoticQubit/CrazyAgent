@@ -48,7 +48,7 @@ async fn fresh_case(with_repository: bool, message: &str, owner: usize) -> (Fixt
     }
     let (_, opened) = apply_actual(&case, 0, "stop-open-session", MasterOwnerAction::Open {
         project_id: case.session.project_id.clone(), expected_config_id: case.config.id.clone(),
-        expected_source_hash: case.session.source_hash.clone(), selection: case.session.selection.clone(),
+        expected_source_hash: case.session.source_hash.clone(), selection: Box::new(case.session.selection.clone()),
     }).await;
     if opened.result != OwnerResult::Applied || opened.historical_replay {
         case.close().await;
@@ -63,6 +63,7 @@ async fn fresh_case(with_repository: bool, message: &str, owner: usize) -> (Fixt
         case.close().await;
         panic!("actual newly opened session required for stop fixture");
     };
+    let session = *session;
     case.session = session;
     let (request, applied) = apply_actual(&case, owner, "stop-fresh-submit", MasterOwnerAction::Submit {
         project_id: case.session.project_id.clone(), session_id: case.session.session_id.clone(),

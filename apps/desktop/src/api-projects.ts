@@ -69,6 +69,7 @@ export interface StoredSetup {
   documents: { name: string; bytes: number }[];
   folder: string;
   created_ms: number;
+  revision: number;
 }
 
 export interface ResearchJob {
@@ -294,6 +295,12 @@ export async function loadResearchLog(id: string, job: number): Promise<Result<s
   return { kind: "ok", value: result.value.lines.slice(-RESEARCH_LOG_LINES_MAX) };
 }
 
+/** Stops one research job: a running agent stops and a waiting one never starts.
+ * Inputs: the project id, the job id and a generation. Output: the engine receipt. */
+export function cancelResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_cancel_research", { id, job, generation });
+}
+
 /** Asks the engine to run one failed research job again.
  * Inputs: the project id, the job id and a draft generation. Output: the engine receipt. */
 export function retryResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {
@@ -358,10 +365,15 @@ export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, generation });
+/** Changes a project's details, research, pool and team in one engine change. Inputs: project id,
+ * the whole new setup (no documents), a generation, the new name or null to keep it, and the
+ * setup revision the screen showed, so a change made elsewhere is refused. Output: the receipt. */
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
 }
 
+/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
+ * Inputs: project id and a generation. Output: the receipt. */
 export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_remove_project", { id, generation });
 }

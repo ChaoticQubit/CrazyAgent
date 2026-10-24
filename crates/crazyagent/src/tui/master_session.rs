@@ -10,9 +10,9 @@ use crate::engine::owner::{
     OwnerProvenance, OwnerRead, OwnerReadReply, OwnerResponse, OwnerResult,
 };
 use crate::master_session::{
-    MasterBackend, MasterCursor, MasterOwnerAction, MasterReason, MasterSelection, MasterSessionPhase,
-    MasterSessionView, MasterTurnPhase, MasterTurnView, RcliProfileRegistration,
-    RcliProfileRegistrationMetadata,
+    MasterBackend, MasterCursor, MasterOwnerAction, MasterReason, MasterSelection,
+    MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
+    RcliProfileRegistration, RcliProfileRegistrationMetadata,
 };
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::routing::{ResourceBudget, RouteRequest};
@@ -55,7 +55,7 @@ pub(super) enum Job {
     },
     Read {
         context: Context,
-        confirmation: Option<Confirmation>,
+        confirmation: Option<Box<Confirmation>>,
     },
     Mutation {
         submission: Submission,
@@ -484,7 +484,7 @@ impl State {
             project_id: self.project.clone().unwrap(),
             expected_config_id: catalog.config_id.clone(),
             expected_source_hash: catalog.source_hash.clone(),
-            selection,
+            selection: Box::new(selection),
         };
         self.enqueue(action, self.forms[index].generation)?;
         self.forms[index].explicit = true;
@@ -717,7 +717,7 @@ impl State {
         self.flight = Some(context.clone());
         Some(Job::Read {
             context,
-            confirmation,
+            confirmation: confirmation.map(Box::new),
         })
     }
 
@@ -1165,9 +1165,12 @@ impl State {
             "h Register SDK home | requires actual Open/read and selected connection home".into(),
         );
         if let Some(catalog) = &self.catalog {
-            if catalog.models.pools.iter().any(|pool| {
-                pool.projects.is_empty() || pool.roles.is_empty()
-            }) {
+            if catalog
+                .models
+                .pools
+                .iter()
+                .any(|pool| pool.projects.is_empty() || pool.roles.is_empty())
+            {
                 lines.push(
                     "Unassigned pools do not route; Settings > Pools > a Assign to project".into(),
                 );
@@ -1250,7 +1253,7 @@ impl View {
                 expected_source_hash,
                 ..
             } => {
-                session.selection == *selection
+                session.selection == **selection
                     && session.config_id == *expected_config_id
                     && session.source_hash == *expected_source_hash
                     && session.phase == MasterSessionPhase::Configured
@@ -1505,24 +1508,28 @@ impl Catalog {
     /// form's project as master. Input: the form, whose backend is ignored. Output: that
     /// backend, or None when no pool is assigned to the project.
     fn assigned_backend(&self, form: &Form) -> Option<MasterBackend> {
-        [MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude]
-            .into_iter()
-            .find(|backend| {
-                let probe = Form {
-                    database: None,
-                    project: form.project.clone(),
-                    backend: *backend,
-                    pool: None,
-                    account: None,
-                    target: None,
-                    values: form.values.clone(),
-                    field: 0,
-                    generation: form.generation,
-                    open: false,
-                    explicit: false,
-                };
-                !self.pools(&probe).is_empty()
-            })
+        [
+            MasterBackend::Rcli,
+            MasterBackend::Codex,
+            MasterBackend::Claude,
+        ]
+        .into_iter()
+        .find(|backend| {
+            let probe = Form {
+                database: None,
+                project: form.project.clone(),
+                backend: *backend,
+                pool: None,
+                account: None,
+                target: None,
+                values: form.values.clone(),
+                field: 0,
+                generation: form.generation,
+                open: false,
+                explicit: false,
+            };
+            !self.pools(&probe).is_empty()
+        })
     }
 
     /// Picks the execution target a new master of this form would use under DEC-076.
@@ -1531,7 +1538,11 @@ impl Catalog {
     /// that is not a signed-in connection; None when policy allows no such target.
     fn target(&self, form: &Form) -> Option<CredentialRef> {
         if form.backend == MasterBackend::Rcli {
-            let pool = self.models.pools.iter().find(|pool| Some(&pool.id) == form.pool.as_ref());
+            let pool = self
+                .models
+                .pools
+                .iter()
+                .find(|pool| Some(&pool.id) == form.pool.as_ref());
             let own = self
                 .models
                 .connections
@@ -1937,6 +1948,7 @@ pub(super) async fn read_view(
     let OwnerData::ProjectMaster { session } = state.data else {
         return Err("master_session_read_required".into());
     };
+    let session = session.map(|session| *session);
     let mut view = View {
         session,
         turns: Vec::new(),
@@ -2135,7 +2147,11 @@ const MASTER_TURN_WALL_MS: u64 = 600_000;
 /// clipped to the tightest configured capacity so a slow local model can finish a reply.
 /// Input: the global, project and task capacities. Output: a budget that fits all three.
 fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
-    let ceiling = capacities.iter().map(|capacity| capacity.wall_time_ms).min().unwrap_or(0);
+    let ceiling = capacities
+        .iter()
+        .map(|capacity| capacity.wall_time_ms)
+        .min()
+        .unwrap_or(0);
     let budget = ResourceBudget {
         wall_time_ms: MASTER_TURN_WALL_MS.min(ceiling).max(1),
         ..ResourceBudget::unit()
@@ -2150,7 +2166,11 @@ pub async fn default_master_open(
 ) -> Result<MasterOwnerAction, String> {
     let catalog = read_catalog(controller).await?;
     let budget = default_master_budget(&catalog.capacities);
-    for backend in [MasterBackend::Rcli, MasterBackend::Codex, MasterBackend::Claude] {
+    for backend in [
+        MasterBackend::Rcli,
+        MasterBackend::Codex,
+        MasterBackend::Claude,
+    ] {
         let mut form = Form {
             database: None,
             project: project_id.clone(),
@@ -2177,14 +2197,18 @@ pub async fn default_master_open(
         let target = catalog
             .target(&form)
             .ok_or("No allowed execution sandbox in settings")?;
-        if catalog.capacities.iter().any(|capacity| !budget.fits(capacity)) {
+        if catalog
+            .capacities
+            .iter()
+            .any(|capacity| !budget.fits(capacity))
+        {
             return Err("The default allowance exceeds current owner policy".into());
         }
         return Ok(MasterOwnerAction::Open {
             project_id: project_id.clone(),
             expected_config_id: catalog.config_id.clone(),
             expected_source_hash: catalog.source_hash.clone(),
-            selection: MasterSelection {
+            selection: Box::new(MasterSelection {
                 backend,
                 pool_ref: pool.clone(),
                 target_profile_ref: target.clone(),
@@ -2196,7 +2220,7 @@ pub async fn default_master_open(
                     budget_ref: pool,
                     resources: budget,
                 },
-            },
+            }),
         });
     }
     Err("No account pool is assigned to this project as its master".into())
@@ -2225,7 +2249,11 @@ pools = [
             models,
             approved: vec![reference("codex-account"), reference("local-account")],
             targets: vec![reference("codex-connection"), reference("local")],
-            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+            capacities: [
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+            ],
         };
         let mut form = Form {
             database: None,
@@ -2259,16 +2287,23 @@ pools = [
   { id = "key-pool", members = ["key-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
   { id = "local-pool", members = ["local-connection"], projects = ["demo"], roles = ["project_leader"], fallback_allowed = false },
 ]"#).unwrap();
-        let local_profile =
-            crate::config::configured_profile_ref(&models.connections[1]).unwrap();
+        let local_profile = crate::config::configured_profile_ref(&models.connections[1]).unwrap();
         let catalog = Catalog {
             config_id: ConfigId::new("0".repeat(64)).unwrap(),
             source_hash: "0".repeat(64),
             revision: Cursor::new(1),
             models,
             approved: vec![reference("key-account"), reference("local-account")],
-            targets: vec![reference("local"), reference("key-ref"), local_profile.clone()],
-            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+            targets: vec![
+                reference("local"),
+                reference("key-ref"),
+                local_profile.clone(),
+            ],
+            capacities: [
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+            ],
         };
         let mut form = Form {
             database: None,
@@ -2310,7 +2345,11 @@ pools = [
             models,
             approved: vec![reference("codex-account"), reference("local-account")],
             targets: vec![reference("codex-connection"), reference("local")],
-            capacities: [ResourceBudget::unit(), ResourceBudget::unit(), ResourceBudget::unit()],
+            capacities: [
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+                ResourceBudget::unit(),
+            ],
         };
         let mut form = Form {
             database: None,
@@ -2326,7 +2365,10 @@ pools = [
             explicit: false,
         };
         let codex_only = catalog(models(""));
-        assert_eq!(codex_only.assigned_backend(&form), Some(MasterBackend::Codex));
+        assert_eq!(
+            codex_only.assigned_backend(&form),
+            Some(MasterBackend::Codex)
+        );
         let both = catalog(models("\"demo\""));
         assert_eq!(both.assigned_backend(&form), Some(MasterBackend::Rcli));
         form.project = ProjectId::new("other").unwrap();
@@ -2335,13 +2377,22 @@ pools = [
 
     #[test]
     fn default_master_budget_allows_a_slow_local_turn_within_policy() {
-        let roomy = ResourceBudget { wall_time_ms: 86_400_000, ..ResourceBudget::unit() };
+        let roomy = ResourceBudget {
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
         let budget = default_master_budget(&[roomy.clone(), roomy.clone(), roomy]);
         assert_eq!(budget.wall_time_ms, MASTER_TURN_WALL_MS);
         assert!(budget.wall_time_ms >= 600_000);
         assert_eq!(budget.validate(), Ok(()));
-        let tight = ResourceBudget { wall_time_ms: 90_000, ..ResourceBudget::unit() };
-        let roomy = ResourceBudget { wall_time_ms: 86_400_000, ..ResourceBudget::unit() };
+        let tight = ResourceBudget {
+            wall_time_ms: 90_000,
+            ..ResourceBudget::unit()
+        };
+        let roomy = ResourceBudget {
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
         let clipped = default_master_budget(&[roomy.clone(), tight.clone(), roomy]);
         assert_eq!(clipped.wall_time_ms, 90_000);
         assert!(clipped.fits(&tight));
@@ -2358,7 +2409,9 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ReadinessStale => {
             "Sign-in is out of date: sign in again (Settings, 2 Connections, F2), then send again"
         }
-        MasterReason::InvalidAuthentication => "Sign-in was rejected: sign in again, then send again",
+        MasterReason::InvalidAuthentication => {
+            "Sign-in was rejected: sign in again, then send again"
+        }
         MasterReason::QuotaUnknown => "Usage limit is unknown for this account",
         MasterReason::QuotaExhausted => "Usage limit reached for this account",
         MasterReason::RateLimited => "Rate limited; try again shortly",
@@ -2409,7 +2462,10 @@ mod turn_line_tests {
                     .to_string()
             ]
         );
-        let changed = MasterTurnView { reason: Some(MasterReason::ConnectionChanged), ..turn };
+        let changed = MasterTurnView {
+            reason: Some(MasterReason::ConnectionChanged),
+            ..turn
+        };
         let mut lines = Vec::new();
         turn_lines(&changed, &mut lines);
         assert_eq!(

@@ -1,36 +1,53 @@
+#[cfg(test)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
+#[cfg(test)]
 use std::ffi::OsString;
 use std::io;
+#[cfg(test)]
 use std::os::fd::OwnedFd;
+#[cfg(test)]
 use std::os::unix::process::CommandExt;
+#[cfg(test)]
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
+#[cfg(test)]
+use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 const RUN_TIME_MAX: Duration = Duration::from_secs(600);
+#[cfg(test)]
 const CLEANUP_TIME_MAX: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const STREAM_BYTES_MAX: usize = 65_536;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+#[cfg(test)]
 const TERM_GRACE: Duration = Duration::from_millis(100);
 const DROP_TIME: Duration = Duration::from_secs(2);
+#[cfg(test)]
 const READ_BYTES: usize = 4096;
+#[cfg(test)]
 const READ_BATCH: usize = 16;
 
+#[cfg(test)]
 pub(super) struct ProcessBounds {
     pub(super) run_time: Duration,
     pub(super) cleanup_time: Duration,
     pub(super) stream_bytes: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct DirectIdentity {
     pub(super) pid: u32,
     pub(super) process_group: u32,
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ProcessStop {
     Exited,
@@ -40,6 +57,7 @@ pub(super) enum ProcessStop {
     StderrLimit,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(super) struct StreamObservation {
     pub(super) bytes: Vec<u8>,
@@ -48,12 +66,14 @@ pub(super) struct StreamObservation {
     pub(super) truncated: bool,
 }
 
+#[cfg(test)]
 pub(super) struct GroupCleanup {
     pub(super) direct_reaped: bool,
     pub(super) group_absent: bool,
     pub(super) uncertain: bool,
 }
 
+#[cfg(test)]
 pub(super) struct ProcessObservation {
     pub(super) identity: DirectIdentity,
     pub(super) stop: ProcessStop,
@@ -63,11 +83,13 @@ pub(super) struct ProcessObservation {
     pub(super) cleanup: GroupCleanup,
 }
 
+#[cfg(test)]
 struct Stream {
     descriptor: Option<OwnedFd>,
     observation: StreamObservation,
 }
 
+#[cfg(test)]
 pub(super) struct OwnedProcess {
     child: Child,
     identity: DirectIdentity,
@@ -81,6 +103,7 @@ pub(super) struct OwnedProcess {
     finished: bool,
 }
 
+#[cfg(test)]
 impl ProcessBounds {
     fn validate(&self, started: Instant) -> io::Result<Instant> {
         if self.run_time.is_zero()
@@ -104,6 +127,7 @@ impl ProcessBounds {
     }
 }
 
+#[cfg(test)]
 impl Stream {
     fn new(descriptor: OwnedFd, retention: usize) -> Self {
         let stream = Self {
@@ -174,6 +198,7 @@ impl Stream {
     }
 }
 
+#[cfg(test)]
 impl OwnedProcess {
     pub(super) fn spawn(
         mut command: Command,
@@ -413,6 +438,7 @@ impl OwnedProcess {
     }
 }
 
+#[cfg(test)]
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
         if self.status.is_some() && self.group_absent {
@@ -598,7 +624,9 @@ impl CustodySession {
 
     pub(in crate::engine) fn prepare_status_child(&mut self) -> Result<(), EngineError> {
         if self.status_child != StatusChild::Unprepared {
-            return Err(EngineError("native_auth_status_child_already_prepared".into()));
+            return Err(EngineError(
+                "native_auth_status_child_already_prepared".into(),
+            ));
         }
         self.revalidate_reaped_child()?;
         self.status_child = StatusChild::Prepared;
@@ -625,9 +653,7 @@ impl CustodySession {
             .revalidate_retained()
     }
 
-    pub(in crate::engine) fn profile_path(
-        &self,
-    ) -> Result<std::path::PathBuf, EngineError> {
+    pub(in crate::engine) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
         self.guard
             .as_ref()
             .expect("session retains its physical guard")
@@ -660,7 +686,10 @@ impl CustodySession {
         channel: &mut NativeAuthCustodyChannel,
         event: super::claude_auth::types::ClaudeAuthObservation,
     ) -> Result<NativeAuthCustodyControl, EngineError> {
-        let guard = self.guard.as_ref().expect("session retains its physical guard");
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
         channel.observe_claude(guard, event).await
     }
 
@@ -668,13 +697,14 @@ impl CustodySession {
         &self,
         channel: &mut NativeAuthCustodyChannel,
     ) -> Result<Option<crate::engine::owner::AccountSecret>, EngineError> {
-        let guard = self.guard.as_ref().expect("session retains its physical guard");
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
         channel.take_claude_input(guard).await
     }
 
-    pub(in crate::engine) fn seal_after_child_reaped(
-        mut self,
-    ) -> Result<Retirement, EngineError> {
+    pub(in crate::engine) fn seal_after_child_reaped(mut self) -> Result<Retirement, EngineError> {
         let group = self
             .child_group
             .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()));
@@ -690,7 +720,10 @@ impl CustodySession {
         guard.revalidate_retained()?;
         self.child.take();
         self.child_group.take();
-        let guard = self.guard.take().expect("validated physical guard remains retained");
+        let guard = self
+            .guard
+            .take()
+            .expect("validated physical guard remains retained");
         assert!(self.child.is_none());
         assert!(self.child_group.is_none());
         Ok(Retirement {

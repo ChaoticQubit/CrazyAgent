@@ -1,3 +1,4 @@
+use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
@@ -6,12 +7,14 @@ use super::frame::{
 };
 use super::keys::{Global, Key, global};
 use super::screens::new_project_page::kept_draft;
+use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::Arrival;
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::Role;
 use super::widgets::{TextField, buttons};
+use crate::harnesses::HarnessStatus;
 use ratatui::Frame;
 use ratatui::layout::Position;
 use ratatui::text::{Line, Span};
@@ -488,7 +491,14 @@ impl Shell {
                 Err(_) => {}
             },
             Arrival::Owner(_) => {
-                super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx)
+                if let Some(SettingsEvent::Harnesses(Ok(entries))) = settings_event(&arrival) {
+                    let ready = entries
+                        .iter()
+                        .filter(|entry| entry.status == HarnessStatus::Ready)
+                        .count();
+                    self.ctx.store.harnesses = Load::Ready((ready, entries.len()));
+                }
+                super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}
         }
@@ -1009,6 +1019,48 @@ mod tests {
         shell.key(Key::Right);
         shell.key(Key::Enter);
         assert!(shell.quitting(), "Quit still quits");
+    }
+
+    #[test]
+    fn home_asks_for_harness_readiness_until_a_reply_fills_the_store() {
+        use crate::harnesses::{HarnessEntry, Search, catalog};
+        use crate::tui::client::OwnerEvent;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("ca-hh-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let codex = root.path().join("codex");
+        std::fs::write(&codex, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entries = catalog(&Search::new(
+            vec![root.path().to_path_buf()],
+            None,
+            Vec::new(),
+        ));
+        let reply = |result: Result<Vec<HarnessEntry>, String>| {
+            Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+                SettingsEvent::Harnesses(result),
+            ))))
+        };
+
+        let mut shell = at(Place::Home, ctx());
+        assert!(drain(&mut shell).contains(&"Settings".to_owned()));
+        shell.arrive(reply(Err("controller_pending_intent".into())));
+        assert_eq!(shell.ctx.store.harnesses, Load::NotReady);
+        shell.arrive(reply(Ok(entries.clone())));
+        assert_eq!(shell.ctx.store.harnesses, Load::Ready((1, entries.len())));
+
+        shell.key(Key::Char('s'));
+        drain(&mut shell);
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Home));
+        let requests = drain(&mut shell);
+        assert!(requests.contains(&"Projects".to_owned()), "{requests:?}");
+        assert!(
+            !requests.contains(&"Settings".to_owned()),
+            "known readiness is not asked for again"
+        );
     }
 
     #[test]

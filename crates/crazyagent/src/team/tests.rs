@@ -110,6 +110,7 @@ fn stored(project: &str, sub: Vec<HarnessSlot>) -> StoredSetup {
         documents: vec![],
         folder: "/private/tmp/unused".into(),
         created_ms: 1,
+        revision: 1,
     }
 }
 
@@ -755,7 +756,11 @@ fn reopening_the_runtime_returns_interrupted_work_to_the_queue() {
         .unwrap();
     assert_eq!(
         agent,
-        ("stopped".into(), None, Some("The engine restarted".into()))
+        (
+            "stopped".into(),
+            None,
+            Some("Stopped when CrazyAgent closed".into())
+        )
     );
     let message: String = connection
         .query_row("SELECT state FROM team_messages", [], |r| r.get(0))
@@ -1425,4 +1430,175 @@ fn concurrent_agent_setups_create_one_project_repository() {
     assert_eq!(String::from_utf8_lossy(&commits.stdout).trim(), "1");
     let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
     assert_eq!(exclude.matches("/worktrees/").count(), 1, "{exclude}");
+}
+
+#[test]
+fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() {
+    use crate::agents::AgentState;
+    use crate::agents::tests::{alive, until};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-register",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.team.min_agents = 2;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-register", &["local-a"]);
+    let warm = |connection: &mut Connection, on: bool| {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::KeepWarm {
+                    project_id: setup.project_id.clone(),
+                    on,
+                }
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    warm(&mut connection, true);
+    let executable = base.join("codex");
+    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
+    let source = pool.clone();
+    let team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone());
+    let service = runtime::TeamService::start(team, std::time::Duration::from_millis(50));
+    let project = setup.project_id.clone();
+    let groups = |connection: &Connection| {
+        status(connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .filter(|a| a.status != AgentStatus::Stopped)
+            .filter_map(|a| a.process_group)
+            .count()
+    };
+
+    until("the warm sub-agent to start", || groups(&connection) == 1);
+    let first = status(&connection, &setup).unwrap();
+    assert_eq!(first.agents.len(), 1, "{first:#?}");
+    let listed = agents
+        .list(Some(&project), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    let id = listed[0].id.clone();
+    assert_eq!(
+        listed[0].label,
+        format!("Team sub-agent {}", first.agents[0].id)
+    );
+    assert_eq!(listed[0].role, crate::agents::AgentRole::SubAgent);
+    assert_eq!(listed[0].state, AgentState::Running);
+    assert_eq!(
+        (listed[0].harness.as_str(), listed[0].attempt),
+        ("codex", 1)
+    );
+    assert!(listed[0].can_stop && listed[0].can_restart && !listed[0].can_interrupt);
+    assert_eq!(agents.interrupt(&id).unwrap_err().0, "agent_not_busy");
+    assert_eq!(agents.send(&id, "hello").unwrap_err().0, "agent_hosted");
+    let group = first.agents[0].process_group.unwrap() as i32;
+    assert!(alive(group));
+
+    agents.restart(&id).unwrap();
+    until("the restarted sub-agent", || {
+        let view = agents.view(&id).unwrap();
+        view.state == AgentState::Running && view.attempt == 2 && groups(&connection) == 1
+    });
+    until("the first process group to be gone", || !alive(group));
+    let second = status(&connection, &setup).unwrap();
+    assert_eq!(
+        second.agents.len(),
+        2,
+        "one fresh team agent, no extra warm one: {second:#?}"
+    );
+    assert_eq!(second.agents[0].status, AgentStatus::Stopped);
+    assert_eq!(
+        agents
+            .list(Some(&project), 0, crate::agents::LIST_MAX)
+            .unwrap()
+            .len(),
+        1,
+        "the restart continues the same register entry"
+    );
+
+    warm(&mut connection, false);
+    let stopped = agents.stop(&id).unwrap();
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert!(!stopped.can_stop && stopped.can_restart);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let after = status(&connection, &setup).unwrap();
+    assert_eq!(
+        after.agents.len(),
+        2,
+        "a stopped agent is not replaced: {after:#?}"
+    );
+    assert!(
+        after
+            .agents
+            .iter()
+            .all(|a| a.status == AgentStatus::Stopped)
+    );
+
+    agents.restart(&id).unwrap();
+    until("the agent restarted after its stop", || {
+        let view = agents.view(&id).unwrap();
+        view.state == AgentState::Running && view.attempt == 3 && groups(&connection) == 1
+    });
+    let third = status(&connection, &setup).unwrap();
+    assert_eq!(third.agents.len(), 3, "{third:#?}");
+    let group = third.agents[2].process_group.unwrap() as i32;
+
+    service.stop();
+    let closed = agents.view(&id).unwrap();
+    assert_eq!(closed.state, AgentState::Closed);
+    assert_eq!(closed.status, "Stopped when CrazyAgent closed");
+    until("the last process group to be gone", || !alive(group));
 }

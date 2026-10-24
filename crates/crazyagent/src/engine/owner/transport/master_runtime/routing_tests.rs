@@ -3,7 +3,8 @@ use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{EngineService, NativeProfileUsePurpose};
 use crate::engine::owner::{
     HostStamp, ModelAccessCollection, OwnerClient, OwnerClientKind, OwnerData, OwnerMutation,
-    OwnerOperation, OwnerRead, OwnerReadReply, OwnerReply, OwnerRequest, OwnerResponse, OwnerResult,
+    OwnerOperation, OwnerRead, OwnerReadReply, OwnerReply, OwnerRequest, OwnerResponse,
+    OwnerResult,
 };
 use crate::master_session::{
     MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
@@ -152,7 +153,12 @@ fn git(repository: &Path, home: &Path, arguments: &[&str]) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(["-c", "user.name=Master routing fixture"])
         .args(["-c", "user.email=master-routing@example.invalid"])
         .arg("-C")
@@ -199,9 +205,7 @@ fn rows(tx: &Transaction<'_>, table: &str) -> Vec<Vec<Value>> {
             (0..columns).map(|column| row.get(column)).collect()
         })
         .unwrap();
-    values
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    values.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
 #[derive(Debug, PartialEq)]
@@ -254,10 +258,21 @@ impl Fixture {
         let repository = root.path().join("repository");
         if with_repository {
             private_directory(&repository);
-            git(&repository, root.path(), &["init", "--initial-branch=trunk"]);
-            private_file(&repository.join("README"), b"Actual master routing fixture.\n");
+            git(
+                &repository,
+                root.path(),
+                &["init", "--initial-branch=trunk"],
+            );
+            private_file(
+                &repository.join("README"),
+                b"Actual master routing fixture.\n",
+            );
             git(&repository, root.path(), &["add", "README"]);
-            git(&repository, root.path(), &["commit", "-qm", "Initialize master routing fixture"]);
+            git(
+                &repository,
+                root.path(),
+                &["commit", "-qm", "Initialize master routing fixture"],
+            );
         }
         let (stop, stopped) = watch::channel(false);
         let service = tokio::time::timeout(
@@ -320,7 +335,7 @@ impl Fixture {
                         project_id: project.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: selection(backend),
+                        selection: Box::new(selection(backend)),
                     },
                 },
             },
@@ -407,7 +422,7 @@ impl Fixture {
         else {
             panic!("actual committed session missing");
         };
-        session
+        *session
     }
 
     async fn commit_owner(
@@ -431,7 +446,10 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn command(&self, command: MasterRuntimeCommand) -> Result<MasterRuntimeResult, EngineError> {
+    async fn command(
+        &self,
+        command: MasterRuntimeCommand,
+    ) -> Result<MasterRuntimeResult, EngineError> {
         tokio::time::timeout(TEST_BOUND, self.runtime().master_runtime_command(command))
             .await
             .expect("actual runtime actor exceeded the test bound")
@@ -505,7 +523,9 @@ impl Fixture {
             .collect();
         captures.sort();
         let revision: i64 = tx
-            .query_row("SELECT revision FROM state WHERE id=1", [], |row| row.get(0))
+            .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         Snapshot {
             revision: u64::try_from(revision).expect("actual owner revision must be nonnegative"),
@@ -596,7 +616,10 @@ async fn claude_drive_runs_the_native_readiness_checks_without_preparation_attem
     after.assert_no_effects();
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.events.len(), before.events.len() + 1);
-    assert_eq!(&after.events[..before.events.len()], before.events.as_slice());
+    assert_eq!(
+        &after.events[..before.events.len()],
+        before.events.as_slice()
+    );
     assert_eq!(after.registrations, before.registrations);
     let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
     assert!(session.current_turn.is_none());
@@ -609,7 +632,10 @@ async fn claude_drive_runs_the_native_readiness_checks_without_preparation_attem
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(serde_json::from_str::<MasterTurnView>(&stored).unwrap(), returned);
+    assert_eq!(
+        serde_json::from_str::<MasterTurnView>(&stored).unwrap(),
+        returned
+    );
     case.finish().await;
 }
 
@@ -618,7 +644,11 @@ async fn codex_subscription_master_is_not_blocked_as_an_unsupported_backend() {
     let case = Fixture::new(MasterBackend::Codex, false).await;
     let returned = case.drive().await;
     let persisted = case.persisted_turn().await;
-    assert_ne!(persisted.reason, Some(MasterReason::UnsupportedCapability), "{returned:?}");
+    assert_ne!(
+        persisted.reason,
+        Some(MasterReason::UnsupportedCapability),
+        "{returned:?}"
+    );
     if let Ok(turn) = &returned {
         assert_ne!(turn.reason, Some(MasterReason::UnsupportedCapability));
     }
@@ -715,7 +745,10 @@ async fn actor_route_enforces_real_host_project_and_turn_joins_before_writes() {
     for (command, expected) in invalid {
         let before = case.snapshot();
         let result = case.command(command).await;
-        assert_eq!(result.err().expect("invalid actor scope accepted").0, expected);
+        assert_eq!(
+            result.err().expect("invalid actor scope accepted").0,
+            expected
+        );
         assert_eq!(case.snapshot(), before);
         before.assert_no_effects();
         assert_eq!(case.persisted_turn().await, case.turn);
@@ -729,7 +762,10 @@ async fn actor_route_enforces_real_host_project_and_turn_joins_before_writes() {
 async fn rcli_route_preserves_queued_view_and_real_configuration_without_allocating() {
     let case = Fixture::new(MasterBackend::Rcli, false).await;
     let proof = case.register().await;
-    assert_eq!(proof.database_instance, case.runtime().identity().db_instance);
+    assert_eq!(
+        proof.database_instance,
+        case.runtime().identity().db_instance
+    );
     assert_eq!(proof.engine_epoch, case.runtime().identity().engine_epoch);
     assert_eq!(proof.config_id, case.session.config_id);
     assert_eq!(proof.source_hash, case.session.source_hash);
@@ -755,7 +791,10 @@ async fn rcli_route_preserves_queued_view_and_real_configuration_without_allocat
     assert_eq!(*returned, case.turn);
     assert_eq!(case.persisted_turn().await, case.turn);
     assert_eq!(case.snapshot(), before);
-    assert_eq!(fs::read(case.home.join(".backboard/config.json")).unwrap(), LOCAL_CONFIG);
+    assert_eq!(
+        fs::read(case.home.join(".backboard/config.json")).unwrap(),
+        LOCAL_CONFIG
+    );
     assert!(!case.repository.exists());
     assert!(!case.home.join(".backboard/keys.json").exists());
     case.finish().await;
@@ -783,11 +822,20 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     assert_eq!(prepared.session.session_id, case.session.session_id);
     assert_eq!(prepared.session.current_turn.as_ref(), Some(&case.turn.id));
     assert_eq!(prepared.attempt.request.project_id, case.session.project_id);
-    assert_eq!(prepared.attempt.request.task_id, case.session.bootstrap_task_id);
+    assert_eq!(
+        prepared.attempt.request.task_id,
+        case.session.bootstrap_task_id
+    );
     assert_eq!(prepared.attempt.connection, proof.connection);
-    assert_eq!(prepared.attempt.connection.account_ref, reference("local-account"));
+    assert_eq!(
+        prepared.attempt.connection.account_ref,
+        reference("local-account")
+    );
     assert_eq!(prepared.attempt.connection.model.id.as_str(), "local-model");
-    assert_eq!(prepared.attempt.request.target_profile_ref, proof.profile_ref);
+    assert_eq!(
+        prepared.attempt.request.target_profile_ref,
+        proof.profile_ref
+    );
     assert_eq!(prepared.lease.project_id, case.session.project_id);
     assert_eq!(prepared.lease.task_id, case.session.bootstrap_task_id);
     assert_eq!(prepared.lease.owner_session, case.session.session_id);
@@ -807,11 +855,14 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
             .unwrap();
         let persisted: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(persisted["auth"], serde_json::to_value(&auth).unwrap());
-        assert_eq!(persisted["worktree_lease"], serde_json::to_value(&prepared.worktree_lease).unwrap());
+        assert_eq!(
+            persisted["worktree_lease"],
+            serde_json::to_value(&prepared.worktree_lease).unwrap()
+        );
     }
     let database = case.root.path().join("engine.db");
-    let mut custody = NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap())
-        .unwrap();
+    let mut custody =
+        NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
     let guard = custody
         .acquire_configured_rcli_use(
             &case.runtime().identity(),
@@ -912,12 +963,21 @@ async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission(
         .unwrap();
     match result {
         MasterRuntimeResult::Prepared(prepared) => {
-            assert_eq!(prepared.session.current_turn.as_ref(), Some(&second.request_id));
+            assert_eq!(
+                prepared.session.current_turn.as_ref(),
+                Some(&second.request_id)
+            );
             assert!(prepared.attempt.request.previous_attempt.is_none());
-            assert_eq!(prepared.attempt.connection.account_ref, reference("local-account"));
+            assert_eq!(
+                prepared.attempt.connection.account_ref,
+                reference("local-account")
+            );
         }
         MasterRuntimeResult::Turn(turn) => {
-            panic!("second RCLI turn was not admitted: {:?} {:?}", turn.phase, turn.reason)
+            panic!(
+                "second RCLI turn was not admitted: {:?} {:?}",
+                turn.phase, turn.reason
+            )
         }
         _ => panic!("actual RCLI preparation returned an unexpected result"),
     }

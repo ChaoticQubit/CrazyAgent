@@ -893,7 +893,7 @@ impl NativeOwner {
                             match master_session::read_view(
                                 &mut *controller,
                                 &context,
-                                confirmation.as_ref(),
+                                confirmation.as_deref(),
                             )
                             .await
                             {
@@ -1037,7 +1037,7 @@ impl NativeOwner {
         intent: &crate::master_session::RcliProfileRegistration,
     ) -> Result<(), String> {
         if !matches!(&state.data, OwnerData::ProjectMaster { session: Some(session) }
-            if session == &intent.expected_session
+            if **session == intent.expected_session
                 && session.phase == crate::master_session::MasterSessionPhase::Configured
                 && session.current_turn.is_none())
             || state.config_id != intent.expected_session.config_id

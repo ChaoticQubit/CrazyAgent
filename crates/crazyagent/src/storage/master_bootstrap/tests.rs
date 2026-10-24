@@ -1,8 +1,8 @@
 use crate::config::EffectiveConfig;
 use crate::engine::owner::native_auth::Command as AuthCommand;
 use crate::engine::owner::{
-    NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeAuthScope, NativeAuthStart,
-    OwnerData, OwnerMutation, OwnerOperation, OwnerRead, OwnerRequest, OwnerResult, Started,
+    NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeAuthScope, NativeAuthStart, OwnerData,
+    OwnerMutation, OwnerOperation, OwnerRead, OwnerRequest, OwnerResult, Started,
 };
 use crate::master_session::{MasterBackend, MasterOwnerAction, MasterSelection, MasterSessionView};
 use crate::protocol::{
@@ -71,8 +71,15 @@ fn repository(root: &Path) -> PathBuf {
     git(
         &repository,
         &[
-            "-c", "user.name=Bootstrap Test", "-c", "user.email=bootstrap@invalid",
-            "-c", "commit.gpgsign=false", "commit", "-m", "base",
+            "-c",
+            "user.name=Bootstrap Test",
+            "-c",
+            "user.email=bootstrap@invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "base",
         ],
     );
     assert!(repository.join(".git").is_dir());
@@ -110,30 +117,55 @@ struct Case {
 
 impl Case {
     fn new() -> Self {
-        let root = tempfile::Builder::new().prefix("ca-mbp-")
-            .tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("ca-mbp-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let repository = repository(root.path());
         let global = root.path().join("global.toml");
         std::fs::write(&global, CATALOG).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let sources = settings::SettingsSources::open(&global, &root.path().join("project.toml"))
-            .unwrap();
+        let sources =
+            settings::SettingsSources::open(&global, &root.path().join("project.toml")).unwrap();
         let config = sources.config().unwrap();
         let path = root.path().join("engine.db");
-        let OpenedDatabase { mut connection, lock, mut custody } =
-            storage::open_actor_database(&path, false).unwrap();
+        let OpenedDatabase {
+            mut connection,
+            lock,
+            mut custody,
+        } = storage::open_actor_database(&path, false).unwrap();
         let started = storage::owner_start(&mut connection).unwrap();
-        let session = open(&mut connection, &config, &sources, &path, &started, &repository, &mut custody);
+        let session = open(
+            &mut connection,
+            &config,
+            &sources,
+            &path,
+            &started,
+            &repository,
+            &mut custody,
+        );
         assert_eq!(session.owner.engine_epoch, started.host.engine_epoch);
         assert!(connection.is_autocommit());
-        Self { db: connection, _lock: lock, custody, sources, config, started,
-            session, repository, root }
+        Self {
+            db: connection,
+            _lock: lock,
+            custody,
+            sources,
+            config,
+            started,
+            session,
+            repository,
+            root,
+        }
     }
 
     fn starting_auth(&mut self) -> NativeAuthFact {
         let begin = native_auth::begin_native_auth(
-            &mut self.db, &self.config, Some(&self.sources), &mut self.custody,
+            &mut self.db,
+            &self.config,
+            Some(&self.sources),
+            &mut self.custody,
             &self.started.owners[0].admission,
             AuthCommand::Start(NativeAuthStart {
                 request_id: RequestId::new("actual-auth-start").unwrap(),
@@ -145,7 +177,8 @@ impl Case {
                 },
                 method: NativeAuthMethod::CodexBrowser,
             }),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(begin.reply.fact.phase, NativeAuthPhase::Starting);
         assert!(begin.work.is_some());
         begin.reply.fact
@@ -153,51 +186,90 @@ impl Case {
 }
 
 fn open(
-    db: &mut Connection, config: &EffectiveConfig, sources: &settings::SettingsSources,
-    path: &Path, started: &Started, repository: &Path,
-    custody: &mut Result<crate::engine::bootstrap::NativeProfileCustody, crate::engine::EngineError>,
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: &settings::SettingsSources,
+    path: &Path,
+    started: &Started,
+    repository: &Path,
+    custody: &mut Result<
+        crate::engine::bootstrap::NativeProfileCustody,
+        crate::engine::EngineError,
+    >,
 ) -> MasterSessionView {
     let project = ProjectId::new("project").unwrap();
     let request = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: RequestId::new("actual-project-create").unwrap(),
-        expected_revision: Cursor::new(storage::owner_revision(&db.transaction().unwrap()).unwrap()),
-        operation: OwnerOperation::Apply { mutation: OwnerMutation::CreateProject {
-            project_id: project.clone(),
-            spec: ProjectSpec { name: "Planning".into(),
-                repositories: vec![repository.to_str().unwrap().into()] },
-        } },
+        expected_revision: Cursor::new(
+            storage::owner_revision(&db.transaction().unwrap()).unwrap(),
+        ),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::CreateProject {
+                project_id: project.clone(),
+                spec: ProjectSpec {
+                    name: "Planning".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            },
+        },
     };
-    let created = storage::owner_apply(db, config, path, &started.owners[0].admission, &request)
-        .unwrap();
+    let created =
+        storage::owner_apply(db, config, path, &started.owners[0].admission, &request).unwrap();
     assert_eq!(created.result, OwnerResult::Applied);
     let request = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: RequestId::new("actual-master-open").unwrap(),
         expected_revision: created.current_revision,
-        operation: OwnerOperation::Apply { mutation: OwnerMutation::ProjectMaster {
-            action: MasterOwnerAction::Open {
-                project_id: project.clone(), expected_config_id: config.id.clone(),
-                expected_source_hash: settings::verified_source_hash(config, Some(sources)).unwrap(),
-                selection: selection(),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Open {
+                    project_id: project.clone(),
+                    expected_config_id: config.id.clone(),
+                    expected_source_hash: settings::verified_source_hash(config, Some(sources))
+                        .unwrap(),
+                    selection: Box::new(selection()),
+                },
             },
-        } },
+        },
     };
-    let opened = storage::master_session::apply(db, config, Some(sources), custody, &started.host,
-        &started.owners[0].admission, &request).unwrap();
+    let opened = storage::master_session::apply(
+        db,
+        config,
+        Some(sources),
+        custody,
+        &started.host,
+        &started.owners[0].admission,
+        &request,
+    )
+    .unwrap();
     assert_eq!(opened.result, OwnerResult::Applied);
-    let reply = storage::master_session::read(db, config, Some(sources),
-        &started.owners[0].admission, &OwnerRead::ProjectMaster { project_id: project }).unwrap();
-    let OwnerData::ProjectMaster { session: Some(session) } = reply.data else {
+    let reply = storage::master_session::read(
+        db,
+        config,
+        Some(sources),
+        &started.owners[0].admission,
+        &OwnerRead::ProjectMaster {
+            project_id: project,
+        },
+    )
+    .unwrap();
+    let OwnerData::ProjectMaster {
+        session: Some(session),
+    } = reply.data
+    else {
         panic!("actual master Open must produce a persisted session");
     };
+    let session = *session;
     assert_eq!(session.owner, opened.provenance);
     session
 }
 
 fn leases(db: &Connection, session: &MasterSessionView) -> Vec<WorktreeLease> {
     let Outcome::Worktrees { leases } = worktrees::leases(db, &session.bootstrap_task_id).unwrap()
-    else { panic!("actual lease query must return leases"); };
+    else {
+        panic!("actual lease query must return leases");
+    };
     leases
 }
 
@@ -208,15 +280,33 @@ fn master_lease_primitive_materializes_committed_source_without_task_authority()
     let repository = case.repository.to_str().unwrap();
     let tx = case.db.transaction().unwrap();
     let ordinary = Command::AllocateWorktree {
-        task_id: case.session.bootstrap_task_id.clone(), repository: repository.into(),
-        owner_session: case.session.session_id.clone(), native_descendant: None,
+        task_id: case.session.bootstrap_task_id.clone(),
+        repository: repository.into(),
+        owner_session: case.session.session_id.clone(),
+        native_descendant: None,
     };
-    assert_eq!(worktrees::reserve(&tx, case.root.path(), &ordinary).unwrap(),
-        Outcome::Rejected { code: "task_missing".into() });
-    assert_eq!(worktrees::admit(&tx, &case.session.project_id, repository).unwrap(), Outcome::Applied);
-    assert_eq!(worktrees::reserve_master_bootstrap(&tx, case.root.path(),
-        &case.session.project_id, &case.session.bootstrap_task_id,
-        &case.session.session_id, repository).unwrap(), Outcome::Applied);
+    assert_eq!(
+        worktrees::reserve(&tx, case.root.path(), &ordinary).unwrap(),
+        Outcome::Rejected {
+            code: "task_missing".into()
+        }
+    );
+    assert_eq!(
+        worktrees::admit(&tx, &case.session.project_id, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        worktrees::reserve_master_bootstrap(
+            &tx,
+            case.root.path(),
+            &case.session.project_id,
+            &case.session.bootstrap_task_id,
+            &case.session.session_id,
+            repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
     let reserved = leases(&tx, &case.session);
     assert_eq!(reserved.len(), 1);
     assert_eq!(reserved[0].state, LeaseState::Reserved);
@@ -227,12 +317,33 @@ fn master_lease_primitive_materializes_committed_source_without_task_authority()
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].state, LeaseState::Ready);
     assert_eq!(ready[0].native_descendant, None);
-    assert_eq!(std::fs::read(Path::new(&ready[0].path).join("tracked")).unwrap(), b"committed\n");
-    assert_eq!(std::fs::read(case.repository.join("tracked")).unwrap(), b"owner dirty\n");
-    let mode = std::fs::symlink_metadata(&ready[0].path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o077, 0, "master worktree root must be private for the RCLI host cwd");
-    let tasks: i64 = case.db.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0)).unwrap();
-    let auth: i64 = case.db.query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| row.get(0)).unwrap();
+    assert_eq!(
+        std::fs::read(Path::new(&ready[0].path).join("tracked")).unwrap(),
+        b"committed\n"
+    );
+    assert_eq!(
+        std::fs::read(case.repository.join("tracked")).unwrap(),
+        b"owner dirty\n"
+    );
+    let mode = std::fs::symlink_metadata(&ready[0].path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "master worktree root must be private for the RCLI host cwd"
+    );
+    let tasks: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+        .unwrap();
+    let auth: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
     assert_eq!(tasks, 0);
     assert_eq!(auth, 0);
 }
@@ -242,14 +353,26 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
     let mut case = Case::new();
     let fact = case.starting_auth();
     let tx = case.db.transaction().unwrap();
-    let error = super::reserve(&tx, case.root.path(), &case.session,
-        case.repository.to_str().unwrap(), &fact).unwrap_err();
+    let error = super::reserve(
+        &tx,
+        case.root.path(),
+        &case.session,
+        case.repository.to_str().unwrap(),
+        &fact,
+    )
+    .unwrap_err();
     assert_eq!(error.0, "master_bootstrap_authentication_stale");
     let error = super::ready(&tx, &case.session, &fact).unwrap_err();
     assert_eq!(error.0, "master_bootstrap_authentication_stale");
     assert!(leases(&tx, &case.session).is_empty());
-    let receipts: i64 = tx.query_row("SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| row.get(0)).unwrap();
-    let tasks: i64 = tx.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0)).unwrap();
+    let receipts: i64 = tx
+        .query_row("SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tasks: i64 = tx
+        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+        .unwrap();
     assert_eq!(receipts, 0);
     assert_eq!(tasks, 0);
 }
@@ -258,10 +381,15 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
 fn bootstrap_initializer_rejects_conflicting_schema() {
     let root = tempfile::tempdir_in("/private/tmp").unwrap();
     let db = Connection::open(root.path().join("conflict.db")).unwrap();
-    db.execute_batch("CREATE TABLE bootstrap_workspaces (body TEXT)").unwrap();
+    db.execute_batch("CREATE TABLE bootstrap_workspaces (body TEXT)")
+        .unwrap();
     let error = super::initialize(&db).unwrap_err();
     assert_eq!(error.0, "master_bootstrap_schema_conflict");
-    let count: i64 = db.query_row("SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| row.get(0)).unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM bootstrap_workspaces", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
     assert_eq!(count, 0);
 }
 
@@ -272,6 +400,11 @@ fn bootstrap_reservation_asserts_its_transaction_invariant() {
     let fact = case.starting_auth();
     let tx = case.db.transaction().unwrap();
     tx.execute_batch("COMMIT").unwrap();
-    let _ = super::reserve(&tx, case.root.path(), &case.session,
-        case.repository.to_str().unwrap(), &fact);
+    let _ = super::reserve(
+        &tx,
+        case.root.path(),
+        &case.session,
+        case.repository.to_str().unwrap(),
+        &fact,
+    );
 }

@@ -39,8 +39,7 @@ async fn codex_host_process_real_pipe_input_output_eof_and_reap_are_retained() {
         loop {
             match process.next_output().await.unwrap() {
                 CodexHostOutput::Stdout(bytes) => stdout.extend(bytes),
-                CodexHostOutput::Stderr(bytes) => assert!(bytes.is_empty()),
-                CodexHostOutput::Exited(status) => break status,
+                CodexHostOutput::Exited => break process.exit_status().expect("reaped status"),
             }
         }
     })
@@ -98,10 +97,12 @@ async fn codex_host_process_real_stderr_overflow_is_an_error_with_observed_bytes
         loop {
             match process.next_output().await {
                 Err(error) => break error,
-                Ok(CodexHostOutput::Stderr(_)) => {}
                 Ok(CodexHostOutput::Stdout(bytes)) => assert!(bytes.is_empty()),
-                Ok(CodexHostOutput::Exited(status)) => {
-                    panic!("overflow was reported as ordinary exit: {status}")
+                Ok(CodexHostOutput::Exited) => {
+                    panic!(
+                        "overflow was reported as ordinary exit: {:?}",
+                        process.exit_status()
+                    )
                 }
             }
         }

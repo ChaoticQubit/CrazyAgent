@@ -1,6 +1,7 @@
 use super::settings::{draw_page, step};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod};
+use crate::config::POOL_MEMBERS_MAX;
 use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
@@ -565,8 +566,11 @@ impl Screen for Accounts {
                 hint("Esc", "Home"),
             ];
         }
-        vec![
-            hint("a", "Add account"),
+        let mut hints = vec![hint("a", "Add account")];
+        if !self.marked.is_empty() {
+            hints.push(hint("p", "New pool from selected"));
+        }
+        hints.extend([
             hint("Enter", "Open"),
             hint("/", "Filter"),
             hint(
@@ -580,7 +584,8 @@ impl Screen for Accounts {
             hint("Space", "Select"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
-        ]
+        ]);
+        hints
     }
 
     fn typing(&self) -> bool {
@@ -609,6 +614,20 @@ impl Screen for Accounts {
                 self.attention_only = !self.attention_only;
                 self.selected = 0;
                 Flow::Handled
+            }
+            Key::Char('p') => {
+                if self.marked.is_empty() {
+                    ctx.say(Message::warning("Select accounts with Space first.", ""));
+                    return Flow::Handled;
+                }
+                if self.marked.len() > POOL_MEMBERS_MAX {
+                    ctx.say(Message::warning(
+                        "A pool holds at most 15 accounts.",
+                        "Unselect some, then press p again.",
+                    ));
+                    return Flow::Handled;
+                }
+                Flow::Open(Place::NewPoolFrom(self.marked.iter().cloned().collect()))
             }
             Key::Char(' ') => {
                 let id = self
@@ -767,7 +786,7 @@ impl AccountDetails {
         let list = self
             .list
             .take()
-            .map_or_else(|| Box::new(Accounts::new()), |list| list);
+            .unwrap_or_else(|| Box::new(Accounts::new()));
         Flow::Replace(list)
     }
 
