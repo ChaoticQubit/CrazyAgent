@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod buffer;
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
@@ -17,9 +18,14 @@ pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
 pub const STREAM_CHUNKS_MAX: usize = 256;
 pub const VIEWERS_MAX: usize = 8;
+pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
+pub const SCROLLBACK_LINES: u32 = 5000;
+pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
 
 const _: () = assert!(INPUT_BYTES_MAX == crate::team::DIRECT_INPUT_BYTES_MAX);
 const _: () = assert!(CHUNK_BYTES_MAX * 4 + 256 < crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(VIEWER_BUFFER_BYTES_MAX >= CHUNK_BYTES_MAX * 16);
+const _: () = assert!(PANES_PER_PROJECT_MAX == 15);
 
 /// A terminal host failure as a stable lowercase code clients show in plain words.
 /// `terminal_unavailable` means the host cannot run at all, such as tmux missing.
@@ -126,25 +132,27 @@ pub struct PaneRef {
 
 /// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
 /// `screen` redraws the whole current screen in a fresh terminal of `cols` by `rows`.
-/// `next` gives each later output chunk in order and none once the terminal or viewer closes.
+/// `next` gives each later output chunk in order and none once the terminal ends.
+/// A viewer that falls more than `VIEWER_BUFFER_BYTES_MAX` behind loses the oldest output and
+/// reads one `buffer::skipped_marker` chunk in its place.
 #[derive(Debug)]
 pub struct TerminalStream {
     pub agent: AgentId,
     pub cols: u16,
     pub rows: u16,
     pub screen: Vec<u8>,
-    pub(crate) chunks: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    pub(crate) chunks: buffer::Chunks,
 }
 
 impl TerminalStream {
     /// Waits for the next output chunk. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none when the terminal ended or fell behind.
+    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
     pub async fn next(&mut self) -> Option<Vec<u8>> {
         self.chunks.recv().await
     }
 
     /// Waits for the next output chunk outside an async runtime. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none when the terminal ended or fell behind.
+    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
     pub fn next_blocking(&mut self) -> Option<Vec<u8>> {
         self.chunks.blocking_recv()
     }
@@ -183,6 +191,71 @@ pub trait Host: Send + Sync {
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
     fn alive(&self) -> Result<Vec<AgentId>, HostError>;
+
+    /// Ends every terminal except `keep`, as the engine quits.
+    /// Takes the terminals that stay running, such as a master the owner keeps alive.
+    /// Returns once the rest ended; with nothing kept, the host leaves nothing behind.
+    fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        end_except(self, keep)
+    }
+}
+
+/// Ends every live terminal of a host that is not in `keep`.
+/// Takes the host and the names to keep; a terminal that ended meanwhile is skipped.
+/// Returns the first other failure.
+pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), HostError> {
+    for agent in host.alive()? {
+        if keep.contains(&agent) {
+            continue;
+        }
+        match host.kill(&agent) {
+            Ok(()) => {}
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            Err(problem) => return Err(problem),
+        }
+    }
+    Ok(())
+}
+
+/// Turns a terminal code into the sentence clients show, such as for a refused attach.
+/// Takes the code from `HostError`, `TerminalFrame::Rejected` or `TerminalFrame::Closed`.
+/// Returns plain words without internal terms.
+pub fn plain_reason(code: &str) -> &'static str {
+    match code {
+        "terminal_unavailable" => "Agent terminals need tmux. Run setup to install it.",
+        "terminal_tmux_unsupported" => {
+            "The installed tmux is too old for agent terminals. Run setup to update it."
+        }
+        "terminal_agent_unknown" | "terminal_ended" => {
+            "This agent has stopped, so its terminal is closed."
+        }
+        "terminal_agent_running" => "This agent already has a terminal.",
+        "terminal_agent_invalid" => "That is not an agent terminal.",
+        "terminal_project_full" => {
+            "This project already runs 15 agents, the most one project may run at once."
+        }
+        "terminal_viewers_full" => {
+            "This terminal is open in too many places. Close one of them first."
+        }
+        "terminal_input_bounds" | "terminal_input_too_long" => {
+            "That is too much to type at once. Send it in smaller parts."
+        }
+        "terminal_size_bounds" | "terminal_size_invalid" => "That terminal size is out of range.",
+        "terminal_detached" => "You closed this view. The agent keeps running.",
+        "terminal_viewer_gone" | "terminal_viewer_slow" => {
+            "This view stopped reading, so it was closed. Open the terminal again."
+        }
+        "terminal_socket_path_long" | "terminal_folder_unsafe" => {
+            "The engine's terminal folder cannot be used safely."
+        }
+        "terminal_not_answering" | "terminal_closed" | "terminal_attach_timeout" => {
+            "The terminal host did not answer. Try again."
+        }
+        "owner_grant_stale_or_revoked" => {
+            "This app's access to the engine changed. Open the terminal again."
+        }
+        _ => "The terminal could not be used.",
+    }
 }
 
 /// Opens this platform's terminal host for an engine: the private tmux server on macOS and Linux.

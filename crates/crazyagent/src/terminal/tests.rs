@@ -71,3 +71,34 @@ fn terminal_frames_use_the_documented_wire_shape() {
     };
     assert!(crate::protocol::encode_frame(&largest).is_ok());
 }
+
+#[test]
+fn every_terminal_code_has_plain_words() {
+    for code in [
+        "terminal_unavailable",
+        "terminal_tmux_unsupported",
+        "terminal_agent_unknown",
+        "terminal_ended",
+        "terminal_agent_running",
+        "terminal_project_full",
+        "terminal_viewers_full",
+        "terminal_input_bounds",
+        "terminal_size_bounds",
+        "terminal_detached",
+        "terminal_viewer_gone",
+        "terminal_folder_unsafe",
+        "terminal_not_answering",
+        "owner_grant_stale_or_revoked",
+    ] {
+        let reason = plain_reason(code);
+        assert_ne!(reason, plain_reason("something_else"), "{code}");
+        assert!(
+            !reason.contains('_') && reason.ends_with('.'),
+            "{code}: {reason}"
+        );
+    }
+    assert_eq!(
+        plain_reason("terminal_agent_unknown"),
+        "This agent has stopped, so its terminal is closed."
+    );
+}

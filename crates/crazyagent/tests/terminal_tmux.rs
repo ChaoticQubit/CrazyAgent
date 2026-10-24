@@ -1,8 +1,12 @@
 #![cfg(unix)]
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, SOCKET_PATH_BYTES_MAX, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host, INPUT_BYTES_MAX, TerminalStream};
+use crazyagent::terminal::{
+    AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
+    VIEWER_BUFFER_BYTES_MAX, plain_reason,
+};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -275,4 +279,142 @@ fn a_shared_terminal_folder_is_refused() {
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
     let host = Tmux::open(Some(tmux), &folder);
     assert_eq!(host.alive().unwrap_err().0, "terminal_folder_unsafe");
+}
+
+fn option(tmux: &Path, socket: &Path, name: &str) -> String {
+    let output = Command::new(tmux)
+        .arg("-S")
+        .arg(socket)
+        .args(["show-options", "-gv", name])
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn panes_have_a_scrollback_cap_and_close_when_their_process_ends() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let agent = AgentId::team(3).unwrap();
+    host.spawn(
+        &agent,
+        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "exec cat"]),
+    )
+    .unwrap();
+    assert_eq!(
+        option(&tmux, &socket, "history-limit"),
+        SCROLLBACK_LINES.to_string()
+    );
+    let mut stream = host.attach(&agent).unwrap();
+    host.input(&agent, b"\x04").unwrap();
+    assert!(
+        ended(&mut stream),
+        "the stream ends when the agent's process ends"
+    );
+    assert!(
+        host.alive().unwrap().is_empty(),
+        "a dead pane does not stay open"
+    );
+    let refused = host.attach(&agent).unwrap_err().0;
+    assert_eq!(refused, "terminal_agent_unknown");
+    assert_eq!(
+        plain_reason(&refused),
+        "This agent has stopped, so its terminal is closed."
+    );
+    assert_eq!(
+        host.input(&agent, b"x").unwrap_err().0,
+        "terminal_agent_unknown"
+    );
+}
+
+#[test]
+fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let host = Tmux::open(Some(tmux), &folder);
+    let agent = AgentId::team(4).unwrap();
+    host.spawn(&agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    let mut stream = host.attach(&agent).unwrap();
+    let flood = VIEWER_BUFFER_BYTES_MAX * 3;
+    host.input(
+        &agent,
+        format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-done\r").as_bytes(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+    let mut seen = Vec::new();
+    assert!(read_until(&mut stream, &mut seen, b"\r\nflood-done\r\n"));
+    assert!(
+        contains(&seen, b" bytes of output skipped]"),
+        "the viewer reads a skipped marker instead of being dropped"
+    );
+    assert!(seen.len() < flood, "the oldest output was dropped");
+    assert!(skipped_marker(1).starts_with(b"\r\n"));
+    host.kill(&agent).unwrap();
+}
+
+#[test]
+fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let master = AgentId::team(1).unwrap();
+    let sub = AgentId::team(2).unwrap();
+    for agent in [&master, &sub] {
+        host.spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .unwrap();
+    }
+    host.close(std::slice::from_ref(&master)).unwrap();
+    assert_eq!(
+        host.alive().unwrap(),
+        [master.clone()],
+        "the kept master stays"
+    );
+    drop(host);
+
+    let again = Tmux::open(Some(tmux.clone()), &folder);
+    assert_eq!(again.alive().unwrap(), [master.clone()]);
+    again.close(&[]).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let listed = Command::new(&tmux)
+        .arg("-S")
+        .arg(&socket)
+        .arg("list-sessions")
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        !listed.status.success(),
+        "no tmux session is left after a clean quit: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+
+    let unused = root.path().join("unused");
+    Tmux::open(Some(tmux), &unused).close(&[]).unwrap();
+    assert!(
+        !unused.exists(),
+        "closing a host that never started starts nothing"
+    );
 }
