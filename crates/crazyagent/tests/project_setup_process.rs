@@ -80,8 +80,23 @@ async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_job
     let sources = tempfile::tempdir().unwrap();
     std::fs::write(sources.path().join("research.md"), "# Prior research\n").unwrap();
 
+    let home = tempfile::Builder::new()
+        .prefix("ca-setup-cli-home-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let home_path = home.path().canonicalize().unwrap();
     let engine = Engine::start(root.path()).await;
     let mut controller = owner(root.path()).await;
+    match controller
+        .set_projects_home(home_path.to_str().unwrap().into(), 1)
+        .await
+        .unwrap()
+    {
+        OwnerResponse::Applied { operation } => {
+            assert_eq!(operation.result, OwnerResult::Applied)
+        }
+        other => panic!("setting the projects home must commit: {other:?}"),
+    }
     let project = ProjectId::new("project-cli-setup").unwrap();
     let response = controller
         .setup_project(
@@ -103,7 +118,7 @@ async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_job
                 team: None,
                 documents: vec![sources.path().join("research.md").to_str().unwrap().into()],
             },
-            1,
+            2,
         )
         .await
         .unwrap();
@@ -114,9 +129,7 @@ async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_job
     drop(controller);
     engine.stop();
 
-    let folder = std::fs::canonicalize(root.path())
-        .unwrap()
-        .join("projects/project-cli-setup");
+    let folder = home_path.join("recipe-box").join(".crazyagent");
     assert!(folder.join("context/brief.md").is_file());
     assert_eq!(
         std::fs::read_to_string(folder.join("context/documents/research.md")).unwrap(),
