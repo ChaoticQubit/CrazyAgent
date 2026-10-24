@@ -100,17 +100,22 @@ pub(super) fn read(
 }
 
 /// Plans an AddExistingFolder before the owner transport moves or copies it.
-/// Input: the connection, database path, owner admission, source and mode.
-/// Output: the checked plan, or the refusal code; nothing on disk changes.
+/// Input: the connection, database path, owner admission, the revision the
+/// owner saw, source and mode. Output: the checked plan, or the refusal code
+/// (`stale_revision` when the engine moved on); nothing on disk changes.
 pub(super) fn add_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
+    expected: &Cursor,
     source: &str,
     mode: AddMode,
 ) -> Result<AddPlan, EngineError> {
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
+    if owner_revision(&tx)? != expected.value() {
+        return Err(error("stale_revision"));
+    }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     home::plan_add(&saved, &engine_root(path)?, source, mode)
 }
@@ -135,14 +140,35 @@ pub(super) fn execute(
                 Err(e) => rejected(e),
             }
         }
-        HomeAction::Added { source, mode } => {
-            let Some(saved) = home::load(tx)? else {
-                return rejected(error("projects_home_unset"));
-            };
-            match home::verify_added(&saved, source, *mode) {
-                Ok(()) => Ok(Outcome::Applied),
-                Err(e) => rejected(e),
-            }
-        }
+        HomeAction::Added { .. } => rejected(error("home_add_requires_transport")),
     }
+}
+
+/// Records the result of an AddExistingFolder the owner transport carried out.
+/// Input: the transaction, the mutation's command and the transport's result. Output: Rejected with the transport's refusal code, or
+/// Applied once the folder is confirmed in the home (and, for Move, gone from
+/// its old place); anything else is `home_add_unverified`.
+pub(super) fn record_added(
+    tx: &Transaction<'_>,
+    command: &Command,
+    effect: &Result<(), String>,
+) -> Result<Outcome, EngineError> {
+    let Command::ProjectsHome {
+        action: HomeAction::Added { source, mode },
+    } = command
+    else {
+        return Err(error("home_add_record_invalid"));
+    };
+    if let Err(code) = effect {
+        return Ok(Outcome::Rejected { code: code.clone() });
+    }
+    let Some(saved) = home::load(tx)? else {
+        return Ok(Outcome::Rejected {
+            code: "projects_home_unset".into(),
+        });
+    };
+    Ok(match home::verify_added(&saved, source, *mode) {
+        Ok(()) => Outcome::Applied,
+        Err(e) => Outcome::Rejected { code: e.0 },
+    })
 }

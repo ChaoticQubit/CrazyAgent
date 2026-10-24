@@ -117,9 +117,16 @@ pub(crate) enum Job {
     ),
     HomeAddPlan(
         Admission,
+        Cursor,
         String,
         crate::projects_home::AddMode,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
+    ),
+    HomeAddRecord(
+        Admission,
+        Box<OwnerRequest>,
+        Result<(), String>,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     OwnerApply(
         Admission,
@@ -433,12 +440,18 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, source, mode, reply) => {
+                        Job::HomeAddPlan(admission, expected, source, mode, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &source, mode)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode)
                             };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddRecord(admission, request, effect, reply) => {
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(&effect))
+                            });
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -1756,6 +1769,22 @@ fn owner_apply(
     a: &Admission,
     request: &OwnerRequest,
 ) -> Result<OwnerApplied, EngineError> {
+    owner_apply_with(db, config, path, a, request, None)
+}
+
+/// Applies one owner mutation, optionally with a disk effect already done.
+/// Input: as `owner_apply`, plus the owner transport's result of moving or
+/// copying a folder for AddExistingFolder. Output: the recorded receipt; an
+/// add is checked on disk and recorded even when the revision moved meanwhile,
+/// because its revision was checked before the effect.
+fn owner_apply_with(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<&Result<(), String>>,
+) -> Result<OwnerApplied, EngineError> {
     request.validate()?;
     let OwnerOperation::Apply { mutation } = &request.operation else {
         return Err(error("owner_mutation_required"));
@@ -1783,7 +1812,9 @@ fn owner_apply(
             current_revision: Cursor::new(revision),
         });
     }
-    let outcome = if request.expected_revision.value() != revision {
+    let outcome = if let Some(effect) = effect {
+        projects_home::record_added(&tx, &command, effect)?
+    } else if request.expected_revision.value() != revision {
         Outcome::Rejected {
             code: "stale_revision".into(),
         }

@@ -1,8 +1,8 @@
+use super::platform::{copy_link, permission_bits, private_folder, writable_folder};
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -108,8 +108,7 @@ fn copy_into(source: &Path, destination: &Path, verify: bool) -> Result<(), Engi
 fn make_writable(root: &Path) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(folder) = stack.pop() {
-        let mode = fs::symlink_metadata(&folder)?.permissions().mode();
-        fs::set_permissions(&folder, fs::Permissions::from_mode(mode | 0o700))?;
+        writable_folder(&folder)?;
         for entry in fs::read_dir(&folder)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -133,7 +132,7 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
         return Err(refused("home_source_not_folder"));
     }
     fs::create_dir(target).map_err(failed)?;
-    fs::set_permissions(target, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+    private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
     let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize)];
     let mut entries = 0u64;
@@ -150,13 +149,13 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
             let kind = metadata.file_type();
             if kind.is_symlink() {
                 let link = fs::read_link(&path).map_err(failed)?;
-                std::os::unix::fs::symlink(link, &copy).map_err(failed)?;
+                copy_link(&path, link, &copy).map_err(failed)?;
             } else if kind.is_dir() {
                 if depth + 1 > DEPTH_MAX {
                     return Err(refused("home_copy_too_large"));
                 }
                 fs::create_dir(&copy).map_err(failed)?;
-                fs::set_permissions(&copy, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+                private_folder(&copy).map_err(failed)?;
                 folders.push((copy.clone(), metadata.permissions()));
                 stack.push((path, copy, depth + 1));
             } else if kind.is_file() {
@@ -197,7 +196,7 @@ pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
             }
             continue;
         }
-        if a.permissions().mode() & 0o7777 != b.permissions().mode() & 0o7777 {
+        if permission_bits(&a) != permission_bits(&b) {
             return Err(differs());
         }
         if a.is_file() {

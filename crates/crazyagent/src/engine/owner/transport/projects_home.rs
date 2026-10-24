@@ -5,7 +5,7 @@ const SIZE_MARGIN: Duration = Duration::from_millis(250);
 
 enum Step {
     Reply(OwnerResponse),
-    Record,
+    Record(Result<(), String>),
     Size(u64),
 }
 
@@ -26,8 +26,9 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// Serves AddExistingFolder and FolderSize for one authenticated owner.
 /// Input: the stream, engine, authority, owner packet and admission, the
 /// validated request and the exchange deadline. Output: the reply written
-/// under the owner egress barrier; an add is recorded only after the folder
-/// is complete in the projects home, and a refusal is written as Rejected.
+/// under the owner egress barrier. An add is recorded after its disk work,
+/// as Applied once the folder is complete in the home or as Rejected with the
+/// refusal code; a FolderSize refusal is written as Rejected.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -79,20 +80,18 @@ async fn prepare_add(
         other => return Ok(Step::Reply(other)),
     }
     let source = source.to_owned();
+    let expected = request.expected_revision.clone();
     let plan = match engine
-        .owner_job(|reply| Job::HomeAddPlan(a.clone(), source, mode, reply))
+        .owner_job(|reply| Job::HomeAddPlan(a.clone(), expected, source, mode, reply))
         .await
     {
         Ok(plan) => plan,
-        Err(e) => return Ok(Step::Reply(OwnerResponse::Rejected { code: e.0 })),
+        Err(e) => return Ok(Step::Record(Err(e.0))),
     };
-    match tokio::task::spawn_blocking(move || plan.run())
+    let effect = tokio::task::spawn_blocking(move || plan.run())
         .await
-        .map_err(|_| failure("home_add_interrupted"))?
-    {
-        Ok(()) => Ok(Step::Record),
-        Err(e) => Ok(Step::Reply(OwnerResponse::Rejected { code: e.0 })),
-    }
+        .map_err(|_| failure("home_add_interrupted"))?;
+    Ok(Step::Record(effect.map_err(|e| e.0)))
 }
 
 async fn measure(path: &str, deadline: Instant) -> Result<Step, EngineError> {
@@ -119,9 +118,9 @@ async fn finish(
     let id = request.request_id.clone();
     let response = match step? {
         Step::Reply(response) => response,
-        Step::Record => OwnerResponse::Applied {
+        Step::Record(effect) => OwnerResponse::Applied {
             operation: engine
-                .owner_job(|reply| Job::OwnerApply(a.clone(), request, reply))
+                .owner_job(|reply| Job::HomeAddRecord(a.clone(), Box::new(request), effect, reply))
                 .await?,
         },
         Step::Size(bytes) => {

@@ -1,5 +1,6 @@
 mod intake;
 mod layout;
+mod platform;
 mod watch;
 
 pub use intake::{AddPlan, copy_tree, folder_size, move_by_copy, verify_tree};
@@ -118,10 +119,12 @@ fn refused(code: &str) -> EngineError {
 }
 
 /// Finds the signed-in user's own home folder, resolved to its real path.
-/// Input: none. Output: the folder, or `owner_home_unknown` when HOME is unset
-/// or does not resolve, so no safety check silently runs without it.
+/// Input: none. Output: the folder, or `owner_home_unknown` when HOME
+/// (USERPROFILE on Windows) is unset or does not resolve, so no safety check
+/// silently runs without it.
 pub fn owner_home() -> Result<PathBuf, EngineError> {
-    let home = std::env::var_os("HOME").ok_or_else(|| refused("owner_home_unknown"))?;
+    let home = std::env::var_os(platform::OWNER_HOME_VARIABLE)
+        .ok_or_else(|| refused("owner_home_unknown"))?;
     let home = std::fs::canonicalize(home).map_err(|_| refused("owner_home_unknown"))?;
     assert!(home.is_absolute());
     Ok(home)

@@ -1,8 +1,8 @@
+use super::platform::open_append;
 use super::{real_folder, refused};
 use crate::engine::EngineError;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const CRAZYAGENT_DIRECTORY: &str = ".crazyagent";
@@ -94,12 +94,7 @@ pub fn exclude_from_git(folder: &Path) -> Result<bool, EngineError> {
         text.push_str(line);
         text.push('\n');
     }
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(&path)
-        .map_err(|_| refused("git_exclude_invalid"))?;
+    let mut file = open_append(&path).map_err(|_| refused("git_exclude_invalid"))?;
     file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|_| refused("git_exclude_invalid"))?;
