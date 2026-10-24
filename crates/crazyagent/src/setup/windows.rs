@@ -1,5 +1,5 @@
 use super::run::{reported_version, run_bounded};
-use super::{Dependency, InstallError, Installer, Pin, Version};
+use super::{Dependency, InstallError, Installer, Pin, UV_WINGET_ID, Version};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -7,8 +7,6 @@ use std::time::Duration;
 /// The version Windows reports for tmux: it needs none, because agent terminals run on the
 /// built-in ConPTY host.
 pub const CONPTY: &str = "conpty";
-/// uv's package id in the winget community source.
-pub const UV_WINGET_ID: &str = "astral-sh.uv";
 
 const INSTALL_LIMIT: Duration = Duration::from_secs(15 * 60);
 const VERSION_LIMIT: Duration = Duration::from_secs(10);
@@ -39,9 +37,9 @@ pub fn uv_command(version: &Version) -> Command {
 }
 
 /// The Windows installer. tmux reports as found with version `conpty`, because the
-/// built-in ConPTY host replaces it. uv comes from winget at the pinned version in the
-/// owner's user scope; the release pin's URL and checksum are not used, since winget checks
-/// its own manifest checksum. Graphify comes from `uv tool install` into the app data folder.
+/// built-in ConPTY host replaces it. uv comes from its winget pin, `astral-sh.uv` at the
+/// pinned version in the owner's user scope; winget checks its own manifest checksum.
+/// Graphify comes from `uv tool install` into the app data folder.
 #[derive(Debug, Clone)]
 pub struct WindowsInstaller {
     app_data: PathBuf,
@@ -50,10 +48,14 @@ pub struct WindowsInstaller {
 
 impl WindowsInstaller {
     /// Input: the app's private data folder, which holds Graphify and its Python, and the
-    /// owner's `%LOCALAPPDATA%`, where winget links uv. Output: the installer, or
-    /// `setup_store_unavailable` when either path is relative.
-    pub fn new(app_data: &Path, local_app_data: &Path) -> Result<Self, InstallError> {
-        if !app_data.is_absolute() || !local_app_data.is_absolute() {
+    /// owner's `%LOCALAPPDATA%`, where winget links uv, if Windows set it. Output: the
+    /// installer, `setup_local_app_data_missing` when `%LOCALAPPDATA%` is unset or
+    /// relative, or `setup_store_unavailable` when the app data folder is relative.
+    pub fn new(app_data: &Path, local_app_data: Option<&Path>) -> Result<Self, InstallError> {
+        let Some(local_app_data) = local_app_data.filter(|path| path.is_absolute()) else {
+            return Err(InstallError("setup_local_app_data_missing"));
+        };
+        if !app_data.is_absolute() {
             return Err(InstallError("setup_store_unavailable"));
         }
         Ok(Self {
@@ -150,7 +152,9 @@ impl Installer for WindowsInstaller {
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         let (mut command, wanted) = match (dep, pin) {
             (Dependency::Tmux, _) => return Version::parse(CONPTY),
-            (Dependency::Uv, Pin::Release { version, .. }) => (uv_command(version), version),
+            (Dependency::Uv, Pin::Winget { id, version }) if id == UV_WINGET_ID => {
+                (uv_command(version), version)
+            }
             (
                 Dependency::Graphify,
                 Pin::UvTool {
@@ -187,7 +191,8 @@ mod tests {
     fn windows_needs_no_tmux_and_pins_uv_and_graphify_exactly() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
-        let installer = WindowsInstaller::new(&app, &temp.path().join("local")).unwrap();
+        let local = temp.path().join("local");
+        let installer = WindowsInstaller::new(&app, Some(&local)).unwrap();
         let conpty = Version::parse(CONPTY).unwrap();
         assert_eq!(installer.find(Dependency::Tmux), Ok(Some(conpty.clone())));
         let brew = Pin::Homebrew {
@@ -248,8 +253,43 @@ mod tests {
             );
         }
         assert_eq!(
-            WindowsInstaller::new(Path::new("relative"), temp.path()).err(),
+            WindowsInstaller::new(Path::new("relative"), Some(temp.path())).err(),
             Some(InstallError("setup_store_unavailable"))
         );
+    }
+
+    #[test]
+    fn windows_refuses_plainly_without_an_absolute_local_app_data_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        for local in [None, Some(Path::new("relative"))] {
+            assert_eq!(
+                WindowsInstaller::new(temp.path(), local).err(),
+                Some(InstallError("setup_local_app_data_missing"))
+            );
+        }
+        let sentence = crate::setup::plain_reason("setup_local_app_data_missing");
+        assert!(sentence.contains("local app data"), "{sentence}");
+        assert!(WindowsInstaller::new(temp.path(), Some(temp.path())).is_ok());
+    }
+
+    #[test]
+    fn uv_installs_only_from_its_own_winget_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let installer = WindowsInstaller::new(temp.path(), Some(temp.path())).unwrap();
+        let version = Version::parse("0.13.5").unwrap();
+        for (dep, id) in [
+            (Dependency::Uv, "someone.uv"),
+            (Dependency::Uv, "astral-sh.uv --override x"),
+            (Dependency::Graphify, UV_WINGET_ID),
+        ] {
+            let pin = Pin::Winget {
+                id: id.to_owned(),
+                version: version.clone(),
+            };
+            assert_eq!(
+                installer.install(dep, &pin),
+                Err(InstallError("setup_pin_invalid"))
+            );
+        }
     }
 }
