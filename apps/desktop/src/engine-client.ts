@@ -300,7 +300,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "add_existing_folder" | "start_onboarding";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -746,19 +746,24 @@ export interface FolderSize {
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { state: "waiting" } | { state: "running" } | { state: "done" } | { state: "failed"; reason: string };
 
-export interface OnboardingView {
-  graph: OnboardingStep;
-  mapping: OnboardingStep;
-  draft: ProjectSetup;
-  missing: string[];
-  name?: string;
-  overview?: string | null;
+export interface MappingFacts {
+  languages: string[];
+  build_commands: string[];
+  test_commands: string[];
+  entry_points: string[];
 }
 
-export interface OnboardingStarted extends IntentReceipt {
-  project_id: string | null;
+export interface OnboardingView {
+  project_id: string;
+  graph: OnboardingStep;
+  mapping: OnboardingStep;
+  name: string;
+  draft: ProjectSetup;
+  facts: MappingFacts;
+  missing: string[];
+  overview: string | null;
 }
 
 export interface GitHubDeviceCode {
@@ -830,32 +835,102 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
 export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
-  | { kind: "found"; version: string }
-  | { kind: "installing" }
-  | { kind: "installed"; version: string }
-  | { kind: "failed"; reason: string }
-  | { kind: "missing" };
+  | { state: "missing" }
+  | { state: "found"; version: string }
+  | { state: "installing" }
+  | { state: "installed"; version: string }
+  | { state: "failed"; reason: string };
 
 export interface Dependency {
   name: DependencyName;
+  label: string;
   state: DependencyState;
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
+export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
+
+export type PackState = { state: "available" } | { state: "installing" } | { state: "on" } | { state: "off" } | { state: "failed"; reason: string };
 
 export interface PackEntry {
   id: string;
   kind: PackEntryKind;
+  group: PackGroup;
   source: string;
   license: string;
   on_by_default: boolean;
-  state: DependencyState;
-  name?: string;
+  state: PackState;
 }
 
 export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
+  running: boolean;
+}
+
+/** Reads the projects home folder and whether the engine watches it. Output: the home. */
+export function projectsHome(): Promise<ProjectsHome> {
+  return invoke<ProjectsHome>("desktop_projects_home");
+}
+
+/** Picks the projects home folder; nothing on disk moves.
+ * Inputs: an absolute folder path and a generation. Output: the engine receipt. */
+export function setProjectsHome(path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_projects_home", { path, generation });
+}
+
+/** Lists the folders in the projects home with their state. Output: the found projects. */
+export function foundProjects(): Promise<FoundProject[]> {
+  return invoke<FoundProject[]>("desktop_found_projects");
+}
+
+/** Measures a folder before Copy and names its GitHub repository, if any.
+ * Input: an absolute folder path. Output: its size and GitHub owner/name. */
+export function folderSize(path: string): Promise<FolderSize> {
+  return invoke<FolderSize>("desktop_folder_size", { path });
+}
+
+/** Moves or copies an existing folder into the projects home.
+ * Inputs: the source folder, move or copy, and a generation. Output: the engine receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, generation });
+}
+
+/** Starts onboarding a found folder on a pool. Inputs: the folder, the pool id and a
+ * generation. Output: the engine receipt; Home then lists the folder as setting up. */
+export function startOnboarding(path: string, pool: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_start_onboarding", { path, pool, generation });
+}
+
+/** Reads one project's onboarding with the mapping agent's overview. Input: the project id. */
+export function onboarding(id: string): Promise<OnboardingView> {
+  return invoke<OnboardingView>("desktop_onboarding", { id });
+}
+
+/** Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status. */
+export function githubSignOut(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_sign_out");
+}
+
+/** Reads setup: tools, the default pack and whether setup is running. Output: the status. */
+export function setupStatus(): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_setup_status");
+}
+
+/** Starts setup with the ticked pack entries; the ticked MCP servers count as approved.
+ * Input: the ticked ids. Output: the status as the run starts. */
+export function runSetup(pack: string[]): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_run_setup", { pack });
+}
+
+/** Switches one installed pack entry on or off. Inputs: its id and the state. */
+export function setPackEntry(id: string, on: boolean): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on });
+}
+
+/** Removes one installed pack entry and what it added. Input: its id. */
+export function removePackEntry(id: string): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_remove_pack_entry", { id });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

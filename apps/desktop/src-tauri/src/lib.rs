@@ -3,6 +3,7 @@ pub mod bridge;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
+use bridge::intake::{FolderSize, OnboardingView};
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::Pick;
 use bridge::project_setup::{MemoryItem, ResearchLog};
@@ -19,6 +20,7 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
 };
+use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
@@ -28,7 +30,9 @@ use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
+use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::setup::SetupStatus;
 use crazyagent::team::TeamStatus;
 use std::sync::Arc;
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -556,6 +560,187 @@ async fn desktop_research_log(
 ) -> Result<ResearchLog, BridgeError> {
     main_window(&window)?;
     lock(&state)?.research_log(&id, job).await
+}
+
+#[tauri::command]
+async fn desktop_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ProjectsHome, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.projects_home().await
+}
+
+#[tauri::command]
+async fn desktop_set_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_projects_home(path, generation).await
+}
+
+#[tauri::command]
+async fn desktop_found_projects(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<FoundProject>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.found_projects().await
+}
+
+#[tauri::command]
+async fn desktop_folder_size(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+) -> Result<FolderSize, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.folder_size(path).await
+}
+
+#[tauri::command]
+async fn desktop_add_existing_folder(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    source: String,
+    mode: AddMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_existing_folder(source, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_start_onboarding(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.start_onboarding(path, pool, generation).await
+}
+
+#[tauri::command]
+async fn desktop_onboarding(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<OnboardingView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.onboarding(&id).await
+}
+
+#[tauri::command]
+async fn desktop_github_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_status().await
+}
+
+#[tauri::command]
+async fn desktop_github_sign_in(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubDeviceCode, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_sign_in().await
+}
+
+#[tauri::command]
+async fn desktop_github_token(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    token: String,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_token(token).await
+}
+
+#[tauri::command]
+async fn desktop_github_use_cli(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_use_cli().await
+}
+
+#[tauri::command]
+async fn desktop_github_sign_out(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_sign_out().await
+}
+
+#[tauri::command]
+async fn desktop_github_repos(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    page: u32,
+) -> Result<GitHubRepoPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_repos(page).await
+}
+
+#[tauri::command]
+async fn desktop_clone_repo(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    full_name: String,
+) -> Result<CloneReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.clone_repo(full_name).await
+}
+
+#[tauri::command]
+async fn desktop_setup_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.setup_status().await
+}
+
+#[tauri::command]
+async fn desktop_run_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    pack: Vec<String>,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.run_setup(pack).await
+}
+
+#[tauri::command]
+async fn desktop_set_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_pack_entry(id, on).await
+}
+
+#[tauri::command]
+async fn desktop_remove_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_pack_entry(id).await
 }
 
 #[tauri::command]
@@ -1276,6 +1461,24 @@ pub fn run() {
             desktop_cancel_research,
             desktop_retry_research,
             desktop_research_log,
+            desktop_projects_home,
+            desktop_set_projects_home,
+            desktop_found_projects,
+            desktop_folder_size,
+            desktop_add_existing_folder,
+            desktop_start_onboarding,
+            desktop_onboarding,
+            desktop_github_status,
+            desktop_github_sign_in,
+            desktop_github_token,
+            desktop_github_use_cli,
+            desktop_github_sign_out,
+            desktop_github_repos,
+            desktop_clone_repo,
+            desktop_setup_status,
+            desktop_run_setup,
+            desktop_set_pack_entry,
+            desktop_remove_pack_entry,
             desktop_project_memories,
             desktop_review_memory,
             desktop_memories,
