@@ -115,6 +115,21 @@ fn stop_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'st
     })
 }
 
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Ends a TUI whose main loop did not stop within `STOP_GRACE` of a stop request, as
+/// when its terminal hung up and the terminal read never returns.
+/// Input: none. Output: never returns; restores the terminal mode and exits with failure.
+fn force_exit() -> ! {
+    let _ = disable_raw_mode();
+    let _ = run::restore(&mut std::io::stdout());
+    let _ = writeln!(
+        std::io::stderr(),
+        "TUI did not stop within {STOP_GRACE:?} of a stop request; exiting"
+    );
+    std::process::exit(1)
+}
+
 pub fn run_tui(client: Client) -> Result<(), TuiError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(TuiError("TUI requires terminal stdin and stdout".into()));
@@ -127,7 +142,9 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
     let requested = stop_requested()?;
     drop(_enter);
     let stopped = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
+    let done = finished.clone();
     let signal_thread = std::thread::spawn(move || {
         signals.block_on(async {
             let mut requested = std::pin::pin!(requested);
@@ -135,9 +152,16 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
                 tokio::select! {
                     _ = &mut requested => { stop.store(true, Ordering::Relaxed); break; }
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                        if stop.load(Ordering::Relaxed) { break; }
+                        if stop.load(Ordering::Relaxed) { return; }
                     }
                 }
+            }
+            let deadline = Instant::now() + STOP_GRACE;
+            while !done.load(Ordering::Relaxed) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !done.load(Ordering::Relaxed) {
+                force_exit();
             }
         });
     });
@@ -162,6 +186,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
             .map_err(TuiError)?;
         event_loop(&mut terminal, &mut app, &mut connection, &stopped)
     })();
+    finished.store(true, Ordering::Relaxed);
     stopped.store(true, Ordering::Relaxed);
     signal_thread
         .join()

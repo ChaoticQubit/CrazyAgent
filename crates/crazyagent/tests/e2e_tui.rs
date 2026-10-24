@@ -4,7 +4,7 @@ mod e2e_support;
 
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::terminal::tmux::installed;
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, scratch};
+use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, scratch, stop_tmux};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -107,15 +107,7 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_remove("TMUX")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        stop_tmux(&self.tmux, &self.socket);
     }
 }
 

@@ -22,6 +22,97 @@ const STOP_TIME: Duration = Duration::from_secs(40);
 const ATTACH_TIME: Duration = Duration::from_secs(10);
 const FOUND_TIME: Duration = Duration::from_secs(20);
 const STDERR_BYTES_MAX: u64 = 64 * 1024;
+const PANE_EXIT_TIME: Duration = Duration::from_secs(5);
+const PANES_MAX: usize = 16;
+
+/// Reports whether a process with this id still exists.
+/// Input: a process id. Output: true while `kill -0` succeeds for it.
+pub fn alive(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Lists the process ids every pane of a test tmux server runs.
+/// Input: the tmux binary and server socket. Output: at most 16 pane process ids;
+/// none when the server is already gone.
+pub fn pane_pids(tmux: &Path, socket: &Path) -> Vec<u32> {
+    Command::new(tmux)
+        .arg("-S")
+        .arg(socket)
+        .args(["list-panes", "-a", "-F", "#{pane_pid}"])
+        .env_remove("TMUX")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .take(PANES_MAX)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Test processes started from this test binary's `crazyagent` that must not outlive
+/// the test. Dropping it gives each one five seconds to exit, then kills and waits for
+/// any still running, so a failed test leaves no TUI behind.
+/// Input: the process ids. Output: none.
+pub struct Survivors(pub Vec<u32>);
+
+impl Drop for Survivors {
+    fn drop(&mut self) {
+        assert!(self.0.len() <= PANES_MAX);
+        let deadline = Instant::now() + PANE_EXIT_TIME;
+        while self.0.iter().any(|pid| alive(*pid)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for pid in self.0.iter().copied().filter(|pid| alive(*pid)) {
+            let command = Command::new("ps")
+                .args(["-o", "command=", "-p", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            if !command.contains(ENGINE) {
+                continue;
+            }
+            eprintln!("test process {pid} outlived its terminal; killing it: {command}");
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let killed = Instant::now() + PANE_EXIT_TIME;
+            while alive(pid) && Instant::now() < killed {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Stops a test tmux server and every `crazyagent` process its panes ran.
+/// Input: the tmux binary and server socket. Output: none; pane processes that
+/// survive the hang-up are killed by `Survivors`.
+pub fn stop_tmux(tmux: &Path, socket: &Path) {
+    let _survivors = Survivors(pane_pids(tmux, socket));
+    let _ = Command::new(tmux)
+        .arg("-S")
+        .arg(socket)
+        .arg("kill-server")
+        .env_remove("TMUX")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
 
 /// Makes a private scratch folder with a short path, so engine and tmux socket paths
 /// stay under the Unix socket length limit.
