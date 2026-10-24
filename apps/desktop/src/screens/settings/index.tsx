@@ -17,7 +17,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "plugins", label: "Plugins and skills", icon: "puzzle" },
   { id: "pack", label: "Pack", icon: "boxes" },
   { id: "home", label: "Projects folder", icon: "folder" },
-  { id: "github", label: "GitHub", icon: "link" },
+  { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
   { id: "profile", label: "Profile", icon: "user-round" },
 ];

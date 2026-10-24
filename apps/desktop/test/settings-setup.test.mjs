@@ -8,6 +8,7 @@ const { PackSettingsView, packConfirm } = await import("../src/screens/settings/
 const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine } = await import("../src/screens/settings/projects-home.tsx");
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
+const { Icon } = await import("../src/ui/icon.tsx");
 
 const ok = (value) => ({ kind: "ok", value });
 const notReady = { kind: "not_ready" };
@@ -142,4 +143,19 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
   assert.doesNotMatch(out, /Sign out/);
   assert.match(html(GitHubSettingsView, { ...panels, status: ok({ ...signedOut, problem: "GitHub didn't accept the saved token." }) }), /role="alert">GitHub didn&#x27;t accept the saved token\./);
   assert.match(html(GitHubSettingsView, { ...panels, status: notReady }), /Signing in to GitHub isn&#x27;t ready yet/);
+});
+
+test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () => {
+  const svg = (name, size) => html(Icon, { name, size });
+  const markup = html(PackSettingsView, packProps(ok(setup())));
+  assert.ok(markup.includes(`${svg("blocks", 14)}<strong>superpowers</strong>`), markup);
+  assert.ok(markup.includes(`${svg("server", 14)}<strong>headroom</strong>`), markup);
+  assert.ok(markup.includes(svg("circle-check", 12)), "On carries its status icon");
+  assert.ok(markup.includes(svg("power-off", 12)), "Off carries its status icon");
+  const base = { busy: false, problem: "", onChoose: forbidden, onUse: forbidden, onMove: forbidden, onCancel: forbidden, onRetry: forbidden };
+  const picked = html(ProjectsHomeSettingsView, { ...base, home: ok({ path: "/Users/mira/Projects", watching: true }), picked: "/Users/mira/Work" });
+  assert.ok(picked.includes(`${svg("check", 15)}Use this folder</button>`), picked);
+  assert.ok(picked.includes(`${svg("folder-input", 15)}Move my projects there</button>`), picked);
+  const account = html(GitHubAccountView, { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, busy: false, problem: "", onSignOut: forbidden });
+  assert.ok(account.includes(`<h2 class="row">${svg("git-branch", 16)}GitHub account</h2>`), account);
 });

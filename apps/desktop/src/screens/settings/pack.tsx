@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
 import type { PackEntry, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Skeleton, StatusBadge, Switch } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Skeleton, StatusBadge, Switch } from "../../ui";
 import { displayText } from "../conversation";
-import { SETUP_POLL_MS, entryName, installed, packGroups, packStateView, setupBusy } from "../intake/intake";
+import { SETUP_POLL_MS, entryIcon, entryName, installed, packGroups, packStateView, setupBusy } from "../intake/intake";
 import "../project/projects.css";
 import "../intake/intake.css";
 
@@ -52,7 +52,7 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onRet
         const locked = running || busy !== null;
         return <li className="in-row" key={entry.id}>
           <span className="in-row-main">
-            <span className="pj-row"><strong>{entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
+            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
               <StatusBadge word={state.word} tone={state.tone} /></span>
             <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}</span>
             {state.line && <span className="pj-small pj-error">{state.line}</span>}

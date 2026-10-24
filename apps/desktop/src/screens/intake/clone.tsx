@@ -3,7 +3,7 @@ import { cloneRepo, gitHubSignIn, gitHubToken, gitHubUseCli, intakeCopy, loadGit
 import { openLink } from "../../api-projects";
 import type { GitHubDeviceCode, GitHubRepo, GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate } from "../../ui";
+import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, gitHubPage, repoMatches, repoMeta } from "./intake";
@@ -50,12 +50,12 @@ export function GitHubSignInView({ device, now, busy, problem, tokenOpen, tokenR
     {!device && <span className="pj-row">
       <Button variant="primary" icon="log-in" pending={busy} pendingLabel="Starting..." onClick={onDevice}>Sign in with GitHub</Button>
       <Button icon="terminal" disabled={busy} onClick={onCli}>Use the GitHub CLI</Button>
-      {!tokenOpen && <Button variant="quiet" disabled={busy} onClick={onTokenOpen}>Paste a token instead</Button>}
+      {!tokenOpen && <Button variant="quiet" icon="key-round" disabled={busy} onClick={onTokenOpen}>Paste a token instead</Button>}
     </span>}
     {tokenOpen && !device && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); onToken(); }}>
       <SecretField id="gh-token" label="GitHub token" inputRef={tokenRef} maxLength={255}
         helper="A fine-grained token that can read the repositories you want to clone. It goes to your keychain and isn't shown again." />
-      <span><Button type="submit" disabled={busy}>Save token</Button></span>
+      <span><Button type="submit" icon="key-round" disabled={busy}>Save token</Button></span>
     </form>}
     {problem && <p className="pj-error" role="alert">{displayText(problem)}</p>}
   </section>;
@@ -86,9 +86,9 @@ export function RepoListView({ status, repos, query, onQuery, more, onMore, clon
       {repos.value.length === 0 ? <p className="pj-muted">No repositories on this account.</p>
         : shown.length === 0 ? <p className="pj-muted">No repositories match "{query.trim()}".</p>
         : <ul className="in-list">{shown.map((repo) => <li className="in-row" key={repo.full_name}>
-          <span className="in-row-main"><strong className="pj-mono">{displayText(repo.full_name)}</strong>
+          <span className="in-row-main"><span className="pj-row"><Icon name={repo.private ? "lock" : "globe"} size={14} /><strong className="pj-mono">{displayText(repo.full_name)}</strong></span>
             <span className="pj-small pj-secondary">{repoMeta(repo)}</span></span>
-          <Button size="small" pending={cloning === repo.full_name} pendingLabel="Cloning..." disabled={cloning !== null && cloning !== repo.full_name}
+          <Button size="small" icon="git-branch" pending={cloning === repo.full_name} pendingLabel="Cloning..." disabled={cloning !== null && cloning !== repo.full_name}
             onClick={() => onClone(repo)}>Clone</Button>
         </li>)}</ul>}
       {more && <span><Button variant="quiet" onClick={onMore}>Show more</Button></span>}

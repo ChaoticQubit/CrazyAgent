@@ -42,7 +42,7 @@ export function HomeFolderView({ home, picked, busy, problem, onChoose, onSave, 
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <span className="pj-row">
       <Button icon="folder-open" disabled={busy} onClick={onChoose}>{current || picked ? "Choose another folder" : "Choose folder"}</Button>
-      {picked && <Button variant="primary" pending={busy} pendingLabel="Saving..." onClick={onSave}>Use this folder</Button>}
+      {picked && <Button variant="primary" icon="check" pending={busy} pendingLabel="Saving..." onClick={onSave}>Use this folder</Button>}
       {!picked && current && onContinue && <Button variant="primary" onClick={onContinue}>Continue</Button>}
     </span>
   </div>;
