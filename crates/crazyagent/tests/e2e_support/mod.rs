@@ -6,6 +6,7 @@ use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::projects_home::FoundProject;
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::setup::{DependencyState, SetupStatus};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
@@ -353,6 +354,27 @@ impl Owner {
     /// Reads the found projects until the check holds, for up to 20 s.
     /// Inputs: what is awaited, for the failure message, and the check.
     /// Output: the list the check accepted.
+    /// Reads setup until no tool is still being checked; the engine checks tool versions
+    /// in the background, so an early read may say Checking. Output: the settled status.
+    pub async fn setup_checked(&mut self) -> SetupStatus {
+        let start = Instant::now();
+        loop {
+            let status = self.controller.setup_status().await.unwrap();
+            let checking = status
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.state == DependencyState::Checking);
+            if !checking {
+                return status;
+            }
+            assert!(
+                start.elapsed() < FOUND_TIME,
+                "tools still checking: {status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn found_until(
         &mut self,
         what: &str,

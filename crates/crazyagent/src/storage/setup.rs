@@ -333,7 +333,7 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
     let manifest = manifest()?;
     let installed = installed(tx)?;
     Ok(SetupStatus {
-        dependencies: progress::dependency_rows(&progress, &[]),
+        dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
         running: progress.running,
     })

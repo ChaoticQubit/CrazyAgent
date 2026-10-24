@@ -58,6 +58,7 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Signing in...",
             "Starting",
             "Installing",
+            "Checking",
             "Setting up",
         ],
     ),
