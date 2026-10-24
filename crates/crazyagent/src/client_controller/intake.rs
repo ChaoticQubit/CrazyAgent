@@ -29,26 +29,6 @@ impl OwnerController {
         self.send_pending().await
     }
 
-    /// Switches the projects home from Settings, moving every project folder along when asked.
-    /// Takes the absolute new folder, whether project folders move with it, and the client generation.
-    /// Returns the actual owner response; a refusal is an applied operation carrying the plain code.
-    pub async fn move_projects_home(
-        &mut self,
-        path: String,
-        move_projects: bool,
-        generation: u64,
-    ) -> Result<OwnerResponse, EngineError> {
-        self.projects_home().await?;
-        self.begin_mutation(
-            OwnerMutation::MoveProjectsHome {
-                path,
-                move_projects,
-            },
-            generation,
-        )?;
-        self.send_pending().await
-    }
-
     /// Lists the folders in the projects home with their Found, Missing, Onboarding or Ready state.
     /// Takes nothing.
     /// Returns the folders in the engine's order.
@@ -139,13 +119,6 @@ impl OwnerController {
     /// Returns the new status.
     pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, EngineError> {
         self.github()?.github_use_cli().await
-    }
-
-    /// Signs out of GitHub; the engine deletes the stored token.
-    /// Takes nothing.
-    /// Returns the signed-out status.
-    pub async fn github_sign_out(&mut self) -> Result<GitHubStatus, EngineError> {
-        self.github()?.github_sign_out().await
     }
 
     /// Lists one page of the signed-in owner's GitHub repositories, most recently pushed first.
