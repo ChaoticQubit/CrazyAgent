@@ -349,7 +349,13 @@ impl NativeOwner {
 
     async fn settings_event(&mut self, job: SettingsJob, lost: &mut bool) -> SettingsEvent {
         match job {
-            SettingsJob::Accounts(request) => SettingsEvent::Accounts(self.accounts(request).await),
+            SettingsJob::Accounts(request) => {
+                let result = self.accounts(request).await;
+                if let Err(code) = &result {
+                    *lost |= connection_lost(code);
+                }
+                SettingsEvent::Accounts(result)
+            }
             SettingsJob::AllAccounts => {
                 SettingsEvent::AllAccounts(self.all_accounts(ACCOUNTS_PAGE, lost).await)
             }
@@ -858,8 +864,21 @@ fn fresh_id() -> Result<RequestId, String> {
     RequestId::new(id).map_err(|_| "native_auth_request_id_invalid".to_owned())
 }
 
+/// Tells whether a failed engine call means the trusted connection is gone: the
+/// socket vanished, a restarted engine replaced it, it refused the connection,
+/// or the reply never came. Refusals the engine answered are not a loss.
+/// Input: a raw engine error or a bounded code. Output: true when the owner
+/// connection must detach and reconnect.
 pub(super) fn connection_lost(code: &str) -> bool {
-    code == "controller_disconnected" || code.contains("transport")
+    let code = bounded_problem(code);
+    code == "controller_disconnected"
+        || code == "trusted_owner_connection_failed"
+        || code.starts_with("owner_root_")
+        || code.starts_with("owner_socket_")
+        || code.starts_with("owner_outcome_unknown")
+        || code.ends_with("_owner_unavailable")
+        || code.ends_with("_outcome_unknown")
+        || code.contains("transport")
 }
 
 /// Reads one owner change reply: the engine answers a refused change as an
@@ -1178,6 +1197,152 @@ mod tests {
                 .await,
         );
         assert_eq!(here, vec![("release-notes".to_owned(), Some(false))]);
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn engine(root: &std::path::Path) -> (EngineService, tokio::sync::watch::Sender<bool>) {
+        let global = root.join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root,
+            "e.sock",
+            &global,
+            &root.join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        (service, stop)
+    }
+
+    fn failure(event: &SettingsEvent) -> Option<&str> {
+        match event {
+            SettingsEvent::Accounts(Err(code))
+            | SettingsEvent::AllAccounts(Err(code))
+            | SettingsEvent::Harnesses(Err(code))
+            | SettingsEvent::Memories(Err(code))
+            | SettingsEvent::MemoryAdded(Err(code))
+            | SettingsEvent::Plugins(Err(code)) => Some(code),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn only_a_failed_transport_counts_as_a_lost_connection() {
+        for gone in [
+            "No such file or directory (os error 2)",
+            "trusted_owner_connection_failed",
+            "controller_disconnected",
+            "accounts_owner_unavailable",
+            "accounts_outcome_unknown",
+            "owner_outcome_unknown_reconcile_same_identity",
+            "owner_socket_replaced",
+            "owner_root_replaced_or_unsafe",
+        ] {
+            assert!(connection_lost(gone), "{gone}");
+        }
+        for answered in [
+            "account_not_found",
+            "memory_duplicate",
+            "controller_pending_intent",
+            "trusted_connection_unavailable",
+            "model_access_read_only",
+        ] {
+            assert!(!connection_lost(answered), "{answered}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reattaches() {
+        let jobs: [(&str, fn() -> SettingsJob); 7] = [
+            ("accounts list", || {
+                SettingsJob::Accounts(AccountsRequest::List {
+                    after: None,
+                    limit: 50,
+                })
+            }),
+            ("accounts catalog", || {
+                SettingsJob::Accounts(AccountsRequest::Catalog)
+            }),
+            ("all accounts", || SettingsJob::AllAccounts),
+            ("harnesses", || SettingsJob::Harnesses),
+            ("memories", || SettingsJob::Memories {
+                scopes: vec![MemoryScope::Global],
+            }),
+            ("add memory", || SettingsJob::AddMemory {
+                scope: MemoryScope::Global,
+                text: "Written while the engine is stopped.".into(),
+                generation: 1,
+            }),
+            ("plugins", || SettingsJob::Plugins),
+        ];
+        let mut kept = Vec::new();
+        let mut last = None;
+        for ((label, job), restart) in jobs.into_iter().flat_map(|job| [(job, false), (job, true)])
+        {
+            let root = tempfile::Builder::new()
+                .prefix("ca-tlost-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (mut service, _stop) = engine(root.path()).await;
+            let mut native = NativeOwner::new(
+                root.path().join("e.sock"),
+                crate::tui::test_home::ENGINE_WAIT,
+            );
+            let _ = native.attach().await;
+            assert!(native.ready, "{label}: attach");
+            tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+            let restarted = if restart {
+                Some(engine(root.path()).await)
+            } else {
+                None
+            };
+            let event = native.settings(job()).await;
+            let code = failure(&event).map(str::to_owned);
+            assert!(
+                code.is_some(),
+                "{label} (restart {restart}): the old session answered"
+            );
+            if native.ready {
+                kept.push(format!("{label} (restart {restart}): {code:?}"));
+            }
+            if let Some((mut service, _stop)) = restarted {
+                tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            last = Some((root, native));
+        }
+        assert!(
+            kept.is_empty(),
+            "still attached after the engine went away: {kept:#?}"
+        );
+
+        let (root, mut native) = last.unwrap();
+        let (mut service, _stop) = engine(root.path()).await;
+        let _ = native.attach().await;
+        assert!(native.ready);
+        let listed = native
+            .settings(SettingsJob::Accounts(AccountsRequest::List {
+                after: None,
+                limit: 50,
+            }))
+            .await;
+        assert!(matches!(
+            listed,
+            SettingsEvent::Accounts(Ok(AccountsReply::Page(_)))
+        ));
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

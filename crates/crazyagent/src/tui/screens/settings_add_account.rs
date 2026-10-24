@@ -14,7 +14,7 @@ use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
 use crate::tui::client::settings::{
     SettingsEvent, SettingsJob, SignInJob, SignInTicket, SignInView,
 };
-use crate::tui::ctx::{Ctx, Load};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, Request};
@@ -1078,6 +1078,7 @@ impl AddAccount {
                 ctx.say(Message::success("Account added.", ""));
                 ctx.request(Request::Pools);
             }
+            (Stage::Form(_), Err(_)) if ctx.link != Link::Ready => {}
             (Stage::Form(_), Err(code)) => ctx.say(Message::error(plain(code), "")),
             _ => {}
         }

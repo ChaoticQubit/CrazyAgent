@@ -6,7 +6,7 @@ use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::ctx::{Ctx, Load};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::glyphs::Glyphs;
 use crate::tui::keys::Key;
@@ -689,6 +689,7 @@ impl Screen for Accounts {
         match result {
             Ok(accounts) => self.loaded(accounts, ctx),
             Err(code) if self.accounts.is_empty() => self.load = Load::Failed(code.clone()),
+            Err(_) if ctx.link != Link::Ready => {}
             Err(code) if asked => {
                 ctx.say(Message::error("Could not refresh accounts.", plain(code)))
             }
@@ -1101,6 +1102,7 @@ impl Screen for AccountDetails {
                 return Flow::Replace(Box::new(Accounts::new()));
             }
             Ok(_) => {}
+            Err(_) if ctx.link != Link::Ready => {}
             Err(code) => ctx.say(Message::error(plain(code), "")),
         }
         Flow::Handled
