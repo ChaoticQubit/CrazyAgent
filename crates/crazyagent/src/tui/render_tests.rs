@@ -5,7 +5,7 @@ use super::glyphs::{ASCII, Glyphs, UNICODE};
 use super::keys::Key;
 use super::screens::new_project_page::kept_draft;
 use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{ProjectCard, ResearchCounts};
+use super::seam::{Activity, ProjectCard, ResearchCounts};
 use super::shell::Shell;
 use super::theme::{Appearance, Colors, Depth};
 use crate::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
@@ -203,6 +203,7 @@ fn card(
         pool: pool.map(Into::into),
         research,
         created_ms: Some(clock::now_ms() - age_ms),
+        activity: Default::default(),
     }
 }
 
@@ -423,6 +424,39 @@ fn home_frames_match_the_design() {
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 0, 0, 0)])));
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 2, 0, 0)])));
     check("home-ready-80", &render(&mut shell, 80, 24), &[]);
+}
+
+#[test]
+fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
+    let mut cards = projects();
+    cards[0].activity = Activity {
+        working: Some(1),
+        suggestions: 3,
+    };
+    cards[1].activity = Activity {
+        working: Some(0),
+        suggestions: 1,
+    };
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(cards);
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    let shown = render(&mut shell, 80, 24).join("\n");
+    assert!(shown.contains("Tidepool"), "{shown}");
+    assert_eq!(shown.matches("3 agents running").count(), 2, "{shown}");
+    assert!(shown.contains("3 suggested memories"), "{shown}");
+    assert!(shown.contains("1 suggested memory"), "{shown}");
+    assert!(!shown.contains("Updated 4 min ago"), "{shown}");
+    assert!(
+        shown.contains(" n New project  a Add project  Enter Open  m Review memories  s Settings"),
+        "{shown}"
+    );
+    shell.key(Key::Char('m'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Settings(SettingsSection::Memory))
+    );
 }
 
 #[test]

@@ -33,4 +33,4 @@
                                                                               │                                         
                                                                               │                                         
                                                                                                                         
- Enter Add an account   ↑↓ Move   Tab Switch panel   n New project   s Settings   Ctrl-K Go to   Ctrl-Q Quit     ? Help 
+ Enter Add an account   n New project   a Add project   ↑↓ Move   Tab Switch panel   s Settings   Ctrl-K Go to   ? Help 

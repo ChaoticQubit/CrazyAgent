@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
  ✓ Setup done. 2 accounts ready in pool Main.                                   
- n New project  Enter Open  s Settings  / Filter  Ctrl-K Go to           ? Help 
+ n New project  a Add project  Enter Open  s Settings  / Filter          ? Help 
