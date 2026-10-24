@@ -22,6 +22,7 @@ use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -255,6 +256,14 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+/// Refuses team state where no 0700 directory can be made or checked.
+/// Takes the path, unused. Returns `team_state_unavailable`.
+#[cfg(not(unix))]
+fn private_directory(_path: &Path) -> Result<(), EngineError> {
+    Err(EngineError("team_state_unavailable".into()))
+}
+
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<(), EngineError> {
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}

@@ -2,7 +2,9 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -202,6 +204,7 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 /// and `TMPDIR` always come from `base`. Inputs: the installed profile, the absolute
 /// program, the base variables and the harness's variables (None removes one).
 /// Output: the command, or `Invalid` when any variable is refused by [`agent_env_refused`].
+#[cfg(unix)]
 pub fn agent_command<'a>(
     profile: &Path,
     program: &Path,
@@ -238,6 +241,21 @@ pub fn agent_command<'a>(
             || AGENT_GIT_ENV.iter().any(|(git, _)| name == *git))
     );
     Ok(command)
+}
+
+/// Refuses a `sandbox-exec` agent command, since Windows has neither Seatbelt nor process
+/// groups; Windows agents wait for the AppContainer boundary. Takes the profile, program
+/// and environments, all unused. Returns `Unavailable` with the AppContainer reason.
+#[cfg(target_os = "windows")]
+pub fn agent_command<'a>(
+    _profile: &Path,
+    _program: &Path,
+    _base: &[(&str, &OsStr)],
+    _harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    Err(SandboxError::Unavailable(
+        windows::APPCONTAINER_MISSING.into(),
+    ))
 }
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on,
@@ -567,6 +585,7 @@ impl ProjectSandbox {
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
     /// atomically. The path must lie outside every writable root, so no agent
     /// can rewrite the profile its next launch uses.
+    #[cfg(unix)]
     pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
         let parent = path
             .parent()
@@ -602,9 +621,20 @@ impl ProjectSandbox {
         Ok(())
     }
 
+    /// Refuses to write a Seatbelt profile, which Windows cannot load; Windows agents wait
+    /// for the AppContainer boundary. Takes the path, unused. Returns `Unavailable` with the
+    /// AppContainer reason.
+    #[cfg(target_os = "windows")]
+    pub fn install(&self, _path: &Path) -> Result<(), SandboxError> {
+        Err(SandboxError::Unavailable(
+            windows::APPCONTAINER_MISSING.into(),
+        ))
+    }
+
     /// A command that runs `program` under the installed profile with a cleared
     /// environment: HOME and TMPDIR point at the agent's own dirs, and the
     /// process leads its own group so the whole tree can be stopped.
+    #[cfg(unix)]
     pub fn command(&self, profile: &Path, program: &Path) -> Command {
         let mut command = agent_command(
             profile,
@@ -757,6 +787,19 @@ fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
 }
 
+/// The owner's home folder from the user profile, canonical when it resolves, which
+/// no sandbox root may contain. Takes nothing. Returns the folder, or `Invalid` when the
+/// profile names none or a relative one.
+#[cfg(target_os = "windows")]
+fn owner_home() -> Result<PathBuf, SandboxError> {
+    let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
+    if !clean_absolute(&home) {
+        return Err(invalid("owner home must be absolute"));
+    }
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
+#[cfg(unix)]
 fn owner_home() -> Result<PathBuf, SandboxError> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .map_err(|error| SandboxError::Io(io::Error::from(error)))?
