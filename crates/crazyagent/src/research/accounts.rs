@@ -122,8 +122,9 @@ fn usable(
     }
 }
 
-/// Resolves a project to its folder under `projects_root` and the account
-/// picked from its assigned pool, rereading the engine's settings files and
+/// Resolves a project to the folder the engine recorded when it was set up,
+/// or else its folder under `projects_root`, and the account picked from its
+/// assigned pool, rereading the engine's settings files and
 /// sign-in records on every call so pool assignment and sign-in take effect
 /// without a restart. A managed account is offered only while it passes the
 /// sign-in check every master and team turn uses for this engine run.
@@ -170,14 +171,17 @@ impl SettingsResolver {
     /// be read.
     pub fn resolve(&self, project: &str, harness: &str) -> Option<(PathBuf, AccountPick)> {
         CredentialRef::new(project).ok()?;
-        let folder = self.projects_root.join(project);
+        let database = self.engine();
+        let folder = database
+            .as_ref()
+            .and_then(|database| stored_folder(database, project))
+            .unwrap_or_else(|| self.projects_root.join(project));
         let metadata = std::fs::symlink_metadata(&folder).ok()?;
         if !metadata.file_type().is_dir() || folder.canonicalize().ok()? != folder {
             return None;
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
-        let database = self.engine();
         let pick = pick_account(&access, project, harness, |connection| {
             database
                 .as_ref()
@@ -228,6 +232,16 @@ impl SettingsResolver {
         database.busy_timeout(DATABASE_WAIT).ok()?;
         Some(database)
     }
+}
+
+/// The folder the engine recorded for a set-up project, such as its folder
+/// in the projects home. Takes the engine database and the project id.
+/// Returns `None` when the project has no setup record or it cannot be read.
+fn stored_folder(database: &Connection, project: &str) -> Option<PathBuf> {
+    let id = crate::protocol::ProjectId::new(project).ok()?;
+    let tx = database.unchecked_transaction().ok()?;
+    let stored = crate::project_setup::load_setup(&tx, &id).ok()??;
+    Some(stored.project_folder())
 }
 
 /// Proves a managed connection is signed in for the running engine with the

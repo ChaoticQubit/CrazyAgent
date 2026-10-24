@@ -38,6 +38,7 @@ fallback_allowed = false
 
 struct Engine {
     root: tempfile::TempDir,
+    home: tempfile::TempDir,
     service: Option<EngineService>,
     _stop: tokio::sync::watch::Sender<bool>,
 }
@@ -62,11 +63,28 @@ impl Engine {
         )
         .await
         .unwrap();
-        Self {
+        let home = tempfile::Builder::new()
+            .prefix("ca-setup-home-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let engine = Self {
             root,
+            home,
             service: Some(service),
             _stop: stop,
-        }
+        };
+        let mut owner = engine.owner().await;
+        let response = owner
+            .set_projects_home(engine.home().to_str().unwrap().into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(result(response), OwnerResult::Applied);
+        engine
+    }
+
+    /// The canonical projects home where this engine creates projects.
+    fn home(&self) -> PathBuf {
+        std::fs::canonicalize(self.home.path()).unwrap()
     }
 
     async fn owner(&self) -> OwnerController {
@@ -167,9 +185,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
 
-    let folder = std::fs::canonicalize(engine.root.path())
-        .unwrap()
-        .join("projects/setup-pooled");
+    let project_folder = engine.home().join("meal-planner");
+    let folder = project_folder.join(".crazyagent");
     let brief = std::fs::read_to_string(folder.join("context/brief.md")).unwrap();
     for expected in [
         "# Meal planner",
@@ -188,13 +205,20 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
     );
     assert!(folder.join("context/research").is_dir());
     assert!(folder.join("worktrees").is_dir());
+    let mode = std::fs::metadata(&project_folder)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o700, 0o700);
     assert_eq!(
-        std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
-        0o700
+        mode & 0o022,
+        0,
+        "only the owner may write the project folder"
     );
+    assert!(!project_folder.join("context").exists());
 
     let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
-    assert_eq!(stored.folder, folder.to_str().unwrap());
+    assert_eq!(stored.folder, project_folder.to_str().unwrap());
     assert_eq!(stored.team.master, "codex");
     assert!(stored.team.master_tools);
     assert_eq!(stored.documents.len(), 2);
@@ -268,8 +292,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
             code: "document_not_a_regular_file".into()
         }
     );
-    assert!(!folder.with_file_name("setup-linked").exists());
-    assert!(!folder.with_file_name(".staging-setup-linked").exists());
+    assert!(!engine.home().join("linked").exists());
+    assert!(!engine.home().join(".crazyagent-new-setup-linked").exists());
     assert_eq!(
         engine.rows("SELECT count(*) FROM projects WHERE id='setup-linked'"),
         0
@@ -467,14 +491,12 @@ async fn owner_adds_documents_and_deletes_research_and_documents_through_the_eng
         ),
         OwnerResult::Applied
     );
-    let folder = std::path::PathBuf::from(
-        owner
-            .project_setup(project.clone())
-            .await
-            .unwrap()
-            .unwrap()
-            .folder,
-    );
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .state_folder();
 
     let added = owner
         .add_project_documents(
@@ -670,8 +692,7 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
         ),
         1
     );
-    let brief =
-        std::fs::read_to_string(Path::new(&stored.folder).join("context/brief.md")).unwrap();
+    let brief = std::fs::read_to_string(stored.state_folder().join("context/brief.md")).unwrap();
     assert!(brief.contains("# Meals for two"), "{brief}");
     assert!(brief.contains("Plans meals for two."), "{brief}");
     let jobs = owner.research_jobs(project.clone()).await.unwrap();
@@ -947,7 +968,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         1
     );
     assert!(
-        Path::new(&folder).join("context/brief.md").is_file(),
+        Path::new(&folder)
+            .join(".crazyagent/context/brief.md")
+            .is_file(),
         "the project folder stays where it was"
     );
     assert!(
