@@ -4,18 +4,22 @@ export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "memo
 export const PROJECT_TABS = ["overview", "conversation", "agents", "context", "settings"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new"] as const;
+export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
 const PROJECT_ID_MAX = 256;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type ProjectTab = typeof PROJECT_TABS[number];
 export type NewProjectStep = typeof NEW_PROJECT_STEPS[number];
 export type SettingsAction = typeof SETTINGS_ACTIONS[number];
+export type AddProjectWay = typeof ADD_PROJECT_WAYS[number];
 
 export type Route =
   | { name: "welcome" }
   | { name: "home" }
   | { name: "new-project"; step: NewProjectStep }
   | { name: "project"; id: string; tab: ProjectTab }
+  | { name: "add-project"; way: AddProjectWay }
+  | { name: "onboarding"; id: string }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
@@ -37,10 +41,15 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === "projects" && parts[1] === "new" && parts.length === 2) {
     return { name: "new-project", step: pick(NEW_PROJECT_STEPS, params.get("step"), "basics") };
   }
+  if (parts[0] === "projects" && parts[1] === "add" && parts.length === 3) {
+    const way = ADD_PROJECT_WAYS.find((choice) => choice === parts[2]);
+    return way ? { name: "add-project", way } : { name: "home" };
+  }
   if (parts[0] === "projects" && parts.length >= 2 && parts.length <= 3) {
     let id: string;
     try { id = decodeURIComponent(parts[1]); } catch { return { name: "home" }; }
     if (!id || id.length > PROJECT_ID_MAX) return { name: "home" };
+    if (parts[2] === "setup") return { name: "onboarding", id };
     return { name: "project", id, tab: pick(PROJECT_TABS, parts[2], "overview") };
   }
   return { name: "home" };
@@ -54,6 +63,8 @@ export function formatRoute(route: Route): string {
     case "home": return "#/home";
     case "new-project": return `#/projects/new?step=${route.step}`;
     case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}`;
+    case "add-project": return `#/projects/add/${route.way}`;
+    case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "settings": return `#/settings/${route.tab}${route.action ? `?action=${route.action}` : ""}`;
   }
 }
