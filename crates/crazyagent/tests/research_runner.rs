@@ -6,10 +6,8 @@ use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
-use research_support::{EngineRuntime, claude, codex};
+use research_support::{EngineRuntime, claude, codex, hanging_endpoint};
 use std::fs;
-use std::io::Read;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,22 +63,6 @@ fn limits(wall_time: Duration) -> ResearchLimits {
         running_max: 2,
         attempts_max: 1,
     }
-}
-
-fn hanging_endpoint() -> (u16, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handle = std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for stream in listener.incoming().take(64) {
-            let Ok(mut stream) = stream else { break };
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            held.push(stream);
-        }
-    });
-    (port, handle)
 }
 
 fn endpoint(port: u16) -> ResearchAccount {

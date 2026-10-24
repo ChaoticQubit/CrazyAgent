@@ -3,16 +3,19 @@ mod research_support;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
-use research_support::{claude, codex};
+use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
+use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+
+const ENGINE_STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Creates `project-cafe` through the owner client of the running engine
 /// binary, retrying the attach until the owner endpoint answers.
@@ -129,15 +132,32 @@ impl Engine {
 }
 
 impl Drop for Engine {
+    /// Stops an engine that is still running the way the owner does, with
+    /// SIGTERM, so it stops every research agent it started even when the test
+    /// panicked. Kills it only if it is still running after `ENGINE_STOP_WAIT`.
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if self.child.try_wait().ok().flatten().is_some() {
+            return;
         }
+        let _ = Command::new("/bin/kill")
+            .args(["-s", "TERM", &self.child.id().to_string()])
+            .status();
+        let deadline = Instant::now() + ENGINE_STOP_WAIT;
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-fn runtime() -> PathBuf {
+/// A fresh private runtime folder `r-sbx-<pid>-<name>` under the checkout's
+/// `.local-state`, holding `catalog` as the global settings, so each test of
+/// this binary gets its own engine folder and a failed run keeps its evidence.
+fn runtime(name: &str, catalog: &str) -> PathBuf {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../.local-state")
         .canonicalize()
@@ -147,13 +167,13 @@ fn runtime() -> PathBuf {
         "{}",
         base.display()
     );
-    let runtime = base.join(format!("r-sbx-{}", std::process::id()));
+    let runtime = base.join(format!("r-sbx-{}-{name}", std::process::id()));
     if runtime.exists() {
         fs::remove_dir_all(&runtime).unwrap();
     }
     fs::create_dir(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-    for (name, text) in [("global.toml", CATALOG), ("project.toml", "")] {
+    for (name, text) in [("global.toml", catalog), ("project.toml", "")] {
         fs::write(runtime.join(name), text).unwrap();
         fs::set_permissions(runtime.join(name), fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -162,7 +182,7 @@ fn runtime() -> PathBuf {
 
 #[test]
 fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
-    let runtime = runtime();
+    let runtime = runtime("q", CATALOG);
     let engine = Engine::start(&runtime);
     let projects = runtime.join("projects");
     let research = runtime.join("research");
@@ -253,5 +273,38 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
         Some("context/research/front_end_design.md")
     );
     assert!(project.join("worktrees").is_dir());
+    fs::remove_dir_all(&runtime).unwrap();
+}
+
+#[test]
+fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
+    const MID_RUN: &str = "the test fails while the engine's research agent runs";
+    let (port, _endpoint) = hanging_endpoint();
+    let catalog = CATALOG.replace(
+        "http://127.0.0.1:11434/v1",
+        &format!("http://127.0.0.1:{port}/v1"),
+    );
+    assert_ne!(catalog, CATALOG);
+    let runtime = runtime("p", &catalog);
+    let marker = runtime.join("research").join("agents").join("job-");
+    let mut agents = Vec::new();
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let _engine = Engine::start(&runtime);
+        create_cafe(&runtime);
+        let jobs = ResearchJobs::open(&runtime.join("engine.db")).unwrap();
+        jobs.enqueue("project-cafe", "market_research", "codex", false)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while agents.is_empty() {
+            assert!(Instant::now() < deadline, "no research agent started");
+            std::thread::sleep(Duration::from_millis(200));
+            agents = processes_with(&marker);
+        }
+        panic_any(MID_RUN);
+    }));
+    let payload = unwound.expect_err("the test must panic mid-run");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&MID_RUN));
+    assert!(!agents.is_empty());
+    assert_eq!(processes_with(&marker), Vec::<u32>::new());
     fs::remove_dir_all(&runtime).unwrap();
 }
