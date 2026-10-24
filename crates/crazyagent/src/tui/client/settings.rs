@@ -142,15 +142,17 @@ impl std::fmt::Debug for SettingsJob {
     }
 }
 
-/// A research memory waiting for the owner: kept for every project with one
-/// click, or dismissed. Input: read from a project's memory inbox. Output: the
-/// text shown and the ids the review needs.
+/// A research memory for the owner to act on: a suggestion to save for every
+/// project or dismiss, or one kept in its project that can be used in all.
+/// Input: read from a project's memory inbox. Output: the text shown, whether
+/// it is kept already and the ids the change needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct Suggestion {
     pub project: ProjectId,
     pub entry: RequestId,
     pub version: u64,
     pub text: String,
+    pub kept: bool,
 }
 
 /// One step of a managed Codex or Claude sign-in for an account.
@@ -488,8 +490,8 @@ impl NativeOwner {
         done.map_err(|error| problem(&error, lost))
     }
 
-    /// Reads the research memories waiting for the owner, the first page of
-    /// each project's inbox, as the desktop dashboard does.
+    /// Reads the research memories waiting for the owner and the ones kept in a
+    /// project, the first page of each project's inbox, as the desktop does.
     /// Inputs: the projects and the lost-connection flag. Output: at most
     /// SUGGESTIONS_MAX suggestions, or the first plain problem code.
     pub(super) async fn suggestions(
@@ -504,19 +506,20 @@ impl NativeOwner {
                 .project_memories(project, None)
                 .await
                 .map_err(|error| problem(&error, lost))?;
-            found.extend(
-                entries
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed
-                    })
-                    .map(|entry| Suggestion {
-                        project: entry.project_id,
-                        entry: entry.id,
-                        version: entry.version,
-                        text: entry.text,
-                    }),
-            );
+            found.extend(entries.into_iter().filter_map(|entry| {
+                let kept = match entry.status {
+                    KnowledgeStatus::Confirmed => true,
+                    KnowledgeStatus::Provisional if !entry.human_reviewed => false,
+                    _ => return None,
+                };
+                Some(Suggestion {
+                    project: entry.project_id,
+                    entry: entry.id,
+                    version: entry.version,
+                    text: entry.text,
+                    kept,
+                })
+            }));
             if found.len() >= SUGGESTIONS_MAX {
                 found.truncate(SUGGESTIONS_MAX);
                 break;
@@ -528,7 +531,8 @@ impl NativeOwner {
 
     /// Saves a research suggestion to memory for every project, or dismisses it.
     /// Saving keeps it in its project first, then copies the kept version to
-    /// global memory, the same two engine changes the desktop makes.
+    /// global memory, the same two engine changes the desktop makes; a memory
+    /// already kept in its project is only copied.
     /// Inputs: the suggestion, keep or dismiss, one client generation per
     /// change and the lost-connection flag. Output: done, or the plain code of
     /// the step that failed.
@@ -540,7 +544,22 @@ impl NativeOwner {
         lost: &mut bool,
     ) -> Result<(), String> {
         assert!(generations[0] > 0 && generations[0] < generations[1]);
+        assert!(keep || !suggestion.kept);
         let controller = self.settings_controller()?;
+        if suggestion.kept {
+            return applied(
+                controller
+                    .promote_memory(
+                        suggestion.project.clone(),
+                        suggestion.entry.clone(),
+                        suggestion.version,
+                        generations[1],
+                    )
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            );
+        }
         let decision = if keep {
             ReviewDecision::Keep
         } else {
@@ -1083,6 +1102,7 @@ mod tests {
             entry: RequestId::new("entry-never-made").unwrap(),
             version: 1,
             text: "Never researched.".into(),
+            kept: false,
         };
         let refused = native
             .settings(SettingsJob::Suggestion {

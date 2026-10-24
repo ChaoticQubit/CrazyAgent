@@ -147,6 +147,14 @@ fn suggestion(project: &str, text: &str) -> Suggestion {
         entry: RequestId::new(format!("entry-{project}")).unwrap(),
         version: 3,
         text: text.into(),
+        kept: false,
+    }
+}
+
+fn kept(project: &str, text: &str) -> Suggestion {
+    Suggestion {
+        kept: true,
+        ..suggestion(project, text)
     }
 }
 
@@ -590,4 +598,68 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
         }
         other => panic!("reload expected, got {other:?}"),
     }
+}
+
+#[test]
+fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    let found = vec![
+        kept(
+            "tidepool",
+            "Buoy firmware sends readings every 90 s in CBOR.",
+        ),
+        kept("fieldnotes", "Crews sync at dawn."),
+    ];
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
+        &mut ctx,
+    );
+    let (lines, _) = screen.body(116, &ctx);
+    let shown = texts(&lines);
+    assert!(
+        shown[0].contains("7 saved   1 kept in a project"),
+        "one already used in all projects is not offered again"
+    );
+    assert!(shown[5].contains("Crews sync at dawn.") && shown[5].contains("Fieldnotes Mobile"));
+    assert!(
+        shown
+            .iter()
+            .any(|line| line.contains("Kept for Fieldnotes Mobile only."))
+    );
+
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(screen.modal(&ctx).unwrap().0.title, "Use in all projects");
+    screen.key(&Key::Char('n'), &mut ctx);
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "a kept memory is never dismissed"
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Left, &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "Cancel closes");
+    assert_eq!(ctx.queued(), 0);
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Char('y'), &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::Suggestion {
+            suggestion: picked,
+            keep,
+            ..
+        } => {
+            assert_eq!(picked, found[1]);
+            assert!(keep);
+        }
+        other => panic!("suggestion expected, got {other:?}"),
+    }
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(found[1].clone(), Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().lead, "Now used in all projects.");
 }

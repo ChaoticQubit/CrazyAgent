@@ -223,9 +223,24 @@ impl Memory {
             .all(|word| text.contains(word.to_lowercase().as_str()))
     }
 
-    fn suggested<'a>(&'a self, ctx: &Ctx) -> Vec<&'a Suggestion> {
+    fn promoted(&self, item: &Suggestion) -> bool {
+        self.memories.iter().any(|memory| {
+            matches!(
+                &memory.origin,
+                MemoryOrigin::Promoted { project_id, entry_id, .. }
+                    if *project_id == item.project && *entry_id == item.entry
+            )
+        })
+    }
+
+    fn open(&self) -> impl Iterator<Item = &Suggestion> {
         self.suggestions
             .iter()
+            .filter(move |item| !(item.kept && self.promoted(item)))
+    }
+
+    fn suggested<'a>(&'a self, ctx: &Ctx) -> Vec<&'a Suggestion> {
+        self.open()
             .filter(|item| {
                 self.matches(&format!(
                     "{} {}",
@@ -330,6 +345,7 @@ impl Memory {
     }
 
     fn suggestion_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let kept = matches!(self.picked(ctx), Some(Picked::Suggested(item)) if item.kept);
         let Mode::Suggestion { save_focused } = &mut self.mode else {
             return Flow::Ignored;
         };
@@ -337,7 +353,9 @@ impl Memory {
             Key::Esc => self.mode = Mode::List,
             Key::Left | Key::Right | Key::Tab | Key::BackTab => *save_focused = !*save_focused,
             Key::Char('y') => self.decide(true, ctx),
+            Key::Char('n') if kept => self.mode = Mode::List,
             Key::Char('n') => self.decide(false, ctx),
+            Key::Enter if kept && !*save_focused => self.mode = Mode::List,
             Key::Enter => {
                 let keep = *save_focused;
                 self.decide(keep, ctx);
@@ -409,22 +427,31 @@ impl Memory {
         let mut body: Vec<Line<'static>> =
             wrap(&item.text, room).into_iter().map(Line::raw).collect();
         body.push(Line::default());
-        let reach = format!(
-            "From research in {}. Save it for every project?",
-            project_name(&item.project, ctx)
-        );
+        let project = project_name(&item.project, ctx);
+        let (reach, choices) = if item.kept {
+            (
+                format!("Kept for {project} only. Use it in every project?"),
+                ["Cancel", "Use in all projects"],
+            )
+        } else {
+            (
+                format!("From research in {project}. Save it for every project?"),
+                ["Dismiss", "Save to memory"],
+            )
+        };
         body.extend(wrap(&reach, room).into_iter().map(Line::raw));
         body.push(Line::default());
-        body.push(buttons(
-            &["Dismiss", "Save to memory"],
-            Some(usize::from(save_focused)),
-            theme,
-        ));
+        body.push(buttons(&choices, Some(usize::from(save_focused)), theme));
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         (
             Modal {
                 width: MODAL_WIDTH,
-                title: "Suggested memory".into(),
+                title: if item.kept {
+                    "Use in all projects"
+                } else {
+                    "Suggested memory"
+                }
+                .into(),
                 body,
                 top: None,
             },
@@ -483,7 +510,7 @@ impl Memory {
                     None,
                 );
             }
-            Load::Ready(()) if self.memories.is_empty() && self.suggestions.is_empty() => {
+            Load::Ready(()) if self.memories.is_empty() && self.open().next().is_none() => {
                 let mut lines = vec![
                     styled("Memory", Role::Accent, theme),
                     Line::default(),
@@ -507,15 +534,15 @@ impl Memory {
                 );
             }
         }
-        let counts = if self.suggestions.is_empty() {
-            format!("{} saved", self.memories.len())
-        } else {
-            format!(
-                "{} saved   {} suggested",
-                self.memories.len(),
-                self.suggestions.len()
-            )
-        };
+        let kept = self.open().filter(|item| item.kept).count();
+        let waiting = self.open().count() - kept;
+        let mut counts = format!("{} saved", self.memories.len());
+        if waiting > 0 {
+            counts.push_str(&format!("   {waiting} suggested"));
+        }
+        if kept > 0 {
+            counts.push_str(&format!("   {kept} kept in a project"));
+        }
         let mut lines = vec![row(
             limit,
             styled("Memory", Role::Accent, theme),
@@ -573,10 +600,12 @@ impl Memory {
         let entries: Vec<(Line<'static>, Line<'static>)> = suggested
             .iter()
             .map(|item| {
-                (
-                    Line::raw(item.text.clone()),
-                    status("Suggested", theme, glyphs),
-                )
+                let from = if item.kept {
+                    Line::raw(project_name(&item.project, ctx))
+                } else {
+                    status("Suggested", theme, glyphs)
+                };
+                (Line::raw(item.text.clone()), from)
             })
             .chain(visible.iter().map(|memory| {
                 (
@@ -621,10 +650,14 @@ impl Memory {
             (true, Some(Picked::Suggested(item))) => {
                 lines.push(Line::default());
                 lines.push(Line::raw(cut(&item.text, limit, glyphs.ellipsis)));
-                let from = format!(
-                    "From research in {}. Enter to save it for every project or dismiss it.",
-                    project_name(&item.project, ctx)
-                );
+                let project = project_name(&item.project, ctx);
+                let from = if item.kept {
+                    format!("Kept for {project} only. Enter to use it in all projects.")
+                } else {
+                    format!(
+                        "From research in {project}. Enter to save it for every project or dismiss it."
+                    )
+                };
                 lines.push(Line::raw(cut(&from, limit, glyphs.ellipsis)));
             }
             _ => {}
@@ -702,12 +735,13 @@ impl Screen for Memory {
             return vec![sections_hint(ctx.glyphs), hint("Esc", "Home")];
         }
         let mut hints = match self.picked(ctx) {
+            Some(Picked::Suggested(item)) if item.kept => vec![hint("Enter", "Use everywhere")],
             Some(Picked::Suggested(_)) => vec![hint("Enter", "Save or dismiss")],
             Some(Picked::Saved(_)) => vec![hint("Enter", "View"), hint("d", "Delete")],
             None => Vec::new(),
         };
         hints.push(hint("a", "Add"));
-        if !self.memories.is_empty() || !self.suggestions.is_empty() {
+        if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
         }
         hints.push(sections_hint(ctx.glyphs));
@@ -751,7 +785,7 @@ impl Screen for Memory {
         match key {
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char('a') if ready && !self.adding => self.open_composer(),
-            Key::Char('/') if !self.memories.is_empty() || !self.suggestions.is_empty() => {
+            Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
                 self.filtering = true
             }
             Key::Enter if suggested && self.deciding.is_none() => {
@@ -849,17 +883,15 @@ impl Screen for Memory {
                     .as_ref()
                     .is_some_and(|(asked, _)| asked == done) =>
             {
-                let kept = self.deciding.take().is_some_and(|(_, keep)| keep);
+                let keep = self.deciding.take().is_some_and(|(_, keep)| keep);
                 match result {
                     Ok(()) => {
-                        ctx.say(Message::success(
-                            if kept {
-                                "Saved to memory."
-                            } else {
-                                "Suggestion dismissed."
-                            },
-                            "",
-                        ));
+                        let lead = match (done.kept, keep) {
+                            (true, _) => "Now used in all projects.",
+                            (false, true) => "Saved to memory.",
+                            (false, false) => "Suggestion dismissed.",
+                        };
+                        ctx.say(Message::success(lead, ""));
                         self.suggestions.retain(|item| item != done);
                         self.clamp(ctx);
                         self.reload(ctx);
