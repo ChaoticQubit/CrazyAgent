@@ -253,10 +253,8 @@ pub fn github_name(url: &str) -> Option<String> {
         without_user(rest)
     } else if let Some(rest) = url.strip_prefix("ssh://") {
         without_user(rest)
-    } else if let Some(rest) = url.strip_prefix("git@") {
-        rest
     } else {
-        return None;
+        url.strip_prefix("git@")?
     };
     let path = rest
         .strip_prefix("github.com/")

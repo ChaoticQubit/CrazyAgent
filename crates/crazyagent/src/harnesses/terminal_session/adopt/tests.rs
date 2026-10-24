@@ -114,7 +114,7 @@ fn an_idle_pane_is_adopted_as_it_is() {
     session.leave();
     assert_eq!(
         host.alive().unwrap(),
-        [agent.clone()],
+        std::slice::from_ref(&agent),
         "leaving keeps the pane running"
     );
 

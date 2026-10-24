@@ -183,7 +183,7 @@ fn find_rollout(sessions: &Path, cwd: &str, since: SystemTime) -> Option<File> {
             }
         }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
     candidates
         .into_iter()
         .find_map(|(_, path)| open_plain(&path).filter(|file| started_in(file, cwd)))
