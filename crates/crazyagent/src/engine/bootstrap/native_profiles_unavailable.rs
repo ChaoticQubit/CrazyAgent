@@ -60,6 +60,15 @@ impl NativeProfileUse {
     }
 }
 
+impl Drop for NativeProfileUse {
+    /// Matches the Unix lease, which releases its profile locks when dropped, so the
+    /// callers that end a lease at a chosen point mean the same on every target.
+    /// No value is ever made, so this never runs.
+    fn drop(&mut self) {
+        match *self {}
+    }
+}
+
 impl NativeProfileCustody {
     /// Refuses native profile custody where Unix owner, inode and directory-relative checks
     /// do not exist. Takes the database path and metadata, both unused.

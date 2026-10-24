@@ -38,6 +38,10 @@ pub(super) fn private_folder(path: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "windows")]
 pub(super) fn private_folder(path: &Path) -> std::io::Result<()> {
     let mut permissions = fs::symlink_metadata(path)?.permissions();
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "On Windows this clears only FILE_ATTRIBUTE_READONLY; access stays with the inherited ACL"
+    )]
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions)
 }
