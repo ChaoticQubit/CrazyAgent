@@ -193,8 +193,6 @@ pub struct App {
     declaration_pending: Option<CreationPending>,
     creation_job: Option<CreationJob>,
     snapshot_revision: Option<Cursor>,
-    pub(super) accounts: Option<super::client::accounts::AccountsEvent>,
-    pub(super) agents: Option<super::client::agents::AgentsEvent>,
     pub(super) model_access: model_access::State,
     pub(super) dispatch: dispatch::State,
     pub(super) master: master_session::State,
@@ -256,8 +254,6 @@ impl App {
             declaration_pending: None,
             creation_job: None,
             snapshot_revision: None,
-            accounts: None,
-            agents: None,
             model_access: model_access::State::default(),
             dispatch: dispatch::State::default(),
             master: master_session::State::default(),
@@ -865,8 +861,6 @@ impl App {
                     ));
                 }
             }
-            OwnerEvent::Accounts(event) => self.accounts = Some(*event),
-            OwnerEvent::Agents(event) => self.agents = Some(*event),
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
             OwnerEvent::Shell(_)
             | OwnerEvent::Settings(_)

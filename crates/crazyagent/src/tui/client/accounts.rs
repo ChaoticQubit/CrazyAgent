@@ -39,27 +39,13 @@ pub(in crate::tui) enum AccountsReply {
     Models(Vec<String>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::tui) struct AccountsEvent {
-    pub result: Result<AccountsReply, String>,
-}
-
-impl Connection {
-    /// Queues one Settings > Accounts request on the paired owner connection. The reply
-    /// arrives later as `OwnerEvent::Accounts`. Input: the request. Output: queued or why not.
-    #[cfg_attr(
-        not(all(test, unix)),
-        expect(dead_code, reason = "called by the Settings > Accounts view")
-    )]
-    pub(in crate::tui) fn accounts(&mut self, request: AccountsRequest) -> Result<(), String> {
-        self.owner_job(Job::Accounts(Box::new(request)))
-    }
-}
-
 impl NativeOwner {
     /// Runs one accounts request through the owner controller and turns any engine error
-    /// into its plain code. Input: the request. Output: the reply event.
-    pub(super) async fn accounts(&mut self, request: AccountsRequest) -> AccountsEvent {
+    /// into its plain code. Input: the request. Output: the reply or the plain code.
+    pub(super) async fn accounts(
+        &mut self,
+        request: AccountsRequest,
+    ) -> Result<AccountsReply, String> {
         let result = async {
             if !self.ready {
                 return Err(EngineError("controller_disconnected".into()));
@@ -94,14 +80,13 @@ impl NativeOwner {
             })
         }
         .await;
-        AccountsEvent {
-            result: result.map_err(|error: EngineError| bounded_problem(&error.0)),
-        }
+        result.map_err(|error: EngineError| bounded_problem(&error.0))
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::settings::{SettingsEvent, SettingsJob};
     use super::*;
     use crate::accounts::{Provider, SignInMethod};
     use crate::engine::bootstrap::EngineService;
@@ -125,10 +110,12 @@ mod tests {
         connection: &mut Connection,
         request: AccountsRequest,
     ) -> Result<AccountsReply, String> {
-        connection.accounts(request).unwrap();
+        connection.settings(SettingsJob::Accounts(request)).unwrap();
         loop {
-            if let OwnerEvent::Accounts(event) = owner_event(connection).await {
-                return event.result;
+            if let OwnerEvent::Settings(event) = owner_event(connection).await
+                && let SettingsEvent::Accounts(result) = *event
+            {
+                return result;
             }
         }
     }
