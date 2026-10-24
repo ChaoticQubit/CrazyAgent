@@ -133,7 +133,7 @@ fn reach_home(pty: &Pty, project: &str) {
         let screen = pty.until("the TUI shows Home or a first-run step", |screen| {
             at_home(screen, project)
                 || screen.contains("Welcome to CrazyAgent")
-                || screen.contains("Continue without it")
+                || screen.contains("c Continue without")
         });
         if at_home(&screen, project) {
             return;

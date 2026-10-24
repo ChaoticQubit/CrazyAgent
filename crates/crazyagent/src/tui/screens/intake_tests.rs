@@ -45,13 +45,17 @@ struct Engine {
 
 impl Engine {
     async fn start() -> Self {
+        Self::with(SETTINGS).await
+    }
+
+    async fn with(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-intake-")
             .tempdir_in("/private/tmp")
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, SETTINGS).unwrap();
+        std::fs::write(&global, settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -396,6 +400,34 @@ async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     };
     let onboarding = engine.controller.onboarding(project).await.unwrap();
     assert_eq!(onboarding.name, "notes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_run_setup_continues_without_installing_and_home_lists_what_is_missing() {
+    let mut engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Setup { first_run: true }, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
+    let rows = render(&mut shell, 80, 24);
+    let help = rows.last().unwrap();
+    assert!(help.contains("Enter Install and continue"), "{rows:#?}");
+    assert!(help.contains("c Continue without installing"), "{rows:#?}");
+
+    shell.key(Key::Char('c'));
+    assert_eq!(shell.place(), Some(Place::Home));
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Get set up"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Create a pool"), "{rows:#?}");
+    assert!(
+        !engine.root.path().join("setup").exists(),
+        "continuing without installing creates no setup folder"
+    );
+    let status = engine.controller.setup_status().await.unwrap();
+    assert!(!status.running, "no setup run started");
 }
 
 fn waiting_review() -> (Shell, ProjectId) {
