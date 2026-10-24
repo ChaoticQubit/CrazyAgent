@@ -532,3 +532,201 @@ fn opening_another_agent_detaches_the_first_and_esc_detaches_on_leaving() {
         "{sent:?}"
     );
 }
+
+fn attach_master(shell: &mut Shell, output: &[u8]) {
+    shell.key(Key::Enter);
+    requests(shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 43,
+            rows: 18,
+        },
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Output {
+            bytes: output.to_vec(),
+        },
+    });
+}
+
+fn close_master(shell: &mut Shell, reason: &str) {
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Closed {
+            reason: reason.into(),
+        },
+    });
+}
+
+fn pane_row(rows: &[String], y: usize) -> String {
+    chars(&rows[y], 34, 77)
+}
+
+fn padded(text: &str) -> String {
+    format!("{text:<43}")
+}
+
+#[test]
+fn skipped_output_shows_as_a_marker_line_in_the_terminal() {
+    let mut shell = team();
+    attach_master(
+        &mut shell,
+        b"\x1b[31mbuilding\r\n\r\n\x1b[0m[5000 bytes output skipped]\r\nstill going",
+    );
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("building"));
+    assert_eq!(pane_row(&rows, 5), padded("[5000 bytes output skipped]"));
+    assert_eq!(pane_row(&rows, 6), padded("still going"));
+}
+
+#[test]
+fn an_ended_terminal_keeps_its_last_screen_says_the_agent_stopped_and_takes_no_keys() {
+    let mut shell = team();
+    attach_master(&mut shell, b"$ cargo test\r\nok");
+    close_master(&mut shell, "terminal_ended");
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("$ cargo test"));
+    assert_eq!(pane_row(&rows, 4), padded("ok"));
+    assert_eq!(pane_row(&rows, 19), padded("This agent has stopped."));
+    assert_eq!(pane_row(&rows, 20), padded("Its terminal is closed."));
+    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
+    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
+    for key in [Key::Char('x'), Key::Tab, Key::Char('y')] {
+        shell.key(key);
+    }
+    assert!(
+        requests(&mut shell).is_empty(),
+        "no key reaches a terminal that ended"
+    );
+}
+
+#[test]
+fn an_attach_refused_for_a_dead_agent_says_it_stopped() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Rejected {
+            code: "terminal_agent_unknown".into(),
+        },
+    });
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("This agent has stopped."));
+    assert_eq!(pane_row(&rows, 4), padded("Its terminal is closed."));
+    shell.key(Key::Char('x'));
+    assert!(requests(&mut shell).is_empty());
+}
+
+#[test]
+fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
+    let mut shell = team();
+    attach_master(&mut shell, b"$ make\r\ndone");
+    let mut stopped = graph();
+    stopped.nodes[0].status = Some(AgentStatus::Stopped);
+    stopped.nodes[0].terminal = None;
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(stopped),
+    });
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(matches!(
+        &sent[0],
+        Request::TerminalDetach { agent } if agent.as_str() == "team-1"
+    ));
+
+    shell.key(Key::Char('x'));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "keys go to the tree, not the stopped agent"
+    );
+    let rows = render(&mut shell);
+    assert!(chars(&rows[3], 2, 32).contains("Master"), "{}", rows[3]);
+    assert!(chars(&rows[3], 2, 32).contains("Stopped"), "{}", rows[3]);
+    assert_eq!(pane_row(&rows, 3), padded("$ make"));
+    assert_eq!(pane_row(&rows, 19), padded("This agent has stopped."));
+
+    shell.key(Key::Enter);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a stopped agent is not attached again"
+    );
+    assert_eq!(shell.ctx.message().unwrap().lead, "This agent has stopped.");
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("$ make"));
+}
+
+#[test]
+fn a_terminal_lost_with_the_engine_opens_again_once_the_engine_is_back() {
+    let mut shell = team();
+    attach_master(&mut shell, b"before restart");
+    close_master(&mut shell, "terminal_closed");
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("before restart"));
+    assert_eq!(pane_row(&rows, 19), padded("Lost the engine connection."));
+    assert_eq!(
+        pane_row(&rows, 20),
+        padded("It opens again once the engine is back.")
+    );
+    assert!(
+        requests(&mut shell).is_empty(),
+        "nothing is retried before the engine is back"
+    );
+
+    shell.arrive(Arrival::Disconnected("engine_unavailable".into()));
+    shell.arrive(Arrival::Connected(None));
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(matches!(&sent[0], Request::TeamGraph { project: asked } if *asked == project()));
+    assert!(matches!(
+        &sent[1],
+        Request::TerminalAttach { agent } if agent.as_str() == "team-1"
+    ));
+    assert!(matches!(
+        &sent[2],
+        Request::TerminalResize { agent, cols: 43, rows: 18 } if agent.as_str() == "team-1"
+    ));
+
+    attach_frames_after_reconnect(&mut shell);
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("after restart"));
+    assert_eq!(pane_row(&rows, 19), padded(""));
+    assert_eq!(pane_row(&rows, 20), padded(""));
+    shell.key(Key::Tab);
+    shell.key(Key::Char('x'));
+    let sent = requests(&mut shell);
+    assert_eq!(input(&sent[0]), Some(("team-1", &b"x"[..])));
+}
+
+fn attach_frames_after_reconnect(shell: &mut Shell) {
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 43,
+            rows: 18,
+        },
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Output {
+            bytes: b"after restart".to_vec(),
+        },
+    });
+}
+
+#[test]
+fn an_ended_terminal_is_not_opened_again_when_the_engine_comes_back() {
+    let mut shell = team();
+    attach_master(&mut shell, b"bye");
+    close_master(&mut shell, "terminal_ended");
+    shell.arrive(Arrival::Disconnected("engine_unavailable".into()));
+    shell.arrive(Arrival::Connected(None));
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(matches!(&sent[0], Request::TeamGraph { .. }));
+}
