@@ -101,7 +101,6 @@ pub(crate) struct PreparedMasterTurn {
 }
 
 pub(crate) enum MasterRuntimeResult {
-    #[cfg(test)]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),

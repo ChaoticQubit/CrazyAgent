@@ -15,7 +15,7 @@ pub(crate) enum Command {
 pub(crate) enum ResultValue {
     Accepted,
     Profile(AccountProfileReply, bool),
-    Capabilities(AccountAuthCapabilitiesReply),
+    Capabilities(Box<AccountAuthCapabilitiesReply>),
     Work(Box<Work>),
 }
 
@@ -72,7 +72,7 @@ pub(crate) fn execute(
             },
         };
         tx.commit().map_err(error)?;
-        return Ok(ResultValue::Capabilities(reply));
+        return Ok(ResultValue::Capabilities(Box::new(reply)));
     }
     authorize_account_profile_scope(
         &request.scope,
