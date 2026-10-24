@@ -177,7 +177,7 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
         <div className="tg-canvas" style={{ width: layout.width, height: layout.height }}>
           <svg className="tg-lines" width={layout.width} height={layout.height} aria-hidden="true">
             {layout.links.map((link) => <path key={`${link.from}>${link.to}`} className="tg-link" d={link.path} />)}
-            {layout.edges.map((item) => <path key={item.edge.task_id} className={`tg-edge ${item.edge.state}`} d={item.path} />)}
+            {layout.edges.filter((item) => item.path).map((item) => <path key={item.edge.task_id} className={`tg-edge ${item.edge.state}`} d={item.path} />)}
           </svg>
           {layout.nodes.map((item) => <NodeBox key={item.node.id} placed={item} harness={harness} open={item.node.id === open}
             onOpen={(id) => setOpen(id)} onMove={move} />)}

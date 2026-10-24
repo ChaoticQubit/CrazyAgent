@@ -1,11 +1,10 @@
 use super::team::read_failure;
 use super::{BridgeError, NativeBridge, bounded, failure};
-use crazyagent::engine::owner::{OwnerData, OwnerRead};
+use crazyagent::engine::owner::{TerminalControl, TerminalOutput, TerminalSession};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::TeamGraph;
 use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalConnection, TerminalFrame,
-    TerminalReader, TerminalRequest, TerminalWriter,
+    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +27,8 @@ fn attach_failure(code: &str) -> BridgeError {
         "terminal_agent_unknown" => "terminal_agent_unknown",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
+        "controller_disconnected" => "not_connected",
+        "terminal_owner_unavailable" | "owner_socket_replaced" => "owner_unavailable",
         _ => "terminal_attach_failed",
     })
 }
@@ -107,33 +108,30 @@ impl NativeBridge {
     /// Returns the bounded graph of that project or a plain failure code.
     pub async fn team_graph(&mut self, id: &str) -> Result<TeamGraph, BridgeError> {
         let project_id = ProjectId::new(id).map_err(|_| failure("invalid_project"))?;
-        let reply = self
+        let graph = self
             .controller()?
-            .read(OwnerRead::TeamGraph {
-                project_id: project_id.clone(),
-            })
+            .team_graph(project_id.clone())
             .await
             .map_err(|e| read_failure(&e.0))?;
-        let OwnerData::TeamGraph { graph } = reply.data else {
-            return Err(failure("owner_read_failed"));
-        };
         if graph.project_id != project_id {
             return Err(failure("owner_read_failed"));
         }
-        bounded(*graph)
+        bounded(graph)
     }
 
-    /// Opens one owner terminal connection attached to an agent's terminal.
+    /// Opens one owner terminal session attached to an agent's terminal.
     /// Takes the terminal name.
-    /// Returns the connection, whose first frame is the attach or a rejection.
-    pub async fn open_terminal(
-        &mut self,
-        agent: AgentId,
-    ) -> Result<TerminalConnection, BridgeError> {
-        self.controller()?
-            .open_terminal(agent)
+    /// Returns the session with the terminal size, its output and its controls.
+    pub async fn open_terminal(&mut self, agent: AgentId) -> Result<TerminalSession, BridgeError> {
+        let session = self
+            .controller()?
+            .terminal_attach(agent.clone())
             .await
-            .map_err(|e| attach_failure(&e.0))
+            .map_err(|e| attach_failure(&e.0))?;
+        if session.agent != agent {
+            return Err(failure("terminal_agent_mismatch"));
+        }
+        Ok(session)
     }
 }
 
@@ -170,15 +168,17 @@ impl Terminals {
         Ok(())
     }
 
-    /// Streams one opened terminal connection to the window's channel in order.
-    /// Takes the terminal name, the connection and the channel.
+    /// Streams one opened terminal session to the window's channel in order: the attach
+    /// frame with the size first, then the screen and live output.
+    /// Takes the terminal name, the session and the channel.
     /// Returns once the reader and writer run; a full set of views is refused.
     pub fn attach(
         self: &Arc<Self>,
         agent: AgentId,
-        connection: TerminalConnection,
+        session: TerminalSession,
         output: Channel<InvokeResponseBody>,
     ) -> Result<(), BridgeError> {
+        assert_eq!(session.agent, agent);
         let (requests, queue) = mpsc::channel(REQUESTS_MAX);
         let serial = {
             let mut views = self.views()?;
@@ -193,9 +193,25 @@ impl Terminals {
             assert!(views.viewers.len() <= VIEWERS_MAX);
             serial
         };
-        let (reader, writer) = connection.into_split();
-        tauri::async_runtime::spawn(write(writer, queue));
-        tauri::async_runtime::spawn(read(Arc::clone(self), agent, serial, reader, output));
+        let attached = TerminalFrame::Attached {
+            agent_id: agent.clone(),
+            cols: session.cols,
+            rows: session.rows,
+        };
+        let (message, last) = channel_message(&agent, attached);
+        assert!(!last);
+        if output.send(message).is_err() {
+            self.forget(&agent, serial);
+            return Err(failure("terminal_window_closed"));
+        }
+        tauri::async_runtime::spawn(write(session.control, queue));
+        tauri::async_runtime::spawn(read(
+            Arc::clone(self),
+            agent,
+            serial,
+            session.output,
+            output,
+        ));
         Ok(())
     }
 
@@ -235,26 +251,33 @@ impl Terminals {
     }
 }
 
-async fn write(mut writer: TerminalWriter, mut queue: mpsc::Receiver<TerminalRequest>) {
+async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalRequest>) {
     while let Some(request) = queue.recv().await {
-        if writer.send(&request).await.is_err() {
+        let sent = match request {
+            TerminalRequest::Input { bytes } => control.input(bytes).await,
+            TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
+            TerminalRequest::Attach { .. } | TerminalRequest::Detach => continue,
+        };
+        if sent.is_err() {
             return;
         }
     }
-    let _ = writer.send(&TerminalRequest::Detach).await;
+    let _ = control.detach().await;
 }
 
 async fn read(
     terminals: Arc<Terminals>,
     agent: AgentId,
     serial: u64,
-    mut reader: TerminalReader,
+    mut stream: TerminalOutput,
     output: Channel<InvokeResponseBody>,
 ) {
     loop {
-        let (message, last) = match reader.next().await {
-            Ok(Some(frame)) => channel_message(&agent, frame),
-            Ok(None) => (json(&closed("terminal_connection_closed")), true),
+        let (message, last) = match stream.next().await {
+            Ok(frame) => channel_message(&agent, frame),
+            Err(error) if error.0 == "terminal_closed" => {
+                (json(&closed("terminal_connection_closed")), true)
+            }
             Err(error) => (
                 json(&closed(&plain_code(&error.0, "terminal_connection_lost"))),
                 true,

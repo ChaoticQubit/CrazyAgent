@@ -68,6 +68,13 @@ test("live task edges come first, newest first, with labels halfway along each e
   assert.equal(twice.edges[1].label.y - twice.edges[0].label.y, graph.LABEL_STACK);
   const lost = graph.layoutGraph({ ...team, edges: [edge(13, "m", "team-404", "running")] });
   assert.deepEqual(lost.edges, []);
+  const waiting = graph.layoutGraph({ ...team, edges: [edge(14, "m", "m", "sent"), edge(15, "m", "m", "sent")] });
+  const master = at(waiting, "m");
+  assert.deepEqual(waiting.edges.map((item) => item.path), ["", ""]);
+  assert.deepEqual(waiting.edges.map((item) => item.label), [
+    { x: master.x + graph.NODE_WIDTH / 2, y: master.y + graph.NODE_HEIGHT + graph.LABEL_STACK },
+    { x: master.x + graph.NODE_WIDTH / 2, y: master.y + graph.NODE_HEIGHT + graph.LABEL_STACK * 2 },
+  ]);
 });
 
 test("only a bounded number of edges and nodes are drawn", () => {
@@ -136,6 +143,7 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[2], name), "Master, Codex");
   assert.equal(graph.nodeDetail(team.nodes[1], name), "Codex, 2 agents");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1 })), "codex, 1 agent");
+  assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1, status_label: "1 of 2 agents" }), name), "Codex, 1 of 2 agents");
   assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, Work ChatGPT");
   assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
 });

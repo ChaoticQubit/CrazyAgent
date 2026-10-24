@@ -522,8 +522,8 @@ async fn desktop_terminal_attach(
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals.0.room(&agent)?;
-    let connection = lock(&state)?.open_terminal(agent.clone()).await?;
-    terminals.0.attach(agent, connection, output)
+    let session = lock(&state)?.open_terminal(agent.clone()).await?;
+    terminals.0.attach(agent, session, output)
 }
 
 #[tauri::command]

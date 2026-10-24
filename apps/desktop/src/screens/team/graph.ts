@@ -22,7 +22,8 @@ export interface Link { from: string; to: string; path: string }
 export interface PlacedEdge { edge: GraphEdge; path: string; label: Point }
 
 /** A team graph laid out for drawing: node boxes, parent links, task edges with label
- * points, and the canvas size that holds them all. */
+ * points, and the canvas size that holds them all. A task still waiting at the master has
+ * no path; its label sits under the master. */
 export interface GraphLayout {
   nodes: PlacedNode[];
   links: Link[];
@@ -111,6 +112,10 @@ export function layoutGraph(graph: TeamGraph, offsets: Offsets = new Map()): Gra
     const pair = `${edge.from}\u0000${edge.to}`;
     const index = stacked.get(pair) ?? 0;
     stacked.set(pair, index + 1);
+    if (from === to) {
+      edges.push({ edge, path: "", label: { x: start.x, y: start.y + LABEL_STACK * (index + 1) } });
+      continue;
+    }
     edges.push({ edge, path: curve(start, end), label: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 + index * LABEL_STACK } });
   }
   const rows = agents.length ? 3 : groups.length ? 2 : 1;
@@ -188,7 +193,7 @@ export function nodeDetail(node: GraphNode, harness: (id: string) => string = (i
     case "master": return `Master, ${name}`;
     case "harness_group": {
       const count = node.agents ?? 0;
-      return `${name}, ${count} ${count === 1 ? "agent" : "agents"}`;
+      return `${name}, ${node.status_label?.trim() || `${count} ${count === 1 ? "agent" : "agents"}`}`;
     }
     case "agent": return node.account ? `${name}, ${node.account}` : name;
   }
