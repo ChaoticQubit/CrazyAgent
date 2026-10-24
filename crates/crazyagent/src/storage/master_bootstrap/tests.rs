@@ -46,17 +46,21 @@ fn reference(value: &str) -> CredentialRef {
 }
 
 fn git(repository: &Path, args: &[&str]) {
-    let output = Process::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["-c", "core.hooksPath=/dev/null", "-C"])
-        .arg(repository)
-        .args(args)
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        Process::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["-c", "core.hooksPath=/dev/null", "-C"])
+            .arg(repository)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.len() <= 8192);
 }

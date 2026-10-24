@@ -23,8 +23,6 @@ use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(unix)]
-use tokio::net::UnixStream;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
@@ -788,7 +786,7 @@ impl EngineService {
         )?;
         let stream = tokio::time::timeout(
             self.timeout,
-            UnixStream::connect(self.anchor.path.join(ordinary)),
+            crate::spawn_gate::connect_unix(self.anchor.path.join(ordinary)),
         )
         .await
         .map_err(|_| fail("ordinary_readiness_timeout"))?
@@ -872,7 +870,7 @@ impl EngineService {
             .ok_or_else(|| fail("socket_path_already_exists"))?;
         old.verify(&self.anchor)?;
         check_socket(&self.anchor, &path, old.value.ordinary_socket)?;
-        match tokio::time::timeout(self.timeout, UnixStream::connect(&path)).await {
+        match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await {
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
             _ => return Err(fail("ordinary_socket_not_proven_stale")),
         }

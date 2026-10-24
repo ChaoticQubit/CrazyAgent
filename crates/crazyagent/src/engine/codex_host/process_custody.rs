@@ -91,12 +91,13 @@ fn start(
         return Err("codex_host_start_cancelled");
     }
     let mut command = selected_command(command);
-    let child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "codex_host_spawn_failed")?;
+    let child = crate::spawn_gate::spawn(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|_| "codex_host_spawn_failed")?;
     let mut custody = Custody(Some(OwnedChild {
         child,
         profile,

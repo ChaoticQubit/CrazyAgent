@@ -301,13 +301,14 @@ impl LinuxSandbox {
         }
         let held = clean_absolute(helper)
             && helper.is_file()
-            && probe
-                .env_clear()
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success());
+            && crate::spawn_gate::status(
+                probe
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .is_ok_and(|status| status.success());
         if held {
             return Self::new(
                 sandbox,

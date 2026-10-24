@@ -27,16 +27,17 @@ impl Process {
     }
 
     fn launch_output(root: &Path, socket: &str, output: Stdio) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg(socket)
-            .stdout(output)
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg(socket)
+                .stdout(output)
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let stdout = Arc::new(Mutex::new(Vec::new()));
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let (send, first_line) = mpsc::sync_channel(1);
@@ -112,11 +113,13 @@ impl Process {
 
     fn stop(&mut self, signal: &str) {
         assert!(
-            Command::new("/bin/kill")
-                .args(["-s", signal, &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
+            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+                "-s",
+                signal,
+                &self.child.id().to_string()
+            ]))
+            .unwrap()
+            .success()
         );
         assert!(
             self.wait_exit().success(),
@@ -402,13 +405,14 @@ fn cli_preserves_unsafe_locator_objects() {
             }
             "fifo" => {
                 assert!(
-                    Command::new("/usr/bin/mkfifo")
-                        .arg("-m")
-                        .arg("600")
-                        .arg(&path)
-                        .status()
-                        .unwrap()
-                        .success()
+                    crazyagent::spawn_gate::status(
+                        Command::new("/usr/bin/mkfifo")
+                            .arg("-m")
+                            .arg("600")
+                            .arg(&path)
+                    )
+                    .unwrap()
+                    .success()
                 );
                 "owner_locator_unsafe"
             }
@@ -509,11 +513,11 @@ async fn cli_shutdown_stops_both_before_database_unlock() {
         process.ready();
         let state = locator(root.path());
         let generation = root.path().join(state["generation"].as_str().unwrap());
-        let mut stalled = tokio::net::UnixStream::connect(generation.join("owner.sock"))
+        let mut stalled = crazyagent::spawn_gate::connect_unix(generation.join("owner.sock"))
             .await
             .unwrap();
         stalled.write_all(b"CA").await.unwrap();
-        let mut ordinary = tokio::net::UnixStream::connect(root.path().join("e.sock"))
+        let mut ordinary = crazyagent::spawn_gate::connect_unix(root.path().join("e.sock"))
             .await
             .unwrap();
         ordinary.write_all(&[0]).await.unwrap();
@@ -532,12 +536,12 @@ async fn cli_shutdown_stops_both_before_database_unlock() {
         assert!(!root.path().join("e.sock").exists());
         assert!(!generation.exists());
         assert!(
-            tokio::net::UnixStream::connect(root.path().join("e.sock"))
+            crazyagent::spawn_gate::connect_unix(root.path().join("e.sock"))
                 .await
                 .is_err()
         );
         assert!(
-            tokio::net::UnixStream::connect(generation.join("owner.sock"))
+            crazyagent::spawn_gate::connect_unix(generation.join("owner.sock"))
                 .await
                 .is_err()
         );
@@ -638,7 +642,7 @@ fn cli_preserves_unrecorded_socket() {
     let root = tempfile::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.path().join("engine.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let listener = crazyagent::spawn_gate::bind_unix_std(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut process = Process::launch(root.path(), "engine.sock");
     process.refused("socket_path_already_exists");
@@ -669,7 +673,7 @@ async fn pending_cancellation_creates_no_runtime_state() {
 async fn cli_output_failure_cleans_runtime_before_unlock() {
     use std::os::fd::OwnedFd;
     let root = private_root();
-    let (output, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (output, peer) = crazyagent::spawn_gate::unix_pair_std().unwrap();
     drop(peer);
     let fd: OwnedFd = output.into();
     let mut process = Process::launch_output(root.path(), "e.sock", Stdio::from(fd));
@@ -715,11 +719,13 @@ async fn cli_shutdown_preserves_observed_replacements() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let identity = std::fs::symlink_metadata(&path).unwrap().ino();
         assert!(
-            Command::new("/bin/kill")
-                .args(["-s", "TERM", &process.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
+            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+                "-s",
+                "TERM",
+                &process.child.id().to_string()
+            ]))
+            .unwrap()
+            .success()
         );
         assert!(!process.wait_exit().success());
         let error = String::from_utf8(process.stderr.lock().unwrap().clone()).unwrap();
@@ -755,7 +761,7 @@ async fn cli_owner_transport_rejects_wrong_authentication() {
         .path()
         .join(state["generation"].as_str().unwrap())
         .join("owner.sock");
-    let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+    let mut stream = crazyagent::spawn_gate::connect_unix(path).await.unwrap();
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(b"CAO1");
     stream.write_all(&packet).await.unwrap();

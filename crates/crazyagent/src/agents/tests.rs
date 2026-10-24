@@ -358,19 +358,20 @@ fn crashing_engine_process() {
 fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
     let root = case.path();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "agents::tests::crashing_engine_process",
-            "--ignored",
-            "--test-threads",
-            "1",
-        ])
-        .env(CRASH_ROOT, &root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::tests::crashing_engine_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(CRASH_ROOT, &root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null()),
+    )
+    .unwrap();
     assert!(status.success());
     let ids: Vec<String> =
         serde_json::from_slice(&std::fs::read(root.join("ids.json")).unwrap()).unwrap();

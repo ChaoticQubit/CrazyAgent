@@ -298,13 +298,14 @@ fn end_tree(pid: u32) {
         .map(PathBuf::from)
         .filter(|root| root.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let _ = Command::new(root.join("System32").join("taskkill.exe"))
-        .arg("/PID")
-        .arg(pid.to_string())
-        .args(["/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
+    let _ = crate::spawn_gate::status(
+        Command::new(root.join("System32").join("taskkill.exe"))
+            .arg("/PID")
+            .arg(pid.to_string())
+            .args(["/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW),
+    );
 }

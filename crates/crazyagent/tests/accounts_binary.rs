@@ -18,7 +18,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 struct Engine {
     child: Child,
@@ -32,19 +32,20 @@ impl Engine {
 
     fn start_with(root: &Path, run: &str, extra: &[&OsStr]) -> Self {
         let stdout = root.join(format!("{run}.stdout"));
-        let child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .args(extra)
-            .stdin(Stdio::null())
-            .stdout(File::create(&stdout).unwrap())
-            .stderr(File::create(root.join(format!("{run}.stderr"))).unwrap())
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(root)
+                .arg(root.join("global.toml"))
+                .arg(root.join("project.toml"))
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .args(extra)
+                .stdin(Stdio::null())
+                .stdout(File::create(&stdout).unwrap())
+                .stderr(File::create(root.join(format!("{run}.stderr"))).unwrap()),
+        )
+        .unwrap();
         let mut engine = Self { child, stdout };
         let deadline = Instant::now() + Duration::from_secs(20);
         while std::fs::read(&engine.stdout).unwrap() != b"ready\n" {
@@ -59,10 +60,12 @@ impl Engine {
     }
 
     fn stop(&mut self) {
-        let terminated = Command::new("/bin/kill")
-            .args(["-s", "TERM", &self.child.id().to_string()])
-            .status()
-            .unwrap();
+        let terminated = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "TERM",
+            &self.child.id().to_string(),
+        ]))
+        .unwrap();
         assert!(terminated.success());
         let deadline = Instant::now() + Duration::from_secs(20);
         while self.child.try_wait().unwrap().is_none() {
@@ -127,7 +130,7 @@ async fn all_accounts(client: &OwnerClient) -> Vec<AccountView> {
 
 async fn serve_models(listener: &TcpListener) -> String {
     let (mut stream, request) = loop {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp(listener).await.unwrap();
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
         while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -164,7 +167,9 @@ async fn real_engine_binary_keeps_accounts_and_keys_across_restart() {
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let secret = format!("sk-binary-{}", std::process::id());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let lab_url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -299,11 +304,9 @@ fn git_repository(path: &Path) -> String {
             "init",
         ],
     ] {
-        let status = Command::new("git")
-            .args(arguments)
-            .current_dir(path)
-            .status()
-            .unwrap();
+        let status =
+            crazyagent::spawn_gate::status(Command::new("git").args(arguments).current_dir(path))
+                .unwrap();
         assert!(status.success(), "git {arguments:?}");
     }
     path.to_str().unwrap().to_owned()
@@ -311,7 +314,7 @@ fn git_repository(path: &Path) -> String {
 
 async fn key_gate(listener: TcpListener, key: String, seen: Arc<Mutex<Vec<bool>>>) {
     loop {
-        let Ok((mut client, _)) = listener.accept().await else {
+        let Ok((mut client, _)) = crazyagent::spawn_gate::accept_tcp(&listener).await else {
             return;
         };
         let key = key.clone();
@@ -344,7 +347,8 @@ async fn key_gate(listener: TcpListener, key: String, seen: Arc<Mutex<Vec<bool>>
                 let _ = client.write_all(reply.as_bytes()).await;
                 return;
             }
-            let Ok(mut upstream) = TcpStream::connect("127.0.0.1:11434").await else {
+            let Ok(mut upstream) = crazyagent::spawn_gate::connect_tcp("127.0.0.1:11434").await
+            else {
                 return;
             };
             if upstream.write_all(&head).await.is_ok() {
@@ -430,7 +434,9 @@ async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let secret = format!("sk-gate-{}", std::process::id());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let gate_url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()

@@ -104,7 +104,9 @@ fn key(value: &str) -> Option<AccountSecret> {
 }
 
 async fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     listener.local_addr().unwrap().port()
 }
 
@@ -147,7 +149,7 @@ fn holders(root: &Path, secret: &[u8]) -> Vec<PathBuf> {
 
 async fn serve_once(listener: &TcpListener, status: &str, body: &str) -> String {
     let (mut stream, request) = loop {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp(listener).await.unwrap();
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
         while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -179,7 +181,9 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
     assert_eq!(catalog[0].methods[0].label, "Sign in with ChatGPT");
     assert!(all_accounts(&client).await.is_empty());
 
-    let up = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let up_url = format!("http://127.0.0.1:{}/v1", up.local_addr().unwrap().port());
     let down_url = format!("http://127.0.0.1:{}/v1", closed_port().await);
 
@@ -420,7 +424,9 @@ async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() 
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let secret = format!("sk-local-{}", std::process::id());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()

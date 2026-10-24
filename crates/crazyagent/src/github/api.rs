@@ -343,17 +343,18 @@ pub fn find_cli() -> Option<&'static Path> {
 /// (at least `HOME`). Output: the token, or `github_cli_not_signed_in`.
 pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretString, EngineError> {
     let unavailable = || failure("github_cli_not_signed_in");
-    let mut child = Command::new(gh)
-        .args(["auth", "token", "--hostname", "github.com"])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .envs(env.iter().copied())
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| failure("github_cli_missing"))?;
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(gh)
+            .args(["auth", "token", "--hostname", "github.com"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .envs(env.iter().copied())
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|_| failure("github_cli_missing"))?;
     let stdout = child.stdout.take().expect("gh stdout is piped");
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();

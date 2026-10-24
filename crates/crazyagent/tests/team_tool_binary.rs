@@ -16,14 +16,15 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         "the engine's own MCP check sees exactly the delegate tool"
     );
 
-    let mut server = Command::new(engine)
-        .args(&arguments)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut server = crazyagent::spawn_gate::spawn(
+        Command::new(engine)
+            .args(&arguments)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let mut input = server.stdin.take().unwrap();
     input
         .write_all(
@@ -59,11 +60,14 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         }]
     );
 
-    let wrong = Command::new(engine)
-        .arg(SERVER_COMMAND)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let wrong = crazyagent::spawn_gate::output(
+        Command::new(engine)
+            .arg(SERVER_COMMAND)
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(!wrong.status.success());
     assert!(String::from_utf8_lossy(&wrong.stderr).contains("usage: crazyagent team-mcp"));
 }

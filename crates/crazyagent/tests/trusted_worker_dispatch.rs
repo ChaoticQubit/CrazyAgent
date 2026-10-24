@@ -23,7 +23,6 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
 
 const CATALOG: &str = r#"
@@ -329,7 +328,7 @@ async fn exchange<T: Serialize>(
     request: &T,
 ) -> io::Result<Option<Value>> {
     tokio::time::timeout(Duration::from_secs(2), async {
-        let mut stream = UnixStream::connect(socket).await?;
+        let mut stream = crazyagent::spawn_gate::connect_unix(socket).await?;
         if let Some((principal, slot, token)) = auth {
             let mut prelude = [0; 37];
             prelude[..4].copy_from_slice(principal);
@@ -374,14 +373,15 @@ impl OwnedRunner {
             .mode(0o600)
             .open(prepared.root().join("stderr.log"))
             .unwrap();
-        let process = ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
-            .arg("serve")
-            .arg(prepared.root())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .unwrap();
+        let process = crazyagent::spawn_gate::spawn(
+            ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
+                .arg("serve")
+                .arg(prepared.root())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr),
+        )
+        .unwrap();
         let mut runner = Self {
             process,
             root: prepared.root().to_owned(),
@@ -857,25 +857,26 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
         .mode(0o600)
         .open(&error_path)
         .unwrap();
-    let mut process = ProcessCommand::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-            "-C",
-        ])
-        .arg(repository)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(output)
-        .stderr(error)
-        .spawn()
-        .unwrap();
+    let mut process = crazyagent::spawn_gate::spawn(
+        ProcessCommand::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(repository)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(output)
+            .stderr(error),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let result = loop {
         match process.try_wait() {

@@ -210,7 +210,7 @@ pub fn copy_text(text: &str) -> Result<(), &'static str> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     quiet(&mut command);
-    let mut child = command.spawn().map_err(|_| "clipboard_unavailable")?;
+    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| "clipboard_unavailable")?;
     let written = child
         .stdin
         .take()
@@ -235,7 +235,7 @@ fn finish(mut command: Command) -> Result<(), &'static str> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     quiet(&mut command);
-    let status = command.status().map_err(|_| "open_unavailable")?;
+    let status = crate::spawn_gate::status(&mut command).map_err(|_| "open_unavailable")?;
     if status.success() || cfg!(target_os = "windows") {
         Ok(())
     } else {

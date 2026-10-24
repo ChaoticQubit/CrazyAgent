@@ -22,15 +22,16 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crazyagent::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 

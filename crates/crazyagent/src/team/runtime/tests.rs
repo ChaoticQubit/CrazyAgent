@@ -216,15 +216,16 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(self.base.join(FOLDER).join(SOCKET))
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crate::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(self.base.join(FOLDER).join(SOCKET))
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 

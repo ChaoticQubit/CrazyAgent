@@ -1,7 +1,6 @@
 use crate::engine::EngineError;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 const RESPONSE_MAX: usize = 1 << 20;
 const MODELS_MAX: usize = 500;
@@ -31,7 +30,7 @@ pub(crate) async fn reachable(url: &url::Url, timeout: Duration) -> bool {
         return false;
     };
     matches!(
-        tokio::time::timeout(timeout, TcpStream::connect(address)).await,
+        tokio::time::timeout(timeout, crate::spawn_gate::connect_tcp(address)).await,
         Ok(Ok(_))
     )
 }
@@ -54,7 +53,7 @@ pub(crate) async fn get(
     }
     let address = authority(url).ok_or_else(|| failure("account_url_invalid"))?;
     tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect(&address).await.map_err(|_| failure("account_url_unreachable"))?;
+        let mut stream = crate::spawn_gate::connect_tcp(&address).await.map_err(|_| failure("account_url_unreachable"))?;
         let mut request = format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n").into_bytes();
         if let Some(key) = bearer {
             request.extend_from_slice(b"Authorization: Bearer ");

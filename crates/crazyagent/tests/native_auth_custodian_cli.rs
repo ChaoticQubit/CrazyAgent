@@ -5,16 +5,10 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const CHILD_BOUND: Duration = Duration::from_secs(15);
 const OUTPUT_BOUND: usize = 4096;
-
-/// Lets one test at a time spawn a child. On macOS the standard library makes a child's
-/// pipes before it marks them close-on-exec, so a child that a parallel test spawns in that
-/// gap keeps another test's stdin open and the custodian never sees its EOF.
-static SPAWN: Mutex<()> = Mutex::new(());
 
 struct OwnedChild(Child);
 
@@ -40,11 +34,11 @@ struct Observation {
     stderr: String,
 }
 
-/// Spawns the configured command while no other test in this binary spawns.
-/// Input: the command. Output: the child, killed and reaped when dropped.
+/// Spawns the configured command through the crate's spawn gate, so no parallel
+/// test's child inherits this child's stdin. Input: the command. Output: the
+/// child, killed and reaped when dropped.
 fn spawn(command: &mut Command) -> OwnedChild {
-    let _serial = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
-    OwnedChild(command.spawn().unwrap())
+    OwnedChild(crazyagent::spawn_gate::spawn(command).unwrap())
 }
 
 fn private_root() -> tempfile::TempDir {

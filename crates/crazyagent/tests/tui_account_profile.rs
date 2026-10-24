@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::net::TcpListener;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -194,27 +193,28 @@ impl Driver {
         private_file(&output, b"");
         private_file(&error, b"");
         let logs = |path| fs::OpenOptions::new().append(true).open(path).unwrap();
-        let child = Command::new("/usr/bin/python3")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", root.join("home-empty"))
-            .env("TERM", "xterm-256color")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .args(["-B", "-c", DRIVER])
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/qualification"
-            ))
-            .arg(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg(root)
-            .arg(endpoint)
-            .arg(MODEL)
-            .stdin(Stdio::null())
-            .stdout(logs(&output))
-            .stderr(logs(&error))
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new("/usr/bin/python3")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", root.join("home-empty"))
+                .env("TERM", "xterm-256color")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .args(["-B", "-c", DRIVER])
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/qualification"
+                ))
+                .arg(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg(root)
+                .arg(endpoint)
+                .arg(MODEL)
+                .stdin(Stdio::null())
+                .stdout(logs(&output))
+                .stderr(logs(&error))
+                .process_group(0),
+        )
+        .unwrap();
         assert!(child.id() > 1);
         Self {
             child,
@@ -250,11 +250,12 @@ impl Driver {
 
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1 && matches!(signal, "-TERM" | "-KILL"));
-    let _ = Command::new("/bin/kill")
-        .args([signal, "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crazyagent::spawn_gate::status(
+        Command::new("/bin/kill")
+            .args([signal, "--", &format!("-{group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
 }
 
 impl Drop for Driver {
@@ -546,7 +547,7 @@ async fn local_none_account_before_projects_configures_private_profile_and_unass
         fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let (_stop, stopped) = watch::channel(false);
@@ -580,7 +581,7 @@ async fn local_none_account_before_projects_configures_private_profile_and_unass
         }
     }
     let cleanup = service.shutdown().await;
-    let passive = listener.accept();
+    let passive = crazyagent::spawn_gate::accept_tcp_std(&listener);
     let untouched = passive
         .as_ref()
         .err()

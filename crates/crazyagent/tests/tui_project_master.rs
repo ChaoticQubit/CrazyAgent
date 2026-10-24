@@ -225,21 +225,22 @@ impl Driver {
                 .open(path)
                 .unwrap()
         };
-        let child = ProcessCommand::new("python3")
-            .env_remove("PYTHONOPTIMIZE")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/qualification/tui_project_master.py"
-            ))
-            .arg(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg(root)
-            .stdin(Stdio::null())
-            .stdout(private_log(&stdout))
-            .stderr(private_log(&stderr))
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            ProcessCommand::new("python3")
+                .env_remove("PYTHONOPTIMIZE")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/qualification/tui_project_master.py"
+                ))
+                .arg(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg(root)
+                .stdin(Stdio::null())
+                .stdout(private_log(&stdout))
+                .stderr(private_log(&stderr))
+                .process_group(0),
+        )
+        .unwrap();
         assert!(child.id() > 1);
         eprintln!(
             "master686 owned driver pid={} pgid={}",
@@ -295,11 +296,12 @@ impl Driver {
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1);
     assert!(matches!(signal, "-TERM" | "-KILL"));
-    let _ = ProcessCommand::new("/bin/kill")
-        .args([signal, "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crazyagent::spawn_gate::status(
+        ProcessCommand::new("/bin/kill")
+            .args([signal, "--", &format!("-{group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
 }
 
 impl Drop for Driver {

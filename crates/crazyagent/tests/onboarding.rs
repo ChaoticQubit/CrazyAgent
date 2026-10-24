@@ -19,7 +19,6 @@ use crazyagent::research::runner::{
 use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -43,7 +42,7 @@ const OWNER_OVERVIEW: &str = "# Owner overview\n\nWritten by hand.\n";
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
-    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(
@@ -67,22 +66,25 @@ fn require_model() {
 
 /// Runs git in `repo` with no global or system configuration.
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .current_dir(repo)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args([
-            "-c",
-            "user.name=Onboarding Test",
-            "-c",
-            "user.email=onboarding@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Onboarding Test",
+                "-c",
+                "user.email=onboarding@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "git {args:?}: {output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
@@ -145,18 +147,19 @@ struct EngineProcess {
 impl EngineProcess {
     /// Starts the binary and waits up to 20 s for its `ready` line.
     fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(root)
-            .arg(global)
-            .arg(project_settings)
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(root)
+                .arg(global)
+                .arg(project_settings)
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -181,9 +184,11 @@ impl EngineProcess {
         if let Some(status) = self.child.try_wait().ok().flatten() {
             return status.success();
         }
-        let _ = Command::new("/bin/kill")
-            .args(["-s", "TERM", &self.child.id().to_string()])
-            .status();
+        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "TERM",
+            &self.child.id().to_string(),
+        ]));
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait().ok().flatten() {

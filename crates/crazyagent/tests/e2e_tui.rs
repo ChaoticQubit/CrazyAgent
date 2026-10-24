@@ -54,14 +54,17 @@ impl Pty {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .args(args)
-            .env_remove("TMUX")
-            .stdin(Stdio::null())
-            .output()
-            .expect(TMUX);
+        let output = crazyagent::spawn_gate::output(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .args(args)
+                .env_remove("TMUX")
+                .stdin(Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .expect(TMUX);
         assert!(
             output.status.success(),
             "tmux {args:?}: {}",

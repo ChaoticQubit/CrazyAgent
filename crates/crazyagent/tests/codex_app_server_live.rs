@@ -37,27 +37,28 @@ impl AppServer {
             .tempdir()
             .unwrap();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut child = Command::new(codex_executable())
-            .args([
-                "-c",
-                "cli_auth_credentials_store=\"file\"",
-                "app-server",
-                "--listen",
-                "stdio://",
-            ])
-            .env_clear()
-            .env("HOME", home.path())
-            .env("CODEX_HOME", home.path())
-            .env("TMPDIR", home.path())
-            .env("PATH", "/usr/bin:/bin")
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .current_dir(home.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(codex_executable())
+                .args([
+                    "-c",
+                    "cli_auth_credentials_store=\"file\"",
+                    "app-server",
+                    "--listen",
+                    "stdio://",
+                ])
+                .env_clear()
+                .env("HOME", home.path())
+                .env("CODEX_HOME", home.path())
+                .env("TMPDIR", home.path())
+                .env("PATH", "/usr/bin:/bin")
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .current_dir(home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
         let (sender, lines) = mpsc::channel();

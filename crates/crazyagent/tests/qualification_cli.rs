@@ -5,27 +5,35 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .args(args)
-        .output()
-        .unwrap()
+    crazyagent::spawn_gate::output(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
 }
 
 fn admit(path: &Path, root: &TempDir, source: &str, profile: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .args(["qualification", "admit", "--report"])
-        .arg(path)
-        .args([
-            "--source-revision",
-            source,
-            "--profile-id",
-            profile,
-            "--evidence-dir",
-        ])
-        .arg(root.path())
-        .args(["--require", "live_recovery"])
-        .output()
-        .unwrap()
+    crazyagent::spawn_gate::output(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(["qualification", "admit", "--report"])
+            .arg(path)
+            .args([
+                "--source-revision",
+                source,
+                "--profile-id",
+                profile,
+                "--evidence-dir",
+            ])
+            .arg(root.path())
+            .args(["--require", "live_recovery"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
 }
 
 fn complete(root: &TempDir) -> std::path::PathBuf {
@@ -135,18 +143,22 @@ fn binary_requires_trusted_source_profile_and_nonempty_requirements() {
         assert_eq!(output.status.code(), Some(2), "{:?}", output);
         assert!(!output.stderr.is_empty());
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .args(["qualification", "admit", "--report"])
-        .arg(&path)
-        .args([
-            "--source-revision",
-            "revision-a",
-            "--profile-id",
-            "profile-a",
-            "--evidence-dir",
-        ])
-        .arg(root.path())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .args(["qualification", "admit", "--report"])
+            .arg(&path)
+            .args([
+                "--source-revision",
+                "revision-a",
+                "--profile-id",
+                "profile-a",
+                "--evidence-dir",
+            ])
+            .arg(root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }

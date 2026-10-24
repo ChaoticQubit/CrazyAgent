@@ -41,7 +41,7 @@ async fn socket_clients_reconnect_and_stalled_clients_are_bounded() {
     let server = Server::bind(&socket, engine.clone(), &cfg).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(server.run(stopped));
-    let mut stalled = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut stalled = crazyagent::spawn_gate::connect_unix(&socket).await.unwrap();
     stalled.write_all(&[0]).await.unwrap();
     let client = Client::new(socket.clone(), Duration::from_millis(1000)).unwrap();
     let first = client.request(request("snapshot")).await.unwrap();
@@ -104,7 +104,7 @@ async fn complete_request_commits_when_peer_disconnects_before_accept() {
             repositories: vec![],
         },
     };
-    let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let mut stream = crazyagent::spawn_gate::connect_unix(&path).await.unwrap();
     stream
         .write_all(&encode_frame(&operation).unwrap())
         .await
@@ -151,7 +151,7 @@ async fn socket_capacity_and_malformed_frames_fail_without_success() {
     let server = Server::bind(&path, engine.clone(), &cfg).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(server.run(stopped));
-    let stalled = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let stalled = crazyagent::spawn_gate::connect_unix(&path).await.unwrap();
     tokio::time::sleep(Duration::from_millis(25)).await;
     let client = Client::new(path.clone(), Duration::from_millis(250)).unwrap();
     assert!(client.request(request("full")).await.is_err());
@@ -166,7 +166,7 @@ async fn socket_capacity_and_malformed_frames_fail_without_success() {
         vec![0, 0, 0, 0],
     ];
     for frame in cases {
-        let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let mut stream = crazyagent::spawn_gate::connect_unix(&path).await.unwrap();
         stream.write_all(&frame).await.unwrap();
         let mut byte = [0];
         let result = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))

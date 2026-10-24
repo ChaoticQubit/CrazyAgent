@@ -755,7 +755,7 @@ async fn native_auth_dispatch_lifetime_real_spawn_failure_keeps_dispatched_fence
             .unwrap();
         let (_, work) = case.work("actual-os-spawn-failure").await;
         let before = case.snapshot();
-        assert!(ProcessCommand::new(&path).spawn().is_err());
+        assert!(crate::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
         case.retain(work);
         let drained = tokio::time::timeout(
             Duration::from_secs(8),
@@ -777,12 +777,13 @@ async fn native_auth_dispatch_lifetime_real_broken_bootstrap_pipe_preserves_fenc
         let before = case.snapshot();
         let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
         let mut child = TestChild(
-            ProcessCommand::new("/bin/cat")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            crate::spawn_gate::spawn(
+                ProcessCommand::new("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         let input = child.0.stdin.take().unwrap();
         child.kill_and_reap().await;
@@ -806,14 +807,15 @@ async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_preserves_f
         std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o700)).unwrap();
         let registered = RegisteredNativeAuthHost::capture(&executable()).unwrap();
         let mut child = TestChild(
-            ProcessCommand::new(registered.verified_path().unwrap())
-                .arg("native-auth-custodian")
-                .arg(&missing)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            crate::spawn_gate::spawn(
+                ProcessCommand::new(registered.verified_path().unwrap())
+                    .arg("native-auth-custodian")
+                    .arg(&missing)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         launch
             .write_bootstrap(child.0.stdin.take().unwrap())

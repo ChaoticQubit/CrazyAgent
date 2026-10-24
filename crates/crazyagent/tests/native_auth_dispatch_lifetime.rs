@@ -67,25 +67,26 @@ impl ProductEngine {
             .unwrap()
             .write_all(CATALOG.as_bytes())
             .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(&state)
-            .arg(global)
-            .arg(root.path().join("p.toml"))
-            .arg("e.sock")
-            .arg("--writable-settings")
-            .env_clear()
-            .env("HOME", root.path())
-            .env("TMPDIR", root.path())
-            .env("PATH", "/usr/bin:/bin")
-            .env("LANG", "C")
-            .current_dir(root.path())
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(&state)
+                .arg(global)
+                .arg(root.path().join("p.toml"))
+                .arg("e.sock")
+                .arg("--writable-settings")
+                .env_clear()
+                .env("HOME", root.path())
+                .env("TMPDIR", root.path())
+                .env("PATH", "/usr/bin:/bin")
+                .env("LANG", "C")
+                .current_dir(root.path())
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let engine = Self {
             child,
             root,

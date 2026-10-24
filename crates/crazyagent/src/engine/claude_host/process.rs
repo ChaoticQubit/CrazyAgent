@@ -117,7 +117,7 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
-    let child = match command.spawn() {
+    let child = match crate::spawn_gate::spawn(&mut command) {
         Ok(child) => child,
         Err(_) => {
             report.send_replace(Status {

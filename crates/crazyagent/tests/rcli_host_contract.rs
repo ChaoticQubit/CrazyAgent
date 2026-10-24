@@ -26,14 +26,18 @@ fn usage_observation(usage: Value) -> Value {
 #[test]
 fn actual_node_projection_and_codec_frames_round_trip_in_rust() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-strip-types",
-            "scripts/rcli/host.observations.frames.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("node")
+            .args([
+                "--experimental-strip-types",
+                "scripts/rcli/host.observations.frames.mjs",
+            ])
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -183,16 +187,20 @@ for (const [index, number] of [0, -0, 1, 0.000001, 1e-7, -0.125, 5e-324, 9007199
 process.stdout.write(JSON.stringify(cases));
 "#;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-strip-types",
-            "--input-type=module",
-            "--eval",
-            script,
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("node")
+            .args([
+                "--experimental-strip-types",
+                "--input-type=module",
+                "--eval",
+                script,
+            ])
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

@@ -10,7 +10,6 @@ use crazyagent::terminal::tmux::{SOCKET, installed};
 use research_support::{claude, codex, counted_hanging_endpoint, processes_with};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::path::{Path, PathBuf};
@@ -37,7 +36,7 @@ fn require_model() {
             .count(),
         2
     );
-    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(
@@ -101,15 +100,16 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crazyagent::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 
@@ -120,22 +120,23 @@ struct Engine {
 
 impl Engine {
     fn start(runtime: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg("engine")
-            .arg(runtime)
-            .arg(runtime.join("global.toml"))
-            .arg(runtime.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .arg("--codex-executable")
-            .arg(codex())
-            .arg("--claude-executable")
-            .arg(claude())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crazyagent::spawn_gate::spawn(
+            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg("engine")
+                .arg(runtime)
+                .arg(runtime.join("global.toml"))
+                .arg(runtime.join("project.toml"))
+                .arg("engine.sock")
+                .arg("--writable-settings")
+                .arg("--codex-executable")
+                .arg(codex())
+                .arg("--claude-executable")
+                .arg(claude())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -176,11 +177,13 @@ impl Engine {
 
     fn stop(mut self) -> String {
         assert!(
-            Command::new("/bin/kill")
-                .args(["-s", "TERM", &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
+            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+                "-s",
+                "TERM",
+                &self.child.id().to_string()
+            ]))
+            .unwrap()
+            .success()
         );
         let deadline = Instant::now() + Duration::from_secs(20);
         let status = loop {
@@ -204,9 +207,11 @@ impl Drop for Engine {
         if self.child.try_wait().ok().flatten().is_some() {
             return;
         }
-        let _ = Command::new("/bin/kill")
-            .args(["-s", "TERM", &self.child.id().to_string()])
-            .status();
+        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "TERM",
+            &self.child.id().to_string(),
+        ]));
         let deadline = Instant::now() + ENGINE_STOP_WAIT;
         while Instant::now() < deadline {
             if self.child.try_wait().ok().flatten().is_some() {
@@ -444,9 +449,11 @@ fn killing_the_engine_ends_its_research_agents() {
         left = processes_with(&marker);
     }
     for pid in &left {
-        let _ = Command::new("/bin/kill")
-            .args(["-s", "KILL", &pid.to_string()])
-            .status();
+        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            "-s",
+            "KILL",
+            &pid.to_string(),
+        ]));
     }
     drop(server);
     assert_eq!(left, Vec::<u32>::new(), "agents outlived the killed engine");

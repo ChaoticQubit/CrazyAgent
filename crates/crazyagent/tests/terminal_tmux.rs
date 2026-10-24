@@ -38,15 +38,16 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crazyagent::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
 
@@ -315,14 +316,17 @@ fn a_shared_terminal_folder_is_refused() {
 }
 
 fn option(tmux: &Path, socket: &Path, name: &str) -> String {
-    let output = Command::new(tmux)
-        .arg("-S")
-        .arg(socket)
-        .args(["show-options", "-gv", name])
-        .env_clear()
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(["show-options", "-gv", name])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -467,14 +471,17 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     assert_eq!(again.alive().unwrap(), std::slice::from_ref(&master));
     again.close(&[]).unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    let listed = Command::new(&tmux)
-        .arg("-S")
-        .arg(&socket)
-        .arg("list-sessions")
-        .env_clear()
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let listed = crazyagent::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .arg("list-sessions")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         !listed.status.success(),
         "no tmux session is left after a clean quit: {}",
@@ -496,14 +503,17 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
 }
 
 fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {
-    let output = Command::new(tmux)
-        .arg("-S")
-        .arg(socket)
-        .args(arguments)
-        .env_clear()
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(arguments)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "{arguments:?}");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -529,28 +539,29 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let planted_server = Command::new(&tmux)
-        .args(["-u", "-f", "/dev/null", "-S"])
-        .arg(&socket)
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            "crazyagent",
-            "-n",
-            "_crazyagent",
-            "cat",
-        ])
-        .env_clear()
-        .envs(PLANTED)
-        .envs(PLANTED_TERMINAL)
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(&folder)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+    let planted_server = crazyagent::spawn_gate::status(
+        Command::new(&tmux)
+            .args(["-u", "-f", "/dev/null", "-S"])
+            .arg(&socket)
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "crazyagent",
+                "-n",
+                "_crazyagent",
+                "cat",
+            ])
+            .env_clear()
+            .envs(PLANTED)
+            .envs(PLANTED_TERMINAL)
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(&folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     assert!(planted_server.success());
     assert!(
         tmux_reply(&tmux, &socket, &["show-environment", "-g"])
@@ -558,21 +569,24 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         "the server starts out holding the planted variables"
     );
 
-    let engine = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "engine_process_with_planted_variables_spawns_a_pane",
-            "--ignored",
-            "--nocapture",
-            "--test-threads",
-            "1",
-        ])
-        .envs(PLANTED)
-        .envs(PLANTED_TERMINAL)
-        .env(PANE_ENV_ROOT, root.path())
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let engine = crazyagent::spawn_gate::output(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine_process_with_planted_variables_spawns_a_pane",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .envs(PLANTED)
+            .envs(PLANTED_TERMINAL)
+            .env(PANE_ENV_ROOT, root.path())
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         engine.status.success(),
         "{}{}",

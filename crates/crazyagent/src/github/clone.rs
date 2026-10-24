@@ -114,9 +114,8 @@ pub(super) fn clone_repo(
     }
     let helper = store.git_credential_helper(credential, GIT_USER)?;
     let (mut command, remote) = clone_command(endpoints, &helper, &destination, name)?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| failure("github_clone_failed"))?;
+    let mut child =
+        crate::spawn_gate::spawn(&mut command).map_err(|_| failure("github_clone_failed"))?;
     let stderr = child.stderr.take().expect("git stderr is piped");
     let reader = std::thread::spawn(move || {
         let mut sink = Vec::new();

@@ -793,7 +793,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            child.status().unwrap().success()
+            crate::spawn_gate::status(&mut child).unwrap().success()
         };
         for allowed in [
             worktree.join("work.txt"),

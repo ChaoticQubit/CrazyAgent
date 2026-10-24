@@ -131,10 +131,9 @@ fn burn_cpu() {
 fn spawn_children() -> Result<(), Box<dyn std::error::Error>> {
     let mut children = Vec::new();
     for index in 0..6 {
-        match Command::new(std::env::current_exe()?)
-            .arg("sleep-child")
-            .spawn()
-        {
+        match crazyagent::spawn_gate::spawn(
+            Command::new(std::env::current_exe()?).arg("sleep-child"),
+        ) {
             Ok(child) => children.push(child),
             Err(error) => println!("spawn-denied index={index} error={error}"),
         }

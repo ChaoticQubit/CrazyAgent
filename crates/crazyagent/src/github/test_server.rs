@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -69,13 +69,13 @@ pub(super) struct Server {
 
 impl Server {
     pub(super) fn start(handler: impl Fn(&Seen, usize) -> Answer + Send + Sync + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler: Arc<Handler> = Arc::new(handler);
         let recorded = Arc::clone(&seen);
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for stream in crate::spawn_gate::incoming_tcp_std(&listener) {
                 let Ok(stream) = stream else { return };
                 let handler = Arc::clone(&handler);
                 let recorded = Arc::clone(&recorded);

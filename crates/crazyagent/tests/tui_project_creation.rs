@@ -16,19 +16,20 @@ impl Driver {
         let root = tempfile::tempdir().unwrap();
         let stdout = root.path().join("stdout");
         let stderr = root.path().join("stderr");
-        let child = Command::new("python3")
-            .env_remove("PYTHONOPTIMIZE")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/qualification/tui_project_creation.py"
-            ))
-            .arg(env!("CARGO_BIN_EXE_crazyagent"))
-            .stdin(Stdio::null())
-            .stdout(File::create(&stdout).unwrap())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .unwrap();
+        let child = crazyagent::spawn_gate::spawn(
+            Command::new("python3")
+                .env_remove("PYTHONOPTIMIZE")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/qualification/tui_project_creation.py"
+                ))
+                .arg(env!("CARGO_BIN_EXE_crazyagent"))
+                .stdin(Stdio::null())
+                .stdout(File::create(&stdout).unwrap())
+                .stderr(File::create(&stderr).unwrap()),
+        )
+        .unwrap();
         assert!(child.id() > 0);
         assert_ne!(stdout, stderr);
         eprintln!("owned creation driver started pid={}", child.id());
@@ -83,11 +84,12 @@ impl Driver {
 impl Drop for Driver {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = Command::new("/bin/kill")
-                .args(["-s", "TERM", &self.child.id().to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crazyagent::spawn_gate::status(
+                Command::new("/bin/kill")
+                    .args(["-s", "TERM", &self.child.id().to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
             let deadline = Instant::now() + Duration::from_secs(10);
             while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));

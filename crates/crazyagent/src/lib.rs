@@ -32,6 +32,9 @@ pub mod research;
 pub mod routing;
 pub mod sandbox;
 pub mod setup;
+/// The one place this crate starts child processes and creates sockets, so no child
+/// inherits a pipe or socket another thread has not marked close-on-exec yet.
+pub mod spawn_gate;
 pub mod storage;
 pub mod team;
 pub mod terminal;

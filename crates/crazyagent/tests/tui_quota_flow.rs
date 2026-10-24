@@ -38,12 +38,13 @@ impl Drop for PythonRun {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
         }
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crazyagent::spawn_gate::status(
+            Command::new("/bin/kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
         let cleanup = self.deadline.min(Instant::now() + Duration::from_secs(10));
         while Instant::now() < cleanup {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -104,20 +105,21 @@ fn run_case(root: &Path) {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap() + Duration::from_secs(60);
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut python = PythonRun {
-        child: Command::new("python3")
-            .env_remove("PYTHONOPTIMIZE")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/qualification/tui_quota_flow.py"
-            ))
-            .arg(env!("CARGO_BIN_EXE_crazyagent"))
-            .arg(root)
-            .arg(unix_deadline.as_secs_f64().to_string())
-            .stdin(Stdio::null())
-            .stdout(stdout_file)
-            .stderr(stderr_file)
-            .spawn()
-            .unwrap(),
+        child: crazyagent::spawn_gate::spawn(
+            Command::new("python3")
+                .env_remove("PYTHONOPTIMIZE")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../scripts/qualification/tui_quota_flow.py"
+                ))
+                .arg(env!("CARGO_BIN_EXE_crazyagent"))
+                .arg(root)
+                .arg(unix_deadline.as_secs_f64().to_string())
+                .stdin(Stdio::null())
+                .stdout(stdout_file)
+                .stderr(stderr_file),
+        )
+        .unwrap(),
         deadline,
     };
     eprintln!(

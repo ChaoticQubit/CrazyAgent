@@ -317,14 +317,15 @@ fn dropping_a_lease_frees_the_profile_while_another_process_shares_its_descripto
     let shared = guard.manifest.file.try_clone().unwrap();
     fcntl_setfd(&shared, FdFlags::empty()).unwrap();
     assert!(!fcntl_getfd(&shared).unwrap().contains(FdFlags::CLOEXEC));
-    let mut holder = Command::new("/bin/sleep")
-        .env_clear()
-        .arg("30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("actual descriptor holder required");
+    let mut holder = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .env_clear()
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("actual descriptor holder required");
     drop(shared);
     assert_busy(&case.manifest());
     drop(guard);
@@ -767,7 +768,7 @@ impl ExecProbe {
             "e{}.sock",
             SOCKET_ID.fetch_add(1, Ordering::Relaxed),
         ));
-        let readiness = UnixDatagram::bind(&path).unwrap();
+        let readiness = crate::spawn_gate::bind_unix_datagram_std(&path).unwrap();
         readiness
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -786,22 +787,23 @@ impl ExecProbe {
             })
             .collect::<Vec<_>>();
         assert_eq!(protected.len(), 7);
-        let child = Command::new("/usr/bin/python3")
-            .env_clear()
-            .args(["-I", "-S", "-c", EXEC_PROBE])
-            .arg(path)
-            .arg(case.manifest())
-            .arg(serde_json::to_string(&protected).unwrap())
-            .args([
-                canary.as_raw_fd().to_string(),
-                metadata.dev().to_string(),
-                metadata.ino().to_string(),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("actual exec probe required");
+        let child = crate::spawn_gate::spawn(
+            Command::new("/usr/bin/python3")
+                .env_clear()
+                .args(["-I", "-S", "-c", EXEC_PROBE])
+                .arg(path)
+                .arg(case.manifest())
+                .arg(serde_json::to_string(&protected).unwrap())
+                .args([
+                    canary.as_raw_fd().to_string(),
+                    metadata.dev().to_string(),
+                    metadata.ino().to_string(),
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("actual exec probe required");
         let mut probe = Self {
             child,
             readiness,

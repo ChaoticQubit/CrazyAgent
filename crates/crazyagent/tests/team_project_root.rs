@@ -24,22 +24,25 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 /// Runs git in `repo` with no global or system configuration.
 /// Takes the folder and the arguments. Returns standard output; a failure fails the test.
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .current_dir(repo)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args([
-            "-c",
-            "user.name=Project Root Test",
-            "-c",
-            "user.email=project-root@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Project Root Test",
+                "-c",
+                "user.email=project-root@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     assert!(output.status.success(), "git {args:?}: {output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
