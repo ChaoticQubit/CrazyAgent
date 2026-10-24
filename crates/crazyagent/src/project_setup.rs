@@ -31,13 +31,18 @@ pub const CONTEXT_CHUNK_BYTES: usize = 8192;
 pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
 pub const CONTEXT_DIRECTORY: &str = "context";
 pub const PROJECTS_DIRECTORY: &str = "projects";
+#[cfg(unix)]
 const BRIEF_PARTIAL: &str = ".brief.partial";
 pub const RESEARCH_LOG_LINES_MAX: usize = 200;
 pub const RESEARCH_LOG_LINE_CHARS_MAX: usize = 400;
 pub const RESEARCH_LOG_BYTES_MAX: usize = 24 * 1024;
+#[cfg(unix)]
 const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
+#[cfg(unix)]
 const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
+#[cfg(unix)]
 const SECRET_MARKERS: [&str; 10] = [
     "api_key",
     "api-key",
@@ -50,6 +55,7 @@ const SECRET_MARKERS: [&str; 10] = [
     "refresh_token",
     "id_token",
 ];
+#[cfg(unix)]
 const SECRET_PREFIXES: [&str; 13] = [
     "sk-",
     "sk_",
@@ -65,7 +71,9 @@ const SECRET_PREFIXES: [&str; 13] = [
     "AKIA",
     "eyJ",
 ];
+#[cfg(unix)]
 const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
+#[cfg(unix)]
 const HIDDEN_WORD: &str = "[hidden]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -929,6 +937,7 @@ pub fn default_team_status(
     }
 }
 
+#[cfg(unix)]
 fn extension_allowed(name: &str) -> bool {
     Path::new(name)
         .extension()
@@ -1439,13 +1448,6 @@ pub fn section(report: &str, heading: Option<&str>) -> Option<String> {
     Some(lines[start..end].join("\n").trim().to_owned())
 }
 
-/// Refuses the projects root where no 0700 directory can be made.
-/// Takes the engine database path, unused. Returns `project_folder_unavailable`.
-#[cfg(not(unix))]
-fn projects_root(_database: &Path) -> Result<PathBuf, EngineError> {
-    Err(failure("project_folder_unavailable"))
-}
-
 #[cfg(unix)]
 fn projects_root(database: &Path) -> Result<PathBuf, EngineError> {
     let runtime = std::fs::canonicalize(
@@ -1466,6 +1468,7 @@ fn projects_root(database: &Path) -> Result<PathBuf, EngineError> {
     Ok(root)
 }
 
+#[cfg(unix)]
 fn brief(stored: &StoredSetup) -> String {
     let list = |items: Vec<String>| {
         if items.is_empty() {
@@ -2487,6 +2490,7 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 /// Names the newest run folder of a research job in the runner's agent state.
 /// Takes the agents folder and the job id; run folders are named job-<id>-<attempt> with an
 /// optional -<launch>. Returns the highest attempt and launch, or none before any run.
+#[cfg(unix)]
 fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
     let prefix = format!("job-{job}-");
     let mut latest: Option<((u32, u32), String)> = None;
@@ -2521,6 +2525,7 @@ fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
 /// Turns one raw agent log line into plain text with likely secrets hidden.
 /// Takes the raw line; a JSON event gives its message text and textless events are skipped.
 /// Returns the bounded plain line, or none for an empty or textless line.
+#[cfg(unix)]
 fn plain_log_line(raw: &str) -> Option<String> {
     let text = match serde_json::from_str::<serde_json::Value>(raw.trim()) {
         Ok(event) if event.is_object() => event_text(&event)?,
@@ -2543,6 +2548,7 @@ fn plain_log_line(raw: &str) -> Option<String> {
     Some(cut)
 }
 
+#[cfg(unix)]
 fn event_text(event: &serde_json::Value) -> Option<String> {
     [Some(event), event.get("item"), event.get("msg")]
         .into_iter()
@@ -2557,6 +2563,7 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
 /// Hides words and lines that look like credentials before a log line leaves the engine.
 /// Takes one plain line. Returns it with token-like words replaced, or a fixed notice for a
 /// line that names a credential field.
+#[cfg(unix)]
 fn redact(line: &str) -> String {
     let lower = line.to_ascii_lowercase();
     if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
@@ -2568,6 +2575,7 @@ fn redact(line: &str) -> String {
         .join(" ")
 }
 
+#[cfg(unix)]
 fn secret_like(word: &str) -> bool {
     let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
     let prefixed = SECRET_PREFIXES
@@ -2582,7 +2590,7 @@ fn secret_like(word: &str) -> bool {
     prefixed || opaque
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod engine_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -1,20 +1,38 @@
-use crate::research::runner::{AgentProcess, RunError, drain, private_directory};
+use crate::research::runner::RunError;
+#[cfg(unix)]
+use crate::research::runner::{AgentProcess, drain, private_directory};
+#[cfg(unix)]
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+#[cfg(unix)]
 use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Stdio;
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
+#[cfg(unix)]
 const GRAPH_OUT: &str = "graphify-out";
+#[cfg(unix)]
 const GRAPH_FILE: &str = "graph.json";
+#[cfg(unix)]
 const VENV_FILE: &str = "pyvenv.cfg";
+#[cfg(unix)]
 const VENV_BYTES_MAX: u64 = 4096;
+#[cfg(unix)]
 const LOG_BYTES_MAX: u64 = 1024 * 1024;
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(100);
 
 /// The plain reason a graph step fails with when no graphify is installed.
@@ -23,9 +41,12 @@ pub(crate) const GRAPHIFY_MISSING: &str = "graphify not installed";
 /// How one `graphify update .` run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GraphEnding {
+    #[cfg(unix)]
     Built,
     Failed(&'static str),
+    #[cfg(unix)]
     TimedOut,
+    #[cfg(unix)]
     Stopped,
 }
 
