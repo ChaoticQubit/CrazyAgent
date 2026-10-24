@@ -313,17 +313,16 @@ impl Home {
         let theme = &ctx.theme;
         let (state, next) = match folder.state {
             FoundState::Onboarding => (
-                styled("Setting up", Role::Running, theme),
+                status("Setting up", theme, ctx.glyphs),
                 "Enter shows the setup.",
             ),
             FoundState::Missing => (
-                styled("Folder missing", Role::Error, theme),
+                status("Folder missing", theme, ctx.glyphs),
                 "The folder is gone from your projects folder.",
             ),
-            FoundState::Found | FoundState::Ready => (
-                styled("Not set up", Role::Muted, theme),
-                "Enter sets it up.",
-            ),
+            FoundState::Found | FoundState::Ready => {
+                (status("Not set up", theme, ctx.glyphs), "Enter sets it up.")
+            }
         };
         let name_role = if selected {
             Role::Accent

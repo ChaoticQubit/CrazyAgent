@@ -196,8 +196,8 @@ export function HomeView({ projects, accounts, pools, harnesses, activity, sugge
   const [expanded, setExpanded] = useState(false);
   return <>
     <PageHeader title="Projects" actions={<>
-      <a className="btn" href={formatRoute({ name: "add-project", way: "clone" })}><Icon name="link" size={15} />Clone from GitHub</a>
-      <a className="btn" href={formatRoute({ name: "add-project", way: "folder" })}><Icon name="folder-open" size={15} />Add folder</a>
+      <a className="btn" href={formatRoute({ name: "add-project", way: "clone" })}><Icon name="git-branch" size={15} />Clone from GitHub</a>
+      <a className="btn" href={formatRoute({ name: "add-project", way: "folder" })}><Icon name="folder-input" size={15} />Add folder</a>
       <a className="btn primary" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>
     </>} />
     {needs.total > 0 && <section className="needs" aria-label="Needs you">

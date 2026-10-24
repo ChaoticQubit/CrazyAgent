@@ -65,8 +65,8 @@ export function ProjectsHomeSettingsView({ home, picked, busy, problem, onChoose
       <p>Use <span className="pj-mono" title={picked}>{displayText(folderLabel(picked))}</span>?</p>
       {current && <p className="pj-secondary">{`Use this folder moves nothing. Projects already in ${displayText(folderLabel(current))} stay there. Move my projects there takes them with you.`}</p>}
       <span className="pj-row">
-        <Button variant="primary" pending={busy} pendingLabel="Saving..." onClick={onUse}>Use this folder</Button>
-        {current && <Button icon="folder" disabled={busy} onClick={onMove}>Move my projects there</Button>}
+        <Button variant="primary" icon="check" pending={busy} pendingLabel="Saving..." onClick={onUse}>Use this folder</Button>
+        {current && <Button icon="folder-input" disabled={busy} onClick={onMove}>Move my projects there</Button>}
         <Button variant="quiet" disabled={busy} onClick={onCancel}>Cancel</Button>
       </span>
     </section>}

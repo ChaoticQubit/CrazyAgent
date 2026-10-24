@@ -3,7 +3,7 @@ import type {
   AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, OnboardingStep,
   OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, SetupStatus,
 } from "../../engine-client";
-import type { Tone } from "../../ui";
+import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -241,6 +241,11 @@ export function installed(entry: PackEntry): boolean {
 /** The name a pack entry shows. Input: the entry. Output: its id as plain text. */
 export function entryName(entry: PackEntry): string {
   return displayText(entry.id);
+}
+
+/** The icon a pack entry shows. Input: the entry. Output: server for an MCP server, blocks for a skill. */
+export function entryIcon(entry: PackEntry): IconName {
+  return entry.kind === "mcp_server" ? "server" : "blocks";
 }
 
 export const PACK_GROUPS: { group: PackGroup; title: string; about: string }[] = [

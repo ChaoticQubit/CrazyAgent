@@ -13,6 +13,7 @@ const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/c
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
 const { ToolsSetupView } = await import("../src/screens/intake/setup-step.tsx");
 const { Welcome } = await import("../src/screens/first-run/index.tsx");
+const { Icon } = await import("../src/ui/icon.tsx");
 
 const ok = (value) => ({ kind: "ok", value });
 const notReady = { kind: "not_ready" };
@@ -389,4 +390,42 @@ test("first run walks profile, projects folder, tools and accounts in that order
   assert.match(accounts, /<h1>Add an account<\/h1>/);
   assert.match(accounts, />Add account<\/button>/);
   assert.match(accounts, />Skip for now<\/button>/);
+});
+
+test("the projects folder, Add, clone and setup screens draw their Lucide icons", () => {
+  const svg = (name, size) => html(Icon, { name, size });
+  const props = { home: ok({ path: "/Users/mira/Projects", watching: true }), onSetUp: noop, onOpen: noop, onRemove: noop, onRetry: noop };
+  const found = html(FoundProjectsView, { ...props, found: ok([folder("found", { name: "garden" }), folder("onboarding", { name: "shop", project_id: "p1" }), folder("missing", { name: "old", project_id: "p2", git: false })]) });
+  assert.ok(found.includes(`${svg("git-branch", 14)}<strong>garden</strong>`), found);
+  assert.ok(found.includes(`${svg("folder", 14)}<strong>old</strong>`), found);
+  assert.ok(found.includes(`${svg("list-checks", 15)}Set up this project</button>`), found);
+  assert.ok(found.includes(`${svg("arrow-right", 15)}Continue setup</button>`), found);
+  assert.ok(found.includes(`${svg("trash", 15)}Remove project</button>`), found);
+  assert.ok(found.includes(svg("search", 12)), "Found carries its status icon");
+  assert.ok(found.includes(svg("list-checks", 12)), "Setting up carries its status icon");
+  assert.ok(found.includes(svg("circle-x", 12)), "Folder missing carries its status icon");
+
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
+  assert.ok(move.includes(`${svg("folder-input", 15)}Move into projects folder</button>`), move);
+  assert.ok(move.includes(`${svg("git-branch", 15)}Clone instead</button>`), move);
+  const copy = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "copy" });
+  assert.ok(copy.includes(`${svg("copy", 15)}Copy into projects folder</button>`), copy);
+
+  const repos = [{ full_name: "mira/plant-shop", private: true, default_branch: "main", size_kb: 2048 }, { full_name: "mira/notes", private: false, default_branch: "main", size_kb: 12 }];
+  const list = html(RepoListView, { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, query: "", onQuery: noop, more: false, onMore: noop, cloning: null, onClone: noop, repos: ok(repos) });
+  assert.ok(list.includes(`${svg("lock", 14)}<strong class="pj-mono">mira/plant-shop</strong>`), list);
+  assert.ok(list.includes(`${svg("globe", 14)}<strong class="pj-mono">mira/notes</strong>`), list);
+  assert.ok(list.includes(`${svg("git-branch", 15)}Clone</button>`), list);
+
+  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" })], pack, running: false };
+  const tools = html(ToolsSetupView, { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop });
+  assert.ok(tools.includes(`${svg("wrench", 14)}<strong>tmux</strong>`), tools);
+  assert.ok(tools.includes(`${svg("wrench", 15)}Set up tools</button>`), tools);
+  assert.ok(tools.includes(`${svg("blocks", 14)}superpowers`), tools);
+  assert.ok(tools.includes(`${svg("server", 14)}context-mode`), tools);
+  const started = html(ToolsSetupView, { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: true, problem: "", onRun: noop, onContinue: noop });
+  assert.ok(started.includes(`${svg("arrow-right", 15)}Continue</button>`), started);
+  assert.equal(intake.entryIcon(pack[1]), "blocks");
+  assert.equal(intake.entryIcon(pack[2]), "server");
 });

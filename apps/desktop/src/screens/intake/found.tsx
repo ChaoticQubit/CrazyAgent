@@ -4,7 +4,7 @@ import { intakeCopy, loadFoundProjects, loadProjectsHome, startOnboarding } from
 import { loadPools, receiptState, removeProject, type PoolChoice } from "../../api-projects";
 import type { FoundProject, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, RadioCard, StatusBadge, formatRoute, navigate } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -16,6 +16,10 @@ import "./intake.css";
 
 const ACTION_LABELS: Record<Exclude<FoundAction, null>, string> = {
   setup: "Set up this project", continue: "Continue setup", open: "Open project", remove: "Remove project",
+};
+
+const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
+  setup: "list-checks", continue: "arrow-right", open: "folder-open", remove: "trash",
 };
 
 /** Home's projects folder section as a view of its reads: the chooser while no folder is set, then
@@ -56,12 +60,12 @@ export function FoundProjectsView({ home, found, chooser, onSetUp, onOpen, onRem
         const row = foundRow(folder);
         return <li className="in-row" key={folder.path}>
           <span className="in-row-main">
-            <span className="pj-row"><strong>{displayText(folder.name)}</strong><StatusBadge word={row.badge} tone={row.tone} /></span>
+            <span className="pj-row"><Icon name={folder.git ? "git-branch" : "folder"} size={14} /><strong>{displayText(folder.name)}</strong><StatusBadge word={row.badge} tone={row.tone} /></span>
             <span className="pj-mono pj-muted" title={folder.path}>{displayText(folderLabel(folder.path))}</span>
             <span className="pj-small pj-secondary">{row.line} {folder.git ? "Git repository." : "No git yet."}</span>
           </span>
           {row.action && <Button size="small" variant={row.action === "setup" ? "primary" : row.action === "remove" ? "danger-text" : "secondary"}
-            onClick={() => act(folder, row.action)}>{ACTION_LABELS[row.action]}</Button>}
+            icon={ACTION_ICONS[row.action]} onClick={() => act(folder, row.action)}>{ACTION_LABELS[row.action]}</Button>}
         </li>;
       })}</ul>
     </>}
@@ -130,7 +134,7 @@ function SetUpDialog({ folder, onClose, onStarted }: { folder: FoundProject; onC
   };
   return <Dialog open title={`Set up ${folder.name}`} onClose={onClose}
     footer={<><Button onClick={onClose}>Cancel</Button>
-      <Button variant="primary" disabled={!pool} pending={busy} pendingLabel="Starting..." onClick={() => void start()}>Start setup</Button></>}>
+      <Button variant="primary" icon="list-checks" disabled={!pool} pending={busy} pendingLabel="Starting..." onClick={() => void start()}>Start setup</Button></>}>
     <SetUpDialogBody folder={folder} pools={pools} pool={pool} onPool={setPool} problem={problem} />
   </Dialog>;
 }

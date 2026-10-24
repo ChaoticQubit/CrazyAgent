@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import iconArrowLeft from "../assets/icons/arrow-left.svg?raw";
 import iconArrowRight from "../assets/icons/arrow-right.svg?raw";
+import iconBlocks from "../assets/icons/blocks.svg?raw";
 import iconBookOpen from "../assets/icons/book-open.svg?raw";
 import iconBot from "../assets/icons/bot.svg?raw";
 import iconBoxes from "../assets/icons/boxes.svg?raw";
@@ -25,9 +26,11 @@ import iconFileImage from "../assets/icons/file-image.svg?raw";
 import iconFileSpreadsheet from "../assets/icons/file-spreadsheet.svg?raw";
 import iconFileText from "../assets/icons/file-text.svg?raw";
 import iconFolder from "../assets/icons/folder.svg?raw";
+import iconFolderInput from "../assets/icons/folder-input.svg?raw";
 import iconFolderOpen from "../assets/icons/folder-open.svg?raw";
 import iconFolderPlus from "../assets/icons/folder-plus.svg?raw";
 import iconFunnel from "../assets/icons/funnel.svg?raw";
+import iconGitBranch from "../assets/icons/git-branch.svg?raw";
 import iconGlobe from "../assets/icons/globe.svg?raw";
 import iconHardDrive from "../assets/icons/hard-drive.svg?raw";
 import iconHouse from "../assets/icons/house.svg?raw";
@@ -74,6 +77,7 @@ import iconUpload from "../assets/icons/upload.svg?raw";
 import iconUserRound from "../assets/icons/user-round.svg?raw";
 import iconUsers from "../assets/icons/users.svg?raw";
 import iconWifiOff from "../assets/icons/wifi-off.svg?raw";
+import iconWrench from "../assets/icons/wrench.svg?raw";
 import iconX from "../assets/icons/x.svg?raw";
 import iconZap from "../assets/icons/zap.svg?raw";
 import logoAnthropic from "../assets/logos/anthropic.svg?raw";
@@ -91,6 +95,7 @@ import logoVercel from "../assets/logos/vercel.svg?raw";
 const ICON_SOURCES = {
   "arrow-left": iconArrowLeft,
   "arrow-right": iconArrowRight,
+  "blocks": iconBlocks,
   "book-open": iconBookOpen,
   "bot": iconBot,
   "boxes": iconBoxes,
@@ -115,9 +120,11 @@ const ICON_SOURCES = {
   "file-spreadsheet": iconFileSpreadsheet,
   "file-text": iconFileText,
   "folder": iconFolder,
+  "folder-input": iconFolderInput,
   "folder-open": iconFolderOpen,
   "folder-plus": iconFolderPlus,
   "funnel": iconFunnel,
+  "git-branch": iconGitBranch,
   "globe": iconGlobe,
   "hard-drive": iconHardDrive,
   "house": iconHouse,
@@ -164,6 +171,7 @@ const ICON_SOURCES = {
   "user-round": iconUserRound,
   "users": iconUsers,
   "wifi-off": iconWifiOff,
+  "wrench": iconWrench,
   "x": iconX,
   "zap": iconZap,
 } as const;
