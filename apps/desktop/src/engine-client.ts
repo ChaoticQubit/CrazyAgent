@@ -723,6 +723,96 @@ export function researchLog(id: string, job: number): Promise<{ lines: string[] 
   return invoke<{ lines: string[] }>("desktop_research_log", { id, job });
 }
 
+export interface ProjectsHome {
+  path: string | null;
+  watching: boolean;
+}
+
+export type FoundProjectState = "found" | "missing" | "onboarding" | "ready";
+
+export interface FoundProject {
+  name: string;
+  path: string;
+  git: boolean;
+  known: boolean;
+  state: FoundProjectState;
+  project_id?: string | null;
+  github?: string | null;
+}
+
+export interface FolderSize {
+  bytes: number;
+}
+
+export type AddFolderMode = "move" | "copy";
+
+export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+
+export interface OnboardingView {
+  graph: OnboardingStep;
+  mapping: OnboardingStep;
+  draft: ProjectSetup;
+  missing: string[];
+  name?: string;
+  overview?: string | null;
+}
+
+export interface OnboardingStarted extends IntentReceipt {
+  project_id: string | null;
+}
+
+export interface GitHubDeviceCode {
+  user_code: string;
+  verification_uri: string;
+  expires_s: number;
+}
+
+export type GitHubMethod = "device" | "token" | "cli" | "none";
+
+export interface GitHubStatus {
+  signed_in: boolean;
+  login: string | null;
+  method: GitHubMethod;
+}
+
+export interface GitHubRepo {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  size_kb: number;
+}
+
+export type DependencyName = "tmux" | "uv" | "graphify";
+
+export type DependencyState =
+  | { kind: "found"; version: string }
+  | { kind: "installing" }
+  | { kind: "installed"; version: string }
+  | { kind: "failed"; reason: string }
+  | { kind: "missing" };
+
+export interface Dependency {
+  name: DependencyName;
+  state: DependencyState;
+}
+
+export type PackEntryKind = "skill" | "mcp_server";
+
+export interface PackEntry {
+  id: string;
+  kind: PackEntryKind;
+  source: string;
+  license: string;
+  on_by_default: boolean;
+  state: DependencyState;
+  name?: string;
+}
+
+export interface SetupStatus {
+  dependencies: Dependency[];
+  pack: PackEntry[];
+}
+
 export function openProject(id: string): Promise<ProjectDetail> {
   return invoke<ProjectDetail>("desktop_open_project", { id });
 }
