@@ -134,6 +134,7 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
   assert.equal(draft.pool, "main");
   assert.equal(draft.team.master, "claude");
   assert.equal(intake.onboardingDraft(view({ name: "  " }), stored()).name, "shop");
+  assert.equal(intake.onboardingDraft(view({ name: undefined }), stored()).name, "shop");
 });
 
 test("confirm waits for the mapping agent unless a step failed", () => {
