@@ -19,7 +19,7 @@ fn command(args: &[&str], cwd: &Path) -> InteractiveCommand {
             .chain(args.iter().map(|arg| arg.to_string()))
             .collect(),
         cwd: cwd.to_path_buf(),
-        env: vec![("CRAZYAGENT_MARK".into(), "pane-env".into())],
+        env: vec![("PANE_MARK".into(), "pane-env".into())],
         transcript: Transcript::Unavailable,
     }
 }
@@ -64,10 +64,25 @@ fn a_conpty_terminal_runs_streams_takes_input_and_ends() {
         host.spawn(&agent, &shell).unwrap_err().0,
         "terminal_agent_running"
     );
+    for (name, value) in [
+        ("GH_TOKEN", "planted"),
+        ("SSH_AUTH_SOCK", "planted"),
+        ("ANTHROPIC_API_KEY", "sk-ant-planted"),
+    ] {
+        let mut secret = command(&["/Q", "/K"], temp.path());
+        secret.env.push((name.into(), value.into()));
+        assert_eq!(
+            host.spawn(&AgentId::team(8).unwrap(), &secret)
+                .unwrap_err()
+                .0,
+            "terminal_command_invalid",
+            "{name}"
+        );
+    }
     let stream = host.attach(&agent).unwrap();
     assert_eq!((stream.cols, stream.rows), (80, 24));
     let chunks = forward(stream);
-    host.input(&agent, b"echo %CRAZYAGENT_MARK%-%USERNAME%-done\r")
+    host.input(&agent, b"echo %PANE_MARK%-%USERNAME%-done\r")
         .unwrap();
     read_until(&chunks, "pane-env-%USERNAME%-done", Duration::from_secs(30));
     host.resize(&agent, 100, 30).unwrap();

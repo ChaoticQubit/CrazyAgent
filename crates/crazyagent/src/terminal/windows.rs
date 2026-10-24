@@ -6,6 +6,7 @@ use super::{
 use crate::harnesses::interactive::InteractiveCommand;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,9 @@ impl Host for ConptyHost {
             || command.env.len() > ENV_MAX
             || !Path::new(program).is_absolute()
             || !command.cwd.is_absolute()
+            || command.env.iter().any(|(name, value)| {
+                !crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
+            })
         {
             return Err(failure("terminal_command_invalid"));
         }

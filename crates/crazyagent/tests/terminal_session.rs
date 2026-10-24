@@ -103,7 +103,12 @@ fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_w
         other => panic!("expected Ready with the session id, got {other:?}"),
     }
     let key_file = home.join(KEY_FILE);
-    assert_eq!(std::fs::read_to_string(&key_file).unwrap(), KEY);
+    let placeholder = std::fs::read_to_string(&key_file).unwrap();
+    assert!(
+        crazyagent::model_gateway::relay::is_placeholder(&placeholder),
+        "the pane's key file holds the relay token, never the key"
+    );
+    assert!(!placeholder.contains(KEY));
     assert_eq!(
         std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
         0o600

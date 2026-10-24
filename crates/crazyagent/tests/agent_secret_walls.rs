@@ -1,8 +1,10 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::credentials::{Keychain, SecretString, Store, reference};
+use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, ProjectSandbox, SandboxNetwork, agent_command, agent_env_refused,
+    agent_variable_allowed,
 };
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -332,12 +334,34 @@ fn shared_builder_refuses_owner_secrets_and_keeps_the_agent_model_key() {
         "CRAZYAGENT_OWNER_TOKEN",
         "crazyagent_debug_custodian",
         "npm_token",
+        "ANTHROPIC_API_KEY",
+        "CRAZYAGENT_API_KEY",
     ] {
         assert!(agent_env_refused(OsStr::new(name)), "{name}");
     }
+    let token = format!("{TOKEN_PREFIX}{}", "c".repeat(64));
+    for name in ["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"] {
+        let name = OsStr::new(name);
+        assert!(agent_variable_allowed(name, OsStr::new(LOCAL_PLACEHOLDER)));
+        assert!(agent_variable_allowed(name, OsStr::new(&token)));
+        assert!(!agent_variable_allowed(
+            name,
+            OsStr::new("sk-ant-api03-planted")
+        ));
+        assert!(!agent_variable_allowed(name, OsStr::new("")));
+    }
+    for (name, value) in AGENT_GIT_ENV {
+        assert!(agent_variable_allowed(OsStr::new(name), OsStr::new(value)));
+    }
+    assert!(!agent_variable_allowed(
+        OsStr::new("GIT_CONFIG_VALUE_0"),
+        OsStr::new("osxkeychain")
+    ));
+    assert!(!agent_variable_allowed(
+        OsStr::new("GH_TOKEN"),
+        OsStr::new(LOCAL_PLACEHOLDER)
+    ));
     for name in [
-        "ANTHROPIC_API_KEY",
-        "CRAZYAGENT_API_KEY",
         "ANTHROPIC_BASE_URL",
         "CODEX_HOME",
         "CLAUDE_CONFIG_DIR",
@@ -356,6 +380,8 @@ fn shared_builder_refuses_owner_secrets_and_keeps_the_agent_model_key() {
     for name in [
         "GH_TOKEN",
         "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CRAZYAGENT_API_KEY",
         "SSH_AUTH_SOCK",
         "GIT_CONFIG_COUNT",
     ] {
@@ -422,8 +448,10 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     assert_eq!(seen, expected);
-    assert!(seen.keys().all(|name| !agent_env_refused(OsStr::new(name))
-        || AGENT_GIT_ENV.iter().any(|(git, _)| git == name)));
+    assert!(
+        seen.iter()
+            .all(|(name, value)| agent_variable_allowed(OsStr::new(name), OsStr::new(value)))
+    );
 }
 
 #[test]
