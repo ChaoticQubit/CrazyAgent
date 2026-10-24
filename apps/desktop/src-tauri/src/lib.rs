@@ -3,9 +3,11 @@ pub mod bridge;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
+use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::Pick;
 use bridge::project_setup::{MemoryItem, ResearchLog};
+use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
@@ -19,23 +21,30 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
 };
+use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
+use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
+use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::setup::SetupStatus;
-use crazyagent::team::TeamStatus;
+use crazyagent::team::{TeamGraph, TeamStatus};
+use crazyagent::terminal::TerminalRequest;
 use std::sync::Arc;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
 
 pub struct NativeState(Arc<Mutex<NativeBridge>>);
+
+pub struct TerminalState(Arc<Terminals>);
 
 fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     if window.label() != "main" {
@@ -498,6 +507,73 @@ async fn desktop_team_hand_off(
 }
 
 #[tauri::command]
+async fn desktop_team_graph(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<TeamGraph, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_graph(&id).await
+}
+
+#[tauri::command]
+async fn desktop_terminal_attach(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    output: Channel<InvokeResponseBody>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals.0.room(&agent)?;
+    let session = lock(&state)?.open_terminal(agent.clone()).await?;
+    terminals.0.attach(agent, session, output)
+}
+
+#[tauri::command]
+async fn desktop_terminal_input(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    bytes: Vec<u8>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals
+        .0
+        .send(&agent, TerminalRequest::Input { bytes })
+        .await
+}
+
+#[tauri::command]
+async fn desktop_terminal_resize(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals
+        .0
+        .send(&agent, TerminalRequest::Resize { cols, rows })
+        .await
+}
+
+#[tauri::command]
+fn desktop_terminal_detach(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals.0.detach(&agent)
+}
+
+#[tauri::command]
 async fn desktop_update_project_setup(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -557,6 +633,201 @@ async fn desktop_research_log(
 ) -> Result<ResearchLog, BridgeError> {
     main_window(&window)?;
     lock(&state)?.research_log(&id, job).await
+}
+
+#[tauri::command]
+async fn desktop_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ProjectsHome, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.projects_home().await
+}
+
+#[tauri::command]
+async fn desktop_set_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_projects_home(path, generation).await
+}
+
+#[tauri::command]
+async fn desktop_move_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.move_projects_home(path, generation).await
+}
+
+#[tauri::command]
+async fn desktop_found_projects(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<FoundProject>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.found_projects().await
+}
+
+#[tauri::command]
+async fn desktop_folder_size(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+) -> Result<FolderSize, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.folder_size(path).await
+}
+
+#[tauri::command]
+async fn desktop_add_existing_folder(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    source: String,
+    mode: AddMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?
+        .add_existing_folder(source, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_start_onboarding(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.start_onboarding(path, pool, generation).await
+}
+
+#[tauri::command]
+async fn desktop_onboarding(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<OnboardingView, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.onboarding(&id).await
+}
+
+#[tauri::command]
+async fn desktop_github_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_status().await
+}
+
+#[tauri::command]
+async fn desktop_github_sign_in(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubDeviceCode, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_sign_in().await
+}
+
+#[tauri::command]
+async fn desktop_github_token(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    token: String,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_token(token).await
+}
+
+#[tauri::command]
+async fn desktop_github_use_cli(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_use_cli().await
+}
+
+#[tauri::command]
+async fn desktop_github_sign_out(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<GitHubStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_sign_out().await
+}
+
+#[tauri::command]
+async fn desktop_github_repos(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    page: u32,
+) -> Result<GitHubRepoPage, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.github_repos(page).await
+}
+
+#[tauri::command]
+async fn desktop_clone_repo(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    full_name: String,
+) -> Result<CloneReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.clone_repo(full_name).await
+}
+
+#[tauri::command]
+async fn desktop_setup_status(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.setup_status().await
+}
+
+#[tauri::command]
+async fn desktop_run_setup(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    pack: Vec<String>,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.run_setup(pack, generation).await
+}
+
+#[tauri::command]
+async fn desktop_set_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.set_pack_entry(id, on, generation).await
+}
+
+#[tauri::command]
+async fn desktop_remove_pack_entry(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.remove_pack_entry(id, generation).await
 }
 
 #[tauri::command]
@@ -1051,49 +1322,6 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
-async fn desktop_setup_status(
-    window: WebviewWindow,
-    state: State<'_, NativeState>,
-) -> Result<SetupStatus, BridgeError> {
-    main_window(&window)?;
-    lock(&state)?.setup_status().await
-}
-
-#[tauri::command]
-async fn desktop_run_setup(
-    window: WebviewWindow,
-    state: State<'_, NativeState>,
-    pack: Vec<String>,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
-    lock(&state)?.run_setup(pack, generation).await
-}
-
-#[tauri::command]
-async fn desktop_set_pack_entry(
-    window: WebviewWindow,
-    state: State<'_, NativeState>,
-    id: String,
-    on: bool,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
-    lock(&state)?.set_pack_entry(id, on, generation).await
-}
-
-#[tauri::command]
-async fn desktop_remove_pack_entry(
-    window: WebviewWindow,
-    state: State<'_, NativeState>,
-    id: String,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
-    lock(&state)?.remove_pack_entry(id, generation).await
-}
-
-#[tauri::command]
 async fn desktop_agents(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1287,6 +1515,7 @@ pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
         .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
+        .manage(TerminalState(Arc::new(Terminals::default())))
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -1315,11 +1544,35 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_team_graph,
+            desktop_terminal_attach,
+            desktop_terminal_input,
+            desktop_terminal_resize,
+            desktop_terminal_detach,
             desktop_update_project_setup,
             desktop_remove_project,
             desktop_cancel_research,
             desktop_retry_research,
             desktop_research_log,
+            desktop_projects_home,
+            desktop_set_projects_home,
+            desktop_move_projects_home,
+            desktop_found_projects,
+            desktop_folder_size,
+            desktop_add_existing_folder,
+            desktop_start_onboarding,
+            desktop_onboarding,
+            desktop_github_status,
+            desktop_github_sign_in,
+            desktop_github_token,
+            desktop_github_use_cli,
+            desktop_github_sign_out,
+            desktop_github_repos,
+            desktop_clone_repo,
+            desktop_setup_status,
+            desktop_run_setup,
+            desktop_set_pack_entry,
+            desktop_remove_pack_entry,
             desktop_project_memories,
             desktop_review_memory,
             desktop_memories,
@@ -1382,10 +1635,6 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
-            desktop_setup_status,
-            desktop_run_setup,
-            desktop_set_pack_entry,
-            desktop_remove_pack_entry,
             desktop_agents,
             desktop_stop_agent,
             desktop_interrupt_agent,

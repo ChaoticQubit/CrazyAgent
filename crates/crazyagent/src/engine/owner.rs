@@ -168,6 +168,10 @@ pub enum OwnerMutation {
     SetProjectsHome {
         path: String,
     },
+    MoveProjectsHome {
+        path: String,
+        move_projects: bool,
+    },
     AddExistingFolder {
         source: String,
         mode: crate::projects_home::AddMode,
@@ -336,6 +340,17 @@ impl OwnerMutation {
             },
             Self::SetProjectsHome { path } => {
                 let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectsHome {
+                path,
+                move_projects,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveHome {
+                    path: path.clone(),
+                    move_projects: *move_projects,
+                };
                 action.validate()?;
                 Command::ProjectsHome { action }
             }
@@ -1002,7 +1017,7 @@ pub enum OwnerData {
         bytes: u64,
     },
     Onboarding {
-        onboarding: Box<crate::onboarding::Onboarding>,
+        onboarding: Box<crate::onboarding::OnboardingView>,
     },
     Memories {
         page: crate::memory::library::MemoryPage,

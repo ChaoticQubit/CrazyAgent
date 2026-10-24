@@ -1,10 +1,7 @@
 use super::{BridgeError, NativeBridge, failure};
 use crazyagent::project_setup::DOCUMENT_EXTENSIONS;
-use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
-const OPEN: &str = "/usr/bin/open";
 const LINK_BYTES_MAX: usize = 2048;
 const PATH_BYTES_MAX: usize = 4096;
 
@@ -81,23 +78,19 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, BridgeErro
     Ok(canonical)
 }
 
-async fn launch(arguments: Vec<OsString>) -> Result<(), BridgeError> {
-    assert!(!arguments.is_empty());
-    let status = tokio::task::spawn_blocking(move || Command::new(OPEN).args(arguments).status())
+async fn launch(
+    job: impl FnOnce() -> Result<(), &'static str> + Send + 'static,
+) -> Result<(), BridgeError> {
+    tokio::task::spawn_blocking(job)
         .await
         .map_err(|_| failure("open_failed"))?
-        .map_err(|_| failure("open_failed"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(failure("open_failed"))
-    }
+        .map_err(failure)
 }
 
 /// Opens one checked web link in the owner's default browser. Input: the link text.
 pub async fn open_link(text: &str) -> Result<(), BridgeError> {
     let link = link_allowed(text)?;
-    launch(vec![link.into()]).await
+    launch(move || crazyagent::platform::open(std::ffi::OsStr::new(&link))).await
 }
 
 impl NativeBridge {
@@ -109,11 +102,11 @@ impl NativeBridge {
         project_folder(&setup.folder)
     }
 
-    /// Shows a project's folder selected in Finder; nothing in it is opened or run.
+    /// Shows a project's folder in the system file manager; nothing in it is opened or run.
     /// Input: the project id.
     pub async fn reveal_project_folder(&mut self, id: &str) -> Result<(), BridgeError> {
         let folder = self.stored_folder(id).await?;
-        launch(vec!["-R".into(), folder.into_os_string()]).await
+        launch(move || crazyagent::platform::reveal(&folder)).await
     }
 
     /// Opens one document or research file from a project folder with its default app.
@@ -121,6 +114,6 @@ impl NativeBridge {
     pub async fn open_context_item(&mut self, id: &str, path: &str) -> Result<(), BridgeError> {
         let folder = self.stored_folder(id).await?;
         let file = context_file(&folder, path)?;
-        launch(vec![file.into_os_string()]).await
+        launch(move || crazyagent::platform::open(file.as_os_str())).await
     }
 }

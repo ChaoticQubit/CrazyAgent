@@ -1,7 +1,11 @@
+use super::intake::{ask, event, not_ready};
+use super::new_project::display_path;
 use super::new_project_page::kept_draft;
 use super::settings_accounts::send;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::pools::{MemberStatus, PoolSummary};
+use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
+use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -27,10 +31,12 @@ enum Panel {
 }
 
 /// One row of the project list: the New project draft kept after leaving the
-/// wizard, or a project. Input: the kept draft and the store. Output: drawn as a
-/// four-row card; Enter continues the draft or opens the project.
+/// wizard, a projects folder entry that is not a ready project, or a project.
+/// Input: the kept draft, the found folders and the store. Output: drawn as a
+/// four-row card; Enter continues the draft, sets up the folder or opens the project.
 enum Entry {
     Draft(String),
+    Folder(FoundProject),
     Project(ProjectCard),
 }
 
@@ -85,6 +91,8 @@ pub struct Home {
     filter: Option<TextField>,
     filtering: bool,
     was_done: Option<bool>,
+    folder: Load<ProjectsHome>,
+    found: Load<Vec<FoundProject>>,
 }
 
 impl Default for Home {
@@ -105,7 +113,33 @@ impl Home {
             filter: None,
             filtering: false,
             was_done: None,
+            folder: Load::Idle,
+            found: Load::Idle,
         }
+    }
+
+    fn folders(&self) -> Vec<FoundProject> {
+        let mut folders: Vec<FoundProject> = self
+            .found
+            .ready()
+            .map(|found| {
+                found
+                    .iter()
+                    .filter(|folder| folder.state != FoundState::Ready)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        folders.sort_by_key(|folder| match folder.state {
+            FoundState::Onboarding => 0,
+            FoundState::Found => 1,
+            FoundState::Missing | FoundState::Ready => 2,
+        });
+        folders
+    }
+
+    fn unpicked(&self) -> bool {
+        matches!(&self.folder, Load::Ready(home) if home.path.is_none())
     }
 
     fn setup(ctx: &Ctx) -> Option<Setup> {
@@ -138,6 +172,11 @@ impl Home {
         let draft = kept_draft()
             .filter(|name| matches(name.as_str()))
             .map(Entry::Draft);
+        let folders = self
+            .folders()
+            .into_iter()
+            .filter(|folder| matches(folder.name.as_str()))
+            .map(Entry::Folder);
         let projects = projects
             .iter()
             .filter(|card| {
@@ -153,7 +192,7 @@ impl Home {
             })
             .cloned()
             .map(Entry::Project);
-        draft.into_iter().chain(projects).collect()
+        draft.into_iter().chain(folders).chain(projects).collect()
     }
 
     fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 3] {
@@ -260,6 +299,59 @@ impl Home {
                     limit - 2,
                     ctx.glyphs,
                 ),
+            ]),
+            Line::default(),
+        ]
+    }
+
+    fn folder_card(
+        folder: &FoundProject,
+        limit: usize,
+        selected: bool,
+        ctx: &Ctx,
+    ) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let (state, next) = match folder.state {
+            FoundState::Onboarding => (
+                styled("Setting up", Role::Running, theme),
+                "Enter shows the setup.",
+            ),
+            FoundState::Missing => (
+                styled("Folder missing", Role::Error, theme),
+                "The folder is gone from your projects folder.",
+            ),
+            FoundState::Found | FoundState::Ready => (
+                styled("Not set up", Role::Muted, theme),
+                "Enter sets it up.",
+            ),
+        };
+        let name_role = if selected {
+            Role::Accent
+        } else {
+            Role::Heading
+        };
+        let home = ctx.home.as_deref().map(std::path::Path::new);
+        vec![
+            join([
+                Self::gutter(selected, ctx),
+                row(
+                    limit - 2,
+                    styled(folder.name.clone(), name_role, theme),
+                    state,
+                    ctx.glyphs,
+                ),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(
+                    styled(display_path(&folder.path, home), Role::Muted, theme),
+                    limit - 2,
+                    ctx.glyphs,
+                ),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(Line::raw(next), limit - 2, ctx.glyphs),
             ]),
             Line::default(),
         ]
@@ -376,8 +468,13 @@ impl Home {
             }
             Line::from(spans)
         };
+        let unpicked = self
+            .unpicked()
+            .then(|| styled("Pick your projects folder with f.", Role::Warning, theme));
         match &ctx.store.projects {
-            Load::Ready(projects) if projects.is_empty() && kept_draft().is_none() => {
+            Load::Ready(projects)
+                if projects.is_empty() && kept_draft().is_none() && self.folders().is_empty() =>
+            {
                 let mut lines = vec![title(None), Line::default(), Line::raw("No projects yet.")];
                 lines.extend(
                     wrap(
@@ -387,6 +484,10 @@ impl Home {
                     .into_iter()
                     .map(Line::raw),
                 );
+                if let Some(line) = unpicked {
+                    lines.push(Line::default());
+                    lines.push(line);
+                }
                 (lines, None)
             }
             Load::Ready(projects) => {
@@ -423,6 +524,9 @@ impl Home {
                     }
                     None => lines.push(Line::default()),
                 }
+                if let Some(line) = unpicked {
+                    lines.push(pad(line, limit, ctx.glyphs));
+                }
                 if entries.is_empty() {
                     lines.push(Line::raw(format!(
                         "No project matches. Showing 0 of {}.",
@@ -438,6 +542,7 @@ impl Home {
                     let selected = focused && index == self.selected && !self.filtering;
                     lines.extend(match entry {
                         Entry::Draft(name) => Self::draft_card(name, limit, selected, ctx),
+                        Entry::Folder(folder) => Self::folder_card(folder, limit, selected, ctx),
                         Entry::Project(card) => self.card(card, limit, selected, ctx),
                     });
                 }
@@ -526,6 +631,19 @@ impl Home {
         }
         match self.entries(ctx).into_iter().nth(self.selected) {
             Some(Entry::Draft(_)) => Flow::Open(Place::NewProject),
+            Some(Entry::Folder(folder)) => match folder.state {
+                FoundState::Missing => Flow::Handled,
+                FoundState::Onboarding => Flow::Open(Place::Onboarding {
+                    path: folder.path,
+                    name: folder.name,
+                    project: folder.project_id,
+                }),
+                FoundState::Found | FoundState::Ready => Flow::Open(Place::Onboarding {
+                    path: folder.path,
+                    name: folder.name,
+                    project: None,
+                }),
+            },
             Some(Entry::Project(card)) => Flow::Open(Place::Project {
                 id: card.id,
                 name: card.name,
@@ -570,6 +688,7 @@ impl Screen for Home {
                 hint(&arrows, "Move"),
                 hint("Tab", "Switch panel"),
                 hint("n", "New project"),
+                hint("a", "Add project"),
                 hint("s", "Settings"),
                 hint("Ctrl-K", "Go to"),
                 hint("Ctrl-Q", "Quit"),
@@ -577,6 +696,7 @@ impl Screen for Home {
         }
         vec![
             hint("n", "New project"),
+            hint("a", "Add project"),
             hint("Enter", "Open"),
             hint("s", "Settings"),
             hint("/", "Filter"),
@@ -588,8 +708,10 @@ impl Screen for Home {
     fn keys(&self, _ctx: &Ctx) -> Vec<Hint> {
         vec![
             hint("n", "New project"),
+            hint("a", "Add project"),
             hint("s", "Settings"),
             hint("Enter", "Open project"),
+            hint("f", "Projects folder"),
         ]
     }
 
@@ -626,6 +748,8 @@ impl Screen for Home {
         }
         match key {
             Key::Char('n') => Flow::Open(Place::NewProject),
+            Key::Char('a') => Flow::Open(Place::AddProject),
+            Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
             Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
             Key::Char('r') if matches!(ctx.store.projects, Load::Failed(_)) => {
                 ctx.request(Request::Projects);
@@ -679,6 +803,37 @@ impl Screen for Home {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let Some(reply) = event(arrival) {
+            match (&reply.query, &reply.result) {
+                (IntakeQuery::Home, Ok(IntakeView::Home(home))) => {
+                    self.folder = Load::Ready(home.clone());
+                }
+                (IntakeQuery::Home, Err(code)) => {
+                    self.folder = if not_ready(code) {
+                        Load::NotReady
+                    } else {
+                        Load::Failed(code.clone())
+                    };
+                }
+                (IntakeQuery::Found, Ok(IntakeView::Found(found))) => {
+                    self.found = Load::Ready(found.clone());
+                    let count = self.entries(ctx).len();
+                    if self.selected >= count {
+                        self.selected = count.saturating_sub(1);
+                    }
+                    self.follow(ctx);
+                }
+                (IntakeQuery::Found, Err(code)) => {
+                    self.found = if not_ready(code) {
+                        Load::NotReady
+                    } else {
+                        Load::Failed(code.clone())
+                    };
+                }
+                _ => {}
+            }
+            return Flow::Handled;
+        }
         match arrival {
             Arrival::Pools(Ok(pools)) => {
                 let setup = Setup::of(pools);
@@ -717,6 +872,8 @@ impl Screen for Home {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
+        ask(ctx, IntakeQuery::Home);
+        ask(ctx, IntakeQuery::Found);
         if ctx.store.harnesses.ready().is_none() {
             send(ctx, SettingsJob::Harnesses);
         }

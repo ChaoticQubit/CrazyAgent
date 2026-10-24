@@ -71,24 +71,7 @@ pub fn support_details(ctx: &Ctx) -> String {
 }
 
 fn copy(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/usr/bin/pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    child
-        .stdin
-        .take()
-        .ok_or("clipboard_unavailable")?
-        .write_all(text.as_bytes())
-        .map_err(|error| error.to_string())?;
-    let status = child.wait().map_err(|error| error.to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "clipboard_failed".into())
+    crate::platform::copy_text(text).map_err(String::from)
 }
 
 impl Screen for Startup {

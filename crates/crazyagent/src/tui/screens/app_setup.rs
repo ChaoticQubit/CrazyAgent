@@ -531,10 +531,8 @@ impl AppSetup {
             },
             Ask::SignOut => match key {
                 Key::Char('y') => {
-                    let job = AppSetupJob::GitHubSignOut {
-                        generation: ctx.next_generation(),
-                    };
-                    self.change(job, Sent::Done("Signed out of GitHub.".into()), ctx);
+                    let done = "Signed out of GitHub.".to_owned();
+                    self.change(AppSetupJob::GitHubSignOut, Sent::Done(done), ctx);
                 }
                 Key::Char('n') | Key::Esc => {}
                 _ => self.ask = Some(Ask::SignOut),
@@ -1010,9 +1008,15 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
-            AppSetupEvent::PackChanged(result)
-            | AppSetupEvent::HomeSet(result)
-            | AppSetupEvent::GitHubSignedOut(result) => self.changed(result, ctx),
+            AppSetupEvent::PackChanged(result) | AppSetupEvent::HomeSet(result) => {
+                self.changed(result, ctx)
+            }
+            AppSetupEvent::GitHubSignedOut(result) => {
+                let result = result.as_ref().map(|github| {
+                    self.github = Load::Ready(github.clone());
+                });
+                self.changed(&result.map_err(Clone::clone), ctx);
+            }
             AppSetupEvent::Home(result) => {
                 self.reading[1] = false;
                 self.home = loaded(result);

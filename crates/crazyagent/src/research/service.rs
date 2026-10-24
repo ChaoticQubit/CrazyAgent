@@ -160,14 +160,16 @@ where
 
 /// Starts research for a running engine: jobs claimed from the engine
 /// database's `research_jobs` table that project creation fills, agent state
-/// in `<runtime>/research`, one folder per project in `<runtime>/projects`
-/// and pool assignment read live from the engine's settings files.
+/// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
+/// pool assignment read live from the engine's settings files and, with a
+/// terminal host, every agent in its own pane.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
     codex: &Path,
     claude: Option<&Path>,
+    terminal: Option<Arc<dyn crate::terminal::Host>>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -199,6 +201,11 @@ pub fn start_for_engine(
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(host) = terminal {
+        runner = runner
+            .with_terminal(host)
             .map_err(|error| error.to_string())?;
     }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;

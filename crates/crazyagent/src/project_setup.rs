@@ -755,7 +755,8 @@ pub fn catalog(
     Ok(catalog)
 }
 
-fn pool_exists(config: &EffectiveConfig, pool: &CredentialRef) -> bool {
+/// Whether the settings define the pool `pool`.
+pub(crate) fn pool_exists(config: &EffectiveConfig, pool: &CredentialRef) -> bool {
     config
         .settings
         .model_access
@@ -1418,6 +1419,15 @@ fn brief(stored: &StoredSetup) -> String {
     )
 }
 
+/// Writes `stored`'s brief to `<folder>/context/brief.md`, opened beneath the
+/// folder without following links. Takes the project folder and its setup.
+/// Returns a plain code when the context folder is missing or unwritable.
+pub(crate) fn write_brief_at(folder: &Path, stored: &StoredSetup) -> Result<(), &'static str> {
+    let context =
+        open_beneath(folder, &[CONTEXT_DIRECTORY]).map_err(|_| "project_folder_missing")?;
+    write_brief(&context, stored)
+}
+
 fn write_brief(context: &rustix::fd::OwnedFd, stored: &StoredSetup) -> Result<(), &'static str> {
     let unwritable = |_| "project_folder_unwritable";
     let _ = rustix::fs::unlinkat(context, BRIEF_PARTIAL, AtFlags::empty());
@@ -1987,7 +1997,7 @@ fn create(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record(
+pub(crate) fn record(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     project_id: &ProjectId,

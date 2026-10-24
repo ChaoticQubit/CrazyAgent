@@ -1,6 +1,6 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::github::{GitHubRepo, GitHubStatus};
+use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId};
@@ -81,8 +81,8 @@ impl OwnerController {
     }
 
     /// Reads one onboarding: the graph and mapping steps, the drafted setup and what is still missing.
-    /// Takes the project id the start returned.
-    /// Returns the onboarding view; the owner confirms it with `update_project_setup`.
+    /// Takes the project id the folder was registered as.
+    /// Returns the onboarding; the owner confirms its draft with `update_project_setup`.
     pub async fn onboarding(
         &mut self,
         project_id: ProjectId,
@@ -93,71 +93,57 @@ impl OwnerController {
         }
     }
 
-    /// Reads whether CrazyAgent is signed in to GitHub, as whom and how.
+    /// Reads whether CrazyAgent is signed in to GitHub, as whom, how, and any plain problem.
     /// Takes nothing.
     /// Returns the status; no token ever leaves the engine.
     pub async fn github_status(&mut self) -> Result<GitHubStatus, EngineError> {
-        match self.read(OwnerRead::GitHubStatus).await?.data {
-            OwnerData::GitHubStatus { status } => Ok(status),
-            _ => Err(EngineError("controller_read_response".into())),
-        }
+        self.github()?.github_status().await
     }
 
-    /// Starts the GitHub device sign-in.
-    /// Takes the client generation.
-    /// Returns the actual owner response; an applied start carries the code the owner enters on github.com.
-    pub async fn github_sign_in(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
-        self.github_status().await?;
-        self.begin_mutation(OwnerMutation::GitHubSignIn, generation)?;
-        self.send_pending().await
+    /// Starts the GitHub device sign-in; the engine finishes it once the owner enters the code.
+    /// Takes nothing.
+    /// Returns the code and page the owner uses on github.com; `github_status` shows waiting until then.
+    pub async fn github_sign_in(&mut self) -> Result<GitHubDeviceCode, EngineError> {
+        self.github()?.github_sign_in().await
     }
 
-    /// Hands a pasted GitHub token to the engine through the private secret channel, never a plain field.
+    /// Hands a pasted GitHub token to the engine in its own secret frame, never a plain field.
     /// Takes the token as an account secret.
-    /// Returns nothing; read `github_status` for the result.
-    pub async fn github_token(&mut self, token: AccountSecret) -> Result<(), EngineError> {
-        if self.pending.is_some() || self.pending_account_profile.is_some() {
-            return Err(EngineError("controller_pending_intent".into()));
-        }
-        self.client
-            .as_ref()
-            .ok_or_else(|| EngineError("controller_disconnected".into()))?
-            .submit_github_token(token)
-            .await
+    /// Returns the status after the engine checked the token with GitHub.
+    pub async fn github_token(
+        &mut self,
+        token: AccountSecret,
+    ) -> Result<GitHubStatus, EngineError> {
+        self.github()?.github_token(token).await
     }
 
     /// Reuses the GitHub sign-in of an installed and signed-in `gh` CLI.
-    /// Takes the client generation.
-    /// Returns the actual owner response; a rejection carries a plain code.
-    pub async fn github_use_cli(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
-        self.github_status().await?;
-        self.begin_mutation(OwnerMutation::GitHubUseCli, generation)?;
-        self.send_pending().await
+    /// Takes nothing.
+    /// Returns the new status.
+    pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, EngineError> {
+        self.github()?.github_use_cli().await
     }
 
-    /// Lists one page of the signed-in owner's GitHub repositories.
-    /// Takes the page number, starting at 1.
-    /// Returns the repositories on that page; an empty page ends the list.
-    pub async fn github_repos(&mut self, page: u32) -> Result<Vec<GitHubRepo>, EngineError> {
-        if page == 0 {
+    /// Lists one page of the signed-in owner's GitHub repositories, most recently pushed first.
+    /// Takes the page number, from 1 to `github::REPO_PAGE_MAX`.
+    /// Returns the page with the next page number, none after the last page.
+    pub async fn github_repos(&mut self, page: u32) -> Result<GitHubRepoPage, EngineError> {
+        if page == 0 || page > crate::github::REPO_PAGE_MAX {
             return Err(EngineError("github_page_invalid".into()));
         }
-        match self.read(OwnerRead::GitHubRepos { page }).await?.data {
-            OwnerData::GitHubRepos { repos } => Ok(repos),
-            _ => Err(EngineError("controller_read_response".into())),
-        }
+        self.github()?.github_repos(page).await
     }
 
     /// Clones a GitHub repository into the projects home, where it then shows as Found.
-    /// Takes the repository as owner/name and the client generation.
-    /// Returns the actual owner response; a rejection carries a plain code.
-    pub async fn clone_repo(
-        &mut self,
-        full_name: String,
-        generation: u64,
-    ) -> Result<OwnerResponse, EngineError> {
-        self.github_status().await?;
-        self.begin_mutation(OwnerMutation::CloneRepo { full_name }, generation)?;
-        self.send_pending().await
+    /// Takes the repository as owner/name.
+    /// Returns the receipt with the new folder.
+    pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, EngineError> {
+        self.github()?.clone_repo(full_name).await
+    }
+
+    fn github(&self) -> Result<&OwnerClient, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 }

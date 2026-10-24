@@ -254,6 +254,31 @@ async fn open(
     Ok((admission, viewer, host))
 }
 
+/// Records the lines the owner typed into a team sub-agent's terminal for the master's next
+/// turn. Takes the engine database, the team agent id and the lines. A failure loses only
+/// the note; the keys already reached the terminal.
+async fn heard(database: PathBuf, agent: i64, lines: Vec<String>) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .ok()?;
+        connection.busy_timeout(Duration::from_secs(5)).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
+        for line in &lines {
+            let _ = crate::team::direct::record(&connection, agent, line, now);
+        }
+        Some(())
+    })
+    .await;
+}
+
 async fn watch(
     stream: UnixStream,
     packet: &[u8; 37],
@@ -264,6 +289,11 @@ async fn watch(
     authority: &Authority,
 ) {
     let agent = viewer.agent.clone();
+    let member = agent.team_agent();
+    let mut typed = crate::team::direct::InputLines::default();
+    let database = engine_root(authority)
+        .ok()
+        .map(|root| root.join("engine.db"));
     let (mut reader, mut writer) = stream.into_split();
     let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
     let listener = tokio::spawn(async move {
@@ -291,8 +321,17 @@ async fn watch(
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
                 Some(request) => {
+                    let lines = match (&request, member) {
+                        (TerminalRequest::Input { bytes }, Some(_)) => typed.feed(bytes),
+                        _ => Vec::new(),
+                    };
                     if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
                         break "terminal_ended";
+                    }
+                    if let (Some(member), Some(database)) = (member, &database)
+                        && !lines.is_empty()
+                    {
+                        heard(database.clone(), member, lines).await;
                     }
                 }
             },

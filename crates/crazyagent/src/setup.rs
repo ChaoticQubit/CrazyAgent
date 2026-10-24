@@ -136,7 +136,7 @@ pub enum Pin {
 
 /// Where one dependency stands on the setup screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
     Missing,
     Found { version: Version },
@@ -157,7 +157,7 @@ pub struct DependencyStatus {
 /// Where one default-pack entry stands: not installed yet, being installed, installed
 /// and on, installed and switched off, or failed with a plain reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackState {
     Available,
     Installing,

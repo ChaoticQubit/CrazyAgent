@@ -262,10 +262,7 @@ fn local_checks_and_short_lines() {
             &["mcp-server-postgres", "--read-only"]
         ))
     );
-    assert_eq!(
-        command_spec("uvx mcp"),
-        Err("Use the full path of the command, such as /opt/homebrew/bin/uvx.")
-    );
+    assert_eq!(command_spec("uvx mcp"), Err(COMMAND_HINT));
     assert_eq!(
         command_spec("   "),
         Err("Type the command that starts the server.")
@@ -552,10 +549,7 @@ fn a_command_without_a_full_path_is_refused_on_the_edit_page() {
     }
     screen.key(&Key::Enter, &mut ctx);
     assert_eq!(ctx.queued(), 0);
-    assert_eq!(
-        screen.target.error.as_deref(),
-        Some("Use the full path of the command, such as /opt/homebrew/bin/uvx.")
-    );
+    assert_eq!(screen.target.error.as_deref(), Some(COMMAND_HINT));
 }
 
 #[test]

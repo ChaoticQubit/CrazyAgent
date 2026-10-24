@@ -1,5 +1,6 @@
 use super::{
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, clean_absolute, invalid,
+    AGENT_GIT_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    agent_env_refused, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -10,6 +11,9 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+
+/// The Landlock helper's file name. It ships next to the engine's own executable.
+pub const HELPER_NAME: &str = "crazyagent-landlock";
 
 /// Fixed places a distribution installs bubblewrap. It is never looked up through `PATH`.
 pub const BWRAP_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
@@ -285,26 +289,25 @@ impl LinuxSandbox {
         Ok(Self { sandbox, backend })
     }
 
-    /// Picks the backend this machine holds: Landlock when the helper's probe passes for the
-    /// policy's network needs, otherwise bubblewrap from a fixed path. Input: the project
-    /// policy and the helper executable. Output: the sandbox, or `Unavailable` when neither
-    /// backend can hold it.
+    /// Picks the backend this machine holds: Landlock when the helper exists and its probe
+    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path. Input:
+    /// the project policy and the helper executable. Output: the sandbox, or `Unavailable`
+    /// when neither backend can hold it.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
-        if !clean_absolute(helper) || !helper.is_file() {
-            return Err(invalid("sandbox helper must be an absolute file"));
-        }
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
         if matches!(sandbox.network(), SandboxNetwork::Only(_)) {
             probe.arg(LIMIT_NETWORK);
         }
-        let held = probe
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
+        let held = clean_absolute(helper)
+            && helper.is_file()
+            && probe
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
         if held {
             return Self::new(
                 sandbox,
@@ -338,6 +341,14 @@ impl LinuxSandbox {
     /// The project policy this sandbox holds.
     pub fn sandbox(&self) -> &ProjectSandbox {
         &self.sandbox
+    }
+
+    /// The program every wrapped command starts: the Landlock helper or bwrap.
+    pub fn launcher(&self) -> &Path {
+        match &self.backend {
+            LinuxBackend::Landlock { helper } => helper,
+            LinuxBackend::Bubblewrap { bwrap } => bwrap,
+        }
     }
 }
 
@@ -381,6 +392,9 @@ impl Sandbox for LinuxSandbox {
             .current_dir(cwd)
             .process_group(0);
         for (key, value) in harness.get_envs() {
+            if agent_env_refused(key) {
+                return Err(invalid("agent environment holds an owner secret"));
+            }
             if key == "HOME" || key == "TMPDIR" {
                 continue;
             }
@@ -388,6 +402,9 @@ impl Sandbox for LinuxSandbox {
                 Some(value) => command.env(key, value),
                 None => command.env_remove(key),
             };
+        }
+        for (name, value) in AGENT_GIT_ENV {
+            command.env(name, value);
         }
         assert!(command.get_args().any(|arg| arg == "--"));
         Ok(command)

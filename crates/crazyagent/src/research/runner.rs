@@ -4,10 +4,14 @@ use crate::config::ModelConnection;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
-use crate::harnesses::launch::LaunchError;
+use crate::harnesses::launch::{
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+};
+use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{ProjectId, RequestId};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::terminal::{AgentId, Host};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -34,6 +38,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 const CONTEXT_BUSY: &str = "launch_home_busy";
+const PANE_PREFIX: &str = "research-";
+const PANE_EVENTS_MAX: usize = 200_000;
 const CLAUDE_ARGUMENTS: [&str; 9] = [
     "--print",
     "--output-format",
@@ -218,6 +224,7 @@ pub struct ResearchRunner {
     stopping: AtomicBool,
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
+    terminal: Option<Arc<dyn Host>>,
 }
 
 enum Ending {
@@ -279,7 +286,28 @@ impl ResearchRunner {
             stopping: AtomicBool::new(false),
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
+            terminal: None,
         })
+    }
+
+    /// Runs every research agent in its harness's interactive app in a pane of `host` named
+    /// `research-<run>`, where the owner can watch it work. Panes an earlier engine left end
+    /// here, since that engine's jobs go back to the queue. Takes the host.
+    /// Returns the runner, or the host's plain code.
+    pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
+        let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+        for agent in host.alive().map_err(host_error)? {
+            if !agent.as_str().starts_with(PANE_PREFIX) {
+                continue;
+            }
+            match host.kill(&agent) {
+                Ok(()) => {}
+                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+                Err(problem) => return Err(host_error(problem)),
+            }
+        }
+        self.terminal = Some(host);
+        Ok(self)
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`
@@ -298,6 +326,12 @@ impl ResearchRunner {
     /// The job store this runner claims from.
     pub fn database(&self) -> &Path {
         &self.database
+    }
+
+    /// The engine-owned folder holding this runner's sandbox profiles and
+    /// agent state.
+    pub(crate) fn state(&self) -> &Path {
+        &self.state
     }
 
     /// Stops claiming, stops every running agent's process group and returns
@@ -530,6 +564,9 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
+        if let Some(runtime) = self.state.parent() {
+            sandbox = sandbox.guard_engine(runtime)?;
+        }
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
@@ -541,21 +578,58 @@ impl ResearchRunner {
         drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, executable);
+        if let Some(host) = &self.terminal {
+            let output = match harness {
+                ResearchHarness::Codex => tmp.join("report.md"),
+                ResearchHarness::ClaudeCode => agent.join("output.md"),
+            };
+            let (binding, model) = pane_account(account, &home);
+            let request = LaunchRequest {
+                harness: harness.id().to_owned(),
+                executable: executable.to_path_buf(),
+                working_dir: worktree.clone(),
+                account: binding,
+                model,
+                tools: job.tools,
+                sandbox_profile: Some(profile.clone()),
+                limits: LaunchLimits {
+                    run_time: self.limits.wall_time,
+                    output_bytes: usize::try_from(self.limits.output_bytes_max)
+                        .unwrap_or(usize::MAX)
+                        .min(64 * 1024 * 1024),
+                    events: PANE_EVENTS_MAX,
+                    ..LaunchLimits::default()
+                },
+            };
+            let pane = AgentId::new(&format!("{PANE_PREFIX}{name}"))
+                .map_err(|problem| RunError::Invalid(problem.0))?;
+            let mut session =
+                TerminalSession::start_installed(host.clone(), pane, request, installed, &context)
+                    .map_err(|problem| {
+                        RunError::Invalid(format!("agent terminal: {}", problem.0))
+                    })?;
+            let group = session.process_group();
+            let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
+            let _ = session.stop();
+            drop(lease);
+            return Ok((ending?, group, output));
+        }
+        let mut launch = Command::new(executable);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
-                codex_arguments(&mut command, &worktree, &output, &home, job.tools, account)?;
+                codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, job.tools, account)?;
-                command.args(installed.arguments());
+                claude_arguments(&mut launch, &home, &tmp, job.tools, account)?;
+                launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
         };
+        launch.current_dir(&worktree);
+        let mut command = sandbox.wrap(&profile, &launch)?;
         command
-            .current_dir(&worktree)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -675,6 +749,64 @@ impl ResearchRunner {
         Ok(ending)
     }
 
+    /// Types the research prompt into the agent's pane and follows its session record until
+    /// the turn ends, the job is cancelled, the runner stops or a limit passes. The agent's
+    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
+    /// Returns how the run ended.
+    fn supervise_pane(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        session: &mut TerminalSession,
+        prompt: &str,
+        output: &Path,
+    ) -> Result<Ending, RunError> {
+        let mut last = String::new();
+        let mut counted: u64 = 0;
+        if session.send(prompt).is_err() {
+            return Ok(Ending::Exited(false));
+        }
+        let mut beat = Instant::now();
+        let ending = loop {
+            if self.is_stopping() {
+                break Ending::Interrupted;
+            }
+            if counted > self.limits.output_bytes_max {
+                break Ending::Overflowed;
+            }
+            if beat.elapsed() >= HEARTBEAT {
+                beat = Instant::now();
+                match jobs.heartbeat(job.id, &self.claimer, counted) {
+                    Ok(true) => break Ending::Cancelled,
+                    Err(JobError::NotHeld) => break Ending::Interrupted,
+                    Ok(false) | Err(_) => {}
+                }
+            }
+            match session.next_event(POLL) {
+                Ok(Some(LaunchEvent::Text { text })) => {
+                    counted += text.len() as u64;
+                    last = text;
+                }
+                Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
+                Ok(Some(LaunchEvent::Exited { .. })) => break Ending::Exited(false),
+                Ok(_) => {}
+                Err(problem) => {
+                    break match problem.0.as_str() {
+                        "launch_deadline" => Ending::TimedOut,
+                        "launch_output_limit" | "launch_event_limit" => Ending::Overflowed,
+                        _ => Ending::Exited(false),
+                    };
+                }
+            }
+        };
+        let _ = jobs.heartbeat(job.id, &self.claimer, counted);
+        if matches!(ending, Ending::Exited(true)) {
+            assert!(last.len() as u64 <= counted);
+            write_private(output, last.as_bytes())?;
+        }
+        Ok(ending)
+    }
+
     /// Names this launch of a job so it never reuses the agent state or the
     /// worktree of an earlier launch, such as one an engine stop interrupted
     /// without spending its attempt. Takes the project folder and the job.
@@ -718,6 +850,202 @@ impl ResearchRunner {
         let report = render_report(&kind_label(&job.kind), harness.label(), body);
         write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
     }
+}
+
+/// One agent run outside the research queue that may only read `folder`,
+/// such as onboarding's mapping agent: `name` names its agent state and
+/// sandbox profile, `prompt` goes to it on stdin, `wall_time` bounds it.
+pub(crate) struct ReadOnlyRun<'a> {
+    pub name: &'a str,
+    pub folder: &'a Path,
+    pub prompt: &'a str,
+    pub account: &'a ResearchAccount,
+    pub wall_time: Duration,
+}
+
+/// How a read-only agent run ended: its last message, a plain failure, out
+/// of time, or stopped by its caller or the runner's shutdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadOnlyEnding {
+    Answered(String),
+    Failed(&'static str),
+    TimedOut,
+    Stopped,
+}
+
+impl ResearchRunner {
+    /// Runs one agent with tools off that can read `run.folder` but write only
+    /// its own engine-owned work, home and temp folders, reaching nothing but
+    /// its model endpoint. A managed account is held under the engine custody
+    /// lease for the whole run. Takes the run and `stop`, polled while the
+    /// agent runs. Returns how it ended; the agent's process group is stopped
+    /// on every path, including a panic or an early error.
+    pub(crate) fn run_read_only(
+        &self,
+        run: &ReadOnlyRun<'_>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ReadOnlyEnding, RunError> {
+        if !valid_run_name(run.name) || run.wall_time.is_zero() {
+            return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        let folder = run.folder.canonicalize()?;
+        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+            return Err(RunError::Invalid(
+                "read-only folder must be canonical".into(),
+            ));
+        }
+        let agent = self.state.join("agents").join(run.name);
+        if fs::symlink_metadata(&agent).is_ok() {
+            return Err(RunError::Invalid("read-only run name already used".into()));
+        }
+        let lease = match run.account {
+            ResearchAccount::ManagedCodex { connection, .. }
+            | ResearchAccount::ManagedClaude { connection, .. } => {
+                let jobs = ResearchJobs::open(&self.database)?;
+                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
+                    if code == PROFILE_BUSY {
+                        RunError::Busy
+                    } else {
+                        RunError::Account(code)
+                    }
+                })?;
+                Some(self.lease(&host, &fact.binding, run.name, 1)?)
+            }
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+        };
+        private_directory(&agent)?;
+        let home = match &lease {
+            Some(lease) => lease_home(lease)?,
+            None => {
+                let home = agent.join("home");
+                private_directory(&home)?;
+                home
+            }
+        };
+        let work = agent.join("work");
+        private_directory(&work)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
+        let harness = run.account.harness();
+        let executable = match harness {
+            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::ClaudeCode => self
+                .claude
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
+        };
+        let mut sandbox = ProjectSandbox::new(
+            &work,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(vec![model_remote(run.account)?]),
+        )?
+        .allow_read(&folder)?;
+        if let Some(parent) = executable.canonicalize()?.parent() {
+            sandbox = sandbox.allow_read(parent)?;
+        }
+        let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
+        sandbox.install(&profile)?;
+        write_private(&agent.join("prompt.md"), run.prompt.as_bytes())?;
+        let mut command = sandbox.command(&profile, executable);
+        let (output, stdout_log) = match harness {
+            ResearchHarness::Codex => {
+                let output = tmp.join("answer.md");
+                codex_arguments(&mut command, &folder, &output, &home, false, run.account)?;
+                (output, "events.jsonl")
+            }
+            ResearchHarness::ClaudeCode => {
+                claude_arguments(&mut command, &home, &tmp, false, run.account)?;
+                (agent.join("output.md"), "output.md")
+            }
+        };
+        command
+            .current_dir(&folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut running = AgentProcess::new(command.spawn()?);
+        let counted = Arc::new(AtomicU64::new(0));
+        let mut drains = Vec::with_capacity(2);
+        let streams = [
+            (
+                running
+                    .child
+                    .stdout
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+                stdout_log,
+            ),
+            (
+                running
+                    .child
+                    .stderr
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+                "stderr.log",
+            ),
+        ];
+        for (stream, name) in streams {
+            let Some(stream) = stream else { continue };
+            let log = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(agent.join(name))?;
+            let counted = counted.clone();
+            let log_max = self.limits.output_bytes_max;
+            drains.push(std::thread::spawn(move || {
+                drain(stream, &counted, log, log_max)
+            }));
+        }
+        if let Some(mut stdin) = running.child.stdin.take() {
+            let _ = stdin.write_all(run.prompt.as_bytes());
+        }
+        let started = Instant::now();
+        let ending = loop {
+            if let Some(status) = running.child.try_wait()? {
+                break (!status.success())
+                    .then_some(ReadOnlyEnding::Failed("Agent stopped with an error"));
+            }
+            if started.elapsed() >= run.wall_time {
+                break Some(ReadOnlyEnding::TimedOut);
+            }
+            if stop() || self.is_stopping() {
+                break Some(ReadOnlyEnding::Stopped);
+            }
+            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
+                break Some(ReadOnlyEnding::Failed("Agent wrote too much output"));
+            }
+            std::thread::sleep(POLL);
+        };
+        running.stop();
+        drop(running);
+        for handle in drains {
+            let _ = handle.join();
+        }
+        drop(lease);
+        if let Some(ending) = ending {
+            return Ok(ending);
+        }
+        let answer = read_bounded(&output, self.limits.report_bytes_max)
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_default();
+        Ok(if answer.is_empty() {
+            ReadOnlyEnding::Failed("Agent returned no answer")
+        } else {
+            ReadOnlyEnding::Answered(answer)
+        })
+    }
+}
+
+/// Whether `name` can name a read-only run's agent state, sandbox profile and
+/// lease operation: 1 to 96 ASCII letters, digits, `-` or `_`.
+fn valid_run_name(name: &str) -> bool {
+    (1..=96).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 /// The agent home a managed launch runs in: the held lease's profile path,
@@ -947,6 +1275,28 @@ fn claude_arguments(
     Ok(())
 }
 
+/// Names the account and model a research pane launches on, in the agent's home.
+/// Takes the research account and the home. Returns the binding and the model; research
+/// accounts carry no key.
+fn pane_account(account: &ResearchAccount, home: &Path) -> (AccountBinding, Option<String>) {
+    let home = home.to_path_buf();
+    match account {
+        ResearchAccount::Endpoint { base_url, model }
+        | ResearchAccount::AnthropicEndpoint { base_url, model } => (
+            AccountBinding::Url {
+                home,
+                base_url: base_url.clone(),
+                key: None,
+            },
+            Some(model.clone()),
+        ),
+        ResearchAccount::ManagedCodex { model, .. }
+        | ResearchAccount::ManagedClaude { model, .. } => {
+            (AccountBinding::Subscription { home }, model.clone())
+        }
+    }
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -1070,15 +1420,15 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
 /// happens when it is dropped while a panic unwinds or a launch step fails,
 /// kills the whole group, reaps the agent and waits until the group is empty,
 /// so no agent process outlives the run that started it.
-struct AgentProcess {
-    child: Child,
-    group: u32,
+pub(crate) struct AgentProcess {
+    pub(crate) child: Child,
+    pub(crate) group: u32,
     stopped: bool,
 }
 
 impl AgentProcess {
     /// Takes a just spawned agent that leads its own process group.
-    fn new(child: Child) -> Self {
+    pub(crate) fn new(child: Child) -> Self {
         let group = child.id();
         assert!(group > 1);
         Self {
@@ -1090,7 +1440,7 @@ impl AgentProcess {
 
     /// Kills the agent's group once, reaps the agent and waits for the group
     /// to empty. Later calls do nothing, so a reused group id is never killed.
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if self.stopped {
             return;
         }
@@ -1139,7 +1489,14 @@ fn await_group_exit(group: u32) {
     }
 }
 
-fn drain(mut stream: Box<dyn Read + Send>, counted: &AtomicU64, mut log: File, log_max: u64) {
+/// Copies an agent stream into its log, counting every byte read and logging
+/// at most `log_max` bytes, until the stream ends.
+pub(crate) fn drain(
+    mut stream: Box<dyn Read + Send>,
+    counted: &AtomicU64,
+    mut log: File,
+    log_max: u64,
+) {
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
     while let Ok(read) = stream.read(&mut buffer) {
@@ -1155,7 +1512,8 @@ fn drain(mut stream: Box<dyn Read + Send>, counted: &AtomicU64, mut log: File, l
     }
 }
 
-fn private_directory(path: &Path) -> io::Result<()> {
+/// Creates a 0700 directory, or accepts an existing real directory there.
+pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

@@ -171,44 +171,20 @@ fn loopback(text: &str) -> bool {
 }
 
 fn copy(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/usr/bin/pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    child
-        .stdin
-        .take()
-        .ok_or("clipboard_unavailable")?
-        .write_all(text.as_bytes())
-        .map_err(|error| error.to_string())?;
-    let status = child.wait().map_err(|error| error.to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "clipboard_failed".into())
+    crate::platform::copy_text(text).map_err(String::from)
 }
 
 /// Opens an https page in the default browser.
-/// Input: the address from the engine. Output: Ok once handed to macOS; other
-/// schemes are refused.
+/// Input: the address from the engine. Output: Ok once handed to the system's
+/// opener; other schemes are refused.
 pub fn open_page(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("page_refused".into());
     }
-    let status = std::process::Command::new("/usr/bin/open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| error.to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "page_failed".into())
+    crate::platform::open(std::ffi::OsStr::new(url)).map_err(|code| match code {
+        "open_failed" => "page_failed".to_owned(),
+        other => other.to_owned(),
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

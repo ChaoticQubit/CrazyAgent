@@ -45,7 +45,7 @@ test("setup and default-pack refusals read as plain sentences", () => {
 test("every setup command the client calls is a desktop command the bridge maps plainly", () => {
   const source = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
-  const setup = readFileSync(new URL("../src-tauri/src/bridge/setup.rs", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
   const commands = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const expected = {
     setupStatus: "desktop_setup_status",
@@ -61,7 +61,8 @@ test("every setup command the client calls is a desktop command the bridge maps 
     assert.ok(commands.includes(`async fn ${command}(`), command);
   }
   for (const name of ["run_setup", "set_pack_entry", "remove_pack_entry"]) {
-    assert.match(setup, new RegExp(`pub async fn ${name}\\([^)]*generation: u64,?\\s*\\) -> Result<IntentReceipt, BridgeError>`), name);
+    assert.match(setup, new RegExp(`pub async fn ${name}\\([^)]*generation: u64,?\\s*\\) -> Result<SetupStatus, BridgeError>`), name);
+    assert.match(setup, new RegExp(`pub async fn ${name}\\([^)]*\\)[^{]*\\{[^}]*self\\.setup_change\\(`), name);
   }
   for (const kind of ["run_setup", "pack_set", "pack_remove"]) {
     assert.ok(bridge.includes(`=> ("${kind}", None, None)`), kind);

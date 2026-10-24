@@ -1,4 +1,4 @@
-import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
+import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
@@ -307,7 +307,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "run_setup" | "pack_set" | "pack_remove";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -755,17 +755,22 @@ export type AddFolderMode = "move" | "copy";
 
 export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
 
-export interface OnboardingView {
-  graph: OnboardingStep;
-  mapping: OnboardingStep;
-  draft: ProjectSetup;
-  missing: string[];
-  name?: string;
-  overview?: string | null;
+export interface MappingFacts {
+  languages: string[];
+  build_commands: string[];
+  test_commands: string[];
+  entry_points: string[];
 }
 
-export interface OnboardingStarted extends IntentReceipt {
-  project_id: string | null;
+export interface OnboardingView {
+  project_id: string;
+  graph: OnboardingStep;
+  mapping: OnboardingStep;
+  name: string;
+  draft: ProjectSetup;
+  facts: MappingFacts;
+  missing: string[];
+  overview: string | null;
 }
 
 export interface GitHubDeviceCode {
@@ -837,11 +842,11 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
 export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
-  | { kind: "missing" }
-  | { kind: "found"; version: string }
-  | { kind: "installing" }
-  | { kind: "installed"; version: string }
-  | { kind: "failed"; reason: string };
+  | { state: "missing" }
+  | { state: "found"; version: string }
+  | { state: "installing" }
+  | { state: "installed"; version: string }
+  | { state: "failed"; reason: string };
 
 export interface Dependency {
   name: DependencyName;
@@ -850,15 +855,9 @@ export interface Dependency {
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
-
 export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
 
-export type PackState =
-  | { kind: "available" }
-  | { kind: "installing" }
-  | { kind: "on" }
-  | { kind: "off" }
-  | { kind: "failed"; reason: string };
+export type PackState = { state: "available" } | { state: "installing" } | { state: "on" } | { state: "off" } | { state: "failed"; reason: string };
 
 export interface PackEntry {
   id: string;
@@ -874,6 +873,158 @@ export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
   running: boolean;
+}
+
+/** Reads the projects home folder and whether the engine watches it. Output: the home. */
+export function projectsHome(): Promise<ProjectsHome> {
+  return invoke<ProjectsHome>("desktop_projects_home");
+}
+
+/** Picks the projects home folder; nothing on disk moves.
+ * Inputs: an absolute folder path and a generation. Output: the engine receipt. */
+export function setProjectsHome(path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_projects_home", { path, generation });
+}
+
+/** Moves every project folder into a new projects home, after the owner saw the size.
+ * Inputs: the new absolute folder and a generation. Output: the engine receipt. */
+export function moveProjectsHome(path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_move_projects_home", { path, generation });
+}
+
+/** Lists the folders in the projects home with their state. Output: the found projects. */
+export function foundProjects(): Promise<FoundProject[]> {
+  return invoke<FoundProject[]>("desktop_found_projects");
+}
+
+/** Measures a folder before Copy and names its GitHub repository, if any.
+ * Input: an absolute folder path. Output: its size and GitHub owner/name. */
+export function folderSize(path: string): Promise<FolderSize> {
+  return invoke<FolderSize>("desktop_folder_size", { path });
+}
+
+/** Moves or copies an existing folder into the projects home.
+ * Inputs: the source folder, move or copy, and a generation. Output: the engine receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, generation });
+}
+
+/** Starts onboarding a found folder on a pool. Inputs: the folder, the pool id and a
+ * generation. Output: the engine receipt; Home then lists the folder as setting up. */
+export function startOnboarding(path: string, pool: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_start_onboarding", { path, pool, generation });
+}
+
+/** Reads one project's onboarding with the mapping agent's overview. Input: the project id. */
+export function onboarding(id: string): Promise<OnboardingView> {
+  return invoke<OnboardingView>("desktop_onboarding", { id });
+}
+
+/** Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status. */
+export function githubSignOut(): Promise<GitHubStatus> {
+  return invoke<GitHubStatus>("desktop_github_sign_out");
+}
+
+/** Reads setup: tools, the default pack and whether setup is running. Output: the status. */
+export function setupStatus(): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_setup_status");
+}
+
+/** Starts setup with the ticked pack entries; the ticked MCP servers count as approved.
+ * Inputs: the ticked ids and a generation. Output: the status as the run starts. */
+export function runSetup(pack: string[], generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
+}
+
+/** Switches one installed pack entry on or off. Inputs: its id, the state and a generation. */
+export function setPackEntry(id: string, on: boolean, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, generation });
+}
+
+/** Removes one installed pack entry and what it added. Inputs: its id and a generation. */
+export function removePackEntry(id: string, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, generation });
+}
+
+/** What one node of a project's team graph stands for: the master, one harness with its
+ * agent count, or one agent. */
+export type GraphNodeKind = "master" | "harness_group" | "agent";
+export type GraphEdgeState = "sent" | "running" | "done" | "failed";
+
+/** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
+ * links an agent to its harness group and a group to the master; `terminal` is the name the
+ * terminal commands take, for the master and agents that have one. */
+export interface GraphNode {
+  id: string;
+  kind: GraphNodeKind;
+  parent: string | null;
+  label: string;
+  harness: string;
+  status: TeamAgentStatus | null;
+  status_label: string | null;
+  account: string | null;
+  agents: number | null;
+  terminal: string | null;
+}
+
+/** One task edge from the master to the agent running it, or to its harness group before
+ * that. `reply` is the result or the plain problem once the task ended. */
+export interface GraphEdge {
+  from: string;
+  to: string;
+  task_id: number;
+  source: "master" | "owner";
+  text: string;
+  state: GraphEdgeState;
+  reply: string | null;
+}
+
+/** One project's team as a graph: the master, harness groups, agents and task edges. */
+export interface TeamGraph {
+  project_id: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/** A control message on an attached terminal channel: the terminal's size once attached,
+ * then a close with a plain reason, or a rejection with a plain code when it never attached. */
+export type TerminalFrame =
+  | { kind: "attached"; agent_id: string; cols: number; rows: number }
+  | { kind: "closed"; reason: string }
+  | { kind: "rejected"; code: string };
+
+/** One message on an attached terminal channel: raw screen or output bytes, in order (the
+ * current screen first), or a control frame. */
+export type TerminalMessage = ArrayBuffer | TerminalFrame;
+
+/** Reads one project's team graph. Input: the project id. Output: nodes and task edges. */
+export function teamGraph(id: string): Promise<TeamGraph> {
+  return invoke<TeamGraph>("desktop_team_graph", { id });
+}
+
+/** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
+ * and then live output until the terminal closes or the view detaches. Inputs: the terminal
+ * name and the channel. Output: resolves once the engine accepted the attach. */
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<void> {
+  return invoke<void>("desktop_terminal_attach", { agent, output });
+}
+
+/** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
+ * and 1 to 4096 bytes. Output: resolves once the bridge queued them in order. */
+export function terminalInput(agent: string, bytes: number[]): Promise<void> {
+  return invoke<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
+ * name, columns and rows, each from 2 to 1000. Output: resolves once queued. */
+export function terminalResize(agent: string, cols: number, rows: number): Promise<void> {
+  return invoke<void>("desktop_terminal_resize", { agent, cols, rows });
+}
+
+/** Closes this window's view of an agent terminal; the agent keeps running. Input: the
+ * terminal name. Output: resolves once the view is gone. */
+export function terminalDetach(agent: string): Promise<void> {
+  return invoke<void>("desktop_terminal_detach", { agent });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
@@ -1230,27 +1381,6 @@ export function restartAgent(id: string): Promise<AgentView> {
 /** Reads what agents launched for a project receive: skill folders and approved MCP servers. */
 export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
   return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
-}
-
-/** Reads the setup screen: tmux, uv and Graphify, each default-pack entry, and whether setup runs. */
-export function setupStatus(): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_setup_status");
-}
-
-/** Starts setup with the ticked pack entries as one owner intent; ticked MCP servers count as
- * approved by the owner. */
-export function runSetup(pack: string[], generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_run_setup", { pack, generation });
-}
-
-/** Switches one installed default-pack entry on or off with everything it added, as one owner intent. */
-export function setPackEntry(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_set_pack_entry", { id, on, generation });
-}
-
-/** Removes one installed default-pack entry and everything it added, as one owner intent. */
-export function removePackEntry(id: string, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_remove_pack_entry", { id, generation });
 }
 
 export interface MasterTurn {

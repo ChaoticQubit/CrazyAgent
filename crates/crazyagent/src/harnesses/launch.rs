@@ -7,23 +7,23 @@ use crate::protocol::{CredentialRef, RequestId, SessionId};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX;
-const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
-const TOOLS_ON_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-const CODEX_KEY_VARIABLE: &str = "CRAZYAGENT_API_KEY";
-const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
+pub(super) const TOOLS_ON_PATH: &str =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+pub(super) const CODEX_KEY_VARIABLE: &str = "CRAZYAGENT_API_KEY";
+pub(super) const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
 const MKFIFO: &str = "/usr/bin/mkfifo";
@@ -52,7 +52,7 @@ const CODEX_TOOLS_ON: [&str; 5] = [
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
-const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
+pub(super) const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -89,6 +89,10 @@ impl Secret {
 
     pub(crate) fn duplicate(&self) -> Self {
         Self(self.0.clone())
+    }
+
+    pub(super) fn reveal(&self) -> &str {
+        &self.0
     }
 }
 
@@ -127,7 +131,7 @@ impl AccountBinding {
         }
     }
 
-    fn base_url(&self) -> Option<&str> {
+    pub(super) fn base_url(&self) -> Option<&str> {
         match self {
             Self::Subscription { .. } => None,
             Self::ApiKey { base_url, .. } => base_url.as_deref(),
@@ -135,7 +139,7 @@ impl AccountBinding {
         }
     }
 
-    fn key(&self) -> Option<&Secret> {
+    pub(super) fn key(&self) -> Option<&Secret> {
         match self {
             Self::Subscription { .. } => None,
             Self::ApiKey { key, .. } => Some(key),
@@ -217,7 +221,7 @@ pub fn rate_limited(message: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchError(pub String);
 
-fn failure(code: &str) -> LaunchError {
+pub(super) fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
 }
 
@@ -264,32 +268,34 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .sandbox_profile
         .as_ref()
         .ok_or_else(|| failure("launch_sandbox_required"))?;
-    let mut command = Command::new(SANDBOX_EXEC);
+    if !cfg!(target_os = "macos") {
+        return Err(failure("launch_sandbox_unavailable"));
+    }
+    let path = if request.tools {
+        TOOLS_ON_PATH
+    } else {
+        TOOLS_OFF_PATH
+    };
+    let mut command = crate::sandbox::agent_command(
+        profile,
+        &request.executable,
+        &[
+            ("HOME", home.as_os_str()),
+            ("PATH", OsStr::new(path)),
+            ("LANG", OsStr::new("C")),
+            ("LC_ALL", OsStr::new("C")),
+        ],
+        environment
+            .iter()
+            .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
+    )
+    .map_err(|_| failure("launch_environment_refused"))?;
     command
-        .arg("-f")
-        .arg(profile)
-        .arg(&request.executable)
         .args(&arguments)
-        .env_clear()
-        .env("HOME", home)
-        .env(
-            "PATH",
-            if request.tools {
-                TOOLS_ON_PATH
-            } else {
-                TOOLS_OFF_PATH
-            },
-        )
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
         .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    for (name, value) in environment {
-        command.env(name, value);
-    }
+        .stderr(Stdio::piped());
     assert_eq!(
         command.get_current_dir(),
         Some(request.working_dir.as_path())
@@ -306,8 +312,24 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
 
 fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
-    let mut configuration = vec!["cli_auth_credentials_store=\"file\"".to_owned()];
     let mut environment = vec![("CODEX_HOME", home.clone()), ("TMPDIR", home)];
+    if let Some(key) = request.account.key() {
+        environment.push((CODEX_KEY_VARIABLE, OsString::from(&key.0)));
+    }
+    let mut arguments = Vec::new();
+    for setting in codex_configuration(request, context) {
+        arguments.push(OsString::from("-c"));
+        arguments.push(OsString::from(setting));
+    }
+    arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
+    Ok((arguments, environment))
+}
+
+/// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
+/// the account's provider, the model and the tools switch. Input: the request and whether
+/// project context was installed. Output: the settings, in order, without any secret.
+pub(super) fn codex_configuration(request: &LaunchRequest, context: bool) -> Vec<String> {
+    let mut configuration = vec!["cli_auth_credentials_store=\"file\"".to_owned()];
     match &request.account {
         AccountBinding::Subscription { .. } => {
             configuration.push("model_provider=\"openai\"".into());
@@ -324,9 +346,6 @@ fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation
                 "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{base_url}\",wire_api=\"responses\"{key}}}"
             ));
             configuration.push("model_provider=\"crazyagent\"".into());
-            if let Some(key) = request.account.key() {
-                environment.push((CODEX_KEY_VARIABLE, OsString::from(&key.0)));
-            }
         }
     }
     if let Some(model) = &request.model {
@@ -343,13 +362,12 @@ fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation
             .filter(|setting| !(context && request.tools && **setting == "mcp_servers={}"))
             .map(|setting| (*setting).to_owned()),
     );
-    let mut arguments = Vec::new();
-    for setting in configuration {
-        arguments.push(OsString::from("-c"));
-        arguments.push(OsString::from(setting));
-    }
-    arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
-    Ok((arguments, environment))
+    assert!(request.account.key().is_none_or(|key| {
+        configuration
+            .iter()
+            .all(|setting| !setting.contains(&key.0))
+    }));
+    configuration
 }
 
 fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> Invocation {
@@ -405,11 +423,11 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     (arguments, environment)
 }
 
-fn harness_id(request: &LaunchRequest) -> &'static str {
+pub(super) fn harness_id(request: &LaunchRequest) -> &'static str {
     super::spec(&request.harness).map_or("", |spec| spec.id)
 }
 
-fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
+pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
     if !request.executable.is_absolute()

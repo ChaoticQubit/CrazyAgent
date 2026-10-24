@@ -29,8 +29,9 @@ const stored = (extra = {}) => ({
   documents: [], folder: "/Users/mira/Projects/shop", created_ms: 1, revision: 4, ...extra,
 });
 const view = (extra = {}) => ({
-  graph: { kind: "done" }, mapping: { kind: "done" },
+  project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
+  facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
   missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", ...extra,
 });
 
@@ -157,36 +158,70 @@ test("a started onboarding opens only with a project id from an applied receipt"
   assert.deepEqual(intake.startedProject({ ...base, outcome: "uncertain", pending: true, rejection: null }), { kind: "unconfirmed" });
 });
 
+const dep = (name, state, label = name) => ({ name, label, state });
+
 test("setup lists each tool's state in plain words", () => {
-  assert.deepEqual(intake.dependencyView({ name: "tmux", state: { kind: "found", version: "3.5a" } }),
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "found", version: "3.5a" })),
     { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: "Version 3.5a on this Mac." });
-  assert.deepEqual(intake.dependencyView({ name: "uv", state: { kind: "installed", version: "0.9.2" } }),
+  assert.deepEqual(intake.dependencyView(dep("uv", { state: "installed", version: "0.9.2" })),
     { title: "uv", about: "Installs graphify.", word: "Installed", tone: "ok", line: "Version 0.9.2 installed." });
-  assert.deepEqual(intake.dependencyView({ name: "graphify", state: { kind: "installing" } }),
+  assert.deepEqual(intake.dependencyView(dep("graphify", { state: "installing" })),
     { title: "graphify", about: "Builds a code graph of each project.", word: "Installing", tone: "info", line: null });
-  assert.deepEqual(intake.dependencyView({ name: "graphify", state: { kind: "failed", reason: "Checksum didn't match." } }).line, "Checksum didn't match.");
-  assert.deepEqual(intake.dependencyView({ name: "tmux", state: { kind: "missing" } }).line, "Setup installs it.");
-  assert.deepEqual(intake.packStateView({ kind: "on" }), { word: "On", tone: "ok", line: null });
-  assert.equal(intake.packStateView({ kind: "off" }).word, "Off");
-  assert.equal(intake.packStateView({ kind: "available" }).word, "Not installed");
-  assert.equal(intake.packStateView({ kind: "failed", reason: "The download failed." }).line, "The download failed.");
+  assert.deepEqual(intake.dependencyView(dep("graphify", { state: "failed", reason: "Checksum didn't match." })).line, "Checksum didn't match.");
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "missing" })).line, "Setup installs it.");
+  assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "uv (Python tools)")).title, "uv (Python tools)");
+  assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
 });
 
+const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
-  { id: "superpowers", kind: "skill", group: "workflow", source: "github.com/obra/superpowers", license: "MIT", on_by_default: true, state: { kind: "available" } },
-  { id: "serena", kind: "mcp_server", group: "optional", source: "github.com/oraios/serena", license: "MIT", on_by_default: false, state: { kind: "available" } },
-  { id: "context-mode", kind: "mcp_server", group: "context", source: "github.com/mksglu/context-mode", license: "MIT", on_by_default: true, state: { kind: "available" } },
-  { id: "headroom", kind: "mcp_server", group: "context", source: "github.com/x/headroom", license: "Apache-2.0", on_by_default: true, state: { kind: "on" } },
+  entry("graphify", "skill", "always", true, { state: "available" }),
+  entry("superpowers", "skill", "workflow", true, { state: "available" }),
+  entry("context-mode", "mcp_server", "context", true, { state: "available" }),
+  entry("headroom", "mcp_server", "context", true, { state: "on" }, { license: "Apache-2.0" }),
+  entry("serena", "mcp_server", "optional", false, { state: "available" }),
 ];
 
 test("the pack starts with the on-by-default entries ticked and names every ticked MCP server before approval", () => {
-  assert.deepEqual(intake.packTicks(pack), ["superpowers", "context-mode", "headroom"]);
+  assert.deepEqual(intake.packTicks(pack), ["graphify", "superpowers", "context-mode", "headroom"]);
   assert.equal(intake.approvalLine(pack, ["superpowers", "context-mode", "headroom"]),
     "Continuing lets your agents run these MCP servers: context-mode, headroom. You can turn any of them off later.");
   assert.equal(intake.approvalLine(pack, ["superpowers"]), null);
-  assert.equal(intake.setupBusy({ dependencies: [{ name: "uv", label: "uv", state: { kind: "installing" } }], pack: [], running: false }), true);
+  assert.equal(intake.setupBusy({ dependencies: [dep("uv", { state: "installing" })], pack: [], running: false }), true);
+  assert.equal(intake.setupBusy({ dependencies: [], pack: [entry("serena", "mcp_server", "optional", false, { state: "installing" })], running: false }), true);
   assert.equal(intake.setupBusy({ dependencies: [], pack, running: true }), true);
   assert.equal(intake.setupBusy({ dependencies: [], pack, running: false }), false);
+});
+
+test("pack states read in plain words and only on or off entries count as installed", () => {
+  assert.deepEqual(intake.packStateView({ state: "available" }), { word: "Not installed", tone: "neutral", line: null });
+  assert.deepEqual(intake.packStateView({ state: "installing" }), { word: "Installing", tone: "info", line: null });
+  assert.deepEqual(intake.packStateView({ state: "on" }), { word: "On", tone: "ok", line: null });
+  assert.deepEqual(intake.packStateView({ state: "off" }), { word: "Off", tone: "neutral", line: null });
+  assert.deepEqual(intake.packStateView({ state: "failed", reason: "Checksum didn't match." }), { word: "Failed", tone: "danger", line: "Checksum didn't match." });
+  assert.deepEqual(pack.filter(intake.installed).map((item) => item.id), ["headroom"]);
+  assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "off" })), true);
+  assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })), false);
+});
+
+test("the pack groups follow the manifest order and keep pack order inside each group", () => {
+  const groups = intake.packGroups([...pack, entry("caveman", "skill", "reply_style", true, { state: "available" }), entry("odd", "skill", "later", false, { state: "available" })]);
+  assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
+    ["Always on", ["graphify"]], ["Workflow skills", ["superpowers"]], ["Reply style", ["caveman"]],
+    ["Context plugins", ["context-mode", "headroom"]], ["Optional", ["serena"]], ["Other", ["odd"]],
+  ]);
+  assert.deepEqual(intake.packGroups([]), []);
+});
+
+test("setup progress counts every tool, the always-on entries and the ticked pack", () => {
+  const status = {
+    dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("uv", { state: "installing" }), dep("graphify", { state: "failed", reason: "no" })],
+    pack: [entry("graphify", "skill", "always", true, { state: "on" }), entry("superpowers", "skill", "workflow", true, { state: "installing" }),
+      entry("serena", "mcp_server", "optional", false, { state: "available" })],
+    running: true,
+  };
+  assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 3, total: 5, failed: 1 });
+  assert.deepEqual(intake.setupProgress(status, []), { done: 3, total: 4, failed: 1 });
 });
 
 test("new routes for adding a project and reviewing its setup parse and format back", () => {
@@ -198,7 +233,7 @@ test("new routes for adding a project and reviewing its setup parse and format b
     assert.deepEqual(router.parseRoute(hash), route);
     assert.equal(router.formatRoute(route), hash);
   }
-  assert.deepEqual(router.parseRoute("#/projects/add/zip"), { name: "home" });
+  assert.deepEqual(router.parseRoute("#/projects/add/zip"), { name: "project", id: "add", tab: "overview" });
   assert.deepEqual(router.parseRoute("#/projects/p1/overview"), { name: "project", id: "p1", tab: "overview" });
 });
 
@@ -320,19 +355,28 @@ test("the setup review shows the steps, the overview, missing items and a confir
   assert.match(html(OnboardingReviewView, { ...base, view: notReady, draft: null }), /Not ready yet/);
 });
 
-test("the tools step lists dependencies and the pack, and names the MCP servers it approves", () => {
-  const status = ok({ dependencies: [{ name: "tmux", label: "tmux", state: { kind: "found", version: "3.5a" } }, { name: "graphify", label: "Graphify", state: { kind: "missing" } }], pack, running: false });
-  const base = { status, ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
+test("the tools step lists dependencies and the pack by group, and names the MCP servers it approves", () => {
+  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" })], pack, running: false };
+  const base = { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
   const markup = html(ToolsSetupView, base);
   assert.match(markup, /tmux[\s\S]*Found[\s\S]*Version 3\.5a on this Mac\./);
   assert.match(markup, /graphify[\s\S]*Not installed/);
-  assert.match(markup, /Skills[\s\S]*superpowers/);
-  assert.match(markup, /MCP servers[\s\S]*serena/);
+  assert.match(markup, /<legend>Always on<\/legend>[\s\S]*graphify[\s\S]*always on/);
+  assert.match(markup, /<legend>Workflow skills<\/legend>[\s\S]*superpowers/);
+  assert.match(markup, /<legend>Context plugins<\/legend>[\s\S]*context-mode[\s\S]*MCP server/);
+  assert.match(markup, /<legend>Optional<\/legend>[\s\S]*serena[\s\S]*off by default/);
   assert.match(markup, /headroom[\s\S]*>On</);
   assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode, headroom\./);
   assert.match(markup, />Set up tools<\/button>/);
   assert.match(markup, />Skip for now<\/button>/);
-  assert.match(html(ToolsSetupView, { ...base, started: true }), />Continue<\/button>/);
+  assert.doesNotMatch(markup, /role="status"/);
+  const finished = html(ToolsSetupView, { ...base, started: true });
+  assert.match(finished, /Setup finished: 2 of 6 done\./);
+  assert.match(finished, />Continue<\/button>/);
+  assert.doesNotMatch(finished, /Skip for now/);
+  const running = html(ToolsSetupView, { ...base, status: ok({ ...value, running: true }) });
+  assert.match(running, /Installing: 2 of 6 done\. You can continue; setup keeps going\./);
+  assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });
 
