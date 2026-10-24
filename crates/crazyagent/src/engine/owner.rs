@@ -161,6 +161,10 @@ pub enum OwnerMutation {
         source: String,
         mode: crate::projects_home::AddMode,
     },
+    StartOnboarding {
+        path: String,
+        pool: CredentialRef,
+    },
     CancelResearch {
         project_id: ProjectId,
         job: i64,
@@ -319,6 +323,14 @@ impl OwnerMutation {
                 };
                 action.validate()?;
                 Command::ProjectsHome { action }
+            }
+            Self::StartOnboarding { path, pool } => {
+                let action = crate::onboarding::OnboardingAction::Start {
+                    path: path.clone(),
+                    pool: pool.clone(),
+                };
+                action.validate()?;
+                Command::Onboarding { action }
             }
             Self::CancelResearch { project_id, job } => {
                 let action = crate::project_setup::SetupAction::CancelResearch {
@@ -497,6 +509,9 @@ pub enum OwnerRead {
     TeamStatus {
         project_id: ProjectId,
     },
+    TeamGraph {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -514,6 +529,9 @@ pub enum OwnerRead {
     FoundProjects,
     FolderSize {
         path: String,
+    },
+    Onboarding {
+        project_id: ProjectId,
     },
     Memories {
         scope: crate::memory::library::MemoryScope,
@@ -587,10 +605,12 @@ impl OwnerRead {
             | Self::ProjectSetup { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
+            | Self::TeamGraph { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
             | Self::FoundProjects
+            | Self::Onboarding { .. }
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
             | Self::PoolSummaries { .. } => return Ok(None),
@@ -927,6 +947,9 @@ pub enum OwnerData {
     TeamStatus {
         status: Box<crate::team::TeamStatus>,
     },
+    TeamGraph {
+        graph: Box<crate::team::TeamGraph>,
+    },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
     },
@@ -949,6 +972,9 @@ pub enum OwnerData {
     },
     FolderSize {
         bytes: u64,
+    },
+    Onboarding {
+        onboarding: Box<crate::onboarding::Onboarding>,
     },
     Memories {
         page: crate::memory::library::MemoryPage,

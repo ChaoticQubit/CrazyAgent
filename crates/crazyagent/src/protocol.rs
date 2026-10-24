@@ -188,6 +188,10 @@ pub enum Command {
         action: crate::projects_home::HomeAction,
     },
     #[serde(skip_deserializing)]
+    Onboarding {
+        action: crate::onboarding::OnboardingAction,
+    },
+    #[serde(skip_deserializing)]
     Team {
         action: crate::team::TeamAction,
     },

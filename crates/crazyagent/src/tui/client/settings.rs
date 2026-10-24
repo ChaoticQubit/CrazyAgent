@@ -1,4 +1,5 @@
 use super::accounts::{AccountsReply, AccountsRequest};
+use super::app_setup::{AppSetupEvent, AppSetupJob};
 use super::*;
 use crate::accounts::AccountView;
 use crate::config::ModelAccessEdit;
@@ -45,6 +46,7 @@ pub(in crate::tui) enum SettingsJob {
         project: ProjectId,
     },
     Plugin(PluginChange),
+    AppSetup(AppSetupJob),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -115,6 +117,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
             Self::Plugin(_) => "Plugin",
+            Self::AppSetup(job) => job.name(),
         })
     }
 }
@@ -194,6 +197,7 @@ pub(in crate::tui) enum SettingsEvent {
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
     PluginChanged(Result<Option<ServerView>, String>),
+    AppSetup(AppSetupEvent),
 }
 
 impl SettingsEvent {
@@ -214,6 +218,7 @@ impl SettingsEvent {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
+            SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
         }
     }
 }
@@ -331,6 +336,7 @@ impl NativeOwner {
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
+            SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
             SettingsJob::DeleteMemory { memory, generation } => {
                 SettingsEvent::MemoryDeleted(match self.settings_controller() {
                     Ok(controller) => applied(
@@ -504,7 +510,7 @@ impl NativeOwner {
         Err("account_pages_unbounded".into())
     }
 
-    fn settings_controller(&mut self) -> Result<&mut OwnerController, String> {
+    pub(super) fn settings_controller(&mut self) -> Result<&mut OwnerController, String> {
         if !self.ready {
             return Err("trusted_connection_unavailable".into());
         }
@@ -690,7 +696,7 @@ fn connection_lost(code: &str) -> bool {
 /// applied operation whose result is the refusal.
 /// Inputs: the reply, the code for an unknown outcome and the lost-connection
 /// flag. Output: done only when the change took effect, else the plain code.
-fn applied(
+pub(super) fn applied(
     reply: Result<OwnerResponse, EngineError>,
     unknown: &str,
     lost: &mut bool,
@@ -709,7 +715,7 @@ fn applied(
     }
 }
 
-fn problem(error: &EngineError, lost: &mut bool) -> String {
+pub(super) fn problem(error: &EngineError, lost: &mut bool) -> String {
     if connection_lost(&error.0) {
         *lost = true;
     }
