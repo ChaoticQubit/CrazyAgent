@@ -335,6 +335,24 @@ impl Fixture {
         page
     }
 
+    async fn settled(
+        &self,
+        owner: &OwnerClient,
+        session: &MasterSessionView,
+        id: &str,
+    ) -> MasterTurnView {
+        let id = RequestId::new(id).unwrap();
+        for _ in 0..200 {
+            let page = self.page(owner, session).await;
+            let turn = page.turns.into_iter().find(|turn| turn.id == id).unwrap();
+            if turn.phase != MasterTurnPhase::Queued {
+                return turn;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("actual master dispatch left turn {} queued", id.as_str());
+    }
+
     async fn history(&self, owner: &OwnerClient, name: &str) -> ConversationPage {
         let state = self
             .read(
@@ -586,8 +604,13 @@ async fn master_native_backends_store_configured_metadata_without_auth_or_execut
         assert_eq!(session.selection, selected);
         f.submit(&owner, &format!("turn-{name}"), &session, "Plan the work.")
             .await;
-        let page = f.page(&owner, &session).await;
-        queued(&page.turns[0], &session, &format!("turn-{name}"));
+        let turn = f.settled(&owner, &session, &format!("turn-{name}")).await;
+        assert_eq!(turn.session_id, session.session_id);
+        assert_eq!(turn.phase, MasterTurnPhase::Blocked);
+        assert_eq!(turn.reason, Some(MasterReason::ConnectionChanged));
+        assert_eq!(turn.attempt, None);
+        assert_eq!(turn.runtime, None);
+        assert_eq!(turn.reply, None);
     }
     let db = database(f.root.path(), false);
     for table in ["model_gateway_observations", "model_gateway_attempts"] {
@@ -851,9 +874,16 @@ async fn master_cancel_before_delivery_is_durable_and_allows_a_new_planning_turn
         "Use the revised requirement.",
     )
     .await;
-    let page = f.page(&reader, &session).await;
-    queued(&page.turns[1], &session, "next-turn");
-    assert_eq!(page.turns[1].ordinal, 2);
+    let next = f.settled(&reader, &session, "next-turn").await;
+    assert_eq!(next.session_id, session.session_id);
+    assert_eq!(next.phase, MasterTurnPhase::Blocked);
+    assert_eq!(next.reason, Some(MasterReason::ConnectionChanged));
+    assert_eq!(next.attempt, None);
+    assert_eq!(next.runtime, None);
+    assert_eq!(next.reply, None);
+    assert_eq!(next.ordinal, 2);
+    assert_eq!(f.page(&reader, &session).await.turns.len(), 2);
+    assert_eq!(f.session(&reader, "p").await.unwrap().current_turn, None);
     assert_eq!(f.history(&reader, "p").await.entries.len(), 2);
     f.stop().await;
 }
@@ -864,7 +894,7 @@ async fn master_close_before_delivery_cancels_queue_without_fabricating_a_reply(
     let owner = f.owner(OwnerClientKind::Desktop).await;
     f.create(&owner, "p").await;
     let (_, session) = f
-        .open(&owner, "open", "p", selection(MasterBackend::Codex))
+        .open(&owner, "open", "p", selection(MasterBackend::Rcli))
         .await;
     f.submit(
         &owner,

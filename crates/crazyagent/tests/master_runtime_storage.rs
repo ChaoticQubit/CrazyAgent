@@ -4,8 +4,8 @@ use crazyagent::engine::owner::{
     OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerResult,
 };
 use crazyagent::master_session::{
-    MasterBackend, MasterOwnerAction, MasterSelection, MasterSessionView, MasterTurnPage,
-    MasterTurnPhase, MasterTurnView,
+    MasterBackend, MasterOwnerAction, MasterReason, MasterSelection, MasterSessionView,
+    MasterTurnPage, MasterTurnPhase, MasterTurnView,
 };
 use crazyagent::protocol::{
     CredentialRef, Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId,
@@ -127,7 +127,7 @@ impl Fixture {
         }
     }
 
-    async fn queued(&self) -> (MasterSessionView, MasterTurnView) {
+    async fn blocked(&self) -> (MasterSessionView, MasterTurnView) {
         apply(
             &self.owner,
             "create-runtime-project",
@@ -220,31 +220,43 @@ impl Fixture {
     }
 
     async fn submit(&self) -> (MasterSessionView, MasterTurnView) {
-        let session = self.session().await;
+        let opened = self.session().await;
         apply(
             &self.owner,
             "submit-runtime-turn",
             OwnerMutation::ProjectMaster {
                 action: MasterOwnerAction::Submit {
-                    project_id: session.project_id.clone(),
-                    session_id: session.session_id.clone(),
+                    project_id: opened.project_id.clone(),
+                    session_id: opened.session_id.clone(),
                     text: "Persist this owner input without claiming model readiness.".into(),
                 },
             },
         )
         .await;
+        let turn = self.settled(&opened).await;
         let session = self.session().await;
-        let page = self.page(&session).await;
-        assert_eq!(page.turns.len(), 1);
-        let turn = page.turns.into_iter().next().unwrap();
-        assert_eq!(turn.phase, MasterTurnPhase::Queued);
-        assert_eq!(turn.reason, None);
+        assert_eq!(turn.phase, MasterTurnPhase::Blocked);
+        assert_eq!(turn.reason, Some(MasterReason::ConnectionChanged));
         assert_eq!(turn.attempt, None);
         assert_eq!(turn.runtime, None);
         assert_eq!(turn.reply, None);
-        assert_eq!(session.current_turn.as_ref(), Some(&turn.id));
-        assert_eq!(turn.input_cursor, session.version);
+        assert_eq!(session.current_turn, None);
+        assert!(turn.input_cursor.value() > opened.version.value());
+        assert!(session.version.value() > turn.input_cursor.value());
         (session, turn)
+    }
+
+    async fn settled(&self, session: &MasterSessionView) -> MasterTurnView {
+        for _ in 0..200 {
+            let page = self.page(session).await;
+            assert_eq!(page.turns.len(), 1);
+            let turn = page.turns.into_iter().next().unwrap();
+            if turn.phase != MasterTurnPhase::Queued {
+                return turn;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("actual master dispatch left the submitted turn queued");
     }
 }
 
@@ -283,7 +295,7 @@ fn probe_phase(
 #[tokio::test]
 async fn real_sqlite_master_turn_schema_accepts_runtime_lifecycle_phases() {
     let mut fixture = Fixture::start().await;
-    let (session, turn) = fixture.queued().await;
+    let (session, turn) = fixture.blocked().await;
     let mut db = Connection::open_with_flags(
         fixture.root.path().join("engine.db"),
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,

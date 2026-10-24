@@ -311,6 +311,32 @@ fn every_purpose_pair_contends_for_the_same_live_physical_lock() {
 }
 
 #[test]
+fn dropping_a_lease_frees_the_profile_while_another_process_shares_its_descriptor() {
+    let mut case = UseCase::new();
+    let guard = case.acquire();
+    let shared = guard.manifest.file.try_clone().unwrap();
+    fcntl_setfd(&shared, FdFlags::empty()).unwrap();
+    assert!(!fcntl_getfd(&shared).unwrap().contains(FdFlags::CLOEXEC));
+    let mut holder = Command::new("/bin/sleep")
+        .env_clear()
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("actual descriptor holder required");
+    drop(shared);
+    assert_busy(&case.manifest());
+    drop(guard);
+    let file = File::open(case.manifest()).unwrap();
+    let freed = flock(&file, FlockOperation::NonBlockingLockExclusive);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert!(freed.is_ok(), "{freed:?}");
+    assert!(holder.try_wait().unwrap().is_some());
+}
+
+#[test]
 fn dropping_coordinator_custody_preserves_owned_guard_descriptors_and_lock() {
     let mut case = UseCase::new();
     let guard = case.acquire();

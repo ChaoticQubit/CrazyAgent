@@ -560,20 +560,21 @@ impl ResearchRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert!(!carries_secret(&command, &context));
-        let mut child = command.spawn()?;
-        let group = child.id();
-        assert!(group > 1);
+        let mut running = AgentProcess::new(command.spawn()?);
+        let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
         for (stream, name) in [
             (
-                child
+                running
+                    .child
                     .stdout
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 stdout_log,
             ),
             (
-                child
+                running
+                    .child
                     .stderr
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
@@ -591,10 +592,11 @@ impl ResearchRunner {
             let log_max = self.limits.output_bytes_max;
             std::thread::spawn(move || drain(stream, &counted, log, log_max));
         }
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &mut child, group, &counted)?;
+        let ending = self.supervise(jobs, job, &mut running, &counted)?;
+        drop(running);
         drop(installed);
         drop(lease);
         Ok((ending, group, output))
@@ -640,14 +642,13 @@ impl ResearchRunner {
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
-        child: &mut Child,
-        group: u32,
+        agent: &mut AgentProcess,
         counted: &AtomicU64,
     ) -> Result<Ending, RunError> {
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = agent.child.try_wait()? {
                 break Ending::Exited(status.success());
             }
             if started.elapsed() >= self.limits.wall_time {
@@ -669,9 +670,7 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
-        stop_group(group);
-        let _ = child.wait();
-        await_group_exit(group);
+        agent.stop();
         let _ = jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
@@ -1064,6 +1063,48 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
             return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A running agent and the process group it leads. Stopping it, which also
+/// happens when it is dropped while a panic unwinds or a launch step fails,
+/// kills the whole group, reaps the agent and waits until the group is empty,
+/// so no agent process outlives the run that started it.
+struct AgentProcess {
+    child: Child,
+    group: u32,
+    stopped: bool,
+}
+
+impl AgentProcess {
+    /// Takes a just spawned agent that leads its own process group.
+    fn new(child: Child) -> Self {
+        let group = child.id();
+        assert!(group > 1);
+        Self {
+            child,
+            group,
+            stopped: false,
+        }
+    }
+
+    /// Kills the agent's group once, reaps the agent and waits for the group
+    /// to empty. Later calls do nothing, so a reused group id is never killed.
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        stop_group(self.group);
+        let _ = self.child.wait();
+        await_group_exit(self.group);
+        self.stopped = true;
+    }
+}
+
+impl Drop for AgentProcess {
+    /// Stops the agent's process group if the run did not already stop it.
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1533,6 +1574,48 @@ mod tests {
         assert_eq!(lease_home(&lease).unwrap(), home);
         assert_ne!(lease_home(&lease).unwrap(), custody.profile_home(&profile));
         drop(lease);
+    }
+
+    fn group_members(group: u32) -> usize {
+        let output = Command::new("/usr/bin/pgrep")
+            .env_clear()
+            .arg("-g")
+            .arg(group.to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).lines().count()
+    }
+
+    #[test]
+    fn an_agent_dropped_while_a_panic_unwinds_leaves_no_process_in_its_group() {
+        use std::os::unix::process::CommandExt;
+        const MID_RUN: &str = "the run fails while its agent and the agent's child are running";
+        let child = Command::new("/bin/sh")
+            .env_clear()
+            .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = child.id();
+        let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let agent = AgentProcess::new(child);
+            let until = Instant::now() + Duration::from_secs(10);
+            while group_members(agent.group) < 2 {
+                assert!(Instant::now() < until, "the agent never started its child");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::panic::panic_any(MID_RUN);
+        }));
+        let payload = unwound.expect_err("the run must panic mid-run");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&MID_RUN));
+        assert_eq!(group_members(group), 0);
+        assert!(rustix::process::test_kill_process_group(pid).is_err());
     }
 
     #[test]

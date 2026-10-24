@@ -361,6 +361,18 @@ impl NativeProfileUse {
     }
 }
 
+impl Drop for NativeProfileUse {
+    /// Releases the profile locks on their open file descriptions when the lease
+    /// ends, so a process that shares one of them, such as a child forked by another
+    /// thread before its exec, can never keep the profile busy after the lease.
+    fn drop(&mut self) {
+        let _ = flock(&self.manifest.file, FlockOperation::Unlock);
+        if self.configured.is_some() {
+            let _ = flock(&self.home.file, FlockOperation::Unlock);
+        }
+    }
+}
+
 impl NativeProfileCustody {
     pub(crate) fn capture(path: &Path, opened: &Metadata) -> Result<Self, EngineError> {
         let parent = path

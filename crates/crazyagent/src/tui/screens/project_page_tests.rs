@@ -590,6 +590,12 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Home  /  Tidepool"), "{shown}");
     assert!(shown.contains("Main  1 account"), "{shown}");
     assert!(!shown.contains("no pool"), "{shown}");
+    assert!(
+        shown
+            .lines()
+            .any(|line| line.starts_with("  Tidepool  ") && line.ends_with('\u{2026}')),
+        "{shown}"
+    );
 }
 
 #[test]
@@ -697,23 +703,27 @@ fn framed(shell: &mut Shell, width: u16, height: u16) -> String {
 #[test]
 fn shell_draws_the_wizard_like_the_design() {
     let about = "A live dashboard for marine researchers to watch sensor buoys and get alerts when readings look wrong.";
-    let mut drawn = Vec::new();
-    for (width, height) in [(120u16, 36u16), (80, 24)] {
+    let shell_at = |width: u16, height: u16| {
         let mut ctx = ctx(width, height);
         ctx.store.pools = Load::Ready(Vec::new());
         let screen = open(&Place::NewProject, &mut ctx);
-        let mut shell = Shell::with(ctx, screen);
-        for character in "Tidepool".chars() {
-            shell.key(Key::Char(character));
-        }
-        shell.key(Key::Tab);
-        for character in about.chars() {
-            shell.key(Key::Char(character));
-        }
-        drawn.push((
-            format!("wiz-about-{width}"),
-            framed(&mut shell, width, height),
-        ));
+        Shell::with(ctx, screen)
+    };
+    assert_eq!(kept_draft(), None);
+    let mut shell = shell_at(120, 36);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
     }
+    shell.key(Key::Tab);
+    for character in about.chars() {
+        shell.key(Key::Char(character));
+    }
+    let mut drawn = vec![("wiz-about-120".to_owned(), framed(&mut shell, 120, 36))];
+    drop(shell);
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+
+    let mut shell = shell_at(80, 24);
+    assert_eq!(kept_draft(), None);
+    drawn.push(("wiz-about-80".to_owned(), framed(&mut shell, 80, 24)));
     check_frames(&drawn);
 }

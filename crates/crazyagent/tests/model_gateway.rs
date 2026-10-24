@@ -328,6 +328,7 @@ fn uncertain_effects_nonquota_errors_and_completed_work_do_not_automatically_rot
         ready(&mut database, &config);
         let tx = database.transaction().unwrap();
         begin_attempt(&tx, &config, &config, &request("first", None), 100).unwrap();
+        let completed = outcome == AttemptOutcome::Succeeded;
         finish_attempt(
             &tx,
             &RequestId::new("first").unwrap(),
@@ -351,12 +352,15 @@ fn uncertain_effects_nonquota_errors_and_completed_work_do_not_automatically_rot
             .0,
             "gateway_failover_unsafe"
         );
-        assert_eq!(
-            begin_attempt(&tx, &config, &config, &request("bypass", None), 200)
-                .unwrap_err()
-                .0,
-            "gateway_previous_attempt_required"
-        );
+        let bypass = begin_attempt(&tx, &config, &config, &request("bypass", None), 200);
+        if completed {
+            let start = bypass.unwrap();
+            assert!(!start.replayed);
+            assert_eq!(start.attempt.request.id, RequestId::new("bypass").unwrap());
+            assert_eq!(start.attempt.request.previous_attempt, None);
+        } else {
+            assert_eq!(bypass.unwrap_err().0, "gateway_previous_attempt_required");
+        }
     }
 }
 

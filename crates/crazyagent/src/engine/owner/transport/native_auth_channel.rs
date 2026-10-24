@@ -2322,15 +2322,17 @@ fallback_allowed = false
 
         async fn retire(&mut self) -> NativeAuthFact {
             let mut session = CustodySession::new(self.guard.take().unwrap());
-            let child = ProcessCommand::new("/usr/bin/true")
+            let mut child = ProcessCommand::new("/bin/cat")
                 .env_clear()
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .process_group(0)
                 .spawn()
                 .unwrap();
+            let input = child.stdin.take().unwrap();
             session.retain_child(child).unwrap();
+            drop(input);
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     if let Some(status) = session.child_mut().unwrap().try_wait().unwrap() {

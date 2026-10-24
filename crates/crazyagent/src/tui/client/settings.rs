@@ -5,7 +5,7 @@ use crate::config::ModelAccessEdit;
 use crate::engine::EngineError;
 use crate::engine::owner::{
     AccountSecret, ClaudeAuthInput, ModelAccessCollection, ModelAccessRecord, NativeAuthAccount,
-    NativeAuthMethod, NativeAuthPhase, NativeAuthStart,
+    NativeAuthMethod, NativeAuthPhase, NativeAuthStart, OwnerResult,
 };
 use crate::harnesses::HarnessEntry;
 use crate::memory::library::{
@@ -333,14 +333,11 @@ impl NativeOwner {
             }
             SettingsJob::DeleteMemory { memory, generation } => {
                 SettingsEvent::MemoryDeleted(match self.settings_controller() {
-                    Ok(controller) => match controller.delete_memory(memory, generation).await {
-                        Ok(OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }) => {
-                            Ok(())
-                        }
-                        Ok(OwnerResponse::Rejected { code }) => Err(bounded_problem(&code)),
-                        Ok(_) => Err("memory_outcome_unknown".into()),
-                        Err(error) => Err(problem(&error, lost)),
-                    },
+                    Ok(controller) => applied(
+                        controller.delete_memory(memory, generation).await,
+                        "memory_outcome_unknown",
+                        lost,
+                    ),
                     Err(error) => Err(error),
                 })
             }
@@ -669,12 +666,12 @@ impl NativeOwner {
                     generation,
                 )
                 .map_err(|error| bounded_problem(&error.0))?;
-            match controller.send_pending().await {
-                Ok(OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }) => joined += 1,
-                Ok(OwnerResponse::Rejected { code }) => return Err(bounded_problem(&code)),
-                Ok(_) => return Err("pool_outcome_unknown".into()),
-                Err(error) => return Err(problem(&error, lost)),
-            }
+            applied(
+                controller.send_pending().await,
+                "pool_outcome_unknown",
+                lost,
+            )?;
+            joined += 1;
         }
         Ok(joined)
     }
@@ -687,6 +684,29 @@ fn fresh_id() -> Result<RequestId, String> {
 
 fn connection_lost(code: &str) -> bool {
     code == "controller_disconnected" || code.contains("transport")
+}
+
+/// Reads one owner change reply: the engine answers a refused change as an
+/// applied operation whose result is the refusal.
+/// Inputs: the reply, the code for an unknown outcome and the lost-connection
+/// flag. Output: done only when the change took effect, else the plain code.
+fn applied(
+    reply: Result<OwnerResponse, EngineError>,
+    unknown: &str,
+    lost: &mut bool,
+) -> Result<(), String> {
+    match reply {
+        Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
+            match operation.result {
+                OwnerResult::Applied => Ok(()),
+                OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
+                _ => Err(unknown.to_owned()),
+            }
+        }
+        Ok(OwnerResponse::Rejected { code }) => Err(bounded_problem(&code)),
+        Ok(_) => Err(unknown.to_owned()),
+        Err(error) => Err(problem(&error, lost)),
+    }
 }
 
 fn problem(error: &EngineError, lost: &mut bool) -> String {
@@ -769,7 +789,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             written,
-            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+            OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                if operation.result == OwnerResult::Applied
         ));
         let SettingsEvent::Memories(Ok(memories)) = native
             .settings(SettingsJob::Memories {
@@ -804,7 +825,10 @@ mod tests {
                 generation: 3,
             })
             .await;
-        assert!(matches!(again, SettingsEvent::MemoryDeleted(Err(_))));
+        assert!(matches!(
+            again,
+            SettingsEvent::MemoryDeleted(Err(code)) if code == "memory_missing"
+        ));
 
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())

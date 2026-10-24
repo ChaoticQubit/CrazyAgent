@@ -346,3 +346,29 @@ fn rows_never_carry_terminal_escapes_or_control_characters() {
     assert!(!text.chars().any(char::is_control));
     assert_eq!(printable("plain".into()), "plain");
 }
+
+#[test]
+fn rows_pad_and_cut_to_any_width_including_zero() {
+    let name = Row::of("Tidepool", Style::new());
+    assert_eq!(name.clone().pad(0), Row::default());
+    assert_eq!(name.clone().pad(1).text(), "\u{2026}");
+    assert_eq!(name.clone().pad(5).text(), "Tide\u{2026}");
+    assert_eq!(name.clone().pad(10).text(), "Tidepool  ");
+    let wide = Row::of("\u{6f22}\u{5b57}\u{6f22}", Style::new());
+    assert_eq!(wide.clone().pad(4).text(), "\u{6f22} \u{2026}");
+    for width in 0..12 {
+        assert_eq!(wide.clone().pad(width).width(), width);
+        assert_eq!(name.clone().pad(width).width(), width);
+    }
+    let folder = Row::of(
+        format!(
+            "/private/tmp/ca-tui-page-x/projects/project-{}",
+            "a".repeat(64)
+        ),
+        Style::new(),
+    );
+    let row = spread(76, name.clone(), folder.clone());
+    assert_eq!(row.width(), 76);
+    assert!(row.text().ends_with('\u{2026}'), "{}", row.text());
+    assert_eq!(spread(0, name, folder), Row::default());
+}
