@@ -875,7 +875,7 @@ impl ProjectScreen {
             KeyCode::Char('y' | 'n' | 'e') => return self.decide(focused, key.code),
             KeyCode::Char('o') => {
                 return self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                    ProjectReply::Open(s.folder.clone())
+                    ProjectReply::Open(s.project_folder().display().to_string())
                 });
             }
             KeyCode::Enter
@@ -1153,7 +1153,7 @@ impl ProjectScreen {
         match key.code {
             KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                ProjectReply::Open(s.folder.clone())
+                ProjectReply::Open(s.project_folder().display().to_string())
             }),
             _ => ProjectReply::Ignored,
         }

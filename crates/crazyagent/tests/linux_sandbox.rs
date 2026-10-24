@@ -313,3 +313,34 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
     let output = run(&installed, &case, &boundary_script(&case));
     assert_boundary(&case, &output);
 }
+
+#[test]
+fn only_agent_worktrees_in_the_crazyagent_folder_are_writable() {
+    let case = case();
+    let state = case.project.join(".crazyagent");
+    for directory in ["context", "worktrees", "setup"] {
+        fs::create_dir_all(state.join(directory)).unwrap();
+    }
+    fs::write(state.join("context").join("brief.md"), "brief\n").unwrap();
+    let sandbox = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Landlock {
+            helper: PathBuf::from(HELPER),
+        },
+    )
+    .unwrap();
+    let mut harness = Command::new("/bin/sh");
+    harness.current_dir(state.join("worktrees"));
+    let wrapped = sandbox.wrap(&harness).unwrap();
+    let HelperRequest::Run { policy, .. } =
+        HelperRequest::parse(wrapped.get_args().map(OsString::from).collect()).unwrap()
+    else {
+        panic!("expected a run request");
+    };
+    for granted in [state.join("worktrees"), state.join("setup")] {
+        assert!(policy.write.contains(&granted), "{}", granted.display());
+    }
+    for refused in [state.clone(), state.join("context")] {
+        assert!(!policy.write.contains(&refused), "{}", refused.display());
+    }
+}
