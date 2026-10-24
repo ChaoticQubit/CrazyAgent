@@ -35,6 +35,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-field > label, .pj-field > legend, .pj-label { font-weight: 600; padding: 0; }
 .pj-help { color: var(--text-3); font-size: 12px; line-height: 16px; }
 .pj-error { color: var(--danger); font-size: 12px; line-height: 16px; }
+.pj-missing { padding: 0 6px; border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: 11px; font-weight: 600; }
 .pj-note { padding: 10px 12px; border-radius: var(--radius-control); background: var(--surface-2); color: var(--text); display: grid; gap: 8px; justify-items: start; }
 .pj-note.warn { background: var(--warn-soft); }
 .pj-note.pj-inline { display: flex; align-items: center; gap: 8px; }

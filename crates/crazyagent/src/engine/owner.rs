@@ -509,6 +509,9 @@ pub enum OwnerRead {
     TeamStatus {
         project_id: ProjectId,
     },
+    TeamGraph {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -602,6 +605,7 @@ impl OwnerRead {
             | Self::ProjectSetup { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
+            | Self::TeamGraph { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -942,6 +946,9 @@ pub enum OwnerData {
     },
     TeamStatus {
         status: Box<crate::team::TeamStatus>,
+    },
+    TeamGraph {
+        graph: Box<crate::team::TeamGraph>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
