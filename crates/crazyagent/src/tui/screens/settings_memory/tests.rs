@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::RequestId;
 use crate::tui::client::OwnerEvent;
-use crate::tui::screens::settings_accounts::tests::{check, dataset, fixture, list_ctx, render};
+use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
 use crate::tui::seam::{ProjectCard, ResearchCounts};
 use crate::tui::shell::Shell;
 
@@ -122,12 +122,53 @@ fn engine_rows(rows: &mut [String], from: usize, saved_at: usize) {
     }
 }
 
+fn with_add(row: &str, before: &str, gap: &str) -> String {
+    let added = format!("a Add{gap}");
+    let row = row.replacen(before, &format!("{added}{before}"), 1);
+    let room = format!("{}? Help", " ".repeat(added.len() + 1));
+    assert!(row.contains(&room), "the help line has room for a Add");
+    row.replacen(&room, " ? Help", 1)
+}
+
+fn settings(arrival: SettingsEvent) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(arrival))))
+}
+
+fn job(ctx: &mut Ctx) -> SettingsJob {
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => *job,
+        other => panic!("settings request expected, got {other:?}"),
+    }
+}
+
+fn suggestion(project: &str, text: &str) -> Suggestion {
+    Suggestion {
+        project: ProjectId::new(project).unwrap(),
+        entry: RequestId::new(format!("entry-{project}")).unwrap(),
+        version: 3,
+        text: text.into(),
+        kept: false,
+    }
+}
+
+fn kept(project: &str, text: &str) -> Suggestion {
+    Suggestion {
+        kept: true,
+        ..suggestion(project, text)
+    }
+}
+
+fn texts(lines: &[Line<'static>]) -> Vec<String> {
+    lines.iter().map(ToString::to_string).collect()
+}
+
 #[test]
 fn memory_frames_match_the_design() {
     let mut shell = Shell::with(memory_ctx(80, 24), Box::new(Memory::with(memories())));
     shell.key(Key::Down);
     let mut expected = fixture("memory-80", &[]);
     engine_rows(&mut expected, 50, 66);
+    expected[23] = with_add(&expected[23], "/ Filter", "  ");
     assert_eq!(render(&mut shell, 80, 24), expected);
 
     let mut shell = Shell::with(memory_ctx(120, 36), Box::new(Memory::with(memories())));
@@ -135,13 +176,256 @@ fn memory_frames_match_the_design() {
     let mut expected = fixture("memory-120", &[]);
     engine_rows(&mut expected, 70, 92);
     expected[18] = format!("{:<120}", "  ✓ Saved from Tidepool for every project.");
+    expected[35] = with_add(&expected[35], "/ Filter", "   ");
     assert_eq!(render(&mut shell, 120, 36), expected);
 }
 
 #[test]
 fn no_memories_shows_how_they_arrive() {
     let mut shell = Shell::with(memory_ctx(80, 24), Box::new(Memory::with(Vec::new())));
-    check("memory-empty-80", &render(&mut shell, 80, 24), &[], None);
+    let mut expected = fixture("memory-empty-80", &[]);
+    expected[23] = with_add(&expected[23], "Shift-", "  ");
+    assert_eq!(render(&mut shell, 80, 24), expected);
+}
+
+#[test]
+fn memory_problems_read_as_sentences() {
+    assert_eq!(
+        memory_plain("memory_note_blank"),
+        "Write something to remember first."
+    );
+    assert_eq!(
+        memory_plain("knowledge_version_conflict"),
+        "This suggestion changed. The list now shows the latest."
+    );
+    assert_eq!(
+        memory_plain("memory_duplicate"),
+        "This memory is already saved."
+    );
+    assert_eq!(
+        memory_plain("controller_disconnected"),
+        plain("controller_disconnected")
+    );
+}
+
+#[test]
+fn add_memory_saves_a_note_for_the_chosen_projects() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::with(memories());
+    screen.key(&Key::Char('a'), &mut ctx);
+    assert!(screen.typing());
+    assert!(screen.modal(&ctx).is_none());
+    let (lines, cursor) = screen.body(116, &ctx);
+    let shown = texts(&lines);
+    assert_eq!(shown[0], "Add memory");
+    assert!(shown.iter().any(|line| line.contains("Every project")));
+    assert!(cursor.is_some(), "the cursor sits in the note");
+
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0, "a blank note is not sent");
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Write something to remember first."
+    );
+
+    for character in "Ship small".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    screen.key(&Key::Ctrl('j'), &mut ctx);
+    for character in "changes".chars() {
+        screen.key(&Key::Char(character), &mut ctx);
+    }
+    screen.key(&Key::Tab, &mut ctx);
+    let (lines, _) = screen.body(116, &ctx);
+    assert!(
+        texts(&lines)
+            .iter()
+            .any(|line| line.contains("Tidepool only"))
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::AddMemory {
+            scope,
+            text,
+            generation,
+        } => {
+            assert_eq!(scope, only("tidepool"));
+            assert_eq!(text, "Ship small\nchanges");
+            assert!(generation > 0);
+        }
+        other => panic!("add memory expected, got {other:?}"),
+    }
+    assert!(screen.busy(&ctx));
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one save at a time");
+
+    screen.arrive(
+        &settings(SettingsEvent::MemoryAdded(Err("memory_duplicate".into()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().rest, "This memory is already saved.");
+    assert!(screen.typing(), "a refused note stays open to edit");
+
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(matches!(job(&mut ctx), SettingsJob::AddMemory { .. }));
+    screen.arrive(&settings(SettingsEvent::MemoryAdded(Ok(()))), &mut ctx);
+    assert_eq!(ctx.message().unwrap().lead, "Memory saved.");
+    assert!(!screen.typing());
+    assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
+
+    screen.key(&Key::Char('a'), &mut ctx);
+    screen.key(&Key::Char('x'), &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(!screen.typing(), "Esc closes the note without saving");
+    assert_eq!(ctx.queued(), 0);
+}
+
+#[test]
+fn research_suggestions_come_first_and_save_for_every_project() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+    assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    match job(&mut ctx) {
+        SettingsJob::Suggestions { projects } => assert_eq!(projects.len(), 3),
+        other => panic!("suggestions expected, got {other:?}"),
+    }
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    let found = vec![
+        suggestion("tidepool", "Labs want hourly exports."),
+        suggestion("ledgerline", "Studios pay by card."),
+    ];
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
+        &mut ctx,
+    );
+    assert!(!screen.busy(&ctx));
+    let (lines, _) = screen.body(116, &ctx);
+    let shown = texts(&lines);
+    assert!(shown[0].contains("7 saved   2 suggested"));
+    assert!(shown[5].contains("Labs want hourly exports.") && shown[5].contains("Suggested"));
+    assert!(
+        shown
+            .iter()
+            .any(|line| line.contains("From research in Tidepool."))
+    );
+
+    screen.key(&Key::Char('d'), &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "a suggestion is not deleted");
+    screen.key(&Key::Enter, &mut ctx);
+    let (modal, _) = screen.modal(&ctx).unwrap();
+    assert_eq!(modal.title, "Suggested memory");
+    assert!(
+        texts(&modal.body)
+            .iter()
+            .any(|line| line.contains("From research in Tidepool."))
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::Suggestion {
+            suggestion: picked,
+            keep,
+            generations,
+        } => {
+            assert_eq!(picked, found[0]);
+            assert!(keep, "Save to memory is focused first");
+            assert!(generations[0] > 0 && generations[0] < generations[1]);
+        }
+        other => panic!("suggestion expected, got {other:?}"),
+    }
+    assert!(screen.busy(&ctx));
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "one decision at a time");
+
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(found[0].clone(), Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().lead, "Saved to memory.");
+    let (lines, _) = screen.body(116, &ctx);
+    assert!(texts(&lines)[0].contains("1 suggested"));
+    assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
+}
+
+#[test]
+fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
+    let mut ctx = memory_ctx(80, 24);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
+    let found = vec![suggestion("fieldnotes", "Crews sync at dawn.")];
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
+        &mut ctx,
+    );
+    let (lines, _) = screen.body(76, &ctx);
+    assert!(texts(&lines).iter().all(|line| line != "No memories yet."));
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Char('n'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::Suggestion { keep: false, .. }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(
+            found[0].clone(),
+            Err("knowledge_version_conflict".into()),
+        )),
+        &mut ctx,
+    );
+    let message = ctx.message().unwrap();
+    assert_eq!(message.lead, "Could not finish with this suggestion.");
+    assert_eq!(
+        message.rest,
+        "This suggestion changed. The list now shows the latest."
+    );
+    assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
+        &mut ctx,
+    );
+    assert!(!screen.busy(&ctx));
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(ctx.queued(), 0, "Esc decides nothing");
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Char('n'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::Suggestion { keep: false, .. }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(found[0].clone(), Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().lead, "Suggestion dismissed.");
+    let (lines, _) = screen.body(76, &ctx);
+    assert!(texts(&lines).iter().any(|line| line == "No memories yet."));
+}
+
+#[test]
+fn suggestions_without_engine_support_stay_quiet() {
+    let mut ctx = memory_ctx(80, 24);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Err(NOT_READY.into()))),
+        &mut ctx,
+    );
+    assert!(ctx.message().is_none());
+    assert!(!screen.busy(&ctx));
 }
 
 #[test]
@@ -314,4 +598,68 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
         }
         other => panic!("reload expected, got {other:?}"),
     }
+}
+
+#[test]
+fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    let found = vec![
+        kept(
+            "tidepool",
+            "Buoy firmware sends readings every 90 s in CBOR.",
+        ),
+        kept("fieldnotes", "Crews sync at dawn."),
+    ];
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
+        &mut ctx,
+    );
+    let (lines, _) = screen.body(116, &ctx);
+    let shown = texts(&lines);
+    assert!(
+        shown[0].contains("7 saved   1 kept in a project"),
+        "one already used in all projects is not offered again"
+    );
+    assert!(shown[5].contains("Crews sync at dawn.") && shown[5].contains("Fieldnotes Mobile"));
+    assert!(
+        shown
+            .iter()
+            .any(|line| line.contains("Kept for Fieldnotes Mobile only."))
+    );
+
+    screen.key(&Key::Enter, &mut ctx);
+    assert_eq!(screen.modal(&ctx).unwrap().0.title, "Use in all projects");
+    screen.key(&Key::Char('n'), &mut ctx);
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "a kept memory is never dismissed"
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Left, &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "Cancel closes");
+    assert_eq!(ctx.queued(), 0);
+
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Char('y'), &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::Suggestion {
+            suggestion: picked,
+            keep,
+            ..
+        } => {
+            assert_eq!(picked, found[1]);
+            assert!(keep);
+        }
+        other => panic!("suggestion expected, got {other:?}"),
+    }
+    screen.arrive(
+        &settings(SettingsEvent::SuggestionDone(found[1].clone(), Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(ctx.message().unwrap().lead, "Now used in all projects.");
 }
