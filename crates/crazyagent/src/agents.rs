@@ -1118,8 +1118,7 @@ impl Agents {
             .hosts
             .lock()
             .map_err(|_| failure("agent_registry_unavailable"))?
-            .iter()
-            .any(|host| *host == spec.host);
+            .contains(&spec.host);
         if !served {
             return Err(failure("agent_restart_unavailable"));
         }
