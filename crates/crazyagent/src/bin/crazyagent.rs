@@ -412,12 +412,24 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     };
                 }
             };
+            let terminal = service
+                .owner_runtime()
+                .and_then(|handle| handle.terminal().ok());
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(research) = research {
                 let _ = tokio::task::spawn_blocking(move || research.stop()).await;
             }
-            if let Some(team) = team {
-                let _ = tokio::task::spawn_blocking(move || team.stop()).await;
+            let kept = match team {
+                Some(team) => tokio::task::spawn_blocking(move || team.stop())
+                    .await
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            if let Some(host) = terminal {
+                let closed = tokio::task::spawn_blocking(move || host.close(&kept)).await;
+                if let Ok(Err(problem)) = closed {
+                    eprintln!("terminal close: {}", problem.0);
+                }
             }
             result
         }
