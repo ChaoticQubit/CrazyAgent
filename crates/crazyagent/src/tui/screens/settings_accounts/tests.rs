@@ -656,3 +656,164 @@ fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
     assert_eq!(key_problem(Provider::OpenaiApi, 51, true), None);
     assert_eq!(key_problem(Provider::OpenaiCompatible, 0, false), None);
 }
+
+#[cfg(unix)]
+mod lost_engine {
+    use super::*;
+    use crate::engine::Client;
+    use crate::engine::bootstrap::EngineService;
+    use crate::tui::client::Connection;
+    use crate::tui::client::accounts::AccountsRequest;
+    use crate::tui::client::settings::SettingsJob;
+    use crate::tui::screens::open;
+    use crate::tui::seam::Request;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    async fn until(
+        shell: &mut Shell,
+        connection: &mut Connection,
+        done: impl Fn(&OwnerEvent) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(event) = connection.poll_owner().unwrap() {
+                let last = done(&event);
+                shell.arrive(crate::tui::run::owner_arrival(event));
+                if last {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "owner event timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn ready(event: &OwnerEvent) -> bool {
+        matches!(event, OwnerEvent::Access { ready: true, .. })
+    }
+
+    fn settled(event: &OwnerEvent) -> bool {
+        matches!(event, OwnerEvent::Settings(_))
+    }
+
+    async fn send(
+        shell: &mut Shell,
+        connection: &mut Connection,
+        wanted: fn(&SettingsJob) -> bool,
+    ) {
+        let job = std::iter::from_fn(|| shell.ctx.next_request())
+            .find_map(|request| match request {
+                Request::Settings(job) if wanted(&job) => Some(job),
+                _ => None,
+            })
+            .expect("the screen asked the engine");
+        connection.settings(*job).unwrap();
+        until(shell, connection, settled).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_check_against_a_stopped_engine_shows_the_lost_connection_and_recovers() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tacc-lost-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = crate::tui::test_home::engine_config();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let mut connection = Connection::connect_paired(
+            Client::new(
+                root.path().join("e.sock"),
+                crate::tui::test_home::ENGINE_WAIT,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut start = ctx(80, 24);
+        let home = open(&Place::Home, &mut start);
+        let mut shell = Shell::with(start, home);
+        until(&mut shell, &mut connection, ready).await;
+        assert_eq!(shell.ctx.link, Link::Ready);
+        connection
+            .settings(SettingsJob::Accounts(AccountsRequest::Add {
+                draft: crate::accounts::AccountDraft {
+                    provider: Provider::Local,
+                    method: SignInMethod::Url,
+                    name: "Laptop".into(),
+                    url: None,
+                    model: Some("qwen2.5:0.5b".into()),
+                },
+                key: None,
+            }))
+            .unwrap();
+        until(&mut shell, &mut connection, settled).await;
+        while shell.ctx.next_request().is_some() {}
+
+        shell.key(Key::Ctrl('k'));
+        for character in "set accounts".chars() {
+            shell.key(Key::Char(character));
+        }
+        shell.key(Key::Enter);
+        assert_eq!(
+            shell.place(),
+            Some(Place::Settings(SettingsSection::Accounts))
+        );
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::AllAccounts)
+        })
+        .await;
+        shell.key(Key::Enter);
+        assert_eq!(shell.depth(), 2);
+        assert_eq!(shell.place(), None, "the account details are open");
+
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        shell.key(Key::Enter);
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::Accounts(AccountsRequest::Check { .. }))
+        })
+        .await;
+        assert_eq!(shell.ctx.link, Link::Reconnecting);
+        let message = shell.ctx.message().unwrap();
+        assert_eq!(message.lead, "Lost the connection to the engine.");
+        assert_eq!(message.rest, "Retrying in 3 s. What you typed is kept.");
+        let before = shell.ctx.queued();
+        shell.key(Key::Enter);
+        assert_eq!(
+            shell.ctx.queued(),
+            before + 1,
+            "the details still take a check"
+        );
+
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        connection.reconnect().unwrap();
+        until(&mut shell, &mut connection, ready).await;
+        assert_eq!(shell.ctx.link, Link::Ready);
+        assert_eq!(
+            shell.ctx.message().unwrap().lead,
+            "Connected to the engine again."
+        );
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::Accounts(AccountsRequest::Check { .. }))
+        })
+        .await;
+        let checked = shell.ctx.message().unwrap();
+        assert!(checked.lead.starts_with("Connected. "), "{}", checked.lead);
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
