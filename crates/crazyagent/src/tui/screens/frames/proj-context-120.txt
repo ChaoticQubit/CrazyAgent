@@ -33,4 +33,4 @@
 
 
 
- Enter Open   o Open in editor   d Delete   m Save to memory   Shift-←→ Tabs   Esc Home                          ? Help
+ Enter Open   a Add file   o Open in editor   d Delete   m Save to memory   Shift-←→ Tabs   Esc Home             ? Help

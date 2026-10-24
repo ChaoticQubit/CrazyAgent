@@ -2,9 +2,11 @@ use super::*;
 use crate::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crate::engine::EngineError;
 use crate::engine::owner::{ModelAccessCollection, ModelAccessRecord, OwnerResult};
+use crate::memory::KnowledgeStatus;
 use crate::protocol::CredentialRef;
 use crate::protocol::{Outcome, StoredProject};
-use crate::tui::seam::{PoolChange, PoolScope, ProjectCard, ShellEvent, ShellRequest};
+use crate::team::AgentStatus;
+use crate::tui::seam::{Activity, PoolChange, PoolScope, ProjectCard, ShellEvent, ShellRequest};
 
 const PROJECTS_MAX: usize = 200;
 const POOLS_MAX: usize = 64;
@@ -141,6 +143,37 @@ impl NativeOwner {
             .ok_or_else(|| "trusted_connection_unavailable".into())
     }
 
+    /// Reads one project's working team agents and suggested memories for its
+    /// Home card; a read that fails leaves its part unknown or zero.
+    /// Inputs: the owner controller and the project. Output: the activity.
+    async fn activity(controller: &mut OwnerController, project: &ProjectId) -> Activity {
+        let working = controller
+            .team_status(project.clone())
+            .await
+            .ok()
+            .map(|team| {
+                team.agents
+                    .iter()
+                    .filter(|agent| agent.status == AgentStatus::Working)
+                    .count()
+            });
+        let suggestions = controller
+            .project_memories(project.clone(), None)
+            .await
+            .map_or(0, |entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed
+                    })
+                    .count()
+            });
+        Activity {
+            working,
+            suggestions,
+        }
+    }
+
     async fn project_cards(&mut self, lost: &mut bool) -> Result<Vec<ProjectCard>, String> {
         let reply = self
             .ordinary()
@@ -182,7 +215,11 @@ impl NativeOwner {
             } else {
                 Vec::new()
             };
-            cards.push(ProjectCard::build(project, setup.as_ref(), &jobs, &pools));
+            let mut card = ProjectCard::build(project, setup.as_ref(), &jobs, &pools);
+            if setup.is_some() {
+                card.activity = Self::activity(controller, &project.project_id).await;
+            }
+            cards.push(card);
         }
         cards.sort_by(|left, right| {
             right

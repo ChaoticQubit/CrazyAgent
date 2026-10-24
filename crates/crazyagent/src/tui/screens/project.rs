@@ -5,8 +5,9 @@ use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
-    CONTEXT_DIRECTORY, ContextItem, ContextKind, ProjectContext, RESEARCH_LOG_LINES_MAX,
-    ResearchJob, ResearchKind, ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
+    ABOUT_BYTES_MAX, CONTEXT_DIRECTORY, ContextItem, ContextKind, DOCUMENT_PATH_BYTES_MAX,
+    Platform, ProjectContext, ProjectSetup, RESEARCH_LOG_LINES_MAX, ResearchJob, ResearchKind,
+    ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::tui::seam::PoolScope;
@@ -17,6 +18,9 @@ pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
 const MESSAGE_BYTES_MAX: usize = 8192;
+const NAME_BYTES_MAX: usize = 256;
+const STACK_BYTES_MAX: usize = 2048;
+pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 
 /// Names the five tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
@@ -216,6 +220,176 @@ pub(in crate::tui) struct MemoryEdit {
     pub input: TextInput,
 }
 
+/// The Add file box over the Context tab: the full path of one file to copy
+/// into the project's documents.
+/// Busy while the engine copies it; a refusal keeps the path with the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct AddFile {
+    pub input: TextInput,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+/// One row of the General form on the Settings tab, in form order.
+/// Text rows edit the name, description and tech stack; the others are
+/// platform and research switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Field {
+    Name,
+    About,
+    Stack,
+    Platform(Platform),
+    Research(ResearchKind),
+}
+
+impl Field {
+    /// Gives the form row at one position.
+    /// Takes a position below `GENERAL_FIELDS`.
+    /// Returns the row: name, description, stack, then platforms, then research.
+    pub fn at(index: usize) -> Self {
+        assert!(index < GENERAL_FIELDS);
+        let platforms = Platform::ALL.len();
+        match index {
+            0 => Self::Name,
+            1 => Self::About,
+            2 => Self::Stack,
+            index if index < 3 + platforms => Self::Platform(Platform::ALL[index - 3]),
+            index => Self::Research(ResearchKind::ALL[index - 3 - platforms]),
+        }
+    }
+}
+
+/// The General form on the Settings tab: the project's name, description,
+/// tech stack, platforms and research, saved as one engine edit.
+/// Holds the setup revision it started from, so a change made elsewhere is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct GeneralEdit {
+    pub name: TextInput,
+    pub about: TextInput,
+    pub stack: TextInput,
+    pub platforms: Vec<Platform>,
+    pub research: Vec<ResearchKind>,
+    pub cursor: usize,
+    pub revision: u64,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+impl GeneralEdit {
+    fn of(setup: &StoredSetup) -> Self {
+        let field = |limit: usize, multi: bool, value: &str| {
+            let mut input = if multi {
+                TextInput::multi(limit)
+            } else {
+                TextInput::single(limit)
+            };
+            input.set(value);
+            input
+        };
+        Self {
+            name: field(NAME_BYTES_MAX, false, &setup.name),
+            about: field(ABOUT_BYTES_MAX, true, &setup.about),
+            stack: field(STACK_BYTES_MAX, false, &setup.tech_stack.join(", ")),
+            platforms: setup.platforms.clone(),
+            research: setup.research.clone(),
+            cursor: 0,
+            revision: setup.revision,
+            busy: false,
+            error: None,
+        }
+    }
+
+    /// Gives the text field under the cursor.
+    /// Takes the form.
+    /// Returns the field, or none on a switch row.
+    pub fn text(&mut self) -> Option<&mut TextInput> {
+        match Field::at(self.cursor) {
+            Field::Name => Some(&mut self.name),
+            Field::About => Some(&mut self.about),
+            Field::Stack => Some(&mut self.stack),
+            Field::Platform(_) | Field::Research(_) => None,
+        }
+    }
+
+    /// Says whether the cursor is on a text row rather than a switch.
+    /// Takes the form.
+    /// Returns true on the name, description and stack rows.
+    pub fn on_text(&self) -> bool {
+        matches!(
+            Field::at(self.cursor),
+            Field::Name | Field::About | Field::Stack
+        )
+    }
+
+    fn toggle(&mut self) {
+        match Field::at(self.cursor) {
+            Field::Platform(platform) => toggle(&mut self.platforms, platform),
+            Field::Research(kind) => toggle(&mut self.research, kind),
+            Field::Name | Field::About | Field::Stack => {}
+        }
+    }
+
+    /// Builds the engine edit from the form.
+    /// Takes the form and the setup it edits.
+    /// Returns the edit with the name only when it changed, or none when nothing changed.
+    pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
+        let name = self.name.value().trim();
+        let about = self.about.value().trim().to_owned();
+        let tech_stack: Vec<String> = self
+            .stack
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let platforms: Vec<Platform> = Platform::ALL
+            .into_iter()
+            .filter(|platform| self.platforms.contains(platform))
+            .collect();
+        let research: Vec<ResearchKind> = ResearchKind::ALL
+            .into_iter()
+            .filter(|kind| self.research.contains(kind))
+            .collect();
+        let unchanged = name == setup.name
+            && about == setup.about
+            && tech_stack == setup.tech_stack
+            && platforms == sorted(&setup.platforms)
+            && research == sorted(&setup.research);
+        if unchanged {
+            return None;
+        }
+        Some(SetupAction::Update {
+            project_id: setup.project_id.clone(),
+            expected_revision: self.revision,
+            name: (name != setup.name).then(|| name.to_owned()),
+            setup: ProjectSetup {
+                about,
+                tech_stack,
+                platforms,
+                research,
+                pool: setup.pool.clone(),
+                team: Some(setup.team.clone()),
+                documents: Vec::new(),
+            },
+        })
+    }
+}
+
+fn sorted<T: Ord + Copy>(list: &[T]) -> Vec<T> {
+    let mut list = list.to_vec();
+    list.sort();
+    list
+}
+
+fn toggle<T: PartialEq + Copy>(list: &mut Vec<T>, value: T) {
+    if let Some(at) = list.iter().position(|item| *item == value) {
+        list.remove(at);
+    } else {
+        list.push(value);
+    }
+}
+
 /// The last lines of one research agent's output, as the engine last read them.
 /// Holds the job, its status at that read, the lines (none when the read failed) and when it was read.
 /// The engine hides secrets and control characters before the lines arrive.
@@ -247,6 +421,7 @@ pub(in crate::tui) enum ProjectReply {
     Send(String),
     StopTurn,
     Retry,
+    Team,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -279,6 +454,10 @@ pub(in crate::tui) struct ProjectScreen {
     pub edit: Option<MemoryEdit>,
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
+    pub confirm_remove: bool,
+    pub adding: Option<AddFile>,
+    pub general: Option<GeneralEdit>,
+    pub removed: bool,
     pub log: Option<JobLog>,
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
@@ -287,6 +466,7 @@ pub(in crate::tui) struct ProjectScreen {
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
+    setup_due: bool,
     waiting: Option<SetupQuery>,
 }
 
@@ -323,6 +503,10 @@ impl ProjectScreen {
             edit: None,
             confirm_delete: None,
             confirm_stop: None,
+            confirm_remove: false,
+            adding: None,
+            general: None,
+            removed: false,
             log: None,
             problem: None,
             now_ms: 0,
@@ -330,6 +514,7 @@ impl ProjectScreen {
             jobs_read_ms: None,
             context_read_ms: None,
             memories_read_ms: None,
+            setup_due: false,
             waiting: None,
         }
     }
@@ -342,6 +527,9 @@ impl ProjectScreen {
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
+        self.confirm_remove = false;
+        self.adding = None;
+        self.general = None;
         self.typing = tab == Tab::Conversation;
     }
 
@@ -355,7 +543,7 @@ impl ProjectScreen {
         }
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
-        let query = if self.setup.is_none() && !self.setup_missing {
+        let query = if (self.setup.is_none() || self.setup_due) && !self.setup_missing {
             SetupQuery::Setup { project }
         } else if self.setup_missing {
             return None;
@@ -477,7 +665,11 @@ impl ProjectScreen {
                 return;
             }
             Err(problem) => {
+                if self.refused(query, &problem) {
+                    return;
+                }
                 match query {
+                    SetupQuery::Setup { .. } => self.setup_due = false,
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Log { job, .. } => self.log_read(*job, None),
                     SetupQuery::Change {
@@ -495,6 +687,7 @@ impl ProjectScreen {
             SetupView::Setup(Some(setup)) => {
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
+                self.setup_due = false;
             }
             SetupView::Setup(None) => self.setup_missing = true,
             SetupView::Jobs(jobs) => {
@@ -537,13 +730,70 @@ impl ProjectScreen {
         self.assert_consistent();
     }
 
+    /// Puts a refused add, edit or remove back in its box with the reason.
+    /// Takes the change query and the plain problem code.
+    /// Returns true when an open box took the refusal.
+    fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
+        let SetupQuery::Change { action, .. } = query else {
+            return false;
+        };
+        let reason = Some(plain_problem(code));
+        match action {
+            SetupAction::AddDocuments { .. } if self.adding.is_some() => {
+                if let Some(adding) = self.adding.as_mut() {
+                    adding.busy = false;
+                    adding.error = reason;
+                }
+                true
+            }
+            SetupAction::Update { .. } if self.general.is_some() => {
+                if let Some(general) = self.general.as_mut() {
+                    general.busy = false;
+                    general.error = reason;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn changed(&mut self, query: &SetupQuery, result: crate::engine::owner::OwnerResult) {
         use crate::engine::owner::OwnerResult;
         let applied = matches!(result, OwnerResult::Applied);
-        if let OwnerResult::Rejected { code } = &result {
-            self.problem = Some(plain_problem(code));
+        match &result {
+            OwnerResult::Applied => {}
+            OwnerResult::Rejected { code } => {
+                if !self.refused(query, code) {
+                    self.problem = Some(plain_problem(code));
+                }
+            }
+            _ => {
+                self.refused(query, "change_outcome_unknown");
+            }
         }
         match query {
+            SetupQuery::Change {
+                action: SetupAction::AddDocuments { .. },
+                ..
+            } => {
+                self.context_read_ms = None;
+                if applied {
+                    self.adding = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::Update { .. },
+                ..
+            } => {
+                self.setup_due = true;
+                if applied {
+                    self.general = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::Remove { .. },
+                ..
+            } => self.removed = applied,
             SetupQuery::Change {
                 action: SetupAction::DeleteContext { path, .. },
                 ..
@@ -658,6 +908,27 @@ impl ProjectScreen {
         if self.edit.is_some() {
             return self.edit_key(key);
         }
+        if self.adding.is_some() {
+            return self.add_key(key);
+        }
+        if self.general.is_some() {
+            return self.general_key(key);
+        }
+        if self.confirm_remove {
+            return match key.code {
+                KeyCode::Char('y') => {
+                    self.confirm_remove = false;
+                    ProjectReply::Change(Box::new(SetupAction::Remove {
+                        project_id: self.project.clone(),
+                    }))
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.confirm_remove = false;
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            };
+        }
         if let Some(cursor) = self.pool_picker {
             return self.picker_key(key, cursor);
         }
@@ -734,6 +1005,18 @@ impl ProjectScreen {
     pub fn paste(&mut self, text: &str) -> ProjectReply {
         if let Some(edit) = self.edit.as_mut() {
             edit.input.insert_str(text);
+            return ProjectReply::Handled;
+        }
+        if let Some(adding) = self.adding.as_mut().filter(|adding| !adding.busy) {
+            adding.input.insert_str(text);
+            adding.error = None;
+            return ProjectReply::Handled;
+        }
+        if let Some(general) = self.general.as_mut().filter(|general| !general.busy) {
+            if let Some(field) = general.text() {
+                field.insert_str(text);
+                general.error = None;
+            }
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Conversation && self.typing {
@@ -962,6 +1245,7 @@ impl ProjectScreen {
                     }
                 }
             }
+            KeyCode::Char('t') => return ProjectReply::Team,
             KeyCode::Char('r') => {
                 let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
                     return ProjectReply::Handled;
@@ -1049,6 +1333,13 @@ impl ProjectScreen {
                 if let Some(path) = item.and_then(|item| self.absolute(&item.path)) {
                     return ProjectReply::Open(path);
                 }
+            }
+            KeyCode::Char('a') => {
+                self.adding = Some(AddFile {
+                    input: TextInput::single(DOCUMENT_PATH_BYTES_MAX),
+                    busy: false,
+                    error: None,
+                });
             }
             KeyCode::Char('d') => match item {
                 Some(item) if item.kind != ContextKind::Brief => {
@@ -1155,8 +1446,111 @@ impl ProjectScreen {
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
                 ProjectReply::Open(s.folder.clone())
             }),
+            KeyCode::Char('g') => {
+                match self.setup.as_ref() {
+                    Some(setup) => self.general = Some(GeneralEdit::of(setup)),
+                    None if self.setup_missing => {
+                        self.problem = Some(plain_problem("project_setup_missing"));
+                    }
+                    None => self.problem = Some("Still loading the project. Try again.".into()),
+                }
+                ProjectReply::Handled
+            }
+            KeyCode::Char('x') => {
+                self.confirm_remove = true;
+                ProjectReply::Handled
+            }
             _ => ProjectReply::Ignored,
         }
+    }
+
+    fn add_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(adding) = self.adding.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.adding = None;
+                ProjectReply::Handled
+            }
+            _ if adding.busy => ProjectReply::Handled,
+            KeyCode::Enter => {
+                let typed = adding.input.value().trim();
+                if typed.is_empty() {
+                    adding.error = Some("Type the full path of a file on this computer.".into());
+                    return ProjectReply::Handled;
+                }
+                let path = match (typed.strip_prefix("~/"), &self.home) {
+                    (Some(rest), Some(home)) => home.join(rest).display().to_string(),
+                    _ => typed.to_owned(),
+                };
+                let action = SetupAction::AddDocuments {
+                    project_id: self.project.clone(),
+                    documents: vec![path],
+                };
+                if let Err(error) = action.validate() {
+                    adding.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                adding.busy = true;
+                adding.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+            _ => {
+                if adding.input.handle(key) {
+                    adding.error = None;
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    fn general_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(general) = self.general.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        let last = GENERAL_FIELDS - 1;
+        match key.code {
+            KeyCode::Esc => {
+                self.general = None;
+                return ProjectReply::Handled;
+            }
+            _ if general.busy => return ProjectReply::Handled,
+            KeyCode::Tab | KeyCode::Down => general.cursor = (general.cursor + 1).min(last),
+            KeyCode::BackTab | KeyCode::Up => general.cursor = general.cursor.saturating_sub(1),
+            KeyCode::Char(' ') if !general.on_text() => general.toggle(),
+            KeyCode::Enter => return self.save_general(),
+            _ => {
+                if let Some(field) = general.text() {
+                    field.handle(key);
+                }
+            }
+        }
+        if let Some(general) = self.general.as_mut() {
+            general.error = None;
+        }
+        ProjectReply::Handled
+    }
+
+    fn save_general(&mut self) -> ProjectReply {
+        let action = match (&self.general, &self.setup) {
+            (Some(general), Some(setup)) => general.action(setup),
+            _ => None,
+        };
+        let Some(action) = action else {
+            self.general = None;
+            return ProjectReply::Handled;
+        };
+        let Some(general) = self.general.as_mut() else {
+            return ProjectReply::Handled;
+        };
+        if let Err(error) = action.validate() {
+            general.error = Some(plain_problem(&error.0));
+            return ProjectReply::Handled;
+        }
+        general.busy = true;
+        general.error = None;
+        ProjectReply::Change(Box::new(action))
     }
 
     fn assert_consistent(&self) {
@@ -1171,6 +1565,22 @@ impl ProjectScreen {
         }
         assert!(!self.reading || self.preview.is_some() || self.tab != Tab::Context);
         assert!(self.confirm_stop.is_none() || self.confirm_delete.is_none());
+        let boxes = [
+            self.edit.is_some(),
+            self.adding.is_some(),
+            self.general.is_some(),
+            self.confirm_remove,
+        ];
+        assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if let Some(general) = &self.general {
+            assert!(general.cursor < GENERAL_FIELDS);
+        }
+        if self.adding.is_some() {
+            assert_eq!(self.tab, Tab::Context);
+        }
+        if self.general.is_some() || self.confirm_remove {
+            assert_eq!(self.tab, Tab::Settings);
+        }
         if let Some(job) = self.confirm_stop {
             assert_eq!(self.tab, Tab::Agents);
             assert!(job > 0);
@@ -1245,6 +1655,39 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
         "research_job_missing" => "That research is gone. The list is up to date now.",
         "research_log_unreadable" => "The agent's output could not be read.",
+        "documents_empty" => "Type the full path of a file on this computer.",
+        "documents_too_many" => "Add at most 16 documents at once.",
+        "document_path_invalid" => "Use the full path of a file, starting with / or ~/.",
+        "document_not_found" => "There is no file at that path. Check it and try again.",
+        "document_not_a_regular_file" => "Add a file, not a folder or a shortcut.",
+        "document_unreadable" => "That file can't be read. Check its permissions.",
+        "document_changed_while_copying" => "The file changed while it was copied. Try again.",
+        "document_name_duplicate" => "The project already has a document with that name.",
+        "document_name_invalid" => "That file name can't be used. Rename the file first.",
+        "document_too_large" => "Files can be up to 50 MB.",
+        "document_type_not_allowed" => "This file type isn't supported.",
+        "project_documents_too_large" => {
+            "The project's documents would be over 200 MB. Remove some first."
+        }
+        "project_spec_bounds" => "Enter a project name of 1 to 256 characters.",
+        "project_setup_bounds" => "Some answers are too long or repeated. Check each one.",
+        "project_about_invalid" => {
+            "The description is too long or has characters that can't be saved."
+        }
+        "tech_stack_too_long" => "List at most 32 tech stack items.",
+        "tech_stack_entry_invalid" => {
+            "Each tech stack item must be unique and at most 64 characters."
+        }
+        "platforms_duplicate" => "Each platform can be picked once.",
+        "research_duplicate" => "Each kind of research can be picked once.",
+        "stale_revision" | "project_setup_revision" => {
+            "This project changed since you opened the form. Open it again."
+        }
+        "project_master_open" => {
+            "End this project's master conversation first, then remove the project."
+        }
+        "invalid_project" => "This project no longer exists.",
+        "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
         _ => "That didn't work. Try again.",
     }
     .into()

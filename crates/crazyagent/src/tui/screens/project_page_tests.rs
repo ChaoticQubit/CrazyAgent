@@ -9,15 +9,15 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
-use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery};
+use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crate::tui::client::Connection;
 use crate::tui::client::settings::SettingsJob;
+use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
-use crate::tui::seam::{Request, ShellRequest};
+use crate::tui::seam::{ProjectCard, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -485,6 +485,163 @@ async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
     assert!(shown.contains("Main   Enter Change"), "{shown}");
+}
+
+#[test]
+fn t_on_the_agents_tab_opens_the_project_team() {
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    shell.key(Key::Char('t'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+    assert_eq!(shell.depth(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let folder = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .folder;
+    let sources = tempfile::tempdir().unwrap();
+    let scope = sources.path().join("scope.csv");
+    std::fs::write(&scope, "item,size\nlogin,small\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.projects = Load::Ready(vec![ProjectCard {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        about: String::new(),
+        platforms: vec![Platform::Cli],
+        pool: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    }]);
+    let home = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, home);
+    while shell.ctx.next_request().is_some() {}
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Overview,
+        })
+    );
+    pump(&mut shell, &mut connection).await;
+
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Char('g'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Edit project"), "{shown}");
+    assert!(shown.contains("[ Notes CLI"), "{shown}");
+    shell.key(Key::Paste(" Pro".into()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    assert!(sent.contains(&"setup"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Changes saved."), "{shown}");
+    assert!(shown.contains("Notes CLI Pro   g Edit details"), "{shown}");
+
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('a'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Add file"), "{shown}");
+    shell.key(Key::Paste(scope.display().to_string()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    assert!(sent.contains(&"context"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Document added."), "{shown}");
+    assert!(shown.contains("scope.csv"), "{shown}");
+    let copied = std::path::Path::new(&folder).join("context/documents/scope.csv");
+    assert_eq!(
+        std::fs::read_to_string(&copied).unwrap(),
+        "item,size\nlogin,small\n"
+    );
+
+    shell.key(Key::Char('a'));
+    shell.key(Key::Paste(scope.display().to_string()));
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("The project already has a document with that name."),
+        "{shown}"
+    );
+    shell.key(Key::Esc);
+
+    shell.key(Key::ShiftRight);
+    shell.key(Key::Char('x'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Remove Notes CLI Pro from CrazyAgent?"),
+        "{shown}"
+    );
+    shell.key(Key::Char('y'));
+    let change = std::iter::from_fn(|| shell.ctx.next_request())
+        .find_map(|request| match request {
+            Request::Setup(query @ SetupQuery::Change { .. }) => Some(query),
+            _ => None,
+        })
+        .unwrap();
+    connection.project_setup(change).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while shell.place() != Some(Place::Home) {
+        if let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+        }
+        assert!(Instant::now() < deadline, "the removal never arrived");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(shell.depth(), 1);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Notes CLI Pro was removed."), "{shown}");
+    assert!(copied.is_file(), "the folder stays on disk");
+
+    while shell.ctx.next_request().is_some() {}
+    let read = SetupQuery::Setup {
+        project: notes.clone(),
+    };
+    connection.project_setup(read.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let after = loop {
+        if let Some(OwnerEvent::Setup(event)) = connection.poll_owner().unwrap()
+            && event.query == read
+        {
+            break event.result;
+        }
+        assert!(Instant::now() < deadline, "the setup read never arrived");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        !matches!(after, Ok(SetupView::Setup(Some(_)))),
+        "the engine forgot the project: {after:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -14,6 +14,7 @@ fn project(id: &str, name: &str) -> ProjectCard {
         pool: None,
         research: ResearchCounts::default(),
         created_ms: None,
+        activity: Default::default(),
     }
 }
 
