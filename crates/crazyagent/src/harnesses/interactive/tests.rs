@@ -248,6 +248,7 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
         "features.code_mode=false",
         "features.apps=false",
         "features.plugins=false",
+        "features.goals=false",
         "web_search=\"disabled\"",
         "mcp_servers={}",
         "check_for_update_on_startup=false",
@@ -287,6 +288,7 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
     for setting in [
         "sandbox_mode=\"danger-full-access\"",
         "approval_policy=\"never\"",
+        "features.goals=false",
         "mcp_servers={}",
     ] {
         assert!(

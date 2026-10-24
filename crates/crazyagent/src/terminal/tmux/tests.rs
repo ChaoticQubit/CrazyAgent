@@ -41,6 +41,24 @@ fn only_tmux_three_two_and_later_is_supported() {
 }
 
 #[test]
+fn the_attach_screen_keeps_written_trailing_cells_from_tmux_three_four() {
+    for (version, expected) in [
+        ("3.2", CAPTURE_TRIMMED),
+        ("3.3a", CAPTURE_TRIMMED),
+        ("3.4", CAPTURE_WRITTEN),
+        ("3.8", CAPTURE_WRITTEN),
+        ("next-3.6", CAPTURE_WRITTEN),
+        ("10.0", CAPTURE_WRITTEN),
+    ] {
+        assert_eq!(capture_flags(version), Some(expected), "{version}");
+    }
+    assert_eq!(capture_flags("3.1c"), None);
+    assert_eq!(capture_flags("master"), None);
+    assert_eq!(CAPTURE_WRITTEN, "-p -e -N -T");
+    assert_eq!(CAPTURE_TRIMMED, "-p -e");
+}
+
+#[test]
 fn the_attach_screen_redraws_every_row_and_puts_the_cursor_back() {
     let screen = render(
         &[b"ready$ echo hi".to_vec(), b"hi".to_vec(), Vec::new()],

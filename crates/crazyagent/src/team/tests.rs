@@ -2,6 +2,7 @@ use super::*;
 use crate::config::{AccountPool, ModelConnection, ModelReference};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
@@ -112,6 +113,18 @@ fn stored(project: &str, sub: Vec<HarnessSlot>) -> StoredSetup {
         created_ms: 1,
         revision: 1,
     }
+}
+
+/// Writes a stand-in harness `codex` in its own install folder beside the engine data, as a
+/// real install sits outside the engine's folder whose secrets the sandbox walls off.
+/// Takes the engine's base folder and the script. Returns the executable path.
+fn harness(base: &Path, script: &[u8]) -> PathBuf {
+    let install = base.join("harness");
+    std::fs::create_dir_all(&install).unwrap();
+    let executable = install.join("codex");
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    executable
 }
 
 fn database() -> (tempfile::TempDir, Connection) {
@@ -1060,9 +1073,7 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let executable = base.join("codex");
-    std::fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexit 1\n");
     let source = pool.clone();
     let mut team = runtime::TeamRuntime::open(
         &database,
@@ -1167,16 +1178,14 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
     );
     tx.commit().unwrap();
     let seen = folder.join("seen-config.toml");
-    let executable = base.join("codex");
-    std::fs::write(
-        &executable,
+    let executable = harness(
+        &base,
         format!(
             "#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > \"{}\"\nexit 1\n",
             seen.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        )
+        .as_bytes(),
+    );
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
     let engine = engine_folder.join("crazyagent");
@@ -1299,9 +1308,7 @@ fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
         );
     }
     tx.commit().unwrap();
-    let executable = base.join("codex");
-    std::fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexit 1\n");
     let pool = access("team-unsigned", &["codex-signed-in"]);
     let mut team = runtime::TeamRuntime::open(
         &database,
@@ -1497,9 +1504,7 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
         tx.commit().unwrap();
     };
     warm(&mut connection, true);
-    let executable = base.join("codex");
-    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 300\n");
     let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
     let source = pool.clone();
     let team = runtime::TeamRuntime::open(

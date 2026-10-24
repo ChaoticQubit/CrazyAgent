@@ -273,7 +273,7 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
 
     drop(terminals);
     runtime
-        .block_on(tokio::time::timeout(WAIT, service.shutdown()))
+        .block_on(async { tokio::time::timeout(WAIT, service.shutdown()).await })
         .unwrap()
         .unwrap();
 }
