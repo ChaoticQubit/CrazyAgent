@@ -1,6 +1,8 @@
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -12,6 +14,7 @@ pub const DEPTH_MAX: usize = 8;
 pub const NAME_BYTES_MAX: usize = 64;
 pub const DESCRIPTION_BYTES_MAX: usize = 1024;
 pub const SOURCE_BYTES_MAX: usize = 1024;
+#[cfg(unix)]
 const SKIPPED: [&str; 2] = [".git", ".DS_Store"];
 const HEADER_LINES_MAX: usize = 200;
 
@@ -88,6 +91,7 @@ fn field(header: &[&str], key: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+#[cfg(unix)]
 struct Tally {
     files: usize,
     bytes: u64,
@@ -234,7 +238,7 @@ fn copy_file(from: &Path, to: &Path, tally: &mut Tally) -> Result<(), &'static s
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
