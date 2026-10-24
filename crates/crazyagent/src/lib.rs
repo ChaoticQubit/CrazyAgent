@@ -28,6 +28,7 @@ pub mod sandbox;
 pub mod setup;
 pub mod storage;
 pub mod team;
+pub mod terminal;
 pub mod tui;
 pub mod verification;
 pub mod worker_dispatch;
