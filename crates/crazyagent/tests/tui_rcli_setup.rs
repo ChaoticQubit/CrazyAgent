@@ -131,15 +131,16 @@ def retain_home(path):
     assert 'Registered configured profile' not in screen()
 
 def local_connection():
-    key(b'\x1b')
     expect('Connections:')
     key(b'\x1b[B\r')
     expect('Account: local953 | Model: local-model953')
 
 def conversation():
-    key(b'\x1b')
-    expect('Connections:')
-    key(b'\x1b[Z\x1b[Z')
+    expect('Model-access fields are above; conversation draft retained')
+    key(b'\x1b[Z')
+    expect('Projects | n: New project')
+    key(b'\x1b[Z')
+    expect('Project owner conversation')
     fixture.conversation.draft_contains(master, child, draft)
 
 def opened(count):
@@ -147,6 +148,7 @@ def opened(count):
     expect('pool953')
     expect('local953')
     expect('sandbox953')
+    expect('Enter Open | Tab/Shift-Tab fields')
     key(b'\r')
     session = fixture.wait_session(database, child, master, count, 'rcli', 'configured')
     assert session['selection']['route']['account_ref'] == 'local953'
@@ -181,13 +183,14 @@ try:
         raw = fixture.tui_flow.outputs[master]
         result.update(tui_pid=child.pid, supervisor_pid=child.supervisor.pid,
                       tui_group=os.getpgid(child.pid))
+        fixture.conversation.project_input(master, child)
         key(draft.encode())
         fixture.conversation.draft_contains(master, child, draft)
         settings()
         if mode == 'intent':
             home_editor(root / 'home-api')
             key(b'\x1b')
-            expect('Connections:')
+            expect('SDK home input retained')
             home_editor(root / 'home-api', retained=True)
             key(b'\r')
             expect('Home selected')
@@ -195,7 +198,7 @@ try:
             home_editor(root / 'home-local')
             assert str(root / 'home-api') not in screen()
             key(b'\x1b')
-            expect('Connections:')
+            expect('SDK home input retained')
             home_editor(root / 'home-local', retained=True)
             key(b'\r')
             expect('Home selected')
@@ -233,6 +236,7 @@ try:
                     result['operation_id'] = pending.group(1)
                     assert counts() == (0, 0, 0, 0)
                     key(b'\x1b')
+                    fixture.conversation.project_input(master, child)
                     fixture.conversation.draft_contains(master, child, draft)
                     key(b'-newer953')
                     fixture.conversation.draft_contains(master, child, draft + '-newer953')

@@ -93,6 +93,19 @@ def explicit_edit(master, child, initial, marker):
     tui_flow.expect(master, marker, child)
 
 
+def project_input(master, child):
+    deadline = time.monotonic() + 6
+    label = ""
+    while time.monotonic() < deadline:
+        label = screen(master).splitlines()[-7]
+        if "Owner message | " in label and "unassigned retained: 0 bytes" in label:
+            return
+        assert child.poll() is None, "TUI exited while waiting for the project input"
+        drain(master)
+    raise AssertionError("project input not ready: label=%r screen=%r" % (
+        label, screen(master)))
+
+
 def draft_contains(master, child, marker, absent=None):
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:
