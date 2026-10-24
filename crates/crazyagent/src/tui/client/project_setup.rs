@@ -222,16 +222,20 @@ mod tests {
         let sources = tempfile::tempdir().unwrap();
         std::fs::write(sources.path().join("scope.csv"), "item,size\nlogin,small\n").unwrap();
         let (_stop, stopped) = tokio::sync::watch::channel(false);
-        let config =
-            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let config = crate::tui::test_home::engine_config();
         let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
             .await
             .unwrap();
-        let mut native = NativeOwner::new(root.path().join("e.sock"), Duration::from_secs(2));
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
         let (_, access) = native.attach().await;
         let mut app = App::new();
         app.apply_owner(access).unwrap();
         assert!(app.owner_ready);
+        let _home =
+            crate::tui::test_home::projects_home(native.controller.as_mut().unwrap(), 1).await;
 
         let setup = ProjectSetup {
             about: "Terminal-first notes.".into(),
@@ -255,7 +259,8 @@ mod tests {
         let event = native.creation(job).await;
         assert!(
             matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { .. })),
-            "creation must commit"
+            "creation must commit: {:?}",
+            event.result
         );
         assert!(!event.retained);
         app.apply_owner(OwnerEvent::Creation(Box::new(event)))
@@ -264,17 +269,20 @@ mod tests {
             app.has_unresolved_creation(),
             "creation waits for snapshot readback"
         );
-        let snapshot = Client::new(root.path().join("e.sock"), Duration::from_secs(2))
-            .unwrap()
-            .request(crate::protocol::WireRequest {
-                protocol_version: crate::protocol::PROTOCOL_VERSION,
-                client_id: crate::protocol::ClientId::new("tui-setup-test").unwrap(),
-                request_id: RequestId::new("tui-setup-snapshot").unwrap(),
-                expected_revision: Cursor::new(0),
-                command: crate::protocol::Command::Snapshot,
-            })
-            .await
-            .unwrap();
+        let snapshot = Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap()
+        .request(crate::protocol::WireRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            client_id: crate::protocol::ClientId::new("tui-setup-test").unwrap(),
+            request_id: RequestId::new("tui-setup-snapshot").unwrap(),
+            expected_revision: Cursor::new(0),
+            command: crate::protocol::Command::Snapshot,
+        })
+        .await
+        .unwrap();
         app.apply_reply(snapshot).unwrap();
         assert!(!app.has_unresolved_creation());
         assert!(

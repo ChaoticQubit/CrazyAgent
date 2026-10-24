@@ -31,6 +31,9 @@ mod project_creation_tests;
 #[cfg(test)]
 mod render_tests;
 
+#[cfg(test)]
+pub(in crate::tui) mod test_home;
+
 use crate::engine::Client;
 use app::{App, Focus, UiEvent};
 use client::Connection;
