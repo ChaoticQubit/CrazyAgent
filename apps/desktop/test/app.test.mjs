@@ -80,27 +80,90 @@ const account = (patch) => ({ id: "a1", name: "ChatGPT 1", provider: "chatgpt", 
   method_label: "Sign in with ChatGPT", url: null, model: null, status: "signed_in", status_label: "Signed in", ...patch });
 const harness = (id, kind) => ({ id, name: id, status: kind === "limited" ? { kind, reason: "x" } : { kind }, status_label: "", executable: null,
   headless: "", tools: { kind: "switchable" }, model_selection: true, account_kinds: [] });
+const tool = (name, state) => ({ name, label: name, state });
+const toolsRead = (tmux, uv, graphify, patch = {}) => ok({
+  dependencies: [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)], pack: [], running: false, ...patch,
+});
+const found = { state: "found", version: "3.5a" };
+const toolsReady = toolsRead(found, { state: "installed", version: "0.9.2" }, found);
 
 test("Get set up stays until one account is ready and one pool exists; harnesses never block", () => {
   const harnesses = ok([harness("codex", "ready"), harness("claude-code", "ready"), harness("pi", "not_installed")]);
-  const empty = setupSteps(ok([]), ok([]), harnesses);
+  const empty = setupSteps(ok([]), ok([]), harnesses, toolsReady);
   assert.equal(empty.visible, true);
-  assert.deepEqual(empty.items.map((item) => [item.id, item.done]), [["accounts", false], ["pools", false], ["harnesses", false]]);
+  assert.deepEqual(empty.items.map((item) => [item.id, item.done]), [["accounts", false], ["pools", false], ["harnesses", false], ["tools", true]]);
   assert.equal(empty.items[2].body, "2 of 3 harnesses ready on this Mac.");
   assert.equal(empty.items[0].href, "#/settings/accounts?action=add");
   assert.equal(empty.items[1].href, "#/settings/pools?action=new");
-  assert.equal(setupSteps(ok([account({ status: "not_signed_in" })]), ok([]), harnesses).items[0].done, false);
-  assert.equal(setupSteps(ok([account({ status: "key_saved" })]), ok([]), harnesses).items[0].done, true);
+  assert.equal(setupSteps(ok([account({ status: "not_signed_in" })]), ok([]), harnesses, toolsReady).items[0].done, false);
+  assert.equal(setupSteps(ok([account({ status: "key_saved" })]), ok([]), harnesses, toolsReady).items[0].done, true);
   const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
-  assert.equal(setupSteps(ok([account({})]), ok([pool]), harnesses).visible, false);
-  const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
+  assert.equal(setupSteps(ok([account({})]), ok([pool]), harnesses, toolsReady).visible, false);
+  const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
   assert.equal(unknown.visible, true);
   assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
 });
 
+test("Get set up keeps Install tools until tmux, uv and graphify are found; the pack never blocks", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const steps = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools);
+  const item = (tools) => steps(tools).items.find((entry) => entry.id === "tools");
+  const missing = { state: "missing" };
+
+  const skipped = steps(toolsRead(missing, missing, missing));
+  assert.equal(skipped.items.length, 4);
+  assert.equal(skipped.items[3].id, "tools");
+  assert.equal(skipped.visible, true);
+  assert.deepEqual({ ...skipped.items[3] }, {
+    id: "tools", icon: "wrench", title: "Install tools",
+    body: "tmux, uv and graphify aren't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.",
+    action: "Set up tools", href: "#/settings/pack", done: false,
+  });
+  assert.equal(item(toolsRead(found, found, missing)).body,
+    "graphify isn't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
+  assert.equal(item(toolsRead(missing, found, { state: "failed", reason: "Checksum didn't match." })).body,
+    "tmux and graphify aren't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
+
+  assert.equal(item(toolsReady).done, true);
+  assert.equal(item(toolsReady).body, "tmux, uv and graphify are installed.");
+  assert.equal(steps(toolsReady).visible, false);
+  const pack = [{ id: "serena", kind: "mcp_server", group: "optional", source: "x", license: "MIT", on_by_default: false, state: { state: "failed", reason: "no" } },
+    { id: "superpowers", kind: "skill", group: "workflow", source: "x", license: "MIT", on_by_default: true, state: { state: "available" } }];
+  assert.equal(steps(toolsRead(found, found, found, { pack })).visible, false);
+
+  for (const tools of [{ kind: "loading" }, toolsRead({ state: "checking" }, found, found), toolsRead({ state: "checking" }, { state: "checking" }, { state: "checking" })]) {
+    const checking = item(tools);
+    assert.equal(checking.done, false);
+    assert.equal(checking.body, "Checking tmux, uv and graphify on this computer.");
+    assert.equal(steps(tools).visible, true);
+  }
+  assert.equal(item(toolsRead({ state: "installing" }, found, missing)).body, "Setup is installing the tools. This updates when it finishes.");
+  assert.equal(item(toolsRead(found, found, found, { running: true })).done, true);
+  assert.equal(item(ok({ dependencies: [tool("tmux", found), tool("uv", found)], pack: [], running: false })).done, false);
+  assert.equal(item({ kind: "not_ready" }).done, false);
+  assert.equal(item({ kind: "not_ready" }).body, "Tool setup isn't in this build yet.");
+  const failedRead = item({ kind: "error", code: "setup_owner_unavailable", message: "CrazyAgent's engine isn't running." });
+  assert.equal(failedRead.done, false);
+  assert.equal(failedRead.body, "Couldn't check tmux, uv and graphify. Open setup to try again.");
+});
+
+test("Home keeps the Get set up panel with Set up tools after a skipped tools step", () => {
+  const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), accounts: ok([account({})]),
+    pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), onRetryProjects: () => {} };
+  const skipped = renderToStaticMarkup(createElement(HomeView, { ...props, tools: toolsRead(found, found, { state: "missing" }) }));
+  assert.match(skipped, /<h2>Get set up<\/h2>/);
+  assert.match(skipped, /<strong class="grow">Install tools<\/strong>/);
+  assert.match(skipped, /graphify isn&#x27;t installed\./);
+  assert.match(skipped, /<a class="btn small" href="#\/settings\/pack">Set up tools<\/a>/);
+  const checking = renderToStaticMarkup(createElement(HomeView, { ...props, tools: { kind: "loading" } }));
+  assert.match(checking, /Checking tmux, uv and graphify on this computer\./);
+  assert.doesNotMatch(checking, /Couldn&#x27;t check|role="alert"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(HomeView, { ...props, tools: toolsReady })), /Get set up/);
+});
+
 test("Home shows the empty state, setup panel and Needs you from real reads only", () => {
   const accounts = ok(Array.from({ length: 5 }, (_, index) => account({ id: `a${index}`, name: `Claude ${index}`, status: "not_signed_in", status_label: "Not signed in" })));
-  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, onRetryProjects: () => {} }));
+  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "loading" }, onRetryProjects: () => {} }));
   assert.match(markup, /<h2>No projects yet<\/h2>/);
   assert.match(markup, /Create a project and agents start the research you pick\./);
   assert.match(markup, /<h2>Get set up<\/h2>/);
@@ -110,12 +173,12 @@ test("Home shows the empty state, setup panel and Needs you from real reads only
   assert.equal(needsYou(accounts).rows.length, 3);
   const cards = renderToStaticMarkup(createElement(HomeView, {
     projects: ok([{ id: "p 1", name: "<Harbor> & Notes", repository_count: 1 }]), accounts: ok([account({})]),
-    pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), onRetryProjects: () => {},
+    pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {},
   }));
   assert.match(cards, /<a class="project-card" href="#\/projects\/p%201\/overview" aria-label="&lt;Harbor&gt; &amp; Notes">/);
   assert.doesNotMatch(cards, /Get set up|No projects yet/);
   for (const [projects, text] of [[{ kind: "loading" }, /skeleton card-shape/], [{ kind: "not_ready" }, /Not ready yet/], [{ kind: "error", code: "x", message: "y" }, /Couldn&#x27;t load your projects\./]]) {
-    assert.match(renderToStaticMarkup(createElement(HomeView, { projects, accounts: ok([]), pools: ok([]), harnesses: ok([]), onRetryProjects: () => {} })), text);
+    assert.match(renderToStaticMarkup(createElement(HomeView, { projects, accounts: ok([]), pools: ok([]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {} })), text);
   }
 });
 
@@ -158,7 +221,7 @@ test("a project card sums up live agents and research from the team and research
   const rows = [{ id: "p1", name: "Harbor Notes", repository_count: 0 }, { id: "p2", name: "Quayside", repository_count: 0 }];
   const view = (activity) => renderToStaticMarkup(createElement(HomeView, {
     projects: ok(rows), accounts: ok([account({})]), pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
-    harnesses: ok([]), onRetryProjects: () => {}, activity,
+    harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity,
   }));
   const cards = view(new Map([["p1", cardActivity(team(["idle", "working"]), research(["done", "running"]))],
     ["p2", cardActivity(team(["idle"]), research(["needs_pool"]))]]));
@@ -194,7 +257,7 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
 
   const markup = renderToStaticMarkup(createElement(HomeView, {
     projects: ok(projects), accounts, pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
-    harnesses: ok([]), onRetryProjects: () => {}, activity, suggestions,
+    harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity, suggestions,
   }));
   assert.match(markup, /<section class="needs" aria-label="Needs you">/);
   assert.match(markup, /<strong>Quayside<\/strong> Research is waiting for a pool\./);
