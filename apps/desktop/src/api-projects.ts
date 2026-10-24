@@ -1,4 +1,4 @@
-import { call, classifyFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, connect, plainError, status, type Result } from "./api";
 import {
   closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
@@ -246,6 +246,34 @@ export function loadProjectCatalog(pool: string | null, research: ResearchKind[]
 
 export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
+}
+
+/** Whether a New Project receipt gets one automatic reconcile, as the TUI does: the engine
+ * answered OutcomeUnknown or the reply was lost, and the bridge still keeps the intent.
+ * Input: the receipt from Create project. Output: true when it should reconcile once. */
+export function needsReconcile(receipt: IntentReceipt): boolean {
+  return receipt.pending && receipt.rejection === null && (receipt.outcome === "unknown" || receipt.outcome === "uncertain");
+}
+
+/** Reconciles the kept New Project intent once by its operation id and hash, reconnecting
+ * first when the reply was lost and the bridge let go of the engine.
+ * Input: none. Output: the reconcile receipt, or why it couldn't run. */
+export async function reconcileSetup(): Promise<Result<IntentReceipt>> {
+  const current = await status();
+  if (current.kind === "ok" && !current.value.connected) {
+    const connected = await connect();
+    if (connected.kind !== "ok") return connected;
+  }
+  return call<IntentReceipt>("desktop_reconcile_intent");
+}
+
+/** The New Project receipt after one reconcile: the reconcile's answer when it settled the
+ * same kept intent (kind, operation id and project), otherwise the unconfirmed one sent.
+ * Inputs: the sent receipt and the reconcile result. Output: the receipt to show. */
+export function settledReceipt(sent: IntentReceipt, settled: Result<IntentReceipt>): IntentReceipt {
+  if (settled.kind !== "ok") return sent;
+  const same = settled.value.kind === sent.kind && settled.value.operation_id === sent.operation_id && settled.value.project_id === sent.project_id;
+  return same ? settled.value : sent;
 }
 
 export function loadSetup(id: string): Promise<Result<StoredSetup | null>> {

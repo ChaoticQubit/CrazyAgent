@@ -1,7 +1,9 @@
-import { harnessCatalog, nextGeneration, poolSummaries } from "../../api";
+import { harnessCatalog, nextGeneration, poolSummaries, receiptResult } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
-import { assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, setupProject } from "../../api-projects";
+import {
+  assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, reconcileSetup, settledReceipt, setupProject,
+} from "../../api-projects";
 import type { PoolChoice, ProjectCatalog } from "../../api-projects";
 import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
@@ -137,8 +139,14 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       setCreateError(result.kind === "not_ready" ? "Not ready yet: creating a project with research isn't in this build." : `Couldn't create the project. Your answers are kept. ${failureCopy(result.code)}`);
       return;
     }
-    const state = receiptState(result.value);
-    const id = result.value.project_id;
+    let receipt = result.value;
+    if (needsReconcile(receipt)) {
+      const settled = await reconcileSetup();
+      session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
+      receipt = settledReceipt(receipt, settled);
+    }
+    const state = receiptState(receipt);
+    const id = receipt.project_id;
     if (state.kind !== "applied" || !id) {
       setCreating(false);
       setCreateError(state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check your projects before trying again." : `Couldn't create the project. Your answers are kept. ${failureCopy(state.kind === "rejected" ? state.code : "unknown")}`);
