@@ -20,14 +20,6 @@ pub(in crate::tui) mod project_plugins;
     not(test),
     expect(
         dead_code,
-        reason = "v1-tui-projects plugs the live research view into the project screen"
-    )
-)]
-pub(in crate::tui) mod project_research;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
         reason = "v1-tui-projects plugs the live team view into the project screen"
     )
 )]

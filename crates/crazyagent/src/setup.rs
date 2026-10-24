@@ -1,6 +1,15 @@
+#[cfg(unix)]
+pub mod bundled;
+#[cfg(unix)]
+pub mod fetch;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod pack;
+#[cfg(unix)]
+pub(crate) mod process;
+pub mod progress;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod run;
 #[cfg(target_os = "windows")]
@@ -183,13 +192,25 @@ pub struct SetupStatus {
 
 /// Finds and installs the app's system dependencies on one platform. `find` returns the
 /// installed version or none; `install` installs exactly the pin and returns the version
-/// now present. Implementations never use sudo and never change global configuration.
+/// now present; `install_tool` installs one pinned Python tool an MCP server needs into
+/// the app data folder; `program` finds a program setup installed or the system has.
+/// Implementations never use sudo and never change global configuration.
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
+
+    fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
+        let _ = (package, version);
+        Err(InstallError("setup_tool_unsupported"))
+    }
+
+    fn program(&self, name: &str) -> Option<std::path::PathBuf> {
+        let _ = name;
+        None
+    }
 }
 
-const REASONS: [(&str, &str); 19] = [
+const REASONS: [(&str, &str); 22] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -239,6 +260,10 @@ const REASONS: [(&str, &str); 19] = [
         "The server's start command is not valid.",
     ),
     (
+        "pack_server_command_missing",
+        "The program this server needs is not installed.",
+    ),
+    (
         "pack_bundled_unavailable",
         "This bundled entry is not available in this build.",
     ),
@@ -251,6 +276,14 @@ const REASONS: [(&str, &str); 19] = [
         "pack_required",
         "This entry is always on and can't be removed.",
     ),
+    (
+        "setup_tool_unsupported",
+        "This server's tool can't be installed on this system yet.",
+    ),
+    (
+        "pack_not_installed",
+        "This entry is not installed yet. Run setup first.",
+    ),
 ];
 
 /// Turns a setup code into the plain sentence the setup screen shows. Input: a code such
@@ -261,4 +294,61 @@ pub fn plain_reason(code: &str) -> &'static str {
         .find(|(known, _)| *known == code)
         .map(|(_, sentence)| *sentence)
         .unwrap_or("Something went wrong during setup.")
+}
+
+/// The installer for this platform, installing into `<engine root>/setup`.
+/// Input: the engine root. Output: the installer.
+#[cfg(target_os = "macos")]
+pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
+    Box::new(macos::MacInstaller::new(engine_root))
+}
+
+/// The pinned install of one dependency on this platform. Input: the dependency.
+/// Output: its pin.
+#[cfg(target_os = "macos")]
+pub fn platform_pin(dep: Dependency) -> Pin {
+    macos::pin(dep)
+}
+
+/// One owner change to the default pack, as the owner mutations carry it: start setup
+/// with the ticked entries, switch an installed entry, or remove one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SetupAction {
+    Run { pack: Vec<String> },
+    Set { id: String, on: bool },
+    Remove { id: String },
+}
+
+const PACK_ID_BYTES_MAX: usize = 64;
+
+fn valid_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= PACK_ID_BYTES_MAX
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+impl SetupAction {
+    /// Checks the shape of the entry ids before anything runs: at most the manifest's
+    /// entry count, each 1 to 64 letters, digits, `-`, `_` or `.`, no id twice.
+    /// Output: `pack_unknown` for anything else.
+    pub fn validate(&self) -> Result<(), InstallError> {
+        let valid = match self {
+            Self::Run { pack } => {
+                pack.len() <= pack::ENTRIES_MAX
+                    && pack.iter().all(|id| valid_pack_id(id))
+                    && pack
+                        .iter()
+                        .enumerate()
+                        .all(|(index, id)| !pack[..index].contains(id))
+            }
+            Self::Set { id, .. } | Self::Remove { id } => valid_pack_id(id),
+        };
+        if !valid {
+            return Err(InstallError("pack_unknown"));
+        }
+        Ok(())
+    }
 }

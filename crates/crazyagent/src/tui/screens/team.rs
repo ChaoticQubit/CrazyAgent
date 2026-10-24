@@ -24,6 +24,7 @@ const HEADER_ROWS: u16 = 2;
 const TREE_MIN: u16 = 30;
 const TREE_MAX: u16 = 44;
 const BOX_MIN: u16 = 8;
+const ENDED: &str = "terminal_ended";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -55,9 +56,11 @@ struct TreeRow {
 
 struct Attached {
     agent: AgentId,
+    node: String,
     label: String,
     pane: TerminalPane,
     size: (u16, u16),
+    started: bool,
     closed: Option<String>,
 }
 
@@ -138,6 +141,7 @@ impl Team {
                     (*cols).clamp(SIZE_MIN, SIZE_MAX),
                 );
                 attached.pane.show(&[], None);
+                attached.started = true;
             }
             TerminalFrame::Output { bytes } => attached.pane.feed(bytes),
             TerminalFrame::Closed { reason } => {
@@ -155,6 +159,14 @@ impl Team {
         let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
             return;
         };
+        if target.status.is_some_and(|status| !status.live()) {
+            self.task = None;
+            ctx.say(Message::warning(
+                "This agent has stopped.",
+                "Its terminal is closed.",
+            ));
+            return;
+        }
         let Some(agent) = target.terminal.clone() else {
             ctx.say(Message::warning(
                 "This agent has no terminal yet.",
@@ -162,7 +174,7 @@ impl Team {
             ));
             return;
         };
-        let label = target.label.clone();
+        let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
         if self
             .attached
@@ -184,9 +196,11 @@ impl Team {
         });
         self.attached = Some(Attached {
             agent,
+            node: id,
             label,
             pane: TerminalPane::new(rows, cols),
             size: (rows, cols),
+            started: false,
             closed: None,
         });
         self.focus = Focus::Terminal;
@@ -200,6 +214,55 @@ impl Team {
                 agent: attached.agent,
             });
         }
+        self.focus = Focus::Tree;
+    }
+
+    /// Opens the attached terminal again after the engine connection came
+    /// back; a terminal that ended stays closed.
+    /// Input: the context. Output: none; attach and size requests are queued.
+    fn reattach(&mut self, ctx: &mut Ctx) {
+        let (rows, cols) = pane_size(ctx);
+        let Some(attached) = self
+            .attached
+            .as_mut()
+            .filter(|attached| attached.closed.as_deref().is_some_and(lost))
+        else {
+            return;
+        };
+        attached.closed = None;
+        attached.size = (rows, cols);
+        ctx.request(Request::TerminalAttach {
+            agent: attached.agent.clone(),
+        });
+        ctx.request(Request::TerminalResize {
+            agent: attached.agent.clone(),
+            cols,
+            rows,
+        });
+    }
+
+    /// Closes the attached terminal once the team shows its agent stopped,
+    /// so no key reaches a pane whose agent is gone.
+    /// Input: the context. Output: none; a detach is queued for a live view.
+    fn end_stopped(&mut self, ctx: &mut Ctx) {
+        let graph = &self.graph;
+        let Some(attached) = self.attached.as_mut() else {
+            return;
+        };
+        let stopped = graph
+            .ready()
+            .and_then(|graph| graph.nodes.iter().find(|node| node.id == attached.node))
+            .and_then(|node| node.status)
+            .is_some_and(|status| !status.live());
+        if !stopped || attached.closed.as_deref().is_some_and(dead) {
+            return;
+        }
+        if attached.closed.is_none() {
+            ctx.request(Request::TerminalDetach {
+                agent: attached.agent.clone(),
+            });
+        }
+        attached.closed = Some(ENDED.into());
         self.focus = Focus::Tree;
     }
 
@@ -382,24 +445,31 @@ impl Team {
             return None;
         };
         if let Some(code) = &attached.closed {
-            let (lead, rest) = if code == NOT_READY {
-                (
-                    "Not ready yet.",
-                    "This engine cannot stream agent terminals yet.",
-                )
-            } else {
-                (
-                    "The terminal closed.",
-                    plain_problem(code).unwrap_or("Enter on the agent opens it again."),
-                )
-            };
+            let (lead, rest) = closed_words(code);
             let mut lines = vec![Line::raw(lead)];
             lines.extend(
                 wrap(rest, limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
-            boxed(frame, area, &attached.label, false, lines, ctx);
+            if !attached.started {
+                boxed(frame, area, &attached.label, false, lines, ctx);
+                return None;
+            }
+            boxed(frame, area, &attached.label, false, Vec::new(), ctx);
+            attached
+                .pane
+                .draw(frame.buffer_mut(), inner, ctx.depth, false);
+            let rows = inner
+                .height
+                .min(u16::try_from(lines.len()).unwrap_or(u16::MAX));
+            let banner = Rect::new(inner.x, inner.y + inner.height - rows, inner.width, rows);
+            let lines: Vec<Line<'static>> = lines
+                .into_iter()
+                .take(usize::from(rows))
+                .map(|line| pad(line, limit, ctx.glyphs))
+                .collect();
+            draw_lines(frame.buffer_mut(), banner, &lines);
             return None;
         }
         boxed(frame, area, &attached.label, focused, Vec::new(), ctx);
@@ -483,6 +553,7 @@ impl Screen for Team {
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
+                self.end_stopped(ctx);
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
             _ => {}
@@ -495,6 +566,7 @@ impl Screen for Team {
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
+        self.reattach(ctx);
         self.sync(ctx);
     }
 
@@ -687,6 +759,46 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
+    }
+}
+
+/// Says whether a terminal code means the agent's terminal ended for good.
+/// Input: a Closed or Rejected code. Output: true for an ended or unknown pane.
+fn dead(code: &str) -> bool {
+    matches!(code, ENDED | "terminal_agent_unknown")
+}
+
+/// Says whether a terminal code means the engine connection dropped, so the
+/// terminal opens again once the engine is back.
+/// Input: a Closed or Rejected code. Output: true for connection losses.
+fn lost(code: &str) -> bool {
+    matches!(
+        code,
+        "terminal_closed"
+            | "terminal_owner_unavailable"
+            | "terminal_outcome_unknown"
+            | "owner_socket_replaced"
+            | "trusted_owner_connection_failed"
+    )
+}
+
+/// The words shown for a closed or refused terminal.
+/// Input: the code. Output: the lead line and the plain reason under it.
+fn closed_words(code: &str) -> (&'static str, &'static str) {
+    match code {
+        NOT_READY => (
+            "Not ready yet.",
+            "This engine cannot stream agent terminals yet.",
+        ),
+        code if dead(code) => ("This agent has stopped.", "Its terminal is closed."),
+        code if lost(code) => (
+            "Lost the engine connection.",
+            "It opens again once the engine is back.",
+        ),
+        code => (
+            "The terminal closed.",
+            plain_problem(code).unwrap_or("Enter on the agent opens it again."),
+        ),
     }
 }
 

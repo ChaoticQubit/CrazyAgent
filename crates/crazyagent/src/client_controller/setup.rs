@@ -1,7 +1,14 @@
 use super::*;
+use crate::github::GitHubStatus;
 use crate::setup::SetupStatus;
 
 impl OwnerController {
+    fn github_client(&self) -> Result<&OwnerClient, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
     /// Reads what setup shows: each tool CrazyAgent needs, each default-pack entry
     /// and whether a setup run is going on.
     /// Takes nothing. Returns the status.
@@ -53,23 +60,36 @@ impl OwnerController {
         self.send_pending().await
     }
 
-    /// Moves every project folder from the current projects home into another
-    /// folder and makes that folder the home.
-    /// Takes the absolute folder path and the client generation.
+    /// Makes another folder the projects home; with `move_projects` every project
+    /// folder moves from the current home into it, without it nothing moves.
+    /// Takes the absolute folder path, whether to move and the client generation.
     /// Returns the actual owner response; a rejection carries a plain code.
     pub async fn move_projects_home(
         &mut self,
         path: String,
+        move_projects: bool,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.projects_home().await?;
         self.begin_mutation(
             OwnerMutation::MoveProjectsHome {
                 path,
-                move_projects: true,
+                move_projects,
             },
             generation,
         )?;
         self.send_pending().await
+    }
+
+    /// Reads the GitHub account the setup page shows through the engine's GitHub
+    /// channel. Takes nothing. Returns the status; no token leaves the engine.
+    pub async fn github_account(&self) -> Result<GitHubStatus, EngineError> {
+        self.github_client()?.github_status().await
+    }
+
+    /// Signs CrazyAgent out of GitHub; the engine deletes the token it kept.
+    /// Takes nothing. Returns the signed-out status.
+    pub async fn github_sign_out(&self) -> Result<GitHubStatus, EngineError> {
+        self.github_client()?.github_sign_out().await
     }
 }

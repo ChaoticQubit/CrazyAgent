@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::error::TryRecvError;
 
+mod adopt;
+pub use adopt::{PaneRecord, RecordSource};
+
 pub const PROMPT_BYTES_MAX: usize = 1024 * 1024;
 const READY_WAIT: Duration = Duration::from_secs(30);
 const READY_QUIET: Duration = Duration::from_millis(700);
@@ -39,6 +42,7 @@ pub struct TerminalSession {
     turn: bool,
     exited: bool,
     stopped: bool,
+    record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
 }
@@ -157,6 +161,13 @@ impl TerminalSession {
             turn: false,
             exited: false,
             stopped: false,
+            record: PaneRecord::new(
+                &command.transcript,
+                &command.cwd,
+                since,
+                pane.pid,
+                key.as_ref().map(|key| key.0.as_path()),
+            ),
             _key: key,
             _context: installed,
         })

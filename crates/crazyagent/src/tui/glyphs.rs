@@ -34,7 +34,12 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
     ),
     (
         Status::Fail,
-        &["Failed", "Can't reach this URL", "Can't start"],
+        &[
+            "Failed",
+            "Can't reach this URL",
+            "Can't start",
+            "Folder missing",
+        ],
     ),
     (
         Status::Needs,
@@ -43,6 +48,7 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Needs approval",
             "Needs a pool",
             "Needs you",
+            "Missing",
         ],
     ),
     (
@@ -53,11 +59,18 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Signing in...",
             "Starting",
             "Installing",
+            "Setting up",
         ],
     ),
     (
         Status::Waiting,
-        &["Queued", "Waiting for a free account", "Starts after"],
+        &[
+            "Queued",
+            "Waiting for a free account",
+            "Starts after",
+            "Waiting",
+            "Not set up",
+        ],
     ),
     (Status::Off, &["Not installed", "Turned off", "Stopped"]),
     (Status::Limited, &["Limited control"]),
@@ -315,6 +328,32 @@ mod tests {
         assert_eq!(UNICODE.status(Status::Ok), "✓");
         assert_eq!(ASCII.status(Status::Ok), "+");
         assert_eq!(Status::Fail.role(), Role::Error);
+    }
+
+    #[test]
+    fn projects_home_onboarding_setup_and_team_words_carry_glyphs() {
+        for (word, kind) in [
+            ("Found 3.4", Status::Ok),
+            ("Installed 0.9.9", Status::Ok),
+            ("Ready", Status::Ok),
+            ("Signed in as mira", Status::Ok),
+            ("Setting up", Status::Active),
+            ("Installing", Status::Active),
+            ("Folder missing", Status::Fail),
+            ("Missing", Status::Needs),
+            ("Not set up", Status::Waiting),
+            ("Waiting", Status::Waiting),
+            ("Turned off", Status::Off),
+            ("Not installed", Status::Off),
+        ] {
+            assert_eq!(Status::of(word), Some(kind), "{word}");
+        }
+        assert_eq!(Status::of("Missing: About, Platforms."), None);
+        assert_eq!(Status::Active.role(), Role::Running);
+        assert_eq!(Status::Waiting.role(), Role::Muted);
+        assert_eq!(UNICODE.status(Status::Fail), "✗");
+        assert_eq!(ASCII.status(Status::Fail), "x");
+        assert_eq!(ASCII.status(Status::Waiting), "o");
     }
 
     #[test]

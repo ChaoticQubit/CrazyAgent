@@ -469,8 +469,18 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
         jobs(&mut shell).as_slice(),
         [AppSetupJob::GitHubSignOut]
     ));
-    shell.arrive(event(AppSetupEvent::GitHubSignedOut(Ok(()))));
+    let out = GitHubStatus {
+        signed_in: false,
+        login: None,
+        method: GitHubMethod::None,
+        waiting: false,
+        problem: None,
+    };
+    shell.arrive(event(AppSetupEvent::GitHubSignedOut(Ok(out))));
     assert_eq!(lead(&shell), "Signed out of GitHub.");
+    let rows = render(&mut shell, 120, 36);
+    assert!(find(&rows, "GitHub    ").contains("Not signed in"));
+    assert!(!rows.last().unwrap().contains("Sign out of GitHub"));
 }
 
 #[test]

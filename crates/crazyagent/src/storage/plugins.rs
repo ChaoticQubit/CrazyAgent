@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS plugin_switches (
     PRIMARY KEY(project, item)
 );";
 const PAGE_BYTES_MAX: usize = 48 * 1024;
-const STORE: &str = "plugins";
+pub(crate) const STORE: &str = "plugins";
 pub(crate) const SECRETS: &str = "secrets";
 
 pub(crate) enum Command {
@@ -818,7 +818,11 @@ pub(crate) fn execute(
     }
 }
 
-fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValue, EngineError> {
+pub(super) fn run(
+    tx: &Transaction<'_>,
+    root: &Path,
+    command: Command,
+) -> Result<ResultValue, EngineError> {
     Ok(match command {
         Command::AddSkill { scope, source } => {
             let record = add_skill(tx, root, scope, source)?;

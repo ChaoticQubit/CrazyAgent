@@ -90,6 +90,7 @@ const COPY: Record<string, string> = {
   memory_page_invalid: "Show between 1 and 20 memories at a time.",
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
+  invalid_knowledge_text: "Write the memory as text, up to 4096 bytes.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -551,14 +552,50 @@ export async function memorySuggestions(projects: { id: string; name: string }[]
   return { kind: "ok", value: found };
 }
 
-/** Saves a research suggestion to app-wide memory with one owner click: the engine first
- * keeps it in its project, then makes it global. Input: the suggestion. Output: ok once both
- * are saved, or the plain reason the second step failed. */
-export async function saveSuggestion(suggestion: Suggestion): Promise<Result<void>> {
-  const kept = await change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Keep" }, generation: nextGeneration() });
+export const MEMORY_TEXT_BYTES_MAX = 4096;
+
+async function keepGlobally(suggestion: Suggestion, decision: { decision: "Keep" } | { decision: "Edit"; text: string }): Promise<Result<void>> {
+  const kept = await change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision, generation: nextGeneration() });
   if (kept.kind !== "ok") return kept;
   assert(suggestion.version < Number.MAX_SAFE_INTEGER, "memory version exhausted");
   return change("desktop_promote_memory", { project: suggestion.project_id, memory: suggestion.id, version: suggestion.version + 1, generation: nextGeneration() });
+}
+
+/** Saves a research suggestion to app-wide memory with one owner click: the engine first
+ * keeps it in its project, then makes it global. Input: the suggestion. Output: ok once both
+ * are saved, or the plain reason the second step failed. */
+export function saveSuggestion(suggestion: Suggestion): Promise<Result<void>> {
+  return keepGlobally(suggestion, { decision: "Keep" });
+}
+
+/** Checks a memory the owner rewrote, with the engine's rules: not blank, no NUL, at most 4096
+ * UTF-8 bytes. Input: the text. Output: the trimmed text, or the plain reason it can't be saved. */
+export function memoryEdit(text: string): { kind: "ok"; text: string } | { kind: "invalid"; reason: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "invalid", reason: "Write something to remember." };
+  if (trimmed.includes("\0")) return { kind: "invalid", reason: "Remove the empty characters from the memory." };
+  const bytes = new TextEncoder().encode(trimmed).length;
+  if (bytes > MEMORY_TEXT_BYTES_MAX) return { kind: "invalid", reason: `Too long: ${bytes} of ${MEMORY_TEXT_BYTES_MAX} bytes.` };
+  return { kind: "ok", text: trimmed };
+}
+
+/** Saves a research suggestion in the owner's own words: the engine keeps the edited text in
+ * its project, then makes it app-wide. Inputs: the suggestion and the new text. Output: ok once
+ * both are saved, the plain reason the text is refused, or why a step failed. */
+export function saveEditedSuggestion(suggestion: Suggestion, text: string): Promise<Result<void>> {
+  const edit = memoryEdit(text);
+  if (edit.kind === "invalid") return Promise.resolve({ kind: "error", code: "invalid_knowledge_text", message: edit.reason });
+  return keepGlobally(suggestion, { decision: "Edit", text: edit.text });
+}
+
+/** Keeps a project's research memory in the owner's own words, the TUI's "Edit first": the
+ * engine saves the edited text in the project and bumps its version. Inputs: project id,
+ * memory id, its version, the new text and a generation. Output: the receipt, or the plain
+ * reason the text is refused before any engine call. */
+export function editProjectMemory(id: string, memory: string, version: number, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  const edit = memoryEdit(text);
+  if (edit.kind === "invalid") return Promise.resolve({ kind: "error", code: "invalid_knowledge_text", message: edit.reason });
+  return call<IntentReceipt>("desktop_review_memory", { id, memory, version, decision: { decision: "Edit", text: edit.text }, generation });
 }
 
 /** Dismisses a research suggestion; it stays out of memory. Input: the suggestion. */
@@ -600,4 +637,16 @@ export function resizeTerminal(agent: string, cols: number, rows: number): Promi
  * Input: the terminal name. Output: ok once closed. */
 export function detachTerminal(agent: string): Promise<Result<void>> {
   return call<void>("desktop_terminal_detach", { agent });
+}
+
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
+ * and the switch. Output: the engine receipt, not ready, or a plain error. */
+export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan
+ * or null for any, and the task. Output: the engine receipt, not ready, or a plain error. */
+export function delegateTeamTask(id: string, harness: string | null, prompt: string): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_delegate", { id, harness, prompt, generation: nextGeneration() });
 }

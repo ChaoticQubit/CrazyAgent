@@ -48,7 +48,7 @@ pub(in crate::tui) enum AppSetupEvent {
     HomeSet(Result<(), String>),
     FolderSize(String, Result<u64, String>),
     GitHub(Result<GitHubStatus, String>),
-    GitHubSignedOut(Result<(), String>),
+    GitHubSignedOut(Result<GitHubStatus, String>),
 }
 
 impl AppSetupJob {
@@ -125,14 +125,13 @@ impl NativeOwner {
                 path,
                 move_projects,
                 generation,
-            } => {
-                let reply = if move_projects {
-                    controller.move_projects_home(path, generation).await
-                } else {
-                    controller.set_projects_home(path, generation).await
-                };
-                AppSetupEvent::HomeSet(applied(reply, "home_outcome_unknown", lost))
-            }
+            } => AppSetupEvent::HomeSet(applied(
+                controller
+                    .move_projects_home(path, move_projects, generation)
+                    .await,
+                "home_outcome_unknown",
+                lost,
+            )),
             AppSetupJob::FolderSize { path } => {
                 let size = controller
                     .folder_size(path.clone())
@@ -142,7 +141,7 @@ impl NativeOwner {
             }
             AppSetupJob::GitHub => AppSetupEvent::GitHub(
                 controller
-                    .github_status()
+                    .github_account()
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
@@ -150,7 +149,6 @@ impl NativeOwner {
                 controller
                     .github_sign_out()
                     .await
-                    .map(|_| ())
                     .map_err(|error| problem(&error, lost)),
             ),
         }

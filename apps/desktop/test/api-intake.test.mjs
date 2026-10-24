@@ -51,8 +51,10 @@ test("repository pages start at 1 and a bad page is a programming error", async 
 
 test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("projects_home_unset"), "Choose your projects folder first.");
-  assert.equal(api.intakeCopy("folder_name_taken"), "Your projects folder already has a folder with this name. Rename one of them first.");
-  assert.equal(api.intakeCopy("repo_already_cloned"), "This repository is already in your projects folder.");
+  assert.equal(api.intakeCopy("home_destination_exists"), "Your projects folder already has a folder with this name. Rename one of them first.");
+  assert.equal(api.intakeCopy("clone_destination_exists"), "Your projects folder already has a folder with this repository's name.");
+  assert.equal(api.intakeCopy("github_sign_in_expired"), "The GitHub code expired before it was entered. Start again.");
+  assert.equal(api.intakeCopy("home_move_partial"), "Some projects were moved and couldn't be moved back. Check both folders.");
   assert.equal(api.intakeCopy("pending_intent"), "Another change is still being saved. Wait for it to finish, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again.");
 });
@@ -62,4 +64,17 @@ test("setup takes at most 64 pack entries and its failures read as plain sentenc
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");
   assert.equal(api.intakeCopy("pack_required"), "This entry is always on and can't be removed.");
   assert.equal(api.intakeCopy("setup_busy"), "Setup is already running. Wait for it to finish.");
+});
+
+test("every refusal code the native bridge can return has a plain sentence", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const codes = new Set();
+  for (const name of ["INTAKE_CODES", "GITHUB_CODES", "SETUP_CODES"]) {
+    const start = bridge.indexOf(`const ${name}`);
+    assert.ok(start >= 0, name);
+    for (const match of bridge.slice(start, bridge.indexOf("];", start)).matchAll(/"([a-z_]+)"/g)) codes.add(match[1]);
+  }
+  for (const match of bridge.matchAll(/failure\("([a-z_]+)"\)/g)) codes.add(match[1]);
+  assert.ok(codes.size > 100);
+  for (const code of codes) assert.notEqual(api.intakeCopy(code), "Something went wrong. Try again.", code);
 });

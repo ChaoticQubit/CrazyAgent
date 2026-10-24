@@ -248,6 +248,29 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
     assert_eq!(reason, "terminal_ended");
     assert!(!terminals.live());
 
+    terminals.handle(Request::TerminalInput {
+        agent: agent(1),
+        bytes: b"echo gone\r".to_vec(),
+    });
+    assert!(
+        !terminals.live(),
+        "input to an ended terminal opens nothing"
+    );
+    assert!(terminals.poll().is_none());
+
+    terminals.handle(Request::TerminalAttach { agent: agent(1) });
+    match next(&mut terminals) {
+        Some((dead, TerminalFrame::Rejected { code })) => {
+            assert_eq!(dead, agent(1));
+            assert!(
+                matches!(code.as_str(), "terminal_agent_unknown" | "terminal_ended"),
+                "{code}"
+            );
+        }
+        other => panic!("expected the dead agent refused, got {other:?}"),
+    }
+    assert!(!terminals.live());
+
     drop(terminals);
     runtime
         .block_on(tokio::time::timeout(WAIT, service.shutdown()))

@@ -80,7 +80,20 @@ pub(in crate::tui) fn copy(code: &str) -> &'static str {
         "owner_home_unknown" => "Your home folder could not be found.",
         "onboarding_running" => "This project is already being set up.",
         "onboarding_missing" => "This project isn't being set up anymore. Start again.",
-        "onboarding_path_invalid" => "CrazyAgent can't set up this folder.",
+        "onboarding_path_invalid" | "onboarding_path_not_canonical" => {
+            "CrazyAgent can't set up this folder from this path. Open it from Home again."
+        }
+        "onboarding_folder_missing" => "That folder isn't there anymore.",
+        "onboarding_folder_unsafe" => {
+            "This folder holds your home folder, app data or agent settings, so it can't be set up."
+        }
+        "onboarding_layout_incomplete" => {
+            "The project's .crazyagent folder is incomplete. Check it and start again."
+        }
+        "onboarding_project_mismatch" | "project_exists" => {
+            "Another project already uses this name. Rename the folder first."
+        }
+        "project_setup_missing" | "project_missing" => "This project is gone. It was reloaded.",
         "pool_missing" => "That pool no longer exists. Pick another pool.",
         "stale_revision" => "This project changed meanwhile. Check it and confirm again.",
         "github_signed_out" => "Sign in with GitHub first.",

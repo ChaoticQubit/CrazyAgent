@@ -5,13 +5,14 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::github::{GitHubMethod, GitHubStatus};
-use crate::onboarding::{MappingFacts, Onboarding, Step};
+use crate::onboarding::{MappingFacts, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::ctx::{Ctx, Link};
+use crate::tui::glyphs::Status;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
 use crate::tui::seam::{Arrival, Request, ShellRequest};
@@ -267,6 +268,8 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "notes"), "{rows:#?}");
     assert!(shows(&rows, "Not set up"), "{rows:#?}");
+    let state = format!("{} Not set up", shell.ctx.glyphs.status(Status::Waiting));
+    assert!(shows(&rows, &state), "{rows:#?}");
     assert!(shows(&rows, "a Add project"), "{rows:#?}");
 
     shell.key(Key::Char('a'));
@@ -383,7 +386,7 @@ fn waiting_review() -> (Shell, ProjectId) {
     );
     let mut shell = Shell::with(ctx, screen);
     while shell.ctx.next_request().is_some() {}
-    let draft = Onboarding {
+    let draft = OnboardingView {
         project_id: project.clone(),
         graph: Step::Done,
         mapping: Step::Failed {

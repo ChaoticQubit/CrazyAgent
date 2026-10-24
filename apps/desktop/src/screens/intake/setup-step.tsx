@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { intakeCopy, loadSetupStatus, runSetup } from "../../api-intake";
 import type { PackEntry, SetupStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Checkbox, Skeleton, StatusBadge } from "../../ui";
+import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_POLL_MS, approvalLine, dependencyView, entryName, packGroups, packStateView, packTicks, setupBusy, setupProgress } from "./intake";
+import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, packGroups, packStateView, packTicks, setupBusy, setupProgress } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -14,7 +14,7 @@ function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: 
   const required = entry.group === "always";
   return <li className="in-row">
     <span className="in-row-main">
-      <Checkbox label={<>{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted"> MCP server</span>}</>}
+      <Checkbox label={<span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>}
         checked={required || ticked} disabled={locked || required} onChecked={(on) => onTick(entry.id, on)} />
       <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}{required ? ", always on" : entry.on_by_default ? "" : ", off by default"}</span>
       {state.line && <span className="pj-small pj-error">{state.line}</span>}
@@ -57,7 +57,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
       <ul className="in-list">{dependencies.map((dependency) => {
         const row = dependencyView(dependency);
         return <li className="in-row" key={dependency.name}>
-          <span className="in-row-main"><strong>{row.title}</strong><span className="pj-small pj-secondary">{row.about}</span>
+          <span className="in-row-main"><span className="pj-row"><Icon name="wrench" size={14} /><strong>{row.title}</strong></span><span className="pj-small pj-secondary">{row.about}</span>
             {row.line && <span className={`pj-small ${dependency.state.state === "failed" ? "pj-error" : "pj-muted"}`}>{row.line}</span>}</span>
           <StatusBadge word={row.word} tone={row.tone} />
         </li>;
@@ -79,8 +79,8 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     </p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <span className="pj-row">
-      {started || running ? <Button variant="primary" onClick={onContinue}>Continue</Button>
-        : <Button variant="primary" pending={busy} pendingLabel="Starting..." onClick={onRun}>Set up tools</Button>}
+      {started || running ? <Button variant="primary" icon="arrow-right" onClick={onContinue}>Continue</Button>
+        : <Button variant="primary" icon="wrench" pending={busy} pendingLabel="Starting..." onClick={onRun}>Set up tools</Button>}
       {!started && !running && <Button variant="quiet" disabled={busy} onClick={onContinue}>Skip for now</Button>}
     </span>
   </div>;

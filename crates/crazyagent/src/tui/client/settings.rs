@@ -12,10 +12,14 @@ use crate::harnesses::HarnessEntry;
 use crate::memory::library::{
     LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory,
 };
+use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::CredentialRef;
 
 const POOL_JOINS_MAX: usize = 64;
+const SUGGESTION_PROJECTS_MAX: usize = 50;
+/// Most research suggestions the Memory page lists at once.
+pub(in crate::tui) const SUGGESTIONS_MAX: usize = 200;
 const DISPLAY_BYTES_MAX: usize = 4096;
 /// Accounts read per engine page when every account is loaded.
 pub(in crate::tui) const ACCOUNTS_PAGE: u16 = 200;
@@ -40,6 +44,19 @@ pub(in crate::tui) enum SettingsJob {
     DeleteMemory {
         memory: RequestId,
         generation: u64,
+    },
+    AddMemory {
+        scope: MemoryScope,
+        text: String,
+        generation: u64,
+    },
+    Suggestions {
+        projects: Vec<ProjectId>,
+    },
+    Suggestion {
+        suggestion: Suggestion,
+        keep: bool,
+        generations: [u64; 2],
     },
     Plugins,
     ProjectPlugins {
@@ -114,12 +131,28 @@ impl std::fmt::Debug for SettingsJob {
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
             Self::DeleteMemory { .. } => "DeleteMemory",
+            Self::AddMemory { .. } => "AddMemory",
+            Self::Suggestions { .. } => "Suggestions",
+            Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
         })
     }
+}
+
+/// A research memory for the owner to act on: a suggestion to save for every
+/// project or dismiss, or one kept in its project that can be used in all.
+/// Input: read from a project's memory inbox. Output: the text shown, whether
+/// it is kept already and the ids the change needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct Suggestion {
+    pub project: ProjectId,
+    pub entry: RequestId,
+    pub version: u64,
+    pub text: String,
+    pub kept: bool,
 }
 
 /// One step of a managed Codex or Claude sign-in for an account.
@@ -194,6 +227,9 @@ pub(in crate::tui) enum SettingsEvent {
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
+    MemoryAdded(Result<(), String>),
+    Suggestions(Result<Vec<Suggestion>, String>),
+    SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
     PluginChanged(Result<Option<ServerView>, String>),
@@ -213,6 +249,11 @@ impl SettingsEvent {
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
+            SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
+            SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
+            SettingsJob::Suggestion { suggestion, .. } => {
+                Self::SuggestionDone(suggestion.clone(), Err(problem))
+            }
             SettingsJob::Plugins => Self::Plugins(Err(problem)),
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
@@ -337,6 +378,29 @@ impl NativeOwner {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
+            SettingsJob::AddMemory {
+                scope,
+                text,
+                generation,
+            } => SettingsEvent::MemoryAdded(match self.settings_controller() {
+                Ok(controller) => applied(
+                    controller.add_memory(scope, text, generation).await,
+                    "memory_outcome_unknown",
+                    lost,
+                ),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::Suggestions { projects } => {
+                SettingsEvent::Suggestions(self.suggestions(projects, lost).await)
+            }
+            SettingsJob::Suggestion {
+                suggestion,
+                keep,
+                generations,
+            } => {
+                let done = self.decide(&suggestion, keep, generations, lost).await;
+                SettingsEvent::SuggestionDone(suggestion, done)
+            }
             SettingsJob::DeleteMemory { memory, generation } => {
                 SettingsEvent::MemoryDeleted(match self.settings_controller() {
                     Ok(controller) => applied(
@@ -424,6 +488,115 @@ impl NativeOwner {
                 .map(|()| None),
         };
         done.map_err(|error| problem(&error, lost))
+    }
+
+    /// Reads the research memories waiting for the owner and the ones kept in a
+    /// project, the first page of each project's inbox, as the desktop does.
+    /// Inputs: the projects and the lost-connection flag. Output: at most
+    /// SUGGESTIONS_MAX suggestions, or the first plain problem code.
+    pub(super) async fn suggestions(
+        &mut self,
+        projects: Vec<ProjectId>,
+        lost: &mut bool,
+    ) -> Result<Vec<Suggestion>, String> {
+        let controller = self.settings_controller()?;
+        let mut found: Vec<Suggestion> = Vec::new();
+        for project in projects.into_iter().take(SUGGESTION_PROJECTS_MAX) {
+            let entries = controller
+                .project_memories(project, None)
+                .await
+                .map_err(|error| problem(&error, lost))?;
+            found.extend(entries.into_iter().filter_map(|entry| {
+                let kept = match entry.status {
+                    KnowledgeStatus::Confirmed => true,
+                    KnowledgeStatus::Provisional if !entry.human_reviewed => false,
+                    _ => return None,
+                };
+                Some(Suggestion {
+                    project: entry.project_id,
+                    entry: entry.id,
+                    version: entry.version,
+                    text: entry.text,
+                    kept,
+                })
+            }));
+            if found.len() >= SUGGESTIONS_MAX {
+                found.truncate(SUGGESTIONS_MAX);
+                break;
+            }
+        }
+        assert!(found.len() <= SUGGESTIONS_MAX);
+        Ok(found)
+    }
+
+    /// Saves a research suggestion to memory for every project, or dismisses it.
+    /// Saving keeps it in its project first, then copies the kept version to
+    /// global memory, the same two engine changes the desktop makes; a memory
+    /// already kept in its project is only copied.
+    /// Inputs: the suggestion, keep or dismiss, one client generation per
+    /// change and the lost-connection flag. Output: done, or the plain code of
+    /// the step that failed.
+    pub(super) async fn decide(
+        &mut self,
+        suggestion: &Suggestion,
+        keep: bool,
+        generations: [u64; 2],
+        lost: &mut bool,
+    ) -> Result<(), String> {
+        assert!(generations[0] > 0 && generations[0] < generations[1]);
+        assert!(keep || !suggestion.kept);
+        let controller = self.settings_controller()?;
+        if suggestion.kept {
+            return applied(
+                controller
+                    .promote_memory(
+                        suggestion.project.clone(),
+                        suggestion.entry.clone(),
+                        suggestion.version,
+                        generations[1],
+                    )
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            );
+        }
+        let decision = if keep {
+            ReviewDecision::Keep
+        } else {
+            ReviewDecision::Reject
+        };
+        applied(
+            controller
+                .review_memory(
+                    suggestion.project.clone(),
+                    suggestion.entry.clone(),
+                    suggestion.version,
+                    decision,
+                    generations[0],
+                )
+                .await,
+            "memory_outcome_unknown",
+            lost,
+        )?;
+        if !keep {
+            return Ok(());
+        }
+        let version = suggestion
+            .version
+            .checked_add(1)
+            .ok_or_else(|| "memory_version_exhausted".to_owned())?;
+        applied(
+            controller
+                .promote_memory(
+                    suggestion.project.clone(),
+                    suggestion.entry.clone(),
+                    version,
+                    generations[1],
+                )
+                .await,
+            "memory_outcome_unknown",
+            lost,
+        )
     }
 
     /// Reads the saved memories of several scopes, newest first overall.
@@ -782,21 +955,30 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, ["Laptop", "Mini", "Studio"]);
 
-        let written = native
-            .controller
-            .as_mut()
-            .unwrap()
-            .add_memory(
-                MemoryScope::Global,
-                "Use metric units in every recipe.".into(),
-                1,
-            )
-            .await
-            .unwrap();
+        let note = |generation| SettingsJob::AddMemory {
+            scope: MemoryScope::Global,
+            text: "Use metric units in every recipe.".into(),
+            generation,
+        };
+        let written = native.settings(note(1)).await;
+        assert!(matches!(written, SettingsEvent::MemoryAdded(Ok(()))));
+        let twice = native.settings(note(2)).await;
         assert!(matches!(
-            written,
-            OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
-                if operation.result == OwnerResult::Applied
+            twice,
+            SettingsEvent::MemoryAdded(Err(code)) if code == "memory_duplicate"
+        ));
+        let nowhere = native
+            .settings(SettingsJob::AddMemory {
+                scope: MemoryScope::Project {
+                    project_id: ProjectId::new("nowhere").unwrap(),
+                },
+                text: "A project that was never made.".into(),
+                generation: 3,
+            })
+            .await;
+        assert!(matches!(
+            nowhere,
+            SettingsEvent::MemoryAdded(Err(code)) if code == "memory_project_missing"
         ));
         let SettingsEvent::Memories(Ok(memories)) = native
             .settings(SettingsJob::Memories {
@@ -812,7 +994,7 @@ mod tests {
         let deleted = native
             .settings(SettingsJob::DeleteMemory {
                 memory: memory.clone(),
-                generation: 2,
+                generation: 4,
             })
             .await;
         assert!(matches!(deleted, SettingsEvent::MemoryDeleted(Ok(()))));
@@ -828,7 +1010,7 @@ mod tests {
         let again = native
             .settings(SettingsJob::DeleteMemory {
                 memory,
-                generation: 3,
+                generation: 5,
             })
             .await;
         assert!(matches!(
@@ -902,6 +1084,36 @@ mod tests {
         assert!(matches!(
             created,
             OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ));
+        let SettingsEvent::Suggestions(Ok(waiting)) = native
+            .settings(SettingsJob::Suggestions {
+                projects: vec![project.clone()],
+            })
+            .await
+        else {
+            panic!("suggestions required")
+        };
+        assert!(
+            waiting.is_empty(),
+            "a project without research suggests nothing"
+        );
+        let missing = Suggestion {
+            project: project.clone(),
+            entry: RequestId::new("entry-never-made").unwrap(),
+            version: 1,
+            text: "Never researched.".into(),
+            kept: false,
+        };
+        let refused = native
+            .settings(SettingsJob::Suggestion {
+                suggestion: missing.clone(),
+                keep: true,
+                generations: [2, 3],
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            SettingsEvent::SuggestionDone(done, Err(_)) if done == missing
         ));
         let folder = root.path().join("picked/release");
         std::fs::create_dir_all(&folder).unwrap();

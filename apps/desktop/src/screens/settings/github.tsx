@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { gitHubSignOut, intakeCopy, loadGitHubStatus } from "../../api-intake";
 import type { GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, NotReady, Skeleton } from "../../ui";
+import { Button, ConfirmDialog, Icon, LoadError, NotReady, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { GitHubSignIn } from "../intake/clone";
 import { accountLine } from "../intake/intake";
@@ -18,7 +18,7 @@ export function GitHubAccountView({ status, busy, problem, onSignOut }: {
   onSignOut: () => void;
 }) {
   return <section className="pj-stack-s in-panel" aria-label="GitHub account">
-    <h2>GitHub account</h2>
+    <h2 className="row"><Icon name="git-branch" size={16} />GitHub account</h2>
     <p>{accountLine(status)}</p>
     <p className="pj-secondary">{status.method === "cli"
       ? "CrazyAgent uses the GitHub CLI's sign-in on this Mac to list and clone. Signing out here leaves the GitHub CLI signed in."

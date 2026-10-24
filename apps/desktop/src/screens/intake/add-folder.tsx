@@ -48,19 +48,19 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
     {source && <>
       {github && <Notice tone="info">
         This folder's code is on GitHub ({displayText(github)}). Cloning gives a fresh copy and leaves this folder alone.{" "}
-        <Button size="small" onClick={onClone}>Clone instead</Button>
+        <Button size="small" icon="git-branch" onClick={onClone}>Clone instead</Button>
       </Notice>}
       <div className="pj-field">
         <span className="pj-label">Move or copy</span>
         <Segmented label="Move or copy" value={mode} onValue={onMode}
-          options={[{ value: "move", label: "Move", icon: "folder-open" }, { value: "copy", label: "Copy", icon: "copy" }]} />
+          options={[{ value: "move", label: "Move", icon: "folder-input" }, { value: "copy", label: "Copy", icon: "copy" }]} />
       </div>
       {line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>}
       {size?.kind === "not_ready" && mode === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
       {size?.kind === "error" && <p className="pj-error" role="alert">{size.message}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
-        <Button variant="primary" pending={busy} pendingLabel={mode === "move" ? "Moving..." : "Copying..."} disabled={mode === "copy" && bytes === null}
+        <Button variant="primary" icon={mode === "move" ? "folder-input" : "copy"} pending={busy} pendingLabel={mode === "move" ? "Moving..." : "Copying..."} disabled={mode === "copy" && bytes === null}
           onClick={onAdd}>{mode === "move" ? "Move into projects folder" : "Copy into projects folder"}</Button>
         <a className="btn quiet" href={formatRoute({ name: "home" })}>Cancel</a>
       </span>

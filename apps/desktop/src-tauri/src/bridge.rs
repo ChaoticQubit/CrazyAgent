@@ -177,6 +177,15 @@ pub struct HistoryPage {
     pub revision: String,
 }
 
+/// Names the project a StartOnboarding registers, computed from the folder path the way the
+/// engine does, so the receipt can open the setup review. Input: the folder path sent.
+/// Output: the project id, or None for a path with no folder name.
+pub fn onboarded_project(path: &str) -> Option<String> {
+    crazyagent::onboarding::project_id_for(std::path::Path::new(path))
+        .ok()
+        .map(|id| id.as_str().to_owned())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingIntent {
     pub kind: &'static str,
@@ -482,7 +491,9 @@ impl NativeBridge {
             OwnerMutation::SetProjectsHome { .. } => ("projects_home", None, None),
             OwnerMutation::MoveProjectsHome { .. } => ("move_projects_home", None, None),
             OwnerMutation::AddExistingFolder { .. } => ("add_existing_folder", None, None),
-            OwnerMutation::StartOnboarding { .. } => ("start_onboarding", None, None),
+            OwnerMutation::StartOnboarding { path, .. } => {
+                ("start_onboarding", onboarded_project(path), None)
+            }
             OwnerMutation::CancelResearch { project_id, .. } => (
                 "research_cancel",
                 Some(project_id.as_str().to_owned()),
@@ -491,6 +502,9 @@ impl NativeBridge {
             OwnerMutation::RetryResearch { project_id, .. } => {
                 ("research_retry", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::RunSetup { .. } => ("run_setup", None, None),
+            OwnerMutation::SetPackEntry { .. } => ("pack_set", None, None),
+            OwnerMutation::RemovePackEntry { .. } => ("pack_remove", None, None),
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },
             } => ("memory_review", None, None),
@@ -968,21 +982,14 @@ fn rejection_code(code: &str) -> &'static str {
         "research_job_missing" => "research_job_missing",
         "research_job_finished" => "research_job_finished",
         "research_job_not_retryable" => "research_job_not_retryable",
-        "projects_home_unset" => "projects_home_unset",
-        "projects_home_path_invalid" => "projects_home_path_invalid",
-        "projects_home_unwritable" => "projects_home_unwritable",
-        "home_source_invalid" => "home_source_invalid",
-        "folder_missing" => "folder_missing",
-        "folder_not_a_directory" => "folder_not_a_directory",
-        "folder_inside_home" => "folder_inside_home",
-        "folder_contains_home" => "folder_contains_home",
-        "folder_name_taken" => "folder_name_taken",
-        "folder_move_failed" => "folder_move_failed",
-        "folder_copy_failed" => "folder_copy_failed",
-        "onboarding_path_invalid" => "onboarding_path_invalid",
-        "onboarding_running" => "onboarding_running",
-        "onboarding_missing" => "onboarding_missing",
-        _ => crazyagent::memory::library::known_code(code).unwrap_or("owner_rejected"),
+        "setup_busy" => "setup_busy",
+        "pack_unknown" => "pack_unknown",
+        "pack_required" => "pack_required",
+        "pack_not_installed" => "pack_not_installed",
+        "pack_name_taken" => "pack_name_taken",
+        _ => intake::intake_code(code)
+            .or_else(|| crazyagent::memory::library::known_code(code))
+            .unwrap_or("owner_rejected"),
     }
 }
 

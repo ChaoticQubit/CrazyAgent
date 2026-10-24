@@ -3,9 +3,10 @@ import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
-  StatusBadge, TextField, WindowedList, navigate,
+  StatusBadge, TextField, WindowedList, navigate, Checkbox,
 } from "../../ui";
 import { filterAccounts } from "./accounts";
+import { takePoolDraft } from "./pool-draft";
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 
@@ -109,17 +110,27 @@ export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }
   </div>;
 }
 
+/** The accounts the pool editor's left list shows: the search and provider filters, then only
+ * the members when "Selected only" is on. Inputs: the accounts, the filters, the members and
+ * the switch. Output: the accounts to list. */
+export function editorAccounts(accounts: AccountView[], search: string, provider: string, members: readonly string[], selectedOnly: boolean): AccountView[] {
+  const shown = filterAccounts(accounts, search, provider, "");
+  return selectedOnly ? shown.filter((account) => members.includes(account.id)) : shown;
+}
+
 /** The pool editor as a view: name, every account as a windowed checkbox list, the members
  * with the 15-cell counter, and Save pool. Inputs: the pool being edited (absent for a new
- * one), the accounts read, and the save and cancel actions. */
-export function PoolEditorView({ pool, accounts, onSave, onCancel }: {
+ * one), the accounts read, the members a new pool starts with, and the save and cancel actions. */
+export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, onCancel }: {
   pool: PoolSummary | undefined;
   accounts: Loaded<AccountView[]>;
+  initialMembers?: string[];
   onSave: (name: string, members: string[]) => Promise<Result<void>>;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(pool?.name ?? "");
-  const [members, setMembers] = useState<string[]>(pool?.members.map((member) => member.id) ?? []);
+  const [members, setMembers] = useState<string[]>(pool?.members.map((member) => member.id) ?? initialMembers.slice(0, POOL_MEMBER_MAX));
+  const [selectedOnly, setSelectedOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("");
   const [blocked, setBlocked] = useState<string>();
@@ -132,7 +143,7 @@ export function PoolEditorView({ pool, accounts, onSave, onCancel }: {
   const status = new Map<string, string>([...pool?.members.map((member) => [member.id, member.status] as [string, string]) ?? [],
     ...all.map((account) => [account.id, account.status] as [string, string])]);
   const full = members.length >= POOL_MEMBER_MAX;
-  const shown = filterAccounts(all, search, provider, "");
+  const shown = editorAccounts(all, search, provider, members, selectedOnly);
   const providers = [...new Map(all.map((account) => [account.provider, account.provider_name])).entries()];
   const note = notSignedInNote(members, status);
 
@@ -168,12 +179,13 @@ export function PoolEditorView({ pool, accounts, onSave, onCancel }: {
           <SearchField label="Search accounts" value={search} onValue={setSearch} />
           <Select id="pool-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
             options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
+          <Checkbox label="Selected only" checked={selectedOnly} onChecked={setSelectedOnly} />
         </div>
         {accounts.kind === "loading" ? <Skeleton shape="row" count={6} /> : accounts.kind === "not_ready" ? <NotReady what="Accounts" compact />
           : accounts.kind === "error" ? <Notice tone="danger">Couldn't load accounts.</Notice>
           : all.length === 0 ? <EmptyState compact icon="key-round" title="No accounts yet"
             action={<a className="btn" href="#/settings/accounts?action=add">Add account</a>}>Add an account first, then put it in a pool.</EmptyState>
-          : shown.length === 0 ? <p className="item-row secondary">No accounts match.</p>
+          : shown.length === 0 ? <p className="item-row secondary">{selectedOnly && members.length === 0 ? "No accounts selected yet." : "No accounts match."}</p>
           : <WindowedList label="All accounts" count={shown.length} viewport={440} renderRow={(index) => {
             const account = shown[index]!;
             const checked = members.includes(account.id);
@@ -222,10 +234,16 @@ export function Pools({ creating }: { creating: boolean }) {
   const [pools, reload] = useLoad(poolSummaries);
   const [accounts] = useLoad(listAccounts);
   const [editing, setEditing] = useState<{ id?: string } | undefined>(creating ? {} : undefined);
+  const [draft, setDraft] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<PoolSummary>();
   const [removing, setRemoving] = useState(false);
   const [refusal, setRefusal] = useState<string>();
-  useEffect(() => { if (creating) setEditing({}); }, [creating]);
+  useEffect(() => {
+    if (!creating) return;
+    setEditing({});
+    const taken = takePoolDraft();
+    if (taken.length) setDraft(taken);
+  }, [creating]);
 
   const prepare = async (targets: { id: string; name: string }[]) => {
     const failures: { name: string; message: string }[] = [];
@@ -252,13 +270,14 @@ export function Pools({ creating }: { creating: boolean }) {
 
   if (editing) {
     const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
-    return <PoolEditorView key={editing.id ?? "new"} pool={pool} accounts={accounts} onCancel={leave} onSave={async (name, members) => {
+    return <PoolEditorView key={editing.id ?? `new-${draft.join(",")}`} pool={pool} accounts={accounts} initialMembers={editing.id ? [] : draft} onCancel={() => { setDraft([]); leave(); }} onSave={async (name, members) => {
       const saved = session.noteResult(await savePool(editing.id, name, members));
       if (saved.kind !== "ok") return saved;
       const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
       setRefusal(setupNote(await prepare(targets.map((account) => ({ id: account.id, name: account.name })))));
       session.showToast(`${name.trim()} saved.`);
       reload();
+      setDraft([]);
       leave();
       return saved;
     }} />;

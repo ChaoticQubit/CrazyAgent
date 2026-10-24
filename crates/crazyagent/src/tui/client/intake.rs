@@ -2,8 +2,8 @@ use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
-use crate::onboarding::Onboarding;
-use crate::projects_home::{AddMode, FoundProject, FoundState, ProjectsHome};
+use crate::onboarding::OnboardingView;
+use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crate::protocol::CredentialRef;
 
 #[cfg(test)]
@@ -64,7 +64,7 @@ pub(in crate::tui) enum IntakeView {
     Home(ProjectsHome),
     Found(Vec<FoundProject>),
     FolderSize(u64),
-    Onboarding(Box<Onboarding>),
+    Onboarding(Box<OnboardingView>),
     OnboardingStarted(ProjectId),
     GitHub(GitHubStatus),
     DeviceCode(GitHubDeviceCode),
@@ -184,14 +184,14 @@ impl NativeOwner {
                 pool,
                 generation,
             } => {
+                let project = started(&path)?;
                 applied(
                     controller
-                        .start_onboarding(path.clone(), pool, generation)
+                        .start_onboarding(path, pool, generation)
                         .await
-                        .map_err(&mut problem)?,
+                        .map_err(problem)?,
                 )?;
-                let found = controller.found_projects().await.map_err(problem)?;
-                IntakeView::OnboardingStarted(started(&found, &path)?)
+                IntakeView::OnboardingStarted(project)
             }
             IntakeQuery::Onboarding { project } => IntakeView::Onboarding(Box::new(
                 controller.onboarding(project).await.map_err(problem)?,
@@ -231,10 +231,7 @@ fn applied(response: OwnerResponse) -> Result<OwnerResult, String> {
     }
 }
 
-fn started(found: &[FoundProject], path: &str) -> Result<ProjectId, String> {
-    found
-        .iter()
-        .find(|project| project.path == path && project.state == FoundState::Onboarding)
-        .and_then(|project| project.project_id.clone())
-        .ok_or_else(|| "onboarding_missing".into())
+fn started(path: &str) -> Result<ProjectId, String> {
+    crate::onboarding::project_id_for(std::path::Path::new(path))
+        .map_err(|error| bounded_problem(&error.0))
 }
