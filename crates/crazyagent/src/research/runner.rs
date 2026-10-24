@@ -300,6 +300,12 @@ impl ResearchRunner {
         &self.database
     }
 
+    /// The engine-owned folder holding this runner's sandbox profiles and
+    /// agent state.
+    pub(crate) fn state(&self) -> &Path {
+        &self.state
+    }
+
     /// Stops claiming, stops every running agent's process group and returns
     /// its job to the queue so a later runner picks it up again.
     pub fn shutdown(&self) {
@@ -720,6 +726,202 @@ impl ResearchRunner {
     }
 }
 
+/// One agent run outside the research queue that may only read `folder`,
+/// such as onboarding's mapping agent: `name` names its agent state and
+/// sandbox profile, `prompt` goes to it on stdin, `wall_time` bounds it.
+pub(crate) struct ReadOnlyRun<'a> {
+    pub name: &'a str,
+    pub folder: &'a Path,
+    pub prompt: &'a str,
+    pub account: &'a ResearchAccount,
+    pub wall_time: Duration,
+}
+
+/// How a read-only agent run ended: its last message, a plain failure, out
+/// of time, or stopped by its caller or the runner's shutdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadOnlyEnding {
+    Answered(String),
+    Failed(&'static str),
+    TimedOut,
+    Stopped,
+}
+
+impl ResearchRunner {
+    /// Runs one agent with tools off that can read `run.folder` but write only
+    /// its own engine-owned work, home and temp folders, reaching nothing but
+    /// its model endpoint. A managed account is held under the engine custody
+    /// lease for the whole run. Takes the run and `stop`, polled while the
+    /// agent runs. Returns how it ended; the agent's process group is stopped
+    /// on every path, including a panic or an early error.
+    pub(crate) fn run_read_only(
+        &self,
+        run: &ReadOnlyRun<'_>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ReadOnlyEnding, RunError> {
+        if !valid_run_name(run.name) || run.wall_time.is_zero() {
+            return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        let folder = run.folder.canonicalize()?;
+        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+            return Err(RunError::Invalid(
+                "read-only folder must be canonical".into(),
+            ));
+        }
+        let agent = self.state.join("agents").join(run.name);
+        if fs::symlink_metadata(&agent).is_ok() {
+            return Err(RunError::Invalid("read-only run name already used".into()));
+        }
+        let lease = match run.account {
+            ResearchAccount::ManagedCodex { connection, .. }
+            | ResearchAccount::ManagedClaude { connection, .. } => {
+                let jobs = ResearchJobs::open(&self.database)?;
+                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
+                    if code == PROFILE_BUSY {
+                        RunError::Busy
+                    } else {
+                        RunError::Account(code)
+                    }
+                })?;
+                Some(self.lease(&host, &fact.binding, run.name, 1)?)
+            }
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+        };
+        private_directory(&agent)?;
+        let home = match &lease {
+            Some(lease) => lease_home(lease)?,
+            None => {
+                let home = agent.join("home");
+                private_directory(&home)?;
+                home
+            }
+        };
+        let work = agent.join("work");
+        private_directory(&work)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
+        let harness = run.account.harness();
+        let executable = match harness {
+            ResearchHarness::Codex => self.codex.as_path(),
+            ResearchHarness::ClaudeCode => self
+                .claude
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
+        };
+        let mut sandbox = ProjectSandbox::new(
+            &work,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(vec![model_remote(run.account)?]),
+        )?
+        .allow_read(&folder)?;
+        if let Some(parent) = executable.canonicalize()?.parent() {
+            sandbox = sandbox.allow_read(parent)?;
+        }
+        let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
+        sandbox.install(&profile)?;
+        write_private(&agent.join("prompt.md"), run.prompt.as_bytes())?;
+        let mut command = sandbox.command(&profile, executable);
+        let (output, stdout_log) = match harness {
+            ResearchHarness::Codex => {
+                let output = tmp.join("answer.md");
+                codex_arguments(&mut command, &folder, &output, &home, false, run.account)?;
+                (output, "events.jsonl")
+            }
+            ResearchHarness::ClaudeCode => {
+                claude_arguments(&mut command, &home, &tmp, false, run.account)?;
+                (agent.join("output.md"), "output.md")
+            }
+        };
+        command
+            .current_dir(&folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut running = AgentProcess::new(command.spawn()?);
+        let counted = Arc::new(AtomicU64::new(0));
+        let mut drains = Vec::with_capacity(2);
+        let streams = [
+            (
+                running
+                    .child
+                    .stdout
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+                stdout_log,
+            ),
+            (
+                running
+                    .child
+                    .stderr
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+                "stderr.log",
+            ),
+        ];
+        for (stream, name) in streams {
+            let Some(stream) = stream else { continue };
+            let log = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(agent.join(name))?;
+            let counted = counted.clone();
+            let log_max = self.limits.output_bytes_max;
+            drains.push(std::thread::spawn(move || {
+                drain(stream, &counted, log, log_max)
+            }));
+        }
+        if let Some(mut stdin) = running.child.stdin.take() {
+            let _ = stdin.write_all(run.prompt.as_bytes());
+        }
+        let started = Instant::now();
+        let ending = loop {
+            if let Some(status) = running.child.try_wait()? {
+                break (!status.success())
+                    .then_some(ReadOnlyEnding::Failed("Agent stopped with an error"));
+            }
+            if started.elapsed() >= run.wall_time {
+                break Some(ReadOnlyEnding::TimedOut);
+            }
+            if stop() || self.is_stopping() {
+                break Some(ReadOnlyEnding::Stopped);
+            }
+            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
+                break Some(ReadOnlyEnding::Failed("Agent wrote too much output"));
+            }
+            std::thread::sleep(POLL);
+        };
+        running.stop();
+        drop(running);
+        for handle in drains {
+            let _ = handle.join();
+        }
+        drop(lease);
+        if let Some(ending) = ending {
+            return Ok(ending);
+        }
+        let answer = read_bounded(&output, self.limits.report_bytes_max)
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_default();
+        Ok(if answer.is_empty() {
+            ReadOnlyEnding::Failed("Agent returned no answer")
+        } else {
+            ReadOnlyEnding::Answered(answer)
+        })
+    }
+}
+
+/// Whether `name` can name a read-only run's agent state, sandbox profile and
+/// lease operation: 1 to 96 ASCII letters, digits, `-` or `_`.
+fn valid_run_name(name: &str) -> bool {
+    (1..=96).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// The agent home a managed launch runs in: the held lease's profile path,
 /// which is a configured profile folder when the owner set one and the
 /// engine-owned `native-profiles/<key>/home` otherwise. Takes the lease.
@@ -1070,15 +1272,15 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
 /// happens when it is dropped while a panic unwinds or a launch step fails,
 /// kills the whole group, reaps the agent and waits until the group is empty,
 /// so no agent process outlives the run that started it.
-struct AgentProcess {
-    child: Child,
-    group: u32,
+pub(crate) struct AgentProcess {
+    pub(crate) child: Child,
+    pub(crate) group: u32,
     stopped: bool,
 }
 
 impl AgentProcess {
     /// Takes a just spawned agent that leads its own process group.
-    fn new(child: Child) -> Self {
+    pub(crate) fn new(child: Child) -> Self {
         let group = child.id();
         assert!(group > 1);
         Self {
@@ -1090,7 +1292,7 @@ impl AgentProcess {
 
     /// Kills the agent's group once, reaps the agent and waits for the group
     /// to empty. Later calls do nothing, so a reused group id is never killed.
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if self.stopped {
             return;
         }
@@ -1139,7 +1341,14 @@ fn await_group_exit(group: u32) {
     }
 }
 
-fn drain(mut stream: Box<dyn Read + Send>, counted: &AtomicU64, mut log: File, log_max: u64) {
+/// Copies an agent stream into its log, counting every byte read and logging
+/// at most `log_max` bytes, until the stream ends.
+pub(crate) fn drain(
+    mut stream: Box<dyn Read + Send>,
+    counted: &AtomicU64,
+    mut log: File,
+    log_max: u64,
+) {
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
     while let Ok(read) = stream.read(&mut buffer) {
@@ -1155,7 +1364,8 @@ fn drain(mut stream: Box<dyn Read + Send>, counted: &AtomicU64, mut log: File, l
     }
 }
 
-fn private_directory(path: &Path) -> io::Result<()> {
+/// Creates a 0700 directory, or accepts an existing real directory there.
+pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

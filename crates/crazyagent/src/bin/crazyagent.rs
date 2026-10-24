@@ -387,7 +387,16 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         executable,
                         claude.as_deref(),
                     )
-                    .map(Some),
+                    .and_then(|research| {
+                        crazyagent::onboarding::service::start_for_engine(
+                            runtime_dir,
+                            Path::new(&args[2]),
+                            Path::new(&args[3]),
+                            executable,
+                            claude.as_deref(),
+                        )
+                        .map(|onboarding| Some((research, onboarding)))
+                    }),
                 })
                 .and_then(|research| {
                     let mut executables = std::collections::BTreeMap::new();
@@ -407,8 +416,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     {
                         Ok(agents) => agents,
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             return Err(error.0);
                         }
@@ -423,8 +433,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     ) {
                         Ok(team) => Ok((research, Some(team))),
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             Err(error)
                         }
@@ -435,8 +446,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     match writeln!(output, "ready").and_then(|()| output.flush()) {
                         Ok(()) => Ok((research, team)),
                         Err(error) => {
-                            if let Some(research) = research {
+                            if let Some((research, onboarding)) = research {
                                 research.stop();
+                                onboarding.stop();
                             }
                             Err(error.to_string())
                         }
@@ -452,8 +464,12 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 }
             };
             let result = service.run(stopped).await.map_err(|e| e.to_string());
-            if let Some(research) = research {
-                let _ = tokio::task::spawn_blocking(move || research.stop()).await;
+            if let Some((research, onboarding)) = research {
+                let _ = tokio::task::spawn_blocking(move || {
+                    research.stop();
+                    onboarding.stop();
+                })
+                .await;
             }
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;

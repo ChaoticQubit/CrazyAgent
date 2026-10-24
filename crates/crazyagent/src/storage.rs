@@ -769,6 +769,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
+    crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
@@ -1269,6 +1270,7 @@ fn execute(
             repository,
             owner_session,
         } => crate::worktrees::release(tx, task_id, repository, owner_session),
+        Command::Onboarding { action } => crate::onboarding::execute(tx, config, path, action),
         _ => crate::coordination::execute(tx, config, command, revision),
     }
 }
@@ -2081,6 +2083,12 @@ fn owner_read(
         OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
+        },
+        OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
+            onboarding: Box::new(
+                crate::onboarding::status(&tx, project_id)?
+                    .ok_or_else(|| error("onboarding_missing"))?,
+            ),
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
