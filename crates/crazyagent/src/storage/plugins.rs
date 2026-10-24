@@ -818,7 +818,11 @@ pub(crate) fn execute(
     }
 }
 
-fn run(tx: &Transaction<'_>, root: &Path, command: Command) -> Result<ResultValue, EngineError> {
+pub(super) fn run(
+    tx: &Transaction<'_>,
+    root: &Path,
+    command: Command,
+) -> Result<ResultValue, EngineError> {
     Ok(match command {
         Command::AddSkill { scope, source } => {
             let record = add_skill(tx, root, scope, source)?;

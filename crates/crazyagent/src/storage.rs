@@ -23,6 +23,7 @@ mod native_auth;
 #[cfg(test)]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
+pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
@@ -134,6 +135,10 @@ pub(crate) enum Job {
     Plugins(
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
+    ),
+    Setup(
+        setup::Command,
+        oneshot::Sender<Result<setup::ResultValue, EngineError>>,
     ),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
@@ -573,6 +578,17 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::Setup(command, reply) => {
+                            let result = if readonly {
+                                Err(error("setup_readonly"))
+                            } else {
+                                match path.parent() {
+                                    Some(root) => setup::execute(&mut connection, root, command),
+                                    None => Err(error("setup_store_unavailable")),
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Config(next, reply) => {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 if sources.is_some() {
@@ -697,6 +713,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
+    setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
