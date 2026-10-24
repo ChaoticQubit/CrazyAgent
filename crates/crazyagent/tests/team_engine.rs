@@ -4,8 +4,11 @@ use crazyagent::team::{
     AgentRole, AgentStatus, MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAction,
     TeamStatus,
 };
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::{SOCKET, installed};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -14,8 +17,14 @@ use std::time::{Duration, Instant};
 
 const PROJECT: &str = "project-team";
 const ASKS_MAX: usize = 3;
+const LEFT_RUNNING: &str = "Kept running while CrazyAgent was closed";
+const LEFT_EXIT_TIME: Duration = Duration::from_secs(10);
+const MODEL: &str = "qwen2.5:7b";
+const OLLAMA: &str = "127.0.0.1:11434";
+const OLLAMA_TIME: Duration = Duration::from_secs(10);
+const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 
-const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"project-team\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"project-team\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 fn codex() -> PathBuf {
     let path = std::env::var_os("CRAZYAGENT_CODEX")
@@ -25,6 +34,27 @@ fn codex() -> PathBuf {
         .expect("real codex binary required");
     assert!(path.is_file(), "real codex binary required");
     path
+}
+
+/// The engine's private tmux server. Agent sessions outlive the engine, so dropping
+/// this ends the server and every agent pane left in it, also when the test fails.
+struct Server {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 struct Engine {
@@ -115,6 +145,32 @@ impl Drop for Engine {
             let _ = self.child.wait();
         }
     }
+}
+
+/// Fails the test with the command that fixes it unless the local Ollama serves the pool
+/// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+fn require_model() {
+    assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
+    let listed = TcpStream::connect(OLLAMA).and_then(|mut stream| {
+        stream.set_read_timeout(Some(OLLAMA_TIME))?;
+        stream.set_write_timeout(Some(OLLAMA_TIME))?;
+        stream.write_all(
+            format!("GET /api/tags HTTP/1.1\r\nHost: {OLLAMA}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )?;
+        let mut reply = String::new();
+        stream
+            .take(OLLAMA_TAGS_BYTES_MAX)
+            .read_to_string(&mut reply)?;
+        Ok(reply)
+    });
+    let reply = listed.unwrap_or_else(|problem| {
+        panic!("the local Ollama at {OLLAMA} is required and did not answer: {problem}")
+    });
+    assert!(
+        reply.contains(&format!("\"name\":\"{MODEL}\"")),
+        "the local Ollama does not have {MODEL}; run: ollama pull {MODEL}"
+    );
 }
 
 fn runtime() -> PathBuf {
@@ -213,7 +269,12 @@ fn group_alive(group: i64) -> bool {
 
 #[test]
 fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() {
+    require_model();
     let runtime = runtime();
+    let server = installed(&runtime).map(|tmux| Server {
+        tmux,
+        socket: runtime.join(FOLDER).join(SOCKET),
+    });
     let engine = Engine::start(&runtime);
     let folder = runtime.join("projects").join(PROJECT);
     fs::create_dir_all(folder.join("context")).unwrap();
@@ -436,18 +497,32 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
         !group_alive(group),
         "cancel stopped the whole process group"
     );
-    let groups: Vec<i64> = cancelled
+    let groups: Vec<(i64, i64)> = cancelled
         .agents
         .iter()
-        .filter_map(|a| a.process_group)
+        .filter_map(|a| a.process_group.map(|group| (a.id, group)))
         .collect();
 
     let stderr = engine.stop();
     assert!(!stderr.contains("panicked"), "{stderr}");
     let after = owner.status();
     assert!(after.agents.iter().all(|a| !a.status.live()), "{after:#?}");
-    for group in groups {
-        assert!(!group_alive(group), "engine stop ended group {group}");
+    for (id, group) in &groups {
+        let agent = after.agents.iter().find(|a| a.id == *id).unwrap();
+        assert_eq!(
+            group_alive(*group),
+            agent.problem.as_deref() == Some(LEFT_RUNNING),
+            "only an agent left in its pane runs on after the engine stops: {agent:#?}"
+        );
+    }
+    drop(server);
+    let deadline = Instant::now() + LEFT_EXIT_TIME;
+    while groups.iter().any(|(_, group)| group_alive(*group)) {
+        assert!(
+            Instant::now() < deadline,
+            "ending the tmux server ended every agent left running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
     fs::remove_dir_all(&runtime).unwrap();
 }
