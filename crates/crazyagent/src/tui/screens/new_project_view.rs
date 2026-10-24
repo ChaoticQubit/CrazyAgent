@@ -152,17 +152,21 @@ impl Row {
     }
 
     /// Pads the row with spaces, or cuts it with an ellipsis, to an exact width.
-    /// Takes the width in cells.
+    /// Takes the width in cells; a zero width gives an empty row.
     /// Returns a row exactly that wide.
     pub fn pad(self, width: usize) -> Self {
         let used = self.width();
         if used <= width {
             return self.push(" ".repeat(width - used), Style::new());
         }
-        let mut cut = self.slice(0, width.saturating_sub(1));
+        if width == 0 {
+            return Self::default();
+        }
+        let cut = self.slice(0, width - 1);
         let style = cut.0.last().map_or(Style::new(), |span| span.style);
-        cut = cut.push("\u{2026}", style);
-        cut.pad(width)
+        let cut = cut.push("\u{2026}", style);
+        let short = width.saturating_sub(cut.width());
+        cut.push(" ".repeat(short), Style::new())
     }
 
     /// Restyles every piece, keeping the text.

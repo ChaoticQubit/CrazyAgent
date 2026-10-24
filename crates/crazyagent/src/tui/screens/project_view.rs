@@ -290,6 +290,19 @@ fn folder(screen: &ProjectScreen) -> String {
         .unwrap_or_default()
 }
 
+/// Draws the Overview title: the project name, then its folder at the right edge.
+/// Takes the screen, the content width and the look; a folder too long for the row is cut, never the name.
+/// Returns one row exactly the content width.
+fn title(screen: &ProjectScreen, content: usize, look: &Look) -> Row {
+    let name = Row::of(screen.name.clone(), look.heading);
+    let room = content.saturating_sub(name.width() + 2);
+    let mut path = Row::of(folder(screen), look.muted);
+    if path.width() > room {
+        path = path.pad(room);
+    }
+    spread(content, name, path)
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
     let Some(setup) = &screen.setup else {
         return vec![Row::of("Loading...", look.muted)];
@@ -450,11 +463,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
             ),
         };
         let mut lines = vec![
-            spread(
-                content,
-                Row::of(screen.name.clone(), look.heading),
-                Row::of(folder(screen), look.muted),
-            ),
+            title(screen, content, look),
             Row::of(about_line(screen), look.fg).pad(content),
             Row::default(),
         ];
@@ -569,11 +578,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         return (lines, None, help);
     }
     let mut lines = vec![
-        spread(
-            content,
-            Row::of(screen.name.clone(), look.heading),
-            Row::of(folder(screen), look.muted),
-        ),
+        title(screen, content, look),
         Row::of(about_line(screen), look.fg).pad(content),
         Row::default(),
     ];
