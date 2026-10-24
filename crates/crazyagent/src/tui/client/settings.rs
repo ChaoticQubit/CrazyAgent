@@ -1260,7 +1260,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reattaches() {
-        let jobs: [(&str, fn() -> SettingsJob); 7] = [
+        type Job = (&'static str, fn() -> SettingsJob);
+        let jobs: [Job; 7] = [
             ("accounts list", || {
                 SettingsJob::Accounts(AccountsRequest::List {
                     after: None,
