@@ -113,9 +113,9 @@ fn a_scan_lists_plain_top_level_folders_with_git_and_setup_flags() {
 
     let folders = scan(&case.home).unwrap();
     assert_eq!(folders, ["alpha", "beta"]);
-    let found = found(Some(&case.home), &folders, &[]);
+    let entries = found(Some(case.home.as_path()), &folders, &[]);
     assert_eq!(
-        found,
+        entries,
         [
             FoundProject {
                 name: "alpha".into(),
@@ -191,8 +191,8 @@ fn set_up_projects_show_as_ready_onboarding_or_missing() {
         project("elsewhere", case.engine.join("elsewhere"), false),
     ];
     let folders = scan(&case.home).unwrap();
-    let found = found(Some(&case.home), &folders, &registered);
-    let view: Vec<_> = found
+    let entries = found(Some(case.home.as_path()), &folders, &registered);
+    let view: Vec<_> = entries
         .iter()
         .map(|entry| {
             (
@@ -216,7 +216,7 @@ fn set_up_projects_show_as_ready_onboarding_or_missing() {
             ("ready", FoundState::Ready, Some("ready".to_owned())),
         ]
     );
-    let gone = found
+    let gone = entries
         .iter()
         .find(|entry| entry.name == "Project gone")
         .unwrap();
