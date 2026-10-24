@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 
 const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
 const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
+const PLANTED_TERMINAL: [(&str, &str); 4] = [
+    ("COLORTERM", "planted-colorterm"),
+    ("TERM_PROGRAM", "planted-term-program"),
+    ("SHELL", "/bin/planted-shell"),
+    ("TERM", "planted-term"),
+];
 const PLANTED: [(&str, &str); 7] = [
     ("SSH_AUTH_SOCK", "/private/tmp/planted-agent.sock"),
     ("GH_TOKEN", "planted-gh-token"),
@@ -537,6 +543,7 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         ])
         .env_clear()
         .envs(PLANTED)
+        .envs(PLANTED_TERMINAL)
         .env("PATH", "/usr/bin:/bin")
         .current_dir(&folder)
         .stdin(Stdio::null())
@@ -561,6 +568,7 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
             "1",
         ])
         .envs(PLANTED)
+        .envs(PLANTED_TERMINAL)
         .env(PANE_ENV_ROOT, root.path())
         .stdin(Stdio::null())
         .output()
@@ -592,12 +600,19 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         seen,
         BTreeMap::from([
             ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
             ("LANG", "C"),
             (PANE_ENV_OUT, out_text),
         ])
     );
     for (name, value) in PLANTED {
         assert!(!text.contains(name) && !text.contains(value), "{name}");
+    }
+    for (_, value) in PLANTED_TERMINAL {
+        assert!(!text.contains(value), "{value}");
+    }
+    for name in ["TERM_PROGRAM", "TMUX", "TMUX_PANE", "SHELL"] {
+        assert!(!seen.contains_key(name), "{name} stays out of the pane");
     }
     assert_eq!(
         set_variables(&tmux_reply(&tmux, &socket, &["show-environment", "-g"])),
@@ -620,8 +635,8 @@ fn engine_process_with_planted_variables_spawns_a_pane() {
     let Some(root) = std::env::var_os(PANE_ENV_ROOT).map(PathBuf::from) else {
         return;
     };
-    for (name, value) in PLANTED {
-        assert_eq!(std::env::var(name).unwrap(), value);
+    for (name, value) in PLANTED.iter().chain(&PLANTED_TERMINAL) {
+        assert_eq!(std::env::var(name).unwrap(), *value);
     }
     let host = Tmux::open(Some(tmux(&root)), &root.join(FOLDER));
     let program = std::env::current_exe().unwrap();

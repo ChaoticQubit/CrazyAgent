@@ -102,14 +102,18 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     };
     assert_eq!(
         spawn_line(&agent, &command).unwrap(),
-        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
     );
     let mut own_terminal = command.clone();
     own_terminal.env.insert(0, ("TERM".into(), "dumb".into()));
+    own_terminal
+        .env
+        .insert(1, ("COLORTERM".into(), "24bit".into()));
     assert!(
-        spawn_line(&agent, &own_terminal)
-            .unwrap()
-            .contains(" -- /usr/bin/env -i \"TERM=dumb\" \"FOO=bar baz\" \"/bin/sh\"")
+        spawn_line(&agent, &own_terminal).unwrap().contains(
+            " -- /usr/bin/env -i \"TERM=dumb\" \"COLORTERM=24bit\" \"FOO=bar baz\" \"/bin/sh\""
+        ),
+        "a command's own terminal settings replace the defaults"
     );
     let refused = |change: fn(&mut InteractiveCommand)| {
         let mut bad = command.clone();
