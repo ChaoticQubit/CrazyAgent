@@ -239,6 +239,12 @@ pub trait Screen {
         false
     }
 
+    /// True while an agent terminal has focus: every key, Ctrl-C and Esc
+    /// included, goes to the screen and the shell's own keys wait.
+    fn raw(&self) -> bool {
+        false
+    }
+
     /// Handles one key the shell did not take as a global key.
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow;
 
@@ -254,6 +260,9 @@ pub trait Screen {
 
     /// Called when the screen comes to the top of the stack, to refresh data.
     fn shown(&mut self, _ctx: &mut Ctx) {}
+
+    /// Called when the window size changed while the screen is on top.
+    fn resized(&mut self, _ctx: &mut Ctx) {}
 
     /// Draws the body and returns the cursor position for a focused field.
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position>;
