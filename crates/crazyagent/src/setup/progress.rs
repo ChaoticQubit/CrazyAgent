@@ -5,14 +5,25 @@ use super::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 /// What one engine's setup run is doing now: whether it runs, the dependencies it touched
-/// with their states, and the pack entries still installing or failed with a reason.
+/// with their states, and the pack entries still installing or failed with a reason. It
+/// also keeps the last background version check, so a status read never waits on one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     pub running: bool,
     pub dependencies: BTreeMap<Dependency, DependencyState>,
     pub pack: BTreeMap<String, PackState>,
+    pub checking: bool,
+    pub checked: Option<Checked>,
+}
+
+/// What the last background version check found for each dependency, and when it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    pub at: Instant,
+    pub found: Vec<(Dependency, Result<Option<Version>, InstallError>)>,
 }
 
 static PROGRESS: Mutex<BTreeMap<PathBuf, Progress>> = Mutex::new(BTreeMap::new());
@@ -36,25 +47,28 @@ pub fn snapshot(root: &Path) -> Progress {
 }
 
 /// Lists each dependency for the setup screen: the state a run gave it, else what the
-/// machine has now. Inputs: the progress and what `Installer::find` returned for each.
-/// Output: one row per dependency in install order.
-pub fn dependency_rows(
-    progress: &Progress,
-    found: &[(Dependency, Result<Option<Version>, InstallError>)],
-) -> Vec<DependencyStatus> {
+/// last version check found, else checking while no check has finished yet.
+/// Input: the progress. Output: one row per dependency in install order.
+pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
+    let found = progress
+        .checked
+        .as_ref()
+        .map(|checked| checked.found.as_slice());
     let rows: Vec<DependencyStatus> = Dependency::ALL
         .iter()
         .map(|dep| {
-            let seen = found.iter().find(|(name, _)| name == dep).map(|(_, f)| f);
+            let seen =
+                found.map(|found| found.iter().find(|(name, _)| name == dep).map(|(_, f)| f));
             let state = match (progress.dependencies.get(dep), seen) {
                 (Some(step), _) => step.clone(),
-                (None, Some(Ok(Some(version)))) => DependencyState::Found {
+                (None, None) => DependencyState::Checking,
+                (None, Some(Some(Ok(Some(version))))) => DependencyState::Found {
                     version: version.clone(),
                 },
-                (None, Some(Err(code))) => DependencyState::Failed {
+                (None, Some(Some(Err(code)))) => DependencyState::Failed {
                     reason: super::plain_reason(code.0).to_owned(),
                 },
-                (None, Some(Ok(None)) | None) => DependencyState::Missing,
+                (None, Some(Some(Ok(None)) | None)) => DependencyState::Missing,
             };
             DependencyStatus {
                 name: *dep,
@@ -122,8 +136,14 @@ mod tests {
     #[test]
     fn a_system_setup_cannot_install_on_shows_its_own_plain_reason() {
         let unsupported = InstallError(super::super::PLATFORM_UNSUPPORTED);
-        let found = Dependency::ALL.map(|dep| (dep, Err(unsupported)));
-        let rows = dependency_rows(&Progress::default(), &found);
+        let progress = Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: Dependency::ALL.map(|dep| (dep, Err(unsupported))).to_vec(),
+            }),
+            ..Progress::default()
+        };
+        let rows = dependency_rows(&progress);
         assert_eq!(rows.len(), Dependency::ALL.len());
         for row in rows {
             let DependencyState::Failed { reason } = row.state else {

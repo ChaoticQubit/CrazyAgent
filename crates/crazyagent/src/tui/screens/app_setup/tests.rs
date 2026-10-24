@@ -194,6 +194,7 @@ fn setup_status_words_carry_a_glyph() {
     assert_eq!(Status::of("Found 3.5a"), Some(Status::Ok));
     assert_eq!(Status::of("Installed 0.9.9"), Some(Status::Ok));
     assert_eq!(Status::of("Installing"), Some(Status::Active));
+    assert_eq!(Status::of("Checking"), Some(Status::Active));
     assert_eq!(Status::of("Founder"), None);
 }
 
@@ -328,6 +329,27 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
     );
     shell.key(Key::Char('c'));
     assert_eq!(shell.place(), Some(Place::Home));
+}
+
+#[test]
+fn a_tool_still_being_checked_and_a_late_engine_answer_read_plainly() {
+    let mut shell = first_run(80, 24);
+    let mut status = first_run_status();
+    status.dependencies[0].state = DependencyState::Checking;
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 80, 24);
+    assert!(find(&rows, "tmux").contains("Checking"));
+    shell.arrive(event(AppSetupEvent::Status(Err(
+        "owner_outcome_unknown_reconcile_same_identity".into(),
+    ))));
+    assert_eq!(
+        lead(&shell),
+        "Failed to check setup. CrazyAgent did not answer in time. Try again."
+    );
+    assert_ne!(
+        setup_plain("setup_outcome_unknown"),
+        setup_plain("setup_code_nobody_uses")
+    );
 }
 
 #[test]

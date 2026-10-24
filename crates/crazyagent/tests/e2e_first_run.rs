@@ -48,7 +48,7 @@ async fn first_run_saves_the_profile_picks_the_home_reads_setup_and_reaches_home
         }
     );
 
-    let status = owner.controller.setup_status().await.unwrap();
+    let status = owner.setup_checked().await;
     assert!(!status.running);
     let listed = status
         .dependencies

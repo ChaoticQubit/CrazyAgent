@@ -6,7 +6,7 @@ use crate::setup::fetch;
 use crate::setup::pack::{PackGroup, PackManifestEntry};
 #[cfg(unix)]
 use crate::setup::pack::{PackKind, PackSource};
-use crate::setup::progress::{self, Progress};
+use crate::setup::progress;
 use crate::setup::{Dependency, DependencyState, InstallError, Installer, PackState, plain_reason};
 use crate::storage::setup::Command;
 use tokio::sync::mpsc;
@@ -18,11 +18,23 @@ struct Prepared {
     server: Option<(String, ServerSpec)>,
 }
 
+const RECHECK_AFTER: Duration = Duration::from_secs(30);
+const FIRST_CHECK_WAIT: Duration = Duration::from_millis(500);
+const CHECK_POLL: Duration = Duration::from_millis(20);
+
 struct RunGuard(PathBuf);
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
         progress::with(&self.0, |state| state.running = false);
+    }
+}
+
+struct CheckGuard(PathBuf);
+
+impl Drop for CheckGuard {
+    fn drop(&mut self) {
+        progress::with(&self.0, |state| state.checking = false);
     }
 }
 
@@ -52,15 +64,17 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 }
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
-/// status read gets each dependency's state from this machine, an applied setup run
-/// starts installing in the background, and an applied removal sweeps the folders and
-/// secrets it left. Inputs: the engine, its authority, the request and its reply.
-/// Output: the reply, with the status filled in for a setup status read.
+/// status read gets each dependency's state from the last background version check, an
+/// applied setup run starts installing in the background, and an applied removal sweeps
+/// the folders and secrets it left. Inputs: the engine, its authority, the request, its
+/// reply and the exchange deadline. Output: the reply, with the dependencies filled in
+/// for a setup status read.
 pub(super) async fn after_owner(
     engine: &Engine,
     authority: &Authority,
     request: &OwnerRequest,
     result: Result<OwnerReply, EngineError>,
+    deadline: Instant,
 ) -> Result<OwnerReply, EngineError> {
     let mut reply = result?;
     match (&request.operation, &mut reply.response) {
@@ -72,7 +86,7 @@ pub(super) async fn after_owner(
         ) => {
             if let OwnerData::SetupStatus { status } = &mut state.data {
                 let root = engine_root(authority)?;
-                status.dependencies = dependency_rows(&root).await?;
+                status.dependencies = dependency_rows(&root, deadline).await;
             }
         }
         (OwnerOperation::Apply { mutation }, OwnerResponse::Applied { operation })
@@ -94,13 +108,51 @@ pub(super) async fn after_owner(
     Ok(reply)
 }
 
-async fn dependency_rows(root: &Path) -> Result<Vec<crate::setup::DependencyStatus>, EngineError> {
+fn start_check(root: &Path) {
+    let begin = progress::with(root, |state| {
+        let stale = state
+            .checked
+            .as_ref()
+            .is_none_or(|checked| checked.at.elapsed() >= RECHECK_AFTER);
+        let begin = stale && !state.checking;
+        if begin {
+            state.checking = true;
+        }
+        begin
+    });
+    if !begin {
+        return;
+    }
+    let guard = CheckGuard(root.to_path_buf());
     let installer = platform_installer(root);
-    let found =
-        tokio::task::spawn_blocking(move || Dependency::ALL.map(|dep| (dep, installer.find(dep))))
-            .await
-            .map_err(|_| failure("setup_outcome_unknown"))?;
-    Ok(progress::dependency_rows(&progress::snapshot(root), &found))
+    tokio::spawn(async move {
+        let found = tokio::task::spawn_blocking(move || {
+            Dependency::ALL.map(|dep| (dep, installer.find(dep)))
+        })
+        .await;
+        if let Ok(found) = found {
+            progress::with(&guard.0, |state| {
+                state.checked = Some(progress::Checked {
+                    at: std::time::Instant::now(),
+                    found: found.to_vec(),
+                });
+            });
+        }
+        drop(guard);
+    });
+}
+
+async fn dependency_rows(root: &Path, deadline: Instant) -> Vec<crate::setup::DependencyStatus> {
+    start_check(root);
+    let wait = FIRST_CHECK_WAIT.min(deadline.saturating_duration_since(Instant::now()) / 2);
+    let until = Instant::now() + wait;
+    loop {
+        let progress = progress::snapshot(root);
+        if progress.checked.is_some() || Instant::now() >= until {
+            return progress::dependency_rows(&progress);
+        }
+        tokio::time::sleep(CHECK_POLL).await;
+    }
 }
 
 fn start_run(
@@ -118,14 +170,12 @@ fn start_run(
         if state.running {
             return false;
         }
-        *state = Progress {
-            running: true,
-            dependencies: Default::default(),
-            pack: entries
-                .iter()
-                .map(|entry| (entry.id.clone(), PackState::Installing))
-                .collect(),
-        };
+        state.running = true;
+        state.dependencies = Default::default();
+        state.pack = entries
+            .iter()
+            .map(|entry| (entry.id.clone(), PackState::Installing))
+            .collect();
         true
     });
     if !begun {

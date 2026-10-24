@@ -204,10 +204,12 @@ pub enum Pin {
     },
 }
 
-/// Where one dependency stands on the setup screen.
+/// Where one dependency stands on the setup screen. `Checking` means its version check
+/// is still running in the background; the screen reads the status again to see it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
+    Checking,
     Missing,
     Found { version: Version },
     Installing,
@@ -283,7 +285,7 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 24] = [
+const REASONS: [(&str, &str); 25] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -319,6 +321,10 @@ const REASONS: [(&str, &str); 24] = [
     ),
     ("setup_pin_invalid", "The pinned source is not valid."),
     ("setup_busy", "Setup is already running."),
+    (
+        "setup_outcome_unknown",
+        "Setup did not finish answering. Check again in a moment.",
+    ),
     (
         "pack_commit_mismatch",
         "The source does not have the pinned version.",
