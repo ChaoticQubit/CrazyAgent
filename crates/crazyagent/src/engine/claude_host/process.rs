@@ -96,6 +96,7 @@ pub(super) fn run(
         .env("HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)
+        .env("CLAUDE_CODE_TMPDIR", sandbox.sandbox().agent_tmp())
         .env("TERM", "dumb")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
