@@ -1,4 +1,7 @@
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod pack;
+pub(crate) mod run;
 
 use serde::{Deserialize, Serialize};
 
@@ -255,4 +258,18 @@ pub fn plain_reason(code: &str) -> &'static str {
         .find(|(known, _)| *known == code)
         .map(|(_, sentence)| *sentence)
         .unwrap_or("Something went wrong during setup.")
+}
+
+/// The installer for this platform, installing into `<engine root>/setup`.
+/// Input: the engine root. Output: the installer.
+#[cfg(target_os = "macos")]
+pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
+    Box::new(macos::MacInstaller::new(engine_root))
+}
+
+/// The pinned install of one dependency on this platform. Input: the dependency.
+/// Output: its pin.
+#[cfg(target_os = "macos")]
+pub fn platform_pin(dep: Dependency) -> Pin {
+    macos::pin(dep)
 }
