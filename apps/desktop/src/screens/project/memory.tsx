@@ -8,7 +8,7 @@ import { Button, ConfirmDialog, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
-import { memoryGroups, memoryOutcome } from "./research";
+import { memoryGroups, changeOutcome } from "./research";
 import { useLoad } from "../../state";
 import { NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
@@ -48,7 +48,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
   function settle(result: Result<IntentReceipt>, done: string, missing: string) {
     setBusy(null);
     setDeleting(null);
-    const outcome = memoryOutcome(result, done, missing);
+    const outcome = changeOutcome(result, done, missing);
     setNote(outcome.note);
     if (outcome.toast) data.notify(outcome.toast);
     if (outcome.reload) setRound((value) => value + 1);

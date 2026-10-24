@@ -219,3 +219,37 @@ test("an attached document shows its type from the extension", () => {
   assert.equal(wizard.documentType("archive.tar.gz"), "GZ");
   assert.equal(wizard.documentType("Makefile"), "File");
 });
+
+const stored = {
+  project_id: "p-1", name: "Harbor Notes", about: "Notes for marine engineers.", tech_stack: ["Rust", "SQLite"], platforms: ["desktop_app"],
+  research: ["market_research"], pool: "main-pool", team: { master: "codex", master_tools: true, sub_harnesses: [{ harness: "codex", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
+  documents: [{ name: "spec.pdf", bytes: 10 }], folder: "/Users/me/CrazyAgent/harbor-notes", created_ms: 0, revision: 4,
+};
+
+test("project Settings starts from the saved project and sends nothing until something changes", () => {
+  const draft = wizard.draftOf(stored);
+  assert.deepEqual(draft, {
+    name: "Harbor Notes", about: "Notes for marine engineers.", stack: ["Rust", "SQLite"], platforms: ["desktop_app"], otherPlatform: "", documents: [],
+    research: ["market_research"], pool: "main-pool", poolChosen: true, team: stored.team,
+  });
+  assert.notEqual(draft.stack, stored.tech_stack);
+  assert.equal(wizard.editRequest(stored, draft).changed, false);
+  assert.equal(wizard.editRequest(stored, { ...draft, name: "  Harbor Notes ", about: "Notes for marine engineers.  " }).changed, false);
+});
+
+test("an edited project keeps its pool and team, adds no documents and renames only when the name changed", () => {
+  const draft = wizard.draftOf(stored);
+  const edited = wizard.editRequest(stored, { ...draft, about: "For harbor crews.", stack: ["Rust"], research: ["market_research", "competitor_research"] });
+  assert.deepEqual(edited, {
+    name: null, changed: true,
+    setup: { about: "For harbor crews.", tech_stack: ["Rust"], platforms: ["desktop_app"], research: ["market_research", "competitor_research"], pool: "main-pool", team: stored.team, documents: [] },
+  });
+  assert.equal(wizard.editRequest(stored, { ...draft, name: " Harbor Log " }).name, "Harbor Log");
+  assert.equal(wizard.editRequest(stored, { ...draft, research: [] }).changed, true);
+  assert.equal(wizard.editRequest(stored, { ...draft, platforms: ["desktop_app", "website"] }).changed, true);
+  const other = wizard.editRequest(stored, { ...draft, platforms: ["desktop_app", "other"], otherPlatform: "Kiosk" });
+  assert.equal(other.setup.about, "Notes for marine engineers.\n\nOther platform: Kiosk");
+  assert.deepEqual(wizard.basicsErrors({ ...draft, name: "Harbor Notes" }, ["Docs Site"]), {});
+  assert.equal(wizard.basicsErrors({ ...draft, name: "docs site" }, ["Docs Site"]).name, "You already have a project called Docs Site.");
+});
+

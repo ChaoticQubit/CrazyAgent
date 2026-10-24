@@ -142,10 +142,10 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
   return { agents, tasks };
 }
 
-/** What one change to a project memory tells the owner: a toast when the engine applied it,
+/** What one owner change on the project page tells the owner: a toast when the engine applied it,
  * otherwise a line in the panel. Inputs: the engine result, the toast and what is missing when
  * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
-export function memoryOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
+export function changeOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
   if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
   if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
   const state = receiptState(result.value);
@@ -192,6 +192,14 @@ export interface ResearchRow {
   elapsed: string;
   report: boolean;
   active: boolean;
+}
+
+/** What the owner can do with one research agent: read its log once it started, stop it while it
+ * runs, cancel it while it waits, and try again after it failed or was stopped.
+ * Input: the job. Output: whether to offer the log, the stop label or null, and Try again. */
+export function researchActions(job: Pick<ResearchJob, "status" | "started_ms" | "cancel_requested">): { log: boolean; stop: "Stop" | "Cancel" | null; retry: boolean } {
+  const stop = job.cancel_requested ? null : job.status === "running" ? "Stop" : job.status === "queued" || job.status === "needs_pool" ? "Cancel" : null;
+  return { log: job.started_ms !== null, stop, retry: job.status === "failed" || job.status === "cancelled" };
 }
 
 /** Builds one research row from a real job; progress text only states what the job reports.

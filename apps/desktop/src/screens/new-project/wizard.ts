@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, TeamPlan } from "../../api-projects";
+import type { Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -329,6 +329,27 @@ export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: P
       documents: draft.documents.map((document) => document.path),
     },
   };
+}
+
+/** Starts a Project Settings, General draft from the saved project.
+ * Input: the saved setup. Output: a draft with its details, research, pool and team. */
+export function draftOf(stored: StoredSetup): ProjectDraft {
+  return {
+    name: stored.name, about: stored.about, stack: [...stored.tech_stack], platforms: [...stored.platforms], otherPlatform: "", documents: [],
+    research: [...stored.research], pool: stored.pool, poolChosen: true, team: stored.team,
+  };
+}
+
+/** Builds the engine change for an edited project the way New Project builds a new one, keeping
+ * the saved pool and team and adding no documents. Inputs: the saved setup and the edited draft.
+ * Output: the new name or null when it is unchanged, the setup, and whether anything differs. */
+export function editRequest(stored: StoredSetup, draft: ProjectDraft): { name: string | null; setup: ProjectSetup; changed: boolean } {
+  const built = buildRequest({ ...draft, documents: [], pool: stored.pool, team: stored.team });
+  const name = built.spec.name === stored.name ? null : built.spec.name;
+  const same = <T,>(left: T[], right: T[]) => left.length === right.length && left.every((item, index) => item === right[index]);
+  const changed = name !== null || built.setup.about !== stored.about || !same(built.setup.tech_stack, stored.tech_stack)
+    || !same(built.setup.platforms, stored.platforms) || !same(built.setup.research, stored.research);
+  return { name, setup: built.setup, changed };
 }
 
 /** The name the owner gave a pool, which the engine stores beside its id; older pools have
