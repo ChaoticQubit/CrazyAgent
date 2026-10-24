@@ -920,6 +920,8 @@ impl TeamRuntime {
                 prompt.push('\n');
             }
         }
+        let (heard, newest) = super::direct::notes(&self.connection, project)?;
+        prompt.push_str(&heard);
         prompt.push_str(&format!("{speaker}:\n{text}"));
         if team_tool {
             tool::clear(&self.tool_record(id));
@@ -935,6 +937,9 @@ impl TeamRuntime {
                 [message],
             )
             .map_err(error)?;
+        if let Some(newest) = newest {
+            super::direct::delivered(&self.connection, project, newest)?;
+        }
         self.mark_agent(id, AgentStatus::Working, None)
     }
 
