@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { PackSettingsView, packConfirm } = await import("../src/screens/settings/pack.tsx");
+const { PackSettingsView, packConfirm, TOOLS_BUSY } = await import("../src/screens/settings/pack.tsx");
 const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine } = await import("../src/screens/settings/projects-home.tsx");
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
@@ -26,7 +26,7 @@ const pack = [
   entry("linear", "mcp_server", "optional", { state: "failed", reason: "Checksum didn't match." }),
 ];
 const setup = (extra = {}) => ({ dependencies: [], pack, running: false, ...extra });
-const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, ...extra });
+const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
 
 const rowOf = (markup, id) => {
   const start = markup.indexOf(`<strong>${id}</strong>`);
@@ -63,6 +63,30 @@ test("Settings, Pack locks every change while setup runs or another change is in
   assert.match(html(PackSettingsView, packProps(ok(setup({ running: true })))), /role="status">Setup is installing\. Changes wait until it finishes\./);
   assert.doesNotMatch(html(PackSettingsView, packProps(ok(setup()))), /role="status"/);
   assert.match(html(PackSettingsView, packProps(ok(setup()), { problem: "This entry is always on and can't be removed." })), /role="alert">This entry is always on/);
+});
+
+const tool = (name, state) => ({ name, label: name, state });
+const tools = (tmux, uv, graphify) => [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)];
+const present = { state: "found", version: "3.5a" };
+
+test("Settings, Pack lists tmux, uv and graphify first and offers Install tools while one is missing", () => {
+  const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
+  assert.match(skipped, /<h2[^>]*>[\s\S]*Tools<\/h2>[\s\S]*<h2>Always on<\/h2>/);
+  assert.match(rowOf(skipped, "tmux"), /Found[\s\S]*Version 3\.5a on this Mac\./);
+  assert.match(rowOf(skipped, "uv"), /Not installed/);
+  assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);
+  assert.match(skipped, /<button type="button" class="btn primary small"[^>]*>(<svg[\s\S]*?<\/svg>)?Install tools<\/button>/);
+  const ready = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, present, { state: "installed", version: "0.4" }) }))));
+  assert.match(ready, /tmux, uv and graphify are installed\./);
+  assert.doesNotMatch(ready, /Install tools/);
+  const checking = html(PackSettingsView, packProps(ok(setup({ dependencies: tools({ state: "checking" }, present, present) }))));
+  assert.match(rowOf(checking, "tmux"), /Checking/);
+  assert.doesNotMatch(checking, /Install tools|role="alert"/);
+  const running = html(PackSettingsView, packProps(ok(setup({ running: true, dependencies: tools({ state: "installing" }, present, { state: "missing" }) }))));
+  assert.match(rowOf(running, "tmux"), /Installing/);
+  assert.doesNotMatch(running, /Install tools/);
+  assert.match(html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, present, { state: "missing" }) })), { busy: TOOLS_BUSY })),
+    /<button type="button" class="btn primary small"[^>]*disabled=""[^>]*aria-busy="true"[^>]*>[\s\S]*?Starting\.\.\.<\/button>/);
 });
 
 test("Settings, Pack shows not ready, errors and loading without inventing a pack", () => {

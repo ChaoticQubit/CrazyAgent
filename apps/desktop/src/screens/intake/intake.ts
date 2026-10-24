@@ -3,6 +3,7 @@ import type {
   AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, OnboardingStep,
   OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, SetupStatus,
 } from "../../engine-client";
+import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
@@ -301,4 +302,30 @@ export function setupProgress(status: SetupStatus, ticked: string[]): { done: nu
     ...status.pack.filter((item) => ticked.includes(item.id) || item.group === "always").map((item) => item.state.state)];
   const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
+}
+
+const TOOLS: DependencyName[] = ["tmux", "uv", "graphify"];
+const TOOL_PRESENT = new Set(["found", "installed"]);
+const TOOLS_NEED = "Live terminals and the team graph need tmux; setting up a project needs graphify.";
+
+/** Joins tool names the way the setup panel says them: "tmux", "tmux and uv", "tmux, uv and graphify". */
+function namesLine(names: string[]): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** Works out the Install tools item from the setup read: done once tmux, uv and graphify are
+ * each found or installed; the default pack never blocks it. While the read or a tool is still
+ * checking it is not done and says so without an error. Input: the setup read.
+ * Output: whether it is done and its one-line body. */
+export function toolsStep(tools: Loaded<SetupStatus>): { done: boolean; body: string } {
+  const checking = { done: false, body: "Checking tmux, uv and graphify on this computer." };
+  if (tools.kind === "loading") return checking;
+  if (tools.kind === "not_ready") return { done: false, body: "Tool setup isn't in this build yet." };
+  if (tools.kind === "error") return { done: false, body: "Couldn't check tmux, uv and graphify. Open setup to try again." };
+  const states = TOOLS.map((name) => tools.value.dependencies.find((item) => item.name === name)?.state.state);
+  const missing = TOOLS.filter((_, index) => !TOOL_PRESENT.has(states[index] ?? "missing"));
+  if (missing.length === 0) return { done: true, body: "tmux, uv and graphify are installed." };
+  if (toolsChecking(tools.value)) return checking;
+  if (states.includes("installing")) return { done: false, body: "Setup is installing the tools. This updates when it finishes." };
+  return { done: false, body: `${namesLine(missing)} ${missing.length === 1 ? "isn't" : "aren't"} installed. ${TOOLS_NEED}` };
 }

@@ -1,14 +1,16 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
+import { loadSetupStatus } from "../../api-intake";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
-import type { ResearchJob } from "../../engine-client";
+import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
 import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
 import { FoundProjects } from "../intake/found";
+import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { waitingLine } from "../project/research";
 
 export interface SetupItem {
-  id: "accounts" | "pools" | "harnesses";
+  id: "accounts" | "pools" | "harnesses" | "tools";
   icon: IconName;
   title: string;
   body: string;
@@ -84,13 +86,15 @@ export function useProjectActivity(ids: string[]): Map<string, CardActivity> {
 }
 
 /** Works out the Get set up panel: Add an account is done when one account is signed in or
- * has a saved key, Create a pool when one pool exists; harnesses never block. The panel
- * shows until the first two are done. Inputs: the three engine reads. Output: items and
- * whether the panel shows. */
-export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>): { items: SetupItem[]; visible: boolean } {
+ * has a saved key, Create a pool when one pool exists, Install tools when tmux, uv and graphify
+ * are installed; harnesses never block. The panel shows until those three are done.
+ * Inputs: the four engine reads. Output: items and whether the panel shows. */
+export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
+  tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
   const accountsDone = accounts.kind === "ok" && accounts.value.some((account) => READY_ACCOUNT.has(account.status));
   const poolsDone = pools.kind === "ok" && pools.value.length > 0;
   const ready = harnesses.kind === "ok" ? harnesses.value.filter((entry) => entry.status.kind === "ready").length : undefined;
+  const installTools = toolsStep(tools);
   const items: SetupItem[] = [
     { id: "accounts", icon: "key-round", title: "Add an account", body: "Sign in with ChatGPT or Claude, or add an API key or local model.",
       action: "Add account", href: formatRoute({ name: "settings", tab: "accounts", action: "add" }), done: accountsDone },
@@ -99,8 +103,10 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
     { id: "harnesses", icon: "terminal", title: "Check your harnesses",
       body: ready === undefined || harnesses.kind !== "ok" ? "See which coding agents are installed on this Mac." : `${ready} of ${harnesses.value.length} harnesses ready on this Mac.`,
       action: "View harnesses", href: formatRoute({ name: "settings", tab: "harnesses" }), done: false },
+    { id: "tools", icon: "wrench", title: "Install tools", ...installTools,
+      action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },
   ];
-  return { items, visible: !(accountsDone && poolsDone) };
+  return { items, visible: !(accountsDone && poolsDone && installTools.done) };
 }
 
 /** One Needs you row: the project it is about (none for an account), one sentence and one link. */
@@ -179,19 +185,20 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
 /** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
  * the Needs you strip (three rows, Show all for the rest), the projects folder section, project
  * cards with their live work or the empty state, and the Get set up panel while setup is
- * incomplete. Inputs: the four reads, each card's activity and the suggested memories when read,
+ * incomplete. Inputs: the five reads, each card's activity and the suggested memories when read,
  * the projects folder section and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, activity, suggestions, found, onRetryProjects }: {
+export function HomeView({ projects, accounts, pools, harnesses, tools, activity, suggestions, found, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
   pools: Loaded<PoolSummary[]>;
   harnesses: Loaded<HarnessEntry[]>;
+  tools: Loaded<SetupStatus>;
   activity?: Map<string, CardActivity>;
   suggestions?: Loaded<Suggestion[]>;
   found?: ReactNode;
 }) {
-  const setup = setupSteps(accounts, pools, harnesses);
+  const setup = setupSteps(accounts, pools, harnesses, tools);
   const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions);
   const [expanded, setExpanded] = useState(false);
   return <>
@@ -216,13 +223,27 @@ export function HomeView({ projects, accounts, pools, harnesses, activity, sugge
   </>;
 }
 
-/** Home: loads accounts, pools and harnesses for the setup panel, each project's live work and
- * the suggested memories for Needs you, and renders HomeView with the session's projects. */
+/** Reads setup for the Install tools item, and reads it again every few seconds only while a
+ * tool is still being checked or setup is installing. Output: the latest setup read. */
+export function useToolsStatus(): Loaded<SetupStatus> {
+  const [tools, reload] = useLoad(loadSetupStatus);
+  const moving = tools.kind === "ok" && (toolsChecking(tools.value) || setupBusy(tools.value));
+  useEffect(() => {
+    if (!moving) return;
+    const timer = window.setTimeout(reload, SETUP_POLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [moving, tools]);
+  return tools;
+}
+
+/** Home: loads accounts, pools, harnesses and tool setup for the setup panel, each project's live
+ * work and the suggested memories for Needs you, and renders HomeView with the session's projects. */
 export function Home() {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts);
   const [pools] = useLoad(poolSummaries);
   const [harnesses] = useLoad(harnessCatalog);
+  const tools = useToolsStatus();
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
   const activity = useProjectActivity(projects.map((project) => project.id));
   const [suggestions, setSuggestions] = useState<Loaded<Suggestion[]>>({ kind: "loading" });
@@ -232,6 +253,6 @@ export function Home() {
     void memorySuggestions(projects).then((found) => { if (live) setSuggestions(found); });
     return () => { live = false; };
   }, [named]);
-  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} activity={activity} suggestions={suggestions}
+  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} activity={activity} suggestions={suggestions}
     found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
 }
