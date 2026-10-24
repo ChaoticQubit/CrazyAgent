@@ -10,8 +10,41 @@ use std::io::Read;
 mod master;
 #[path = "rcli_host/master_launch.rs"]
 mod master_launch;
+#[cfg(unix)]
 #[path = "rcli_host/master_process.rs"]
 mod master_process;
+
+#[cfg(not(unix))]
+mod master_process {
+    use super::master_launch::error;
+    use crate::protocol::ProtocolError;
+    use std::process::Command;
+
+    /// The rcli master host process, which cannot exist where the engine cannot stop its
+    /// whole process group. `spawn` reports `rcli_master_unavailable`, so every method
+    /// below is unreachable by construction.
+    pub(super) enum HostProcess {}
+
+    impl HostProcess {
+        /// Refuses to start the rcli master host. Takes the command, unused.
+        /// Returns `rcli_master_unavailable`.
+        pub(super) fn spawn(_command: Command) -> Result<Self, ProtocolError> {
+            Err(error("rcli_master_unavailable"))
+        }
+
+        pub(super) fn write(&mut self, _bytes: &[u8]) -> Result<(), ProtocolError> {
+            match *self {}
+        }
+
+        pub(super) fn frame(&mut self) -> Result<Option<Vec<u8>>, ProtocolError> {
+            match *self {}
+        }
+
+        pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
+            match *self {}
+        }
+    }
+}
 #[path = "rcli_host/master_reply.rs"]
 mod master_reply;
 

@@ -1,12 +1,15 @@
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags, open};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -91,6 +94,14 @@ pub(super) fn error(code: &str) -> ProtocolError {
 }
 
 impl RcliMasterLaunch {
+    /// Refuses the rcli master command where its private paths cannot be checked and it
+    /// cannot lead its own process group. Takes the launch. Returns `rcli_master_unavailable`.
+    #[cfg(not(unix))]
+    pub fn command(&self) -> Result<Command, ProtocolError> {
+        Err(error("rcli_master_unavailable"))
+    }
+
+    #[cfg(unix)]
     pub fn command(&self) -> Result<Command, ProtocolError> {
         self.validate_paths()?;
         pinned_file(&self.executable, &self.artifact_sha256, true)?;
@@ -115,6 +126,7 @@ impl RcliMasterLaunch {
         Ok(command)
     }
 
+    #[cfg(unix)]
     fn validate_paths(&self) -> Result<(), ProtocolError> {
         let code = "rcli_master_paths_rejected";
         private_directory(&self.home_dir)?;
@@ -222,6 +234,14 @@ fn checked_profile_config(
     Ok(digest)
 }
 
+/// Refuses an rcli private folder where its Unix owner and mode cannot be checked.
+/// Takes the path, unused. Returns `rcli_master_unavailable`.
+#[cfg(not(unix))]
+fn private_directory(_path: &Path) -> Result<(), ProtocolError> {
+    Err(error("rcli_master_unavailable"))
+}
+
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<(), ProtocolError> {
     let code = "rcli_master_paths_rejected";
     canonical_path(path).map_err(|_| error(code))?;
@@ -253,6 +273,34 @@ fn canonical_path(path: &Path) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Refuses an rcli profile or artifact file where its Unix owner, mode and link count
+/// cannot be checked. Takes the path, metadata and kind, all unused.
+/// Returns `rcli_master_unavailable`.
+#[cfg(not(unix))]
+fn validate_file(
+    _path: &Path,
+    _metadata: &Metadata,
+    _executable: bool,
+) -> Result<(), ProtocolError> {
+    Err(error("rcli_master_unavailable"))
+}
+
+/// Reports no file stamp where the platform has no device, inode, mode or change time;
+/// `checked_file` and `validate_file` refuse there before any stamp is compared.
+/// Takes the metadata, unused. Returns zeros.
+#[cfg(not(unix))]
+fn stamp(_metadata: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
+    (0, 0, 0, 0, 0, 0, 0, 0)
+}
+
+/// Refuses to open and hash an rcli file where no no-follow open is used here.
+/// Takes the path and kind, both unused. Returns `rcli_master_unavailable`.
+#[cfg(not(unix))]
+fn checked_file(_path: &Path, _executable: bool) -> Result<(File, String), ProtocolError> {
+    Err(error("rcli_master_unavailable"))
+}
+
+#[cfg(unix)]
 fn validate_file(path: &Path, metadata: &Metadata, executable: bool) -> Result<(), ProtocolError> {
     canonical_path(path)?;
     let maximum = if executable {
@@ -275,6 +323,7 @@ fn validate_file(path: &Path, metadata: &Metadata, executable: bool) -> Result<(
     Ok(())
 }
 
+#[cfg(unix)]
 fn stamp(metadata: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
     (
         metadata.dev(),
@@ -308,6 +357,7 @@ fn pinned_file(path: &Path, expected: &str, executable: bool) -> Result<File, Pr
     Ok(file)
 }
 
+#[cfg(unix)]
 fn checked_file(path: &Path, executable: bool) -> Result<(File, String), ProtocolError> {
     let code = if executable {
         "rcli_master_artifact_changed"
