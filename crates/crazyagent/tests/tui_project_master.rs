@@ -317,15 +317,14 @@ impl Drop for Driver {
                 .lines()
                 .filter_map(|line| line.strip_prefix("owned-group="))
             {
-                if let Ok(group) = group.parse::<u32>() {
-                    if !output
+                if let Ok(group) = group.parse::<u32>()
+                    && !output
                         .lines()
                         .any(|line| line == format!("reaped-group={group}"))
-                    {
-                        signal_group(group, "-TERM");
-                        signal_group(group, "-KILL");
-                        eprintln!("master686 TUI group={group} required failure cleanup");
-                    }
+                {
+                    signal_group(group, "-TERM");
+                    signal_group(group, "-KILL");
+                    eprintln!("master686 TUI group={group} required failure cleanup");
                 }
             }
         }
