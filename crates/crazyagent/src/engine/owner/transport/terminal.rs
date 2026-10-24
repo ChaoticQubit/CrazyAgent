@@ -1,6 +1,5 @@
 use super::*;
 use crate::protocol::encode_frame;
-use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, TerminalFrame, TerminalRequest,
     TerminalStream,
@@ -9,7 +8,6 @@ use tokio::io::AsyncWrite;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
-const FOLDER: &str = "terminal";
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
 const REQUESTS_QUEUED: usize = 16;
@@ -160,17 +158,11 @@ impl Engine {
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        let found = match slot.as_ref() {
-            Some((true, host)) => return Ok(host.clone()),
-            _ => installed(root),
-        };
-        if found.is_none()
-            && let Some((_, host)) = slot.as_ref()
-        {
+        if let Some((true, host)) = slot.as_ref() {
             return Ok(host.clone());
         }
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(found.clone(), &root.join(FOLDER)));
-        *slot = Some((found.is_some(), host.clone()));
+        let (ready, host) = crate::terminal::platform(root);
+        *slot = Some((ready, host.clone()));
         Ok(host)
     }
 }

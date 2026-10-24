@@ -1,12 +1,15 @@
 use crate::engine::EngineError;
 use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub const FOLDER: &str = "terminal";
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
 pub const CHUNK_BYTES_MAX: usize = 8192;
@@ -180,6 +183,26 @@ pub trait Host: Send + Sync {
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
     fn alive(&self) -> Result<Vec<AgentId>, HostError>;
+}
+
+/// Opens this platform's terminal host for an engine: the private tmux server on macOS and Linux.
+/// Takes the engine root; tmux keeps its socket in `<root>/terminal` and is looked for there first.
+/// Returns whether the host can run now, and the host; one that cannot reports `terminal_unavailable`.
+#[cfg(unix)]
+pub fn platform(engine_root: &Path) -> (bool, Arc<dyn Host>) {
+    let found = tmux::installed(engine_root);
+    let ready = found.is_some();
+    let host: Arc<dyn Host> = Arc::new(tmux::Tmux::open(found, &engine_root.join(FOLDER)));
+    (ready, host)
+}
+
+/// Opens this platform's terminal host for an engine: the ConPTY host on Windows.
+/// Takes the engine root, unused because ConPTY needs no server or socket.
+/// Returns that the host can run, and the host.
+#[cfg(target_os = "windows")]
+pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
+    let host: Arc<dyn Host> = Arc::new(windows::ConptyHost::new());
+    (true, host)
 }
 
 /// What a viewer sends on an owner terminal connection.
