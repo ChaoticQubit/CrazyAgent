@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod direct;
 pub mod graph;
 pub mod runtime;
 pub mod tool;
@@ -675,7 +676,18 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_panes (
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS team_direct_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                task INTEGER,
+                harness TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_ms INTEGER NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS team_direct_inputs_project ON team_direct_inputs(project, delivered);",
         )
         .map_err(error)
 }
