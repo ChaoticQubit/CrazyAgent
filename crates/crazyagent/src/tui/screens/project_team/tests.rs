@@ -10,7 +10,6 @@ use crate::tui::screens::new_project_view::{Screen, tab_strip};
 use crate::tui::screens::project::Tab;
 use crossterm::event::KeyModifiers;
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
 
 const NOW: i64 = 1_793_000_000_000;
 const MINUTE: i64 = 60_000;
@@ -556,15 +555,19 @@ async fn a_real_engine_team_draws_and_keeps_warm() {
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
     let created = controller
         .setup_project(
             project(),
@@ -856,15 +859,19 @@ async fn a_real_engine_takes_a_task_from_the_owner() {
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config =
-        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = crate::tui::test_home::engine_config();
     let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let ordinary = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
     let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
         .await
         .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
     let created = controller
         .setup_project(
             project(),
