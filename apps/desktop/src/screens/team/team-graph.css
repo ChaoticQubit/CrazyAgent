@@ -1,0 +1,320 @@
+.tg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.tg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.tg-head h3 {
+  margin: 0;
+}
+
+.tg-summary {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.tg-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.tg-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.tg-split.with-terminal {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 1.1fr);
+}
+
+@media (max-width: 1100px) {
+  .tg-split.with-terminal {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.tg-canvas-scroll {
+  overflow: auto;
+  max-height: 560px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tg-canvas {
+  position: relative;
+  min-width: 100%;
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.tg-lines {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.tg-link {
+  fill: none;
+  stroke: var(--border-input);
+  stroke-width: 1.5;
+  opacity: 0.55;
+}
+
+.tg-edge {
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 2;
+}
+
+.tg-edge.sent {
+  stroke-dasharray: 6 5;
+}
+
+.tg-edge.running {
+  stroke: var(--accent);
+  stroke-dasharray: 8 6;
+  animation: tg-flow 1s linear infinite;
+}
+
+.tg-edge.done {
+  stroke: var(--ok);
+}
+
+.tg-edge.failed {
+  stroke: var(--danger);
+}
+
+@keyframes tg-flow {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tg-edge.running {
+    animation: none;
+  }
+}
+
+.tg-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--elev-1);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.tg-node:active {
+  cursor: grabbing;
+}
+
+.tg-node:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tg-node.master {
+  border: 2px solid var(--brand);
+}
+
+.tg-node.harness_group {
+  background: var(--surface-2);
+}
+
+.tg-node.open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tg-node-title,
+.tg-node-detail {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tg-node-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tg-node-detail {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.tg-edge-label {
+  position: absolute;
+  max-width: 220px;
+  padding: 2px var(--space-2);
+  overflow: hidden;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tg-edge-label:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tg-edge-label.running {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.tg-edge-label.done {
+  color: var(--ok);
+}
+
+.tg-edge-label.failed {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tg-edge-label[aria-expanded="true"] {
+  background: var(--accent-soft);
+}
+
+.tg-task {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tg-task-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tg-task-head .btn {
+  margin-left: auto;
+}
+
+.tg-task-text,
+.tg-task-reply {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tg-task-reply {
+  color: var(--text-2);
+}
+
+.tg-task-label {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tg-terminal {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--terminal-bg);
+}
+
+.tg-terminal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.tg-terminal-head .btn {
+  margin-left: auto;
+}
+
+.tg-terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.tg-terminal-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tg-terminal-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.tg-terminal-screen {
+  flex: 1;
+  min-height: 360px;
+  padding: var(--space-2);
+}
+
+.tg-terminal-note {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 12px;
+}
