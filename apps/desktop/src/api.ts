@@ -599,3 +599,15 @@ export function resizeTerminal(agent: string, cols: number, rows: number): Promi
 export function detachTerminal(agent: string): Promise<Result<void>> {
   return call<void>("desktop_terminal_detach", { agent });
 }
+
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
+ * and the switch. Output: the engine receipt, not ready, or a plain error. */
+export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan
+ * or null for any, and the task. Output: the engine receipt, not ready, or a plain error. */
+export function delegateTeamTask(id: string, harness: string | null, prompt: string): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_delegate", { id, harness, prompt, generation: nextGeneration() });
+}

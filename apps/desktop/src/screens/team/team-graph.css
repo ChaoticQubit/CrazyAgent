@@ -343,3 +343,23 @@
 .tg-composer-foot .tg-terminal-note {
   padding: 0;
 }
+
+.tg-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tg-hand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tg-hand h4 {
+  margin: 0;
+}

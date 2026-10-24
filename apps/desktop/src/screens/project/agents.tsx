@@ -11,6 +11,7 @@ import { changeOutcome, nearBottom, researchActions, researchRow, teamPanel } fr
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
+import { TeamControls } from "../team/controls";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
@@ -108,6 +109,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} />
+    {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={data.reloadTeam} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
