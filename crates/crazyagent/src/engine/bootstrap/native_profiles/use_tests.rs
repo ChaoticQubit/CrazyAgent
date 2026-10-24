@@ -891,7 +891,7 @@ impl Drop for ExecProbe {
 }
 
 #[test]
-fn duplicated_guard_description_keeps_lock_until_actual_final_close() {
+fn dropping_a_lease_frees_the_profile_even_while_a_duplicate_description_is_open() {
     let mut case = UseCase::new();
     let guard = case.acquire();
     let duplicate = guard.manifest.file.try_clone().unwrap();
@@ -901,8 +901,9 @@ fn duplicated_guard_description_keeps_lock_until_actual_final_close() {
     );
     assert!(fcntl_getfd(&duplicate).unwrap().contains(FdFlags::CLOEXEC));
     let mut child = ExecProbe::spawn(&case);
-    drop(guard);
     child.probe(b'B');
+    drop(guard);
+    child.probe(b'F');
     drop(duplicate);
     child.probe(b'F');
     child.finish();
