@@ -5,6 +5,7 @@ use super::{
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
@@ -19,7 +20,7 @@ pub const SOCKET: &str = "tmux.sock";
 pub const SOCKET_PATH_BYTES_MAX: usize = 100;
 const HOLDER: &str = "_crazyagent";
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-const ENV_PROGRAM: &str = "/usr/bin/env -u TMUX -u TMUX_PANE";
+const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const SEARCH: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const VERSION_MIN: (u32, u32) = (3, 2);
@@ -218,8 +219,58 @@ impl Tmux {
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
         }
+        clear_environment(&control)?;
         Ok(control)
     }
+}
+
+/// Empties the private server's environment so nothing reaches a pane from it: no
+/// variables copied from an attaching client (`update-environment` empty) and none left in
+/// the global or session environment, then checks both are empty.
+/// Input: the control client. Output: Ok, or `terminal_environment_unclean`.
+fn clear_environment(control: &Control) -> Result<(), HostError> {
+    let unclean = || failure("terminal_environment_unclean");
+    control
+        .run("set-option -g update-environment \"\"")
+        .map_err(|_| unclean())?;
+    for (scope, unset) in [
+        ("-g".to_owned(), "-gu".to_owned()),
+        (format!("-t {SESSION}"), format!("-t {SESSION} -u")),
+    ] {
+        let shown = control
+            .run(&format!("show-environment {scope}"))
+            .map_err(|_| unclean())?;
+        for name in variable_names(&shown) {
+            control
+                .run(&format!("set-environment {unset} {}", quote(&name)))
+                .map_err(|_| unclean())?;
+        }
+        let left = control
+            .run(&format!("show-environment {scope}"))
+            .map_err(|_| unclean())?;
+        if !variable_names(&left).is_empty() {
+            return Err(unclean());
+        }
+    }
+    let update = control
+        .run("show-options -gv update-environment")
+        .map_err(|_| unclean())?;
+    if update.iter().any(|line| !line.is_empty()) {
+        return Err(unclean());
+    }
+    Ok(())
+}
+
+/// Reads the variables a `show-environment` reply sets, skipping `-NAME` lines, which
+/// mark a variable removed. Input: the reply lines. Output: the names, in order.
+fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| String::from_utf8_lossy(line))
+        .filter(|line| !line.starts_with('-'))
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 impl Drop for Control {
@@ -418,10 +469,11 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
         || first.starts_with('-')
         || first.contains('=')
         || command.argv.iter().any(|arg| arg.contains('\0'))
-        || command
-            .env
-            .iter()
-            .any(|(name, value)| !env_name(name) || value.contains('\0'))
+        || command.env.iter().any(|(name, value)| {
+            !env_name(name)
+                || value.contains('\0')
+                || !crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
+        })
     {
         return Err(invalid());
     }
@@ -429,12 +481,16 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
         "new-window -d -P -F '#{{pane_id}} #{{pane_pid}}' -n {agent} -c {} -t {SESSION}:",
         quote(cwd)
     );
-    for (name, value) in &command.env {
-        line.push_str(" -e ");
-        line.push_str(&quote(&format!("{name}={value}")));
-    }
     line.push_str(" -- ");
     line.push_str(ENV_PROGRAM);
+    if !command.env.iter().any(|(name, _)| name == "TERM") {
+        line.push(' ');
+        line.push_str(&quote(&format!("TERM={TERMINAL_TYPE}")));
+    }
+    for (name, value) in &command.env {
+        line.push(' ');
+        line.push_str(&quote(&format!("{name}={value}")));
+    }
     for arg in &command.argv {
         line.push(' ');
         line.push_str(&quote(arg));

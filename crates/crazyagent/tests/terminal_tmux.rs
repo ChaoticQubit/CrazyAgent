@@ -7,10 +7,23 @@ use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
     VIEWER_BUFFER_BYTES_MAX, plain_reason,
 };
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::collections::BTreeMap;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
+const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
+const PLANTED: [(&str, &str); 7] = [
+    ("SSH_AUTH_SOCK", "/private/tmp/planted-agent.sock"),
+    ("GH_TOKEN", "planted-gh-token"),
+    ("GITHUB_TOKEN", "planted-github-token"),
+    ("ANTHROPIC_API_KEY", "sk-ant-planted-key"),
+    ("OPENAI_API_KEY", "sk-planted-openai-key"),
+    ("AWS_SECRET_ACCESS_KEY", "planted-aws-secret"),
+    ("GIT_ASKPASS", "/private/tmp/planted-askpass"),
+];
 
 struct Server {
     tmux: PathBuf,
@@ -437,4 +450,173 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
         !unused.exists(),
         "listing or closing a host that never started starts nothing"
     );
+}
+
+fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {
+    let output = Command::new(tmux)
+        .arg("-S")
+        .arg(socket)
+        .args(arguments)
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{arguments:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn set_variables(reply: &str) -> Vec<&str> {
+    reply
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('-'))
+        .collect()
+}
+
+#[test]
+fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hold() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .unwrap();
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let planted_server = Command::new(&tmux)
+        .args(["-u", "-f", "/dev/null", "-S"])
+        .arg(&socket)
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "crazyagent",
+            "-n",
+            "_crazyagent",
+            "cat",
+        ])
+        .env_clear()
+        .envs(PLANTED)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(planted_server.success());
+    assert!(
+        tmux_reply(&tmux, &socket, &["show-environment", "-g"])
+            .contains("GH_TOKEN=planted-gh-token"),
+        "the server starts out holding the planted variables"
+    );
+
+    let engine = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "engine_process_with_planted_variables_spawns_a_pane",
+            "--ignored",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .envs(PLANTED)
+        .env(PANE_ENV_ROOT, root.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        engine.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&engine.stdout),
+        String::from_utf8_lossy(&engine.stderr)
+    );
+
+    let out = root.path().join("pane.env");
+    let started = Instant::now();
+    while !out.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the pane never wrote its environment"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let text = std::fs::read_to_string(&out).unwrap();
+    let seen: BTreeMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(name, _)| *name != "__CF_USER_TEXT_ENCODING")
+        .collect();
+    let out_text = out.to_str().unwrap();
+    assert_eq!(
+        seen,
+        BTreeMap::from([
+            ("TERM", "xterm-256color"),
+            ("LANG", "C"),
+            (PANE_ENV_OUT, out_text),
+        ])
+    );
+    for (name, value) in PLANTED {
+        assert!(!text.contains(name) && !text.contains(value), "{name}");
+    }
+    assert_eq!(
+        set_variables(&tmux_reply(&tmux, &socket, &["show-environment", "-g"])),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        set_variables(&tmux_reply(
+            &tmux,
+            &socket,
+            &["show-environment", "-t", "crazyagent"]
+        )),
+        Vec::<&str>::new()
+    );
+    assert_eq!(option(&tmux, &socket, "update-environment"), "");
+}
+
+#[test]
+#[ignore = "run only by the pane environment test as an engine process holding planted variables"]
+fn engine_process_with_planted_variables_spawns_a_pane() {
+    let Some(root) = std::env::var_os(PANE_ENV_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    for (name, value) in PLANTED {
+        assert_eq!(std::env::var(name).unwrap(), value);
+    }
+    let host = Tmux::open(Some(tmux(&root)), &root.join(FOLDER));
+    let program = std::env::current_exe().unwrap();
+    let out = root.join("pane.env");
+    let command = shell(
+        &root,
+        vec![
+            ("LANG".into(), "C".into()),
+            (PANE_ENV_OUT.into(), out.to_str().unwrap().into()),
+        ],
+        &[
+            program.to_str().unwrap(),
+            "--exact",
+            "pane_process_writes_its_environment",
+            "--ignored",
+            "--test-threads",
+            "1",
+        ],
+    );
+    host.spawn(&AgentId::team(9).unwrap(), &command).unwrap();
+}
+
+#[test]
+#[ignore = "run only inside a tmux pane by the pane environment test"]
+fn pane_process_writes_its_environment() {
+    let Some(out) = std::env::var_os(PANE_ENV_OUT).map(PathBuf::from) else {
+        return;
+    };
+    let text: String = std::env::vars_os()
+        .map(|(name, value)| format!("{}={}\n", name.to_string_lossy(), value.to_string_lossy()))
+        .collect();
+    let partial = out.with_extension("partial");
+    std::fs::write(&partial, text).unwrap();
+    std::fs::rename(&partial, &out).unwrap();
 }
