@@ -156,6 +156,7 @@ def opened(count):
 
 def confirmation(session):
     fixture.setup(master, child, 'RCLI')
+    expect('Owner catalog revision')
     expect('h Register SDK home')
     key(b'h')
     expect('Register configured SDK home')
@@ -208,6 +209,7 @@ try:
                 key(fixture.F4)
                 fixture.wait_session(database, child, master, 1, 'rcli', 'closed')
                 fixture.setup(master, child, 'RCLI')
+                expect('Owner catalog revision')
                 key(b'h')
                 expect('SDK home registration disabled')
                 assert counts() == (0, 0, 0, 0)

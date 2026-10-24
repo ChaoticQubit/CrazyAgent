@@ -115,8 +115,12 @@ fn at_home(screen: &str, project: &str) -> bool {
     screen.contains("New project") && screen.contains(project)
 }
 
-fn on_team(screen: &str) -> bool {
-    screen.contains("Master") && screen.contains("Keep warm")
+fn on_agents(screen: &str, project: &str) -> bool {
+    screen.contains(&format!("{project}  /  Agents"))
+}
+
+fn on_team(screen: &str, project: &str) -> bool {
+    screen.contains(&format!("{project}  /  Team")) && screen.contains("Master")
 }
 
 fn reach_home(pty: &Pty, project: &str) {
@@ -159,15 +163,19 @@ fn open_team(pty: &Pty, project: &str) {
     pty.until("the project screen opens with its tabs", |screen| {
         screen.contains(project) && screen.contains("Tabs")
     });
-    for _ in 0..STEPS_MAX {
+    for step in 0..=STEPS_MAX {
         let screen = pty.screen();
-        if on_team(&screen) {
-            return;
+        if on_agents(&screen, project) {
+            break;
         }
+        assert!(step < STEPS_MAX, "no project tab is Agents:\n{screen}");
         pty.bytes(&SHIFT_RIGHT);
         pty.until("the next project tab shows", |now| now != screen);
     }
-    panic!("no project tab shows the team tree:\n{}", pty.screen());
+    pty.keys(&["t"]);
+    pty.until("t on the Agents tab opens the team tree", |screen| {
+        on_team(screen, project)
+    });
 }
 
 #[test]
@@ -221,10 +229,18 @@ fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     let pty = Pty::launch(tmux, &socket);
     open_team(&pty, &project);
     pty.keys(&["Enter"]);
-    pty.until(
-        "Enter on the live master opens its terminal pane",
-        |screen| !on_team(screen),
-    );
+    for step in 0..=STEPS_MAX {
+        if pty.screen().contains("Back to the team") {
+            break;
+        }
+        assert!(
+            step < STEPS_MAX,
+            "Enter then Tab never moved the keys into the live master's terminal:\n{}",
+            pty.screen()
+        );
+        pty.keys(&["Tab"]);
+        std::thread::sleep(POLL_TIME);
+    }
     let marker = format!("e2e{}", hex(4));
     pty.text(&marker);
     pty.until("the typed text shows in the terminal pane", |screen| {

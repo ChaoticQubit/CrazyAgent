@@ -1,6 +1,7 @@
 if not __debug__:
     raise SystemExit("TUI qualification requires Python assertions enabled")
 
+import codecs
 import errno
 import json
 import fcntl
@@ -104,11 +105,29 @@ def clear_screen_cell(cells, row, column):
         del cells[(row, column + 1)]
 
 
-def screen_text(raw, width, height):
-    cells = {}
-    row, column = 1, 1
-    tokens = re.findall(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]", raw.decode("utf-8", "replace"))
-    for token in tokens:
+SCREEN_TOKEN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]")
+SCREEN_PARTIAL = re.compile(r"\x1b(\[[0-?]*[ -/]*)?")
+SCREEN_TAIL = 64
+screens = {}
+
+
+def screen_state(raw):
+    state = screens.get(id(raw))
+    if (isinstance(raw, bytearray) and state is not None and state["raw"] is raw
+            and state["offset"] <= len(raw)
+            and raw[max(0, state["offset"] - SCREEN_TAIL):state["offset"]] == state["tail"]):
+        return state
+    state = {"raw": raw, "offset": 0, "tail": b"", "carry": "", "cells": {}, "row": 1, "column": 1,
+             "decoder": codecs.getincrementaldecoder("utf-8")("replace")}
+    if isinstance(raw, bytearray):
+        screens[id(raw)] = state
+    return state
+
+
+def screen_advance(state, text):
+    cells = state["cells"]
+    row, column = state["row"], state["column"]
+    for token in SCREEN_TOKEN.findall(text):
         if token.startswith("\x1b["):
             code = token[-1]
             values = token[2:-1]
@@ -120,8 +139,9 @@ def screen_text(raw, width, height):
                 cells.clear()
             elif code == "K":
                 clear_screen_cell(cells, row, column)
-                cells = {position: value for position, value in cells.items()
-                         if position[0] != row or position[1] < column}
+                for position in [position for position in cells
+                                 if position[0] == row and position[1] >= column]:
+                    del cells[position]
             elif code in "ABCD" and numbers:
                 distance = numbers[0]
                 row += distance * ((code == "B") - (code == "A"))
@@ -149,6 +169,23 @@ def screen_text(raw, width, height):
             if advance == 2:
                 cells[(row, column + 1)] = ""
             column += advance
+    state["row"], state["column"] = row, column
+
+
+def screen_text(raw, width, height):
+    state = screen_state(raw)
+    if state["offset"] < len(raw):
+        text = state["carry"] + state["decoder"].decode(bytes(raw[state["offset"]:]))
+        state["offset"] = len(raw)
+        state["tail"] = bytes(raw[max(0, len(raw) - SCREEN_TAIL):])
+        escape = text.rfind("\x1b")
+        state["carry"] = ""
+        if escape >= 0 and SCREEN_PARTIAL.fullmatch(text, escape):
+            state["carry"] = text[escape:]
+            text = text[:escape]
+        screen_advance(state, text)
+    cells = state["cells"]
+    assert state["offset"] == len(raw)
     return "\n".join("".join(cells.get((r, c), " ") for c in range(1, min(width, 300) + 1))
                      for r in range(1, min(height, 120) + 1))
 
@@ -213,8 +250,9 @@ def expect(master, text, child, limit=6):
                 return bytes(output)
         if child.poll() is not None:
             break
-    raise AssertionError("missing %r; status=%r; tail=%r" %
-                         (text, child.poll(), bytes(output[-1200:])))
+    height, width, _, _ = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, bytes(8)))
+    raise AssertionError("missing %r; status=%r; screen=%r; tail=%r" %
+                         (text, child.poll(), screen_text(output, width, height), bytes(output[-1200:])))
 
 
 def close_tui(child, master, slave, before, key=b"\x11"):
