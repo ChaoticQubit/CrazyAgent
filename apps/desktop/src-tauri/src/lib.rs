@@ -6,6 +6,7 @@ mod native_refresh_observation;
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::Pick;
 use bridge::project_setup::{MemoryItem, ResearchLog};
+use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
@@ -29,12 +30,16 @@ use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::protocol::ProjectSpec;
-use crazyagent::team::TeamStatus;
+use crazyagent::team::{TeamGraph, TeamStatus};
+use crazyagent::terminal::TerminalRequest;
 use std::sync::Arc;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
 
 pub struct NativeState(Arc<Mutex<NativeBridge>>);
+
+pub struct TerminalState(Arc<Terminals>);
 
 fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     if window.label() != "main" {
@@ -494,6 +499,73 @@ async fn desktop_team_hand_off(
     lock(&state)?
         .team_hand_off(&id, reply, step, generation)
         .await
+}
+
+#[tauri::command]
+async fn desktop_team_graph(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<TeamGraph, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.team_graph(&id).await
+}
+
+#[tauri::command]
+async fn desktop_terminal_attach(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    output: Channel<InvokeResponseBody>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals.0.room(&agent)?;
+    let connection = lock(&state)?.open_terminal(agent.clone()).await?;
+    terminals.0.attach(agent, connection, output)
+}
+
+#[tauri::command]
+async fn desktop_terminal_input(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    bytes: Vec<u8>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals
+        .0
+        .send(&agent, TerminalRequest::Input { bytes })
+        .await
+}
+
+#[tauri::command]
+async fn desktop_terminal_resize(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals
+        .0
+        .send(&agent, TerminalRequest::Resize { cols, rows })
+        .await
+}
+
+#[tauri::command]
+fn desktop_terminal_detach(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals.0.detach(&agent)
 }
 
 #[tauri::command]
@@ -1243,6 +1315,7 @@ pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
         .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
+        .manage(TerminalState(Arc::new(Terminals::default())))
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -1271,6 +1344,11 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_team_graph,
+            desktop_terminal_attach,
+            desktop_terminal_input,
+            desktop_terminal_resize,
+            desktop_terminal_detach,
             desktop_update_project_setup,
             desktop_remove_project,
             desktop_cancel_research,
