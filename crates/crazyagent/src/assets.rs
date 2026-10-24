@@ -5,7 +5,9 @@ use crate::protocol::*;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -139,6 +141,28 @@ pub(crate) fn execute(
     }
 }
 
+/// Refuses to open an asset file where the Unix no-follow walk from `/` does not exist.
+/// Takes the path, unused. Returns `asset_source_unavailable`.
+#[cfg(not(unix))]
+fn open_regular(_path: &Path) -> Result<std::fs::File, EngineError> {
+    Err(error("asset_source_unavailable"))
+}
+
+/// The device and inode that pin an admitted asset file, so a later read detects a
+/// replaced file. Takes its metadata. Returns the pair.
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+/// Reports no file identity where the platform has none; `open_regular` refuses there
+/// before any identity is recorded. Takes the metadata, unused. Returns zeros.
+#[cfg(not(unix))]
+fn file_identity(_metadata: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(unix)]
 fn open_regular(path: &Path) -> Result<std::fs::File, EngineError> {
     use rustix::fs::{Mode, OFlags, open, openat};
     if !path.is_absolute() || path.as_os_str().len() > 4096 {
@@ -225,10 +249,11 @@ fn admit(
         "asset_sources",
         config.settings.knowledge.asset_sources_max,
     )?;
+    let (device, inode) = file_identity(&metadata);
     let admitted = AdmittedSource {
         source: source.clone(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
+        device,
+        inode,
     };
     tx.execute(
         "INSERT INTO asset_sources(id,scope,name,body) VALUES (?1,?2,?3,?4)",
@@ -290,6 +315,14 @@ fn selected_sources(
     Ok(sources)
 }
 
+/// Refuses to read an asset where its Unix identity and change times cannot be checked.
+/// Takes the admitted source and limit, both unused. Returns `asset_source_unavailable`.
+#[cfg(not(unix))]
+fn content(_source: &AdmittedSource, _maximum: usize) -> Result<AssetContent, EngineError> {
+    Err(error("asset_source_unavailable"))
+}
+
+#[cfg(unix)]
 fn content(source: &AdmittedSource, maximum: usize) -> Result<AssetContent, EngineError> {
     let file = open_regular(&source.source.path)?;
     let before = file.metadata().map_err(error)?;

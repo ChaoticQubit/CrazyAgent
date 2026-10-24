@@ -5,6 +5,7 @@ pub mod transcript;
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -189,6 +190,15 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
+/// Reports whether a path is a regular file Windows can run; Windows has no execute bit,
+/// so any regular file counts and the launch decides by extension. Takes the path.
+/// Returns true for a regular file.
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+#[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)

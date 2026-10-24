@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags, open, openat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -131,11 +132,7 @@ pub fn load_report(
     path: &Path,
     context: AdmissionContext,
 ) -> Result<QualificationReport, AdmissionError> {
-    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
-    let file = File::from(
-        open(path, flags, Mode::empty())
-            .map_err(|e| AdmissionError::InvalidReport(e.to_string()))?,
-    );
+    let file = open_report(path)?;
     let metadata = file
         .metadata()
         .map_err(|e| AdmissionError::InvalidReport(e.to_string()))?;
@@ -202,11 +199,7 @@ pub fn admit(report: &QualificationReport, required: &[Capability]) -> Result<()
         return Err(AdmissionError::MissingCapabilities(missing));
     }
     validate_shape(report)?;
-    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::DIRECTORY;
-    let root = File::from(
-        open(&context.evidence_root, flags, Mode::empty())
-            .map_err(|e| AdmissionError::Evidence(e.to_string()))?,
-    );
+    let root = open_evidence_root(&context.evidence_root)?;
     for artifact in &report.artifacts {
         let file = open_artifact(&root, &artifact.path)?;
         if hash_file(file, ARTIFACT_BYTES_MAX)? != artifact.sha256 {
@@ -278,6 +271,56 @@ fn validate_shape(report: &QualificationReport) -> Result<(), AdmissionError> {
     Ok(())
 }
 
+/// Opens a qualification report without following a final symlink.
+/// Takes the report path. Returns the open file, or `InvalidReport` with the OS error.
+#[cfg(unix)]
+fn open_report(path: &Path) -> Result<File, AdmissionError> {
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    Ok(File::from(open(path, flags, Mode::empty()).map_err(
+        |e| AdmissionError::InvalidReport(e.to_string()),
+    )?))
+}
+
+/// Refuses a qualification report where no no-follow open exists.
+/// Takes the report path, unused. Returns `InvalidReport` reading
+/// `qualification_evidence_unavailable`.
+#[cfg(not(unix))]
+fn open_report(_path: &Path) -> Result<File, AdmissionError> {
+    Err(AdmissionError::InvalidReport(
+        "qualification_evidence_unavailable".into(),
+    ))
+}
+
+/// Opens the evidence root directory without following a final symlink.
+/// Takes its path. Returns the open directory, or `Evidence` with the OS error.
+#[cfg(unix)]
+fn open_evidence_root(path: &Path) -> Result<File, AdmissionError> {
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::DIRECTORY;
+    Ok(File::from(
+        open(path, flags, Mode::empty()).map_err(|e| AdmissionError::Evidence(e.to_string()))?,
+    ))
+}
+
+/// Refuses the evidence root where no directory-relative no-follow walk exists.
+/// Takes its path, unused. Returns `Evidence` reading `qualification_evidence_unavailable`.
+#[cfg(not(unix))]
+fn open_evidence_root(_path: &Path) -> Result<File, AdmissionError> {
+    Err(AdmissionError::Evidence(
+        "qualification_evidence_unavailable".into(),
+    ))
+}
+
+/// Refuses an evidence artifact where no directory-relative no-follow walk exists.
+/// Takes the root and path, both unused. Returns `Evidence` reading
+/// `qualification_evidence_unavailable`.
+#[cfg(not(unix))]
+fn open_artifact(_root: &File, _path: &Path) -> Result<File, AdmissionError> {
+    Err(AdmissionError::Evidence(
+        "qualification_evidence_unavailable".into(),
+    ))
+}
+
+#[cfg(unix)]
 fn open_artifact(root: &File, path: &Path) -> Result<File, AdmissionError> {
     let mut directory = root
         .try_clone()
