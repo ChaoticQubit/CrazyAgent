@@ -4,10 +4,14 @@ use crate::config::ModelConnection;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
-use crate::harnesses::launch::LaunchError;
+use crate::harnesses::launch::{
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+};
+use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{ProjectId, RequestId};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::terminal::{AgentId, Host};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -34,6 +38,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 const CONTEXT_BUSY: &str = "launch_home_busy";
+const PANE_PREFIX: &str = "research-";
+const PANE_EVENTS_MAX: usize = 200_000;
 const CLAUDE_ARGUMENTS: [&str; 9] = [
     "--print",
     "--output-format",
@@ -218,6 +224,7 @@ pub struct ResearchRunner {
     stopping: AtomicBool,
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
+    terminal: Option<Arc<dyn Host>>,
 }
 
 enum Ending {
@@ -279,7 +286,28 @@ impl ResearchRunner {
             stopping: AtomicBool::new(false),
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
+            terminal: None,
         })
+    }
+
+    /// Runs every research agent in its harness's interactive app in a pane of `host` named
+    /// `research-<run>`, where the owner can watch it work. Panes an earlier engine left end
+    /// here, since that engine's jobs go back to the queue. Takes the host.
+    /// Returns the runner, or the host's plain code.
+    pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
+        let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+        for agent in host.alive().map_err(host_error)? {
+            if !agent.as_str().starts_with(PANE_PREFIX) {
+                continue;
+            }
+            match host.kill(&agent) {
+                Ok(()) => {}
+                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+                Err(problem) => return Err(host_error(problem)),
+            }
+        }
+        self.terminal = Some(host);
+        Ok(self)
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`
@@ -547,6 +575,42 @@ impl ResearchRunner {
         drop(setup);
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
+        if let Some(host) = &self.terminal {
+            let output = match harness {
+                ResearchHarness::Codex => tmp.join("report.md"),
+                ResearchHarness::ClaudeCode => agent.join("output.md"),
+            };
+            let (binding, model) = pane_account(account, &home);
+            let request = LaunchRequest {
+                harness: harness.id().to_owned(),
+                executable: executable.to_path_buf(),
+                working_dir: worktree.clone(),
+                account: binding,
+                model,
+                tools: job.tools,
+                sandbox_profile: Some(profile.clone()),
+                limits: LaunchLimits {
+                    run_time: self.limits.wall_time,
+                    output_bytes: usize::try_from(self.limits.output_bytes_max)
+                        .unwrap_or(usize::MAX)
+                        .min(64 * 1024 * 1024),
+                    events: PANE_EVENTS_MAX,
+                    ..LaunchLimits::default()
+                },
+            };
+            let pane = AgentId::new(&format!("{PANE_PREFIX}{name}"))
+                .map_err(|problem| RunError::Invalid(problem.0))?;
+            let mut session =
+                TerminalSession::start_installed(host.clone(), pane, request, installed, &context)
+                    .map_err(|problem| {
+                        RunError::Invalid(format!("agent terminal: {}", problem.0))
+                    })?;
+            let group = session.process_group();
+            let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
+            let _ = session.stop();
+            drop(lease);
+            return Ok((ending?, group, output));
+        }
         let mut command = sandbox.command(&profile, executable);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
@@ -678,6 +742,64 @@ impl ResearchRunner {
         };
         agent.stop();
         let _ = jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed));
+        Ok(ending)
+    }
+
+    /// Types the research prompt into the agent's pane and follows its session record until
+    /// the turn ends, the job is cancelled, the runner stops or a limit passes. The agent's
+    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
+    /// Returns how the run ended.
+    fn supervise_pane(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        session: &mut TerminalSession,
+        prompt: &str,
+        output: &Path,
+    ) -> Result<Ending, RunError> {
+        let mut last = String::new();
+        let mut counted: u64 = 0;
+        if session.send(prompt).is_err() {
+            return Ok(Ending::Exited(false));
+        }
+        let mut beat = Instant::now();
+        let ending = loop {
+            if self.is_stopping() {
+                break Ending::Interrupted;
+            }
+            if counted > self.limits.output_bytes_max {
+                break Ending::Overflowed;
+            }
+            if beat.elapsed() >= HEARTBEAT {
+                beat = Instant::now();
+                match jobs.heartbeat(job.id, &self.claimer, counted) {
+                    Ok(true) => break Ending::Cancelled,
+                    Err(JobError::NotHeld) => break Ending::Interrupted,
+                    Ok(false) | Err(_) => {}
+                }
+            }
+            match session.next_event(POLL) {
+                Ok(Some(LaunchEvent::Text { text })) => {
+                    counted += text.len() as u64;
+                    last = text;
+                }
+                Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
+                Ok(Some(LaunchEvent::Exited { .. })) => break Ending::Exited(false),
+                Ok(_) => {}
+                Err(problem) => {
+                    break match problem.0.as_str() {
+                        "launch_deadline" => Ending::TimedOut,
+                        "launch_output_limit" | "launch_event_limit" => Ending::Overflowed,
+                        _ => Ending::Exited(false),
+                    };
+                }
+            }
+        };
+        let _ = jobs.heartbeat(job.id, &self.claimer, counted);
+        if matches!(ending, Ending::Exited(true)) {
+            assert!(last.len() as u64 <= counted);
+            write_private(output, last.as_bytes())?;
+        }
         Ok(ending)
     }
 
@@ -1147,6 +1269,28 @@ fn claude_arguments(
         }
     }
     Ok(())
+}
+
+/// Names the account and model a research pane launches on, in the agent's home.
+/// Takes the research account and the home. Returns the binding and the model; research
+/// accounts carry no key.
+fn pane_account(account: &ResearchAccount, home: &Path) -> (AccountBinding, Option<String>) {
+    let home = home.to_path_buf();
+    match account {
+        ResearchAccount::Endpoint { base_url, model }
+        | ResearchAccount::AnthropicEndpoint { base_url, model } => (
+            AccountBinding::Url {
+                home,
+                base_url: base_url.clone(),
+                key: None,
+            },
+            Some(model.clone()),
+        ),
+        ResearchAccount::ManagedCodex { model, .. }
+        | ResearchAccount::ManagedClaude { model, .. } => {
+            (AccountBinding::Subscription { home }, model.clone())
+        }
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
