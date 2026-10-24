@@ -36,6 +36,8 @@ const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
@@ -644,8 +646,12 @@ impl ResearchRunner {
                         RunError::Invalid(format!("agent terminal: {}", problem.0))
                     })?;
             let group = session.process_group();
+            #[cfg(unix)]
+            let mut lifeline = Lifeline::watch(group)?;
             let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
             let _ = session.stop();
+            #[cfg(unix)]
+            lifeline.release();
             drop(lease);
             return Ok((ending?, group, output));
         }
@@ -669,7 +675,7 @@ impl ResearchRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert!(!carries_secret(&command, &context));
-        let mut running = AgentProcess::new(command.spawn()?);
+        let mut running = AgentProcess::new(command.spawn()?)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
         for (stream, name) in [
@@ -1006,7 +1012,7 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut running = AgentProcess::new(command.spawn()?);
+        let mut running = AgentProcess::new(command.spawn()?)?;
         let counted = Arc::new(AtomicU64::new(0));
         let mut drains = Vec::with_capacity(2);
         let streams = [
@@ -1576,23 +1582,41 @@ fn stop_timed_out(child: &mut Child) {
 /// A running agent and the process group it leads. Stopping it, which also
 /// happens when it is dropped while a panic unwinds or a launch step fails,
 /// kills the whole group, reaps the agent and waits until the group is empty,
-/// so no agent process outlives the run that started it.
+/// so no agent process outlives the run that started it. Its [`Lifeline`]
+/// kills the group if the engine itself dies first.
 pub(crate) struct AgentProcess {
     pub(crate) child: Child,
     pub(crate) group: u32,
+    #[cfg(unix)]
+    lifeline: Lifeline,
     stopped: bool,
 }
 
 impl AgentProcess {
-    /// Takes a just spawned agent that leads its own process group.
-    pub(crate) fn new(child: Child) -> Self {
+    /// Takes a just spawned agent that leads its own process group and starts
+    /// its lifeline. Returns the guard, or the error that kept the lifeline from
+    /// starting, after stopping the agent's group.
+    pub(crate) fn new(child: Child) -> io::Result<Self> {
         let group = child.id();
         assert!(group > 1);
-        Self {
+        #[cfg(unix)]
+        let lifeline = match Lifeline::watch(group) {
+            Ok(lifeline) => lifeline,
+            Err(error) => {
+                let mut child = child;
+                stop_group(group);
+                let _ = child.wait();
+                await_group_exit(group);
+                return Err(error);
+            }
+        };
+        Ok(Self {
             child,
             group,
+            #[cfg(unix)]
+            lifeline,
             stopped: false,
-        }
+        })
     }
 
     /// Kills the agent's group once, reaps the agent and waits for the group
@@ -1605,6 +1629,7 @@ impl AgentProcess {
         stop_group(self.group);
         let _ = self.child.wait();
         await_group_exit(self.group);
+        self.lifeline.release();
         self.stopped = true;
     }
 
@@ -1625,6 +1650,60 @@ impl Drop for AgentProcess {
     /// Stops the agent's process group if the run did not already stop it.
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Kills an agent's process group if the engine dies while the agent runs. A
+/// `/bin/sh` child in its own process group reads a pipe only the engine holds
+/// and kills the group once that pipe closes without the word `done`, as it
+/// does when the engine dies. Releasing it sends `done` and reaps it.
+#[cfg(unix)]
+pub(crate) struct Lifeline {
+    child: Child,
+    released: bool,
+}
+
+#[cfg(unix)]
+impl Lifeline {
+    /// Starts the lifeline of a running agent. Takes the group id the agent
+    /// leads, above 1. Returns the lifeline, or the error from starting `/bin/sh`.
+    pub(crate) fn watch(group: u32) -> io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+        assert!(group > 1);
+        let child = Command::new("/bin/sh")
+            .env_clear()
+            .args(["-c", LIFELINE, "lifeline", &group.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()?;
+        Ok(Self {
+            child,
+            released: false,
+        })
+    }
+
+    /// Tells the lifeline the engine ended the agent itself, so it exits
+    /// without killing, and reaps it; later calls do nothing. Called once the
+    /// agent's group is stopped, so the group id is never killed after reuse.
+    pub(crate) fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Some(mut pipe) = self.child.stdin.take() {
+            let _ = pipe.write_all(b"done\n");
+        }
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Lifeline {
+    /// Releases the lifeline if the run did not already.
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -2147,7 +2226,7 @@ mod tests {
         let group = child.id();
         let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let agent = AgentProcess::new(child);
+            let agent = AgentProcess::new(child).unwrap();
             let until = Instant::now() + Duration::from_secs(10);
             while group_members(agent.group) < 2 {
                 assert!(Instant::now() < until, "the agent never started its child");
@@ -2158,6 +2237,54 @@ mod tests {
         let payload = unwound.expect_err("the run must panic mid-run");
         assert_eq!(payload.downcast_ref::<&str>(), Some(&MID_RUN));
         assert_eq!(group_members(group), 0);
+        assert!(rustix::process::test_kill_process_group(pid).is_err());
+    }
+
+    #[test]
+    fn a_lifeline_kills_its_agent_group_only_when_its_pipe_closes_without_done() {
+        use std::os::unix::process::CommandExt;
+        let spawn = || {
+            let agent = Command::new("/bin/sh")
+                .env_clear()
+                .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let until = Instant::now() + Duration::from_secs(10);
+            while group_members(agent.id()) < 2 {
+                assert!(Instant::now() < until, "the agent never started its child");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            agent
+        };
+        let mut kept = spawn();
+        let kept_group = kept.id();
+        Lifeline::watch(kept_group).unwrap().release();
+        assert!(
+            group_members(kept_group) >= 2,
+            "a released lifeline killed the agent's group"
+        );
+        stop_group(kept_group);
+        kept.wait().unwrap();
+        await_group_exit(kept_group);
+        let mut orphan = spawn();
+        let group = orphan.id();
+        let mut lifeline = Lifeline::watch(group).unwrap();
+        drop(lifeline.child.stdin.take());
+        lifeline.child.wait().unwrap();
+        orphan.wait().unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while group_members(group) > 0 {
+            assert!(
+                Instant::now() < until,
+                "the lifeline left the agent's group running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process_group(pid).is_err());
     }
 
