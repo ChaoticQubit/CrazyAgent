@@ -583,6 +583,17 @@ async fn desktop_set_projects_home(
 }
 
 #[tauri::command]
+async fn desktop_move_projects_home(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    path: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.move_projects_home(path, generation).await
+}
+
+#[tauri::command]
 async fn desktop_found_projects(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1463,6 +1474,7 @@ pub fn run() {
             desktop_research_log,
             desktop_projects_home,
             desktop_set_projects_home,
+            desktop_move_projects_home,
             desktop_found_projects,
             desktop_folder_size,
             desktop_add_existing_folder,

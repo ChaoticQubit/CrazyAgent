@@ -1,6 +1,6 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure};
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{AccountSecret, OwnerData, OwnerMutation, OwnerRead};
+use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::Onboarding;
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
@@ -381,18 +381,17 @@ impl NativeBridge {
         })
     }
 
-    fn github_ready(&self) -> Result<(), BridgeError> {
+    fn github_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        Ok(())
+        self.controller()?.owner_client().map_err(github_failure)
     }
 
     /// Reads the GitHub sign-in: signed in or not, login, method and any plain problem.
     pub async fn github_status(&mut self) -> Result<GitHubStatus, BridgeError> {
-        self.github_ready()?;
         let status = self
-            .controller()?
+            .github_ready()?
             .github_status()
             .await
             .map_err(github_failure)?;
@@ -401,9 +400,8 @@ impl NativeBridge {
 
     /// Starts the GitHub device sign-in. Output: the code, its page and lifetime.
     pub async fn github_sign_in(&mut self) -> Result<GitHubDeviceCode, BridgeError> {
-        self.github_ready()?;
         let code = self
-            .controller()?
+            .github_ready()?
             .github_sign_in()
             .await
             .map_err(github_failure)?;
@@ -413,7 +411,6 @@ impl NativeBridge {
     /// Sends a pasted GitHub token once through the engine's secret channel; it is never
     /// logged or returned. Input: the token. Output: the status after GitHub checked it.
     pub async fn github_token(&mut self, token: String) -> Result<GitHubStatus, BridgeError> {
-        self.github_ready()?;
         let token = token.trim();
         if token.is_empty() || token.len() > 255 || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(failure("github_token_invalid"));
@@ -421,7 +418,7 @@ impl NativeBridge {
         let secret = AccountSecret::new(token.as_bytes().to_vec())
             .map_err(|_| failure("github_token_invalid"))?;
         let status = self
-            .controller()?
+            .github_ready()?
             .github_token(secret)
             .await
             .map_err(github_failure)?;
@@ -430,9 +427,8 @@ impl NativeBridge {
 
     /// Reuses a signed-in GitHub CLI on this machine. Output: the new status.
     pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, BridgeError> {
-        self.github_ready()?;
         let status = self
-            .controller()?
+            .github_ready()?
             .github_use_cli()
             .await
             .map_err(github_failure)?;
@@ -441,9 +437,8 @@ impl NativeBridge {
 
     /// Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status.
     pub async fn github_sign_out(&mut self) -> Result<GitHubStatus, BridgeError> {
-        self.github_ready()?;
         let status = self
-            .controller()?
+            .github_ready()?
             .github_sign_out()
             .await
             .map_err(github_failure)?;
@@ -452,12 +447,11 @@ impl NativeBridge {
 
     /// Lists one page of the signed-in owner's repositories. Input: the page, from 1.
     pub async fn github_repos(&mut self, page: u32) -> Result<GitHubRepoPage, BridgeError> {
-        self.github_ready()?;
         if page == 0 || page > GITHUB_PAGE_MAX {
             return Err(failure("github_page_invalid"));
         }
         let repos = self
-            .controller()?
+            .github_ready()?
             .github_repos(page)
             .await
             .map_err(github_failure)?;
@@ -467,7 +461,6 @@ impl NativeBridge {
     /// Clones one repository into the projects home through the engine's credential helper.
     /// Input: "owner/name". Output: the repository and the folder it landed in.
     pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, BridgeError> {
-        self.github_ready()?;
         let valid = full_name
             .split_once('/')
             .is_some_and(|(owner, name)| name_part(owner) && name_part(name));
@@ -475,25 +468,24 @@ impl NativeBridge {
             return Err(failure("repo_missing"));
         }
         let receipt = self
-            .controller()?
+            .github_ready()?
             .clone_repo(full_name)
             .await
             .map_err(github_failure)?;
         bounded(receipt)
     }
 
-    fn setup_ready(&self) -> Result<(), BridgeError> {
+    fn setup_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        Ok(())
+        self.controller()?.owner_client().map_err(setup_failure)
     }
 
     /// Reads setup: each dependency, each default-pack entry and whether setup is running.
     pub async fn setup_status(&mut self) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
         let status = self
-            .controller()?
+            .setup_ready()?
             .setup_status()
             .await
             .map_err(setup_failure)?;
@@ -503,10 +495,9 @@ impl NativeBridge {
     /// Starts setup with the ticked pack entries; the ticked MCP servers count as approved.
     /// Input: the ticked entry ids. Output: the status as the run starts.
     pub async fn run_setup(&mut self, pack: Vec<String>) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
         let pack = pack_ids(pack)?;
         let status = self
-            .controller()?
+            .setup_ready()?
             .run_setup(pack)
             .await
             .map_err(setup_failure)?;
@@ -519,10 +510,9 @@ impl NativeBridge {
         id: String,
         on: bool,
     ) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
         let id = pack_ids(vec![id])?.remove(0);
         let status = self
-            .controller()?
+            .setup_ready()?
             .set_pack_entry(id, on)
             .await
             .map_err(setup_failure)?;
@@ -531,14 +521,27 @@ impl NativeBridge {
 
     /// Removes one installed pack entry and what it added. Input: its id.
     pub async fn remove_pack_entry(&mut self, id: String) -> Result<SetupStatus, BridgeError> {
-        self.setup_ready()?;
         let id = pack_ids(vec![id])?.remove(0);
         let status = self
-            .controller()?
+            .setup_ready()?
             .remove_pack_entry(id)
             .await
             .map_err(setup_failure)?;
         bounded(status)
+    }
+
+    /// Moves every project folder from the current projects home into a new one, after the
+    /// owner saw the size; SetProjectsHome alone moves nothing. Inputs: the new absolute
+    /// folder and the client generation. Output: the receipt.
+    pub async fn move_projects_home(
+        &mut self,
+        path: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        crazyagent::projects_home::path_text(&path, "projects_home_path_invalid")
+            .map_err(intake_failure)?;
+        self.home_change(OwnerMutation::MoveProjectsHome { path }, generation)
+            .await
     }
 }
 

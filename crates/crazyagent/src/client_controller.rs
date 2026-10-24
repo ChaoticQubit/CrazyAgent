@@ -224,6 +224,14 @@ impl OwnerController {
         self.pending.as_ref()
     }
 
+    /// Borrows the owner socket client for the channels served beside owner reads and
+    /// mutations, such as GitHub and setup. Output: the client, or `controller_disconnected`.
+    pub fn owner_client(&self) -> Result<&OwnerClient, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
     /// Disconnects this client without stopping the shared engine.
     /// Takes exclusive state and preserves any exact pending request.
     /// Marks cached reads stale until an authoritative refresh.

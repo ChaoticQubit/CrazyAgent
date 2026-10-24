@@ -34,6 +34,7 @@ fn main() {
         "desktop_research_log",
         "desktop_projects_home",
         "desktop_set_projects_home",
+        "desktop_move_projects_home",
         "desktop_found_projects",
         "desktop_folder_size",
         "desktop_add_existing_folder",

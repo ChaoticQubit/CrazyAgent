@@ -39,6 +39,7 @@
     "allow-desktop-research-log",
     "allow-desktop-projects-home",
     "allow-desktop-set-projects-home",
+    "allow-desktop-move-projects-home",
     "allow-desktop-found-projects",
     "allow-desktop-folder-size",
     "allow-desktop-add-existing-folder",

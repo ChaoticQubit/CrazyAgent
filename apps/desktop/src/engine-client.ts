@@ -300,7 +300,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "add_existing_folder" | "start_onboarding";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -877,6 +877,12 @@ export function projectsHome(): Promise<ProjectsHome> {
  * Inputs: an absolute folder path and a generation. Output: the engine receipt. */
 export function setProjectsHome(path: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_set_projects_home", { path, generation });
+}
+
+/** Moves every project folder into a new projects home, after the owner saw the size.
+ * Inputs: the new absolute folder and a generation. Output: the engine receipt. */
+export function moveProjectsHome(path: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_move_projects_home", { path, generation });
 }
 
 /** Lists the folders in the projects home with their state. Output: the found projects. */

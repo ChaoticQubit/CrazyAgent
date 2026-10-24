@@ -479,6 +479,7 @@ impl NativeBridge {
                 ("project_remove", Some(project_id.as_str().to_owned()), None)
             }
             OwnerMutation::SetProjectsHome { .. } => ("projects_home", None, None),
+            OwnerMutation::MoveProjectsHome { .. } => ("move_projects_home", None, None),
             OwnerMutation::AddExistingFolder { .. } => ("add_existing_folder", None, None),
             OwnerMutation::StartOnboarding { .. } => ("start_onboarding", None, None),
             OwnerMutation::CancelResearch { project_id, .. } => (

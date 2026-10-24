@@ -96,42 +96,22 @@ export function RepoListView({ status, repos, query, onQuery, more, onMore, clon
   </section>;
 }
 
-/** Clone from GitHub: signs in through the device flow, the GitHub CLI or a token, lists the
- * account's repositories page by page and clones one into the projects folder. */
-export function CloneFromGitHub() {
-  const session = useAppSession();
-  const [status, reloadStatus] = useLoad(loadGitHubStatus);
+/** Sign in to GitHub with its own state: the device flow polled every few seconds while the code
+ * is live, the GitHub CLI, or a pasted token read once from the field and cleared.
+ * Inputs: the status shown and the status reload. Output: the sign-in panel. */
+export function GitHubSignIn({ status, reloadStatus }: { status: GitHubStatus; reloadStatus: () => void }) {
   const [device, setDevice] = useState<DeviceFlow | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [tokenOpen, setTokenOpen] = useState(false);
   const tokenRef = useRef<HTMLInputElement>(null);
-  const [repos, setRepos] = useState<Loaded<GitHubRepo[]>>({ kind: "loading" });
-  const [next, setNext] = useState<number | null>(null);
-  const [pages, setPages] = useState(0);
-  const [query, setQuery] = useState("");
-  const [cloning, setCloning] = useState<string | null>(null);
-  const signedIn = status.kind === "ok" && status.value.signed_in;
 
   useEffect(() => {
-    if (!device || signedIn) return;
+    if (!device || status.signed_in) return;
     const timer = window.setInterval(() => { setNow(Date.now()); reloadStatus(); }, GITHUB_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [device, signedIn]);
-
-  useEffect(() => {
-    if (!signedIn) return;
-    let live = true;
-    setDevice(null);
-    void loadGitHubRepos(1).then((result) => {
-      if (!live) return;
-      setRepos(result.kind === "ok" ? { kind: "ok", value: result.value.repos } : result);
-      setNext(result.kind === "ok" ? result.value.next : null);
-      setPages(1);
-    });
-    return () => { live = false; };
-  }, [signedIn]);
+  }, [device, status.signed_in]);
 
   const failed = (result: { kind: "not_ready" } | { kind: "error"; code: string }, what: string) =>
     setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result.code));
@@ -166,6 +146,39 @@ export function CloneFromGitHub() {
     void signedInWith(() => gitHubToken(token), "Saving a GitHub token");
   };
 
+  return <GitHubSignInView device={device} now={now} busy={busy} problem={problem || (status.problem ?? "")}
+    tokenOpen={tokenOpen} tokenRef={tokenRef} onDevice={() => void startDevice()} onCli={() => void signedInWith(gitHubUseCli, "Using the GitHub CLI")}
+    onTokenOpen={() => setTokenOpen(true)} onToken={sendToken} onOpenPage={(url) => void openLink(url)} />;
+}
+
+/** Clone from GitHub: signs in through the device flow, the GitHub CLI or a token, lists the
+ * account's repositories page by page and clones one into the projects folder. */
+export function CloneFromGitHub() {
+  const session = useAppSession();
+  const [status, reloadStatus] = useLoad(loadGitHubStatus);
+  const [problem, setProblem] = useState("");
+  const [repos, setRepos] = useState<Loaded<GitHubRepo[]>>({ kind: "loading" });
+  const [next, setNext] = useState<number | null>(null);
+  const [pages, setPages] = useState(0);
+  const [query, setQuery] = useState("");
+  const [cloning, setCloning] = useState<string | null>(null);
+  const signedIn = status.kind === "ok" && status.value.signed_in;
+
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    void loadGitHubRepos(1).then((result) => {
+      if (!live) return;
+      setRepos(result.kind === "ok" ? { kind: "ok", value: result.value.repos } : result);
+      setNext(result.kind === "ok" ? result.value.next : null);
+      setPages(1);
+    });
+    return () => { live = false; };
+  }, [signedIn]);
+
+  const failed = (result: { kind: "not_ready" } | { kind: "error"; code: string }, what: string) =>
+    setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result.code));
+
   const more = async () => {
     if (next === null) return;
     const result = await loadGitHubRepos(next);
@@ -186,15 +199,12 @@ export function CloneFromGitHub() {
     navigate({ name: "home" });
   };
 
-  const shownProblem = problem || (status.kind === "ok" ? status.value.problem ?? "" : "");
   return <div className="pj in-page">
     <PageHeader title="Clone from GitHub" description="Pick a repository and CrazyAgent clones it into your projects folder." />
     {status.kind === "loading" && <Skeleton shape="line" count={3} />}
     {status.kind === "not_ready" && <NotReady what="Cloning from GitHub" />}
     {status.kind === "error" && <LoadError message={status.message} onRetry={reloadStatus} />}
-    {status.kind === "ok" && !status.value.signed_in && <GitHubSignInView device={device} now={now} busy={busy} problem={shownProblem}
-      tokenOpen={tokenOpen} tokenRef={tokenRef} onDevice={() => void startDevice()} onCli={() => void signedInWith(gitHubUseCli, "Using the GitHub CLI")}
-      onTokenOpen={() => setTokenOpen(true)} onToken={sendToken} onOpenPage={(url) => void openLink(url)} />}
+    {status.kind === "ok" && !status.value.signed_in && <GitHubSignIn status={status.value} reloadStatus={reloadStatus} />}
     {status.kind === "ok" && status.value.signed_in && <>
       <RepoListView status={status.value} repos={repos} query={query} onQuery={setQuery} more={next !== null && pages < REPO_PAGES_MAX}
         onMore={() => void more()} cloning={cloning} onClone={(repo) => void clone(repo)} />

@@ -2,7 +2,7 @@ import { classifyFailure, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
@@ -89,6 +89,12 @@ export function loadProjectsHome(): Promise<Result<ProjectsHome>> {
  * Inputs: an absolute folder path and a generation. Output: the engine receipt. */
 export function setProjectsHome(path: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => saveHome(path, generation));
+}
+
+/** Moves every project folder into a new projects folder, after the owner saw the size.
+ * Inputs: the new absolute folder and a generation. Output: the engine receipt. */
+export function moveProjectsHome(path: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => moveHome(path, generation));
 }
 
 /** Reads every folder in the projects folder with its state: found, setting up, ready or missing.

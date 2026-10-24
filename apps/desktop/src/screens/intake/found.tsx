@@ -95,7 +95,7 @@ export function SetUpDialogBody({ folder, pools, pool, onPool, problem }: {
   </div>;
 }
 
-function SetUpDialog({ folder, onClose }: { folder: FoundProject; onClose: () => void }) {
+function SetUpDialog({ folder, onClose, onStarted }: { folder: FoundProject; onClose: () => void; onStarted: () => void }) {
   const [pools, setPools] = useState<Result<PoolChoice[]>>();
   const [pool, setPool] = useState("");
   const [busy, setBusy] = useState(false);
@@ -120,9 +120,13 @@ function SetUpDialog({ folder, onClose }: { folder: FoundProject; onClose: () =>
       return;
     }
     const started = startedProject(result.value);
-    if (started.kind === "rejected") setProblem(intakeCopy(started.code));
-    else if (started.kind === "unconfirmed") setProblem("We couldn't confirm setup started. Check Home and try again.");
-    else navigate({ name: "onboarding", id: started.id });
+    if (started.kind === "rejected") { setProblem(intakeCopy(started.code)); return; }
+    if (started.kind === "started") { navigate({ name: "onboarding", id: started.id }); return; }
+    if (receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm setup started. Check Home and try again."); return; }
+    const found = await loadFoundProjects();
+    const entry = found.kind === "ok" ? found.value.find((item) => item.path === folder.path && item.project_id) : undefined;
+    if (entry?.project_id) navigate({ name: "onboarding", id: entry.project_id });
+    else onStarted();
   };
   return <Dialog open title={`Set up ${folder.name}`} onClose={onClose}
     footer={<><Button onClick={onClose}>Cancel</Button>
@@ -179,7 +183,8 @@ export function FoundProjects() {
     <FoundProjectsView home={home} found={found} chooser={<HomeFolderPicker onSaved={reloadHome} />}
       onSetUp={setSettingUp} onRemove={setRemoving} onRetry={() => setTick((old) => old + 1)}
       onOpen={(id, setup) => navigate(setup ? { name: "onboarding", id } : { name: "project", id, tab: "overview" })} />
-    {settingUp && <SetUpDialog folder={settingUp} onClose={() => setSettingUp(null)} />}
+    {settingUp && <SetUpDialog folder={settingUp} onClose={() => setSettingUp(null)}
+      onStarted={() => { setSettingUp(null); setTick((old) => old + 1); session.showToast(`Setting up ${settingUp.name}. Continue setup from Home.`); }} />}
     <ConfirmDialog open={removing !== null} title={`Remove ${removing?.name ?? "this project"}?`} confirmLabel="Remove project" cancelLabel="Keep project" pending={busy}
       onCancel={() => setRemoving(null)} onConfirm={() => { if (removing) void remove(removing); }}>
       CrazyAgent forgets this project. Its folder is no longer in your projects folder, so nothing on disk changes.
