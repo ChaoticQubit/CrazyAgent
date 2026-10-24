@@ -3,7 +3,7 @@ mod layout;
 mod platform;
 mod watch;
 
-pub use intake::{AddPlan, copy_tree, folder_size, move_by_copy, verify_tree};
+pub use intake::{AddPlan, MovePlan, copy_tree, folder_size, move_by_copy, verify_tree};
 pub use layout::{CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_from_git, prepare_layout};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
@@ -66,11 +66,13 @@ pub enum AddMode {
 }
 
 /// An owner change to the projects home recorded by the engine: picking the
-/// home folder, or recording a folder the host already moved or copied in.
+/// home folder, switching to a new one and optionally moving every project
+/// folder there, or recording a folder the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
     SetHome { path: String },
+    MoveHome { path: String, move_projects: bool },
     Added { source: String, mode: AddMode },
 }
 
@@ -79,7 +81,9 @@ impl HomeAction {
     /// Input: an untrusted action. Output: Ok, or the code of the bad path.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
-            Self::SetHome { path } => path_text(path, "projects_home_path_invalid"),
+            Self::SetHome { path } | Self::MoveHome { path, .. } => {
+                path_text(path, "projects_home_path_invalid")
+            }
             Self::Added { source, .. } => path_text(source, "home_source_invalid"),
         }
     }
@@ -209,6 +213,34 @@ pub fn plan_add(
     }
     assert_eq!(destination.parent(), Some(home));
     Ok(AddPlan::new(real, destination, mode))
+}
+
+/// Plans moving every project folder from the current home to a new one.
+/// Input: the current home, the new folder the owner picked and the engine
+/// data folder. Output: the plan with the top-level folders to move, or a
+/// refusal for an unsafe new home, the same home, homes inside one another,
+/// or a folder name already taken in the new home.
+pub fn plan_move(
+    current: &Path,
+    picked: &Path,
+    engine_root: &Path,
+) -> Result<MovePlan, EngineError> {
+    let next = check_home(picked, engine_root)?;
+    if next == current {
+        return Err(refused("home_move_same"));
+    }
+    if overlaps(&next, current) {
+        return Err(refused("home_move_nested"));
+    }
+    let folders = scan(current)?;
+    if folders
+        .iter()
+        .any(|name| std::fs::symlink_metadata(next.join(name)).is_ok())
+    {
+        return Err(refused("home_destination_exists"));
+    }
+    assert!(folders.len() <= FOLDERS_MAX);
+    Ok(MovePlan::new(current.to_path_buf(), next, folders))
 }
 
 /// Confirms that an add the owner asked for actually landed in the home.
@@ -358,6 +390,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "The folder was added, but some of the original could not be removed."
         }
         "home_add_unverified" => "The folder did not arrive in your projects folder.",
+        "home_move_same" => "That is already your projects folder.",
+        "home_move_nested" => "Pick a projects folder that is not inside the current one.",
+        "home_move_partial" => {
+            "Some projects were moved and could not be moved back. Check both folders."
+        }
+        "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
         "folder_size_unreadable" => "Some files in that folder cannot be read.",
         "folder_size_timeout" | "folder_size_too_large" => "This folder is very large.",

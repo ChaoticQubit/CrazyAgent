@@ -1,6 +1,7 @@
 use super::*;
 use crate::projects_home::{
-    self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeWatch, ProjectsHome, Registered,
+    self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeWatch, MovePlan, ProjectsHome,
+    Registered,
 };
 use std::path::PathBuf;
 
@@ -120,6 +121,71 @@ pub(super) fn add_plan(
     home::plan_add(&saved, &engine_root(path)?, source, mode)
 }
 
+/// Plans a MoveProjectsHome that moves the project folders, before any disk work.
+/// Input: the connection, database path, owner admission, the revision the
+/// owner saw and the new home. Output: the checked plan or the refusal code.
+pub(super) fn move_plan(
+    db: &mut Connection,
+    path: &Path,
+    a: &Admission,
+    expected: &Cursor,
+    picked: &str,
+) -> Result<MovePlan, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if owner_revision(&tx)? != expected.value() {
+        return Err(error("stale_revision"));
+    }
+    let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
+    home::plan_move(&saved, Path::new(picked), &engine_root(path)?)
+}
+
+fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcome, EngineError> {
+    match home::check_home(Path::new(picked), &engine_root(path)?) {
+        Ok(canonical) => {
+            home::save(tx, &canonical)?;
+            Ok(Outcome::Applied)
+        }
+        Err(e) => Ok(Outcome::Rejected { code: e.0 }),
+    }
+}
+
+/// Points every set-up project whose folder sat in the old home at the same
+/// folder name in the new home, after the transport moved them.
+fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), EngineError> {
+    let rows: Vec<(String, String)> = {
+        let mut statement = tx
+            .prepare("SELECT project, body FROM project_setups")
+            .map_err(error)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)?
+    };
+    for (project, body) in rows {
+        let mut stored: crate::project_setup::StoredSetup =
+            serde_json::from_str(&body).map_err(error)?;
+        let folder = PathBuf::from(&stored.folder);
+        let Some(name) = folder.file_name() else {
+            continue;
+        };
+        if folder.parent() != Some(from) {
+            continue;
+        }
+        let moved = to.join(name);
+        stored.folder = moved
+            .to_str()
+            .ok_or_else(|| error("projects_home_path_invalid"))?
+            .to_owned();
+        tx.execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&stored).map_err(error)?, project],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
+
 /// Applies a recorded projects home action inside the owner transaction.
 /// Input: the transaction, database path and action. Output: Applied after the
 /// home is saved or a finished add is confirmed on disk, else Rejected.
@@ -128,36 +194,38 @@ pub(super) fn execute(
     path: &Path,
     action: &HomeAction,
 ) -> Result<Outcome, EngineError> {
-    let rejected =
-        |e: EngineError| -> Result<Outcome, EngineError> { Ok(Outcome::Rejected { code: e.0 }) };
+    let rejected = |code: &str| -> Result<Outcome, EngineError> {
+        Ok(Outcome::Rejected { code: code.into() })
+    };
     match action {
-        HomeAction::SetHome { path: picked } => {
-            match home::check_home(Path::new(picked), &engine_root(path)?) {
-                Ok(canonical) => {
-                    home::save(tx, &canonical)?;
-                    Ok(Outcome::Applied)
-                }
-                Err(e) => rejected(e),
-            }
-        }
-        HomeAction::Added { .. } => rejected(error("home_add_requires_transport")),
+        HomeAction::SetHome { path: picked }
+        | HomeAction::MoveHome {
+            path: picked,
+            move_projects: false,
+        } => switch_home(tx, path, picked),
+        HomeAction::MoveHome {
+            move_projects: true,
+            ..
+        } => rejected("home_move_requires_transport"),
+        HomeAction::Added { .. } => rejected("home_add_requires_transport"),
     }
 }
 
-/// Records the result of an AddExistingFolder the owner transport carried out.
-/// Input: the transaction, the mutation's command and the transport's result. Output: Rejected with the transport's refusal code, or
-/// Applied once the folder is confirmed in the home (and, for Move, gone from
-/// its old place); anything else is `home_add_unverified`.
-pub(super) fn record_added(
+/// Records the result of disk work the owner transport carried out for
+/// AddExistingFolder or MoveProjectsHome with `move_projects`.
+/// Input: the transaction, database path, the mutation's command and the
+/// transport's result. Output: Rejected with the transport's refusal code;
+/// for an add, Applied once the folder is confirmed in the home (and, for
+/// Move, gone from its old place); for a home move, Applied once the new home
+/// is saved and set-up projects point at their moved folders.
+pub(super) fn record(
     tx: &Transaction<'_>,
+    path: &Path,
     command: &Command,
     effect: &Result<(), String>,
 ) -> Result<Outcome, EngineError> {
-    let Command::ProjectsHome {
-        action: HomeAction::Added { source, mode },
-    } = command
-    else {
-        return Err(error("home_add_record_invalid"));
+    let Command::ProjectsHome { action } = command else {
+        return Err(error("home_record_invalid"));
     };
     if let Err(code) = effect {
         return Ok(Outcome::Rejected { code: code.clone() });
@@ -167,8 +235,22 @@ pub(super) fn record_added(
             code: "projects_home_unset".into(),
         });
     };
-    Ok(match home::verify_added(&saved, source, *mode) {
-        Ok(()) => Outcome::Applied,
-        Err(e) => Outcome::Rejected { code: e.0 },
-    })
+    match action {
+        HomeAction::Added { source, mode } => Ok(match home::verify_added(&saved, source, *mode) {
+            Ok(()) => Outcome::Applied,
+            Err(e) => Outcome::Rejected { code: e.0 },
+        }),
+        HomeAction::MoveHome {
+            path: picked,
+            move_projects: true,
+        } => {
+            let outcome = switch_home(tx, path, picked)?;
+            if outcome == Outcome::Applied {
+                let next = home::load(tx)?.ok_or_else(|| error("projects_home_unset"))?;
+                rewrite_folders(tx, &saved, &next)?;
+            }
+            Ok(outcome)
+        }
+        _ => Err(error("home_record_invalid")),
+    }
 }

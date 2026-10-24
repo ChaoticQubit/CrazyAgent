@@ -122,7 +122,13 @@ pub(crate) enum Job {
         crate::projects_home::AddMode,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
-    HomeAddRecord(
+    HomeMovePlan(
+        Admission,
+        Cursor,
+        String,
+        oneshot::Sender<Result<crate::projects_home::MovePlan, EngineError>>,
+    ),
+    HomeRecord(
         Admission,
         Box<OwnerRequest>,
         Result<(), String>,
@@ -448,10 +454,28 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::HomeAddRecord(admission, request, effect, reply) => {
+                        Job::HomeMovePlan(admission, expected, picked, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeRecord(admission, request, effect, reply) => {
+                            let moved_home = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::MoveProjectsHome { .. }
+                                }
+                            );
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(&effect))
                             });
+                            if moved_home && result.is_ok() {
+                                drop(home_watch.take());
+                                home_watch = projects_home::watch_saved(&connection);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -522,6 +546,7 @@ impl Storage {
                                 &request.operation,
                                 OwnerOperation::Apply {
                                     mutation: OwnerMutation::SetProjectsHome { .. }
+                                        | OwnerMutation::MoveProjectsHome { .. }
                                 }
                             );
                             let result =
@@ -1813,7 +1838,7 @@ fn owner_apply_with(
         });
     }
     let outcome = if let Some(effect) = effect {
-        projects_home::record_added(&tx, &command, effect)?
+        projects_home::record(&tx, path, &command, effect)?
     } else if request.expected_revision.value() != revision {
         Outcome::Rejected {
             code: "stale_revision".into(),

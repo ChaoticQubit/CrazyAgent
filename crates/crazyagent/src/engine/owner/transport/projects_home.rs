@@ -10,25 +10,30 @@ enum Step {
 }
 
 /// True for the owner requests that touch folders outside the engine data:
-/// AddExistingFolder and FolderSize. These run their slow disk work here,
-/// off the storage actor, and only then reach the engine database.
+/// AddExistingFolder, MoveProjectsHome that moves the projects, and
+/// FolderSize. These run their slow disk work here, off the storage actor,
+/// and only then reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
     matches!(
         &request.operation,
         OwnerOperation::Apply {
             mutation: OwnerMutation::AddExistingFolder { .. }
+                | OwnerMutation::MoveProjectsHome {
+                    move_projects: true,
+                    ..
+                }
         } | OwnerOperation::Read {
             query: OwnerRead::FolderSize { .. }
         }
     )
 }
 
-/// Serves AddExistingFolder and FolderSize for one authenticated owner.
+/// Serves AddExistingFolder, MoveProjectsHome and FolderSize for one owner.
 /// Input: the stream, engine, authority, owner packet and admission, the
 /// validated request and the exchange deadline. Output: the reply written
-/// under the owner egress barrier. An add is recorded after its disk work,
-/// as Applied once the folder is complete in the home or as Rejected with the
-/// refusal code; a FolderSize refusal is written as Rejected.
+/// under the owner egress barrier. An add or home move is recorded after its
+/// disk work, as Applied once it is complete or as Rejected with the refusal
+/// code; a FolderSize refusal is written as Rejected.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -44,7 +49,18 @@ pub(super) async fn serve(
     let step = match &request.operation {
         OwnerOperation::Apply {
             mutation: OwnerMutation::AddExistingFolder { source, mode },
-        } => prepare_add(engine, a, &request, source, *mode).await,
+        } => match replayed(engine, a, &request).await {
+            Ok(Some(step)) => Ok(step),
+            Ok(None) => prepare_add(engine, a, &request, source, *mode).await,
+            Err(e) => Err(e),
+        },
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectsHome { path, .. },
+        } => match replayed(engine, a, &request).await {
+            Ok(Some(step)) => Ok(step),
+            Ok(None) => prepare_move(engine, a, &request, path).await,
+            Err(e) => Err(e),
+        },
         OwnerOperation::Read {
             query: OwnerRead::FolderSize { path },
         } => measure(path, deadline).await,
@@ -59,6 +75,51 @@ pub(super) async fn serve(
     write_owner_reply(stream, result, id, mutation).await
 }
 
+/// Finds an earlier recording of this exact mutation, so a retry after a lost
+/// reply returns the first receipt instead of repeating the disk work.
+async fn replayed(
+    engine: &Arc<Engine>,
+    a: &Admission,
+    request: &OwnerRequest,
+) -> Result<Option<Step>, EngineError> {
+    let hash = request.mutation_hash()?;
+    let id = request.request_id.clone();
+    Ok(
+        match engine
+            .owner_job(|reply| Job::OwnerReconcile(a.clone(), id, Some(hash), reply))
+            .await?
+        {
+            OwnerResponse::Committed { mut operation } => {
+                operation.historical_replay = true;
+                Some(Step::Reply(OwnerResponse::Applied { operation }))
+            }
+            OwnerResponse::NotRecordedAtBarrier { .. } => None,
+            other => Some(Step::Reply(other)),
+        },
+    )
+}
+
+async fn prepare_move(
+    engine: &Arc<Engine>,
+    a: &Admission,
+    request: &OwnerRequest,
+    path: &str,
+) -> Result<Step, EngineError> {
+    let picked = path.to_owned();
+    let expected = request.expected_revision.clone();
+    let plan = match engine
+        .owner_job(|reply| Job::HomeMovePlan(a.clone(), expected, picked, reply))
+        .await
+    {
+        Ok(plan) => plan,
+        Err(e) => return Ok(Step::Record(Err(e.0))),
+    };
+    let effect = tokio::task::spawn_blocking(move || plan.run())
+        .await
+        .map_err(|_| failure("home_move_interrupted"))?;
+    Ok(Step::Record(effect.map_err(|e| e.0)))
+}
+
 async fn prepare_add(
     engine: &Arc<Engine>,
     a: &Admission,
@@ -66,19 +127,6 @@ async fn prepare_add(
     source: &str,
     mode: AddMode,
 ) -> Result<Step, EngineError> {
-    let hash = request.mutation_hash()?;
-    let id = request.request_id.clone();
-    match engine
-        .owner_job(|reply| Job::OwnerReconcile(a.clone(), id, Some(hash), reply))
-        .await?
-    {
-        OwnerResponse::Committed { mut operation } => {
-            operation.historical_replay = true;
-            return Ok(Step::Reply(OwnerResponse::Applied { operation }));
-        }
-        OwnerResponse::NotRecordedAtBarrier { .. } => {}
-        other => return Ok(Step::Reply(other)),
-    }
     let source = source.to_owned();
     let expected = request.expected_revision.clone();
     let plan = match engine
@@ -120,7 +168,7 @@ async fn finish(
         Step::Reply(response) => response,
         Step::Record(effect) => OwnerResponse::Applied {
             operation: engine
-                .owner_job(|reply| Job::HomeAddRecord(a.clone(), Box::new(request), effect, reply))
+                .owner_job(|reply| Job::HomeRecord(a.clone(), Box::new(request), effect, reply))
                 .await?,
         },
         Step::Size(bytes) => {

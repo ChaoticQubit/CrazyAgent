@@ -62,6 +62,57 @@ impl AddPlan {
     }
 }
 
+/// A checked plan to move every top-level folder of the projects home to a
+/// new home. Built only by `plan_move`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovePlan {
+    from: PathBuf,
+    to: PathBuf,
+    folders: Vec<String>,
+}
+
+impl MovePlan {
+    pub(super) fn new(from: PathBuf, to: PathBuf, folders: Vec<String>) -> Self {
+        assert!(from.is_absolute() && to.is_absolute());
+        assert_ne!(from, to);
+        Self { from, to, folders }
+    }
+
+    /// The new home every folder moves to.
+    pub fn destination(&self) -> &Path {
+        &self.to
+    }
+
+    /// The names of the folders this plan moves.
+    pub fn folders(&self) -> &[String] {
+        &self.folders
+    }
+
+    /// Moves each folder in turn, as AddPlan's Move does. When one fails,
+    /// the folders already moved are moved back. Output: Ok when all moved,
+    /// the first failure's code when everything went back, or
+    /// `home_move_partial` when a folder could not be moved back.
+    pub fn run(self) -> Result<(), EngineError> {
+        let mut moved: Vec<&String> = Vec::with_capacity(self.folders.len());
+        for name in &self.folders {
+            let step = AddPlan::new(self.from.join(name), self.to.join(name), AddMode::Move);
+            if let Err(failure) = step.run() {
+                for back in moved.into_iter().rev() {
+                    let undo =
+                        AddPlan::new(self.to.join(back), self.from.join(back), AddMode::Move);
+                    if undo.run().is_err() {
+                        return Err(refused("home_move_partial"));
+                    }
+                }
+                return Err(failure);
+            }
+            moved.push(name);
+        }
+        assert_eq!(moved.len(), self.folders.len());
+        Ok(())
+    }
+}
+
 /// Moves a folder by copying it, checking every entry of the copy against the
 /// source, and deleting the source only after that check passes.
 /// Input: the real source folder and a free destination path. Output: Ok, or
