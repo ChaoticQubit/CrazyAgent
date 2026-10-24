@@ -3,11 +3,12 @@ use super::ctx::{Ctx, Link};
 use super::glyphs::Glyphs;
 use super::keys::Key;
 use super::prefs;
-use super::seam::{Arrival, NOT_READY, Request, ShellEvent, ShellRequest, TerminalChunk};
+use super::seam::{Arrival, NOT_READY, Request, ShellEvent, ShellRequest};
 use super::shell::Shell;
 use super::theme::{self, Appearance, Colors};
 use super::{TerminalGuard, TuiError, bounded_area};
 use crate::engine::Client;
+use crate::terminal::TerminalFrame;
 use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
@@ -241,6 +242,7 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
             ShellEvent::Projects(result) => Arrival::Projects(result),
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
+        OwnerEvent::TeamGraph { project, result } => Arrival::TeamGraph { project, result },
         other => Arrival::Owner(Box::new(other)),
     }
 }
@@ -270,17 +272,13 @@ fn send(request: Request, shell: &mut Shell, connection: &mut Connection) -> Res
         Request::Master(job) => connection.master(*job),
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),
         Request::Settings(job) => connection.settings(*job),
-        Request::TeamGraph { project } => {
-            shell.arrive(Arrival::TeamGraph {
-                project,
-                result: Err(NOT_READY.into()),
-            });
-            Ok(())
-        }
+        Request::TeamGraph { project } => connection.team_graph(project),
         Request::TerminalAttach { agent } => {
             shell.arrive(Arrival::Terminal {
                 agent,
-                chunk: TerminalChunk::Closed(NOT_READY.into()),
+                frame: TerminalFrame::Rejected {
+                    code: NOT_READY.into(),
+                },
             });
             Ok(())
         }

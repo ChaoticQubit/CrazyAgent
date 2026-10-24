@@ -5,11 +5,11 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
 const QUEUE_MAX: usize = 32;
-const INPUT_BYTES_MAX: usize = 64 * 1024;
 
 /// Engine data a screen shows, with its loading state.
 /// Input: set by the shell as requests start and replies arrive. Output:
@@ -148,7 +148,7 @@ impl Ctx {
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
     /// Input: the request. Output: none; the queue holds at most 32 requests,
-    /// one terminal input at most 64 KiB.
+    /// a joined terminal input at most the engine's terminal input limit.
     pub fn request(&mut self, request: Request) {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;

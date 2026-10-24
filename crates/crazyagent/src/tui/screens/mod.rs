@@ -35,6 +35,7 @@ pub mod settings_harnesses;
 pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
+pub mod team;
 pub mod welcome;
 
 #[cfg(test)]
@@ -166,6 +167,10 @@ pub enum Place {
     },
     Setup {
         first_run: bool,
+    },
+    Team {
+        id: ProjectId,
+        name: String,
     },
 }
 
@@ -310,6 +315,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::EditPool(id) => Box::new(settings::pool_editor::PoolEditor::new(Some(id), ctx)),
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
+        Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
         Place::Project { id, name, tab } => Box::new(project_page::ProjectPage::new(
             id.clone(),
             name.clone(),

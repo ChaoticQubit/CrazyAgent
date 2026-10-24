@@ -122,7 +122,8 @@ impl TerminalPane {
         self.parser.process(bytes);
     }
 
-    /// Replaces the screen with a captured one, as attaching sends first.
+    /// Replaces the screen with a captured one; empty bytes give the fresh
+    /// screen an attach starts from.
     /// Inputs: the captured rows separated by newlines, with their color
     /// sequences, and the zero-based (row, column) cursor when known.
     /// Output: none; rows beyond the pane height are dropped.
