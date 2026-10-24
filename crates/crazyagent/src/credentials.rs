@@ -1,14 +1,50 @@
 use crate::protocol::CredentialRef;
 use std::fmt;
+use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+#[path = "credential_store/linux.rs"]
+mod linux;
 #[cfg(target_os = "macos")]
 #[path = "credential_store/macos.rs"]
 mod macos;
+#[cfg(target_os = "windows")]
+#[path = "credential_store/windows.rs"]
+mod windows;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
 
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 63;
+
+/// Opens this computer's credential store for one engine namespace under
+/// `dev.crazyagent.`: the macOS Keychain here. Input: the namespace.
+/// Output: the shared store, or `credential_store_unavailable`.
+#[cfg(target_os = "macos")]
+pub fn platform_store(namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
+    Ok(Arc::new(Keychain::new(namespace)?))
+}
+
+/// Opens Linux Secret Service for one engine namespace under `dev.crazyagent.`.
+/// Input: the namespace. Output: the shared store, or `credential_store_unavailable`.
+#[cfg(target_os = "linux")]
+pub fn platform_store(namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
+    linux::open(namespace)
+}
+
+/// Opens Windows Credential Manager for one engine namespace under `dev.crazyagent.`.
+/// Input: the namespace. Output: the shared store, or `credential_store_unavailable`.
+#[cfg(target_os = "windows")]
+pub fn platform_store(namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
+    windows::open(namespace)
+}
+
+/// Reports that this platform has no credential store seam yet.
+/// Output: always `credential_store_unavailable`.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn platform_store(_namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
+    Err(StoreError::code("credential_store_unavailable"))
+}
 
 /// A secret held only in memory: one to 1024 visible ASCII bytes, zeroed on drop and
 /// redacted from Debug. Input: the raw bytes. Output: the secret, or `credential_secret_invalid`
