@@ -86,10 +86,6 @@ pub enum AgentState {
 /// One node of a project's team graph: the master, a harness group or an agent.
 /// Input: from the engine's TeamGraph read; `harness` ties agents to their
 /// group, `agents` is a group's agent count. Output: one tree row.
-#[expect(
-    dead_code,
-    reason = "the client builds team graphs from track B1's TeamGraph read"
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphNode {
     pub id: String,
@@ -118,10 +114,6 @@ pub enum EdgeState {
 /// One task the master handed to an agent, from node id to node id.
 /// Input: from the engine's TeamGraph read. Output: one task line under the
 /// tree; `text` and `reply` show when the owner opens it.
-#[expect(
-    dead_code,
-    reason = "the client builds team graphs from track B1's TeamGraph read"
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphEdge {
     pub from: String,
@@ -134,10 +126,6 @@ pub struct GraphEdge {
 
 /// The live team of one project: its nodes and the tasks between them.
 /// Input: from the engine's TeamGraph read. Output: the Team view tree.
-#[expect(
-    dead_code,
-    reason = "the client builds team graphs from track B1's TeamGraph read"
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TeamGraph {
     pub nodes: Vec<GraphNode>,
