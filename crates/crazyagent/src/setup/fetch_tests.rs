@@ -200,7 +200,7 @@ fn a_git_entry_folder_comes_from_its_pinned_checkout_and_bundled_needs_a_bundle(
     let bundle = work.path().join("bundle");
     skill(&bundle.join("mine"), "mine", "Mine.");
     assert_eq!(
-        entry_folder(setup.path(), &bundled, Some(&bundle)).unwrap(),
+        entry_folder(setup.path(), &bundled, Some(bundle.as_path())).unwrap(),
         bundle.join("mine")
     );
 }

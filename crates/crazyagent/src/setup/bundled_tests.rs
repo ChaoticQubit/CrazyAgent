@@ -77,7 +77,7 @@ fn every_bundled_manifest_entry_finds_its_skills_in_the_bundle() {
         };
         assert_eq!(entry.license, "Apache-2.0", "{}", entry.id);
         assert_eq!(path, &format!("skills/{}", entry.id));
-        let folder = entry_folder(setup.path(), entry, Some(&bundled)).unwrap();
+        let folder = entry_folder(setup.path(), entry, Some(bundled.as_path())).unwrap();
         assert!(!skill_folders(&folder).unwrap().is_empty(), "{}", entry.id);
         checked += 1;
     }

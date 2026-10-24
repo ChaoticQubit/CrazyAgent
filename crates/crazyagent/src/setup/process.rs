@@ -122,14 +122,11 @@ pub fn is_sha256(text: &str) -> bool {
 /// is a link, another user's folder or open to others.
 pub fn private_folder(path: &Path) -> Result<(), InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
-    match std::fs::DirBuilder::new()
+    std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(path)
-    {
-        Ok(()) => {}
-        Err(_) => return Err(unavailable),
-    }
+        .map_err(|_| unavailable)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|_| unavailable)?;
     if !metadata.is_dir()
         || metadata.uid() != rustix::process::getuid().as_raw()

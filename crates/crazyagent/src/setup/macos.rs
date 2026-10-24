@@ -189,6 +189,7 @@ impl MacInstaller {
             let (fetched, _) = run(
                 Path::new(CURL),
                 &[
+                    "-q".into(),
                     "-fsSL".into(),
                     "--proto".into(),
                     "=https,file".into(),
