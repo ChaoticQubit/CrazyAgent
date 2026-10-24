@@ -1,4 +1,6 @@
+pub mod interactive;
 pub mod launch;
+pub mod transcript;
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;

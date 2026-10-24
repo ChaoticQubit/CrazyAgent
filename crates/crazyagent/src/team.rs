@@ -20,7 +20,19 @@ pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const DELEGATE_MARKER: &str = "DELEGATE";
+pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
+
+/// Text the owner typed straight into one team agent's terminal. It is recorded on the
+/// agent's task, and the master hears a short note of it on its next turn.
+/// `agent` is the team agent id; `text` is at most `DIRECT_INPUT_BYTES_MAX` bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectInput {
+    pub project: ProjectId,
+    pub agent: i64,
+    pub text: String,
+    pub at_ms: i64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
