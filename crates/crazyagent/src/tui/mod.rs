@@ -31,7 +31,7 @@ mod project_creation_tests;
 #[cfg(test)]
 mod render_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::tui) mod test_home;
 
 use crate::engine::Client;
