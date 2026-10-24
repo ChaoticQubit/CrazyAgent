@@ -1,6 +1,6 @@
-import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
+import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { errorMessage, retryBusy } from "./engine-client";
-import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView } from "./engine-client";
+import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
@@ -568,4 +568,34 @@ export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>>
 export async function listProjects(): Promise<Result<ProjectPage["items"]>> {
   const result = await call<ProjectPage>("desktop_projects", { next: false });
   return result.kind === "ok" ? { kind: "ok", value: result.value.items } : result;
+}
+
+/** Reads one project's team graph: master, harness groups, agents and task edges.
+ * Input: the project id. Output: the graph, not ready, or a plain error. */
+export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
+  return call<TeamGraph>("desktop_team_graph", { id });
+}
+
+/** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
+ * then live output. Inputs: the terminal name and the channel. Output: ok once attached. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<void>> {
+  return call<void>("desktop_terminal_attach", { agent, output });
+}
+
+/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
+ * 1 to 4096 bytes. Output: ok once queued in order. */
+export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result<void>> {
+  return call<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sets an attached agent terminal's size. Inputs: the terminal name, columns and rows.
+ * Output: ok once queued. */
+export function resizeTerminal(agent: string, cols: number, rows: number): Promise<Result<void>> {
+  return call<void>("desktop_terminal_resize", { agent, cols, rows });
+}
+
+/** Closes this window's view of an agent terminal; the agent keeps running.
+ * Input: the terminal name. Output: ok once closed. */
+export function detachTerminal(agent: string): Promise<Result<void>> {
+  return call<void>("desktop_terminal_detach", { agent });
 }

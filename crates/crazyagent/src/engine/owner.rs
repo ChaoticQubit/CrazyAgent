@@ -21,6 +21,7 @@ pub use native_auth::{
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENTS_PAGE, AgentPage};
 pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };
@@ -156,6 +157,10 @@ pub enum OwnerMutation {
     },
     SetProjectsHome {
         path: String,
+    },
+    MoveProjectsHome {
+        path: String,
+        move_projects: bool,
     },
     AddExistingFolder {
         source: String,
@@ -313,6 +318,17 @@ impl OwnerMutation {
             },
             Self::SetProjectsHome { path } => {
                 let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectsHome {
+                path,
+                move_projects,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveHome {
+                    path: path.clone(),
+                    move_projects: *move_projects,
+                };
                 action.validate()?;
                 Command::ProjectsHome { action }
             }
@@ -509,6 +525,9 @@ pub enum OwnerRead {
     TeamStatus {
         project_id: ProjectId,
     },
+    TeamGraph {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -602,6 +621,7 @@ impl OwnerRead {
             | Self::ProjectSetup { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
+            | Self::TeamGraph { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -942,6 +962,9 @@ pub enum OwnerData {
     },
     TeamStatus {
         status: Box<crate::team::TeamStatus>,
+    },
+    TeamGraph {
+        graph: Box<crate::team::TeamGraph>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

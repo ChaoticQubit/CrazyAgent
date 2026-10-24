@@ -1,6 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField } from "../../ui";
+import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField, type Route } from "../../ui";
+import { HomeFolderPicker } from "../intake/home-folder";
+import { ToolsSetup } from "../intake/setup-step";
+import "../intake/intake.css";
 
 export interface ProfileDraft {
   name: string;
@@ -100,10 +103,30 @@ export async function submitProfile(draft: ProfileDraft): Promise<{ errors: Prof
   return { failure: result.code === "uncertain" ? result.message : `Couldn't save your profile. ${result.message}`, notReady: false };
 }
 
-/** The first-run page: no sidebar, the brand and a short intro on the left, the profile form
- * on the right. Saving goes to Home. Inputs: the saved handler and an optional skip handler
- * used when the engine has no profile support yet. */
-export function Welcome({ onSaved, onSkip }: { onSaved: (profile: OwnerProfile) => void; onSkip?: () => void }) {
+export type FirstRunStep = "profile" | "home" | "tools" | "accounts";
+
+export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; intro: string }[] = [
+  { id: "profile", label: "Profile", title: "Tell CrazyAgent about you",
+    intro: "Agents read this before they work for you. You can change it later in Settings, Profile." },
+  { id: "home", label: "Projects folder", title: "Choose your projects folder",
+    intro: "Every project lives in its own folder here. CrazyAgent keeps its own data in a private folder, not in this one." },
+  { id: "tools", label: "Tools", title: "Set up tools",
+    intro: "CrazyAgent installs tmux, uv and graphify when they're missing, at pinned versions it checks before running, plus the default pack of skills and plugins." },
+  { id: "accounts", label: "Accounts", title: "Add an account",
+    intro: "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model." },
+];
+
+/** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
+ * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
+ * to Home or to Add account. Inputs: the saved handler, an optional skip handler used when the
+ * engine has no profile support yet, and the step to start on. */
+export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
+  onSaved: (profile: OwnerProfile, next?: Route) => void;
+  onSkip?: (next?: Route) => void;
+  initialStep?: FirstRunStep;
+}) {
+  const [step, setStep] = useState<FirstRunStep>(initialStep);
+  const [saved, setSaved] = useState<OwnerProfile | null>(null);
   const [draft, setDraft] = useState(emptyProfileDraft);
   const [errors, setErrors] = useState<ProfileErrors>({});
   const [saving, setSaving] = useState(false);
@@ -122,21 +145,40 @@ export function Welcome({ onSaved, onSkip }: { onSaved: (profile: OwnerProfile) 
     }
     setErrors({});
     if ("failure" in result) setFailure({ message: result.failure, notReady: result.notReady });
-    else onSaved(result.saved);
+    else { setSaved(result.saved); setStep("home"); }
   }
+  const finish = (next: Route) => {
+    if (saved) onSaved(saved, next);
+    else onSkip?.(next);
+  };
+  const current = FIRST_RUN_STEPS.find((item) => item.id === step) ?? FIRST_RUN_STEPS[0];
   return <main id="main" className="welcome">
     <div className="intro">
       <BrandMark large />
-      <h1>Tell CrazyAgent about you</h1>
-      <p>Agents read this before they work for you. You can change it later in Settings, Profile.</p>
+      <ol className="in-steps" aria-label="Setup steps">{FIRST_RUN_STEPS.map((item) =>
+        <li key={item.id} aria-current={item.id === step ? "step" : undefined}>{item.label}</li>)}</ol>
+      <h1>{current.title}</h1>
+      <p>{current.intro}</p>
     </div>
-    <form className="form" aria-label="Your profile" noValidate onSubmit={(event) => void submit(event)}>
+    {step === "profile" && <form className="form" aria-label="Your profile" noValidate onSubmit={(event) => void submit(event)}>
       <ProfileFields draft={draft} onDraft={setDraft} errors={errors} />
       {failure && <Notice tone={failure.notReady ? "info" : "danger"} alert>{failure.message}</Notice>}
       <div className="row">
         <Button type="submit" variant="primary" size="large" pending={saving} pendingLabel="Saving...">Save and continue</Button>
-        {failure?.notReady && onSkip && <Button variant="quiet" onClick={onSkip}>Continue without saving</Button>}
+        {failure?.notReady && onSkip && <Button variant="quiet" onClick={() => setStep("home")}>Continue without saving</Button>}
       </div>
-    </form>
+    </form>}
+    {step === "home" && <section className="form" aria-label="Projects folder">
+      <HomeFolderPicker onSaved={() => setStep("tools")} onContinue={() => setStep("tools")} />
+    </section>}
+    {step === "tools" && <section className="form" aria-label="Tools">
+      <ToolsSetup onContinue={() => setStep("accounts")} />
+    </section>}
+    {step === "accounts" && <section className="form" aria-label="Accounts">
+      <div className="row">
+        <Button variant="primary" size="large" icon="key-round" onClick={() => finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
+        <Button variant="quiet" onClick={() => finish({ name: "home" })}>Skip for now</Button>
+      </div>
+    </section>}
   </main>;
 }

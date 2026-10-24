@@ -28,6 +28,7 @@ pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(test)]
 mod native_auth_host_tests;
+mod projects_home;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -113,6 +114,25 @@ pub(crate) enum Job {
         HostStamp,
         OwnerControl,
         oneshot::Sender<Result<Option<OwnerControlReply>, EngineError>>,
+    ),
+    HomeAddPlan(
+        Admission,
+        Cursor,
+        String,
+        crate::projects_home::AddMode,
+        oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
+    ),
+    HomeMovePlan(
+        Admission,
+        Cursor,
+        String,
+        oneshot::Sender<Result<crate::projects_home::MovePlan, EngineError>>,
+    ),
+    HomeRecord(
+        Admission,
+        Box<OwnerRequest>,
+        Result<(), String>,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     OwnerApply(
         Admission,
@@ -215,6 +235,11 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut home_watch = if readonly {
+                    None
+                } else {
+                    projects_home::watch_saved(&connection)
+                };
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Accounts(admission, command, reply) => {
@@ -421,6 +446,38 @@ impl Storage {
                                 &control,
                             ));
                         }
+                        Job::HomeAddPlan(admission, expected, source, mode, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeMovePlan(admission, expected, picked, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeRecord(admission, request, effect, reply) => {
+                            let moved_home = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::MoveProjectsHome { .. }
+                                }
+                            );
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(&effect))
+                            });
+                            if moved_home && result.is_ok() {
+                                drop(home_watch.take());
+                                home_watch = projects_home::watch_saved(&connection);
+                            }
+                            let _ = reply.send(result);
+                        }
                         Job::OwnerApply(admission, request, reply) => {
                             if matches!(
                                 &request.operation,
@@ -485,13 +542,20 @@ impl Storage {
                                 let _ = reply.send(result);
                                 continue;
                             }
-                            let _ = reply.send(owner_apply(
-                                &mut connection,
-                                &config,
-                                &path,
-                                &admission,
-                                &request,
-                            ));
+                            let set_home = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::SetProjectsHome { .. }
+                                        | OwnerMutation::MoveProjectsHome { .. }
+                                }
+                            );
+                            let result =
+                                owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if set_home && result.is_ok() {
+                                drop(home_watch.take());
+                                home_watch = projects_home::watch_saved(&connection);
+                            }
+                            let _ = reply.send(result);
                         }
                         Job::OwnerRead(admission, query, reply) => {
                             if matches!(
@@ -519,6 +583,16 @@ impl Storage {
                                     sources.as_ref(),
                                     &admission,
                                     &query,
+                                ));
+                                continue;
+                            }
+                            if matches!(query, OwnerRead::ProjectsHome | OwnerRead::FoundProjects) {
+                                let _ = reply.send(projects_home::read(
+                                    &mut connection,
+                                    &config,
+                                    &admission,
+                                    &query,
+                                    home_watch.as_ref(),
                                 ));
                                 continue;
                             }
@@ -696,6 +770,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
+    crate::projects_home::initialize(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::assets::initialize(connection)?;
@@ -1128,6 +1203,7 @@ fn execute(
         Command::ProjectSetup { action } => {
             crate::project_setup::execute(tx, config, path, action, revision)
         }
+        Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
         Command::Team { action } => crate::team::execute(
             tx,
             &config.settings.model_access.clone().unwrap_or_default(),
@@ -1720,6 +1796,22 @@ fn owner_apply(
     a: &Admission,
     request: &OwnerRequest,
 ) -> Result<OwnerApplied, EngineError> {
+    owner_apply_with(db, config, path, a, request, None)
+}
+
+/// Applies one owner mutation, optionally with a disk effect already done.
+/// Input: as `owner_apply`, plus the owner transport's result of moving or
+/// copying a folder for AddExistingFolder. Output: the recorded receipt; an
+/// add is checked on disk and recorded even when the revision moved meanwhile,
+/// because its revision was checked before the effect.
+fn owner_apply_with(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<&Result<(), String>>,
+) -> Result<OwnerApplied, EngineError> {
     request.validate()?;
     let OwnerOperation::Apply { mutation } = &request.operation else {
         return Err(error("owner_mutation_required"));
@@ -1747,7 +1839,9 @@ fn owner_apply(
             current_revision: Cursor::new(revision),
         });
     }
-    let outcome = if request.expected_revision.value() != revision {
+    let outcome = if let Some(effect) = effect {
+        projects_home::record(&tx, path, &command, effect)?
+    } else if request.expected_revision.value() != revision {
         Outcome::Rejected {
             code: "stale_revision".into(),
         }
@@ -1998,6 +2092,12 @@ fn owner_read(
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+        },
+        OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
+            graph: Box::new(crate::team::graph(&crate::team::status(
+                &tx,
+                &stored_setup(&tx, project_id)?,
+            )?)),
         },
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),

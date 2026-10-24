@@ -32,10 +32,13 @@ use tokio::time::Instant;
 mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
+mod github;
 mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
+mod projects_home;
+pub(crate) mod terminal;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(test)]
@@ -1078,7 +1081,20 @@ impl OwnerServer {
         deadline: Instant,
         clients: &mut tokio::task::JoinSet<()>,
         custody: &mut tokio::task::JoinSet<()>,
+        terminals: &mut tokio::task::JoinSet<()>,
     ) -> Result<(), EngineError> {
+        if &auth[..4] == terminal::MAGIC {
+            while terminals.try_join_next().is_some() {}
+            if terminals.len() >= crate::terminal::VIEWERS_MAX {
+                return Ok(());
+            }
+            let engine = self.engine.clone();
+            let authority = self.authority.clone();
+            terminals.spawn(async move {
+                terminal::serve(stream, auth, engine, authority, deadline).await;
+            });
+            return Ok(());
+        }
         if &auth[..4] == b"CAN1" {
             while let Some(result) = custody.try_join_next() {
                 if let Err(error) = result
@@ -1118,6 +1134,7 @@ impl OwnerServer {
         let mut clients = tokio::task::JoinSet::new();
         let mut handshakes = tokio::task::JoinSet::new();
         let mut custody = tokio::task::JoinSet::new();
+        let mut terminals = tokio::task::JoinSet::new();
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();
@@ -1141,10 +1158,13 @@ impl OwnerServer {
                 result=custody.join_next(), if !custody.is_empty() => {
                     if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
                 }
+                result=terminals.join_next(), if !terminals.is_empty() => {
+                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                }
                 result=handshakes.join_next(), if !handshakes.is_empty() => {
                     match result {
                         Some(Ok(Some((stream, auth, deadline)))) => {
-                            if let Err(error) = self.accept_owner_handshake(stream, auth, deadline, &mut clients, &mut custody) {
+                            if let Err(error) = self.accept_owner_handshake(stream, auth, deadline, &mut clients, &mut custody, &mut terminals) {
                                 break Err(error);
                             }
                         }
@@ -1162,6 +1182,7 @@ impl OwnerServer {
             assert!(clients.len() <= 2);
             assert!(handshakes.len() <= 3);
             assert!(custody.len() <= 1);
+            assert!(terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("master_dispatch_shutdown cause={}", error.0);
@@ -1173,6 +1194,8 @@ impl OwnerServer {
         handshakes.abort_all();
         custody.abort_all();
         clients.abort_all();
+        terminals.abort_all();
+        while terminals.join_next().await.is_some() {}
         while handshakes.join_next().await.is_some() {}
         while custody.join_next().await.is_some() {}
         while clients.join_next().await.is_some() {}
@@ -1651,6 +1674,9 @@ async fn serve_authenticated_owner(
         if selector.get("accounts").is_some() {
             return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
         }
+        if selector.get("github").is_some() {
+            return github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(
                 &mut stream,
@@ -1686,6 +1712,18 @@ async fn serve_authenticated_owner(
         let request: OwnerRequest =
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;
+        if projects_home::handles(&request) {
+            return projects_home::serve(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                request,
+                deadline,
+            )
+            .await;
+        }
         let id = request.request_id.clone();
         let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
         let foreground = matches!(
