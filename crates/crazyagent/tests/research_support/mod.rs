@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::sync::watch;
 
-pub const SETTINGS: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n";
+pub const SETTINGS: &str = "version = 1\ntimeout_ms = 5000\nallowed_destinations = []\n";
 
 /// A real engine runtime folder: `engine.db` holding projects created through
 /// the owner client of a real engine, one engine-made folder per project in

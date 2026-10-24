@@ -1,4 +1,5 @@
-use crazyagent::config::resolve_config;
+mod engine_support;
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::ProjectSpec;
@@ -86,6 +87,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         "not_connected"
     );
     assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
     let spec = ProjectSpec {
         name: "Chores".into(),
         repositories: vec![],
@@ -210,7 +212,7 @@ async fn desktop_reads_the_team_and_sends_team_actions_through_the_real_engine()
         .tempdir_in("/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = engine_support::engine_config(root.path());
     let (_cancel, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await

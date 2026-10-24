@@ -916,6 +916,27 @@ fn conversation_row(entry: ConversationEntry) -> ConversationRow {
     }
 }
 
+/// Team refusal codes the engine returns to the owner, passed to the window as they are
+/// so it can show the plain sentence for each.
+const TEAM_CODES: [&str; 16] = [
+    "team_task_missing",
+    "team_task_invalid",
+    "team_message_invalid",
+    "team_engine_not_ready",
+    "team_account_left_pool",
+    "team_harness_cannot_run",
+    "team_has_no_sub_agents",
+    "team_harness_not_in_plan",
+    "team_queue_full",
+    "team_task_limit",
+    "team_conversation_full",
+    "team_plan_step_missing",
+    "team_plan_step_handed",
+    "team_state_unavailable",
+    "team_state_not_canonical",
+    "team_state_not_private",
+];
+
 fn rejection_code(code: &str) -> &'static str {
     match code {
         "settings_source_conflict" => "settings_source_conflict",
@@ -989,6 +1010,7 @@ fn rejection_code(code: &str) -> &'static str {
         "pack_name_taken" => "pack_name_taken",
         _ => intake::intake_code(code)
             .or_else(|| crazyagent::memory::library::known_code(code))
+            .or_else(|| TEAM_CODES.iter().copied().find(|known| *known == code))
             .unwrap_or("owner_rejected"),
     }
 }

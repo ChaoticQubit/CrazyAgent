@@ -1,4 +1,5 @@
-use crazyagent::config::resolve_config;
+mod engine_support;
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::memory::KnowledgeStatus;
 use crazyagent::memory::library::{ApprovedKind, ApprovedScope, NOTE_BYTES_MAX};
@@ -64,6 +65,7 @@ fn memory_and_master_cancel_commands_are_registered_in_all_four_places() {
 async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
     let receipt = bridge
         .setup_project(
             ProjectSpec {
@@ -140,7 +142,12 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
             .all(|m| m.text.contains("plain"))
     );
 
-    let folder = bridge.project_setup(&id).await?.unwrap().folder;
+    let project_folder = bridge.project_setup(&id).await?.unwrap().folder;
+    let folder = bridge.project_context(&id).await?.folder;
+    assert_eq!(
+        Path::new(&folder),
+        Path::new(&project_folder).join(".crazyagent")
+    );
     std::fs::write(
         Path::new(&folder).join("context/research/market_research.md"),
         "# Market\n\nMost cooks save recipes as photos.\n",
@@ -326,7 +333,7 @@ async fn desktop_saves_promotes_and_deletes_memory_through_the_real_engine() {
         .tempdir_in("/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let config = engine_support::engine_config(root.path());
     let (_cancel, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await

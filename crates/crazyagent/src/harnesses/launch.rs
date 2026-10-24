@@ -330,6 +330,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         &request.executable,
         &[
             ("HOME", home.as_os_str()),
+            ("TMPDIR", home.as_os_str()),
             ("PATH", OsStr::new(path)),
             ("LANG", OsStr::new("C")),
             ("LC_ALL", OsStr::new("C")),
@@ -361,7 +362,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
 
 fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
-    let mut environment = vec![("CODEX_HOME", home.clone()), ("TMPDIR", home)];
+    let mut environment = vec![("CODEX_HOME", home)];
     if let Some(key) = request.account.key() {
         environment.push((CODEX_KEY_VARIABLE, OsString::from(&key.0)));
     }
