@@ -1263,3 +1263,5 @@ async fn profile_preparation_changes_no_durable_engine_or_admission_state() {
 
 #[path = "account_profile_transport_tests.rs"]
 mod account_profile_transport_tests;
+#[path = "github_transport_tests.rs"]
+mod github_transport_tests;
