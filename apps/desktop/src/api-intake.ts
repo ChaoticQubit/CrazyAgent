@@ -1,9 +1,13 @@
-import { call, classifyFailure, plainError, type Result } from "./api";
+import { classifyFailure, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
-import { cloneRepo as clone, githubRepos, githubSignIn, githubStatus, githubToken, githubUseCli } from "./engine-client";
+import {
+  addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
+  githubUseCli, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
+} from "./engine-client";
 import type {
-  AddFolderMode, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingStarted, OnboardingView,
-  ProjectsHome, SetupStatus,
+  AddFolderMode, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingView, ProjectsHome,
+  SetupStatus,
 } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
@@ -12,8 +16,10 @@ export const SETUP_PACK_MAX = 64;
 
 const COPY: Record<string, string> = {
   projects_home_unset: "Choose your projects folder first.",
-  projects_home_invalid: "CrazyAgent can't use this folder. Choose a folder you can write to.",
+  projects_home_path_invalid: "CrazyAgent can't use this folder. Choose a folder you can write to.",
   projects_home_unwritable: "CrazyAgent can't write to this folder. Choose a folder you can write to.",
+  home_source_invalid: "Choose the folder again with Choose folder.",
+  folder_size_path_invalid: "Choose the folder again with Choose folder.",
   folder_missing: "That folder isn't there anymore. Choose it again.",
   folder_not_a_directory: "Choose a folder, not a file.",
   folder_inside_home: "This folder is already in your projects folder. It shows on Home.",
@@ -21,6 +27,7 @@ const COPY: Record<string, string> = {
   folder_name_taken: "Your projects folder already has a folder with this name. Rename one of them first.",
   folder_move_failed: "Couldn't move the folder. Nothing was changed. Try again.",
   folder_copy_failed: "Couldn't copy the folder. The original is untouched. Try again.",
+  onboarding_path_invalid: "This folder can't be set up. Check it's still in your projects folder.",
   onboarding_running: "This project is already being set up.",
   onboarding_missing: "This project isn't being set up anymore. It was reloaded.",
   github_signed_out: "Sign in with GitHub first.",
@@ -31,11 +38,22 @@ const COPY: Record<string, string> = {
   github_cli_unavailable: "The GitHub CLI isn't installed or isn't signed in on this Mac.",
   github_unreachable: "Couldn't reach GitHub. Check your connection and try again.",
   github_client_missing: "Sign in with GitHub isn't set up in this build yet. Paste a token or use the GitHub CLI.",
+  github_rate_limited: "GitHub is limiting requests right now. Try again in a few minutes.",
+  github_page_invalid: "That page of repositories doesn't exist.",
+  github_failed: "Something went wrong talking to GitHub. Try again.",
   repo_missing: "This repository isn't on your GitHub account anymore.",
   repo_already_cloned: "This repository is already in your projects folder.",
   clone_failed: "Couldn't clone this repository. Nothing was kept. Try again.",
-  setup_running: "Setup is already running. Wait for it to finish.",
-  pack_entry_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
+  setup_busy: "Setup is already running. Wait for it to finish.",
+  setup_failed: "Something went wrong during setup.",
+  setup_outcome_unknown: "We couldn't confirm what setup did. Check the list again.",
+  setup_owner_unavailable: "CrazyAgent's engine isn't running.",
+  setup_store_unavailable: "The app's data folder can't be written.",
+  pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
+  pack_required: "This entry is always on and can't be removed.",
+  pack_not_installed: "This entry isn't installed yet. Run setup first.",
+  pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
+  pack_too_many: "Pick at most 64 entries.",
 };
 
 /** Plain sentence for one intake, GitHub or setup failure code.
@@ -64,19 +82,25 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
 /** Reads the projects folder and whether the engine watches it for new folders.
  * Input: none. Output: the folder, null before the owner chose one. */
 export function loadProjectsHome(): Promise<Result<ProjectsHome>> {
-  return call<ProjectsHome>("desktop_projects_home");
+  return wrap(projectsHome);
 }
 
 /** Sets the projects folder. Nothing already on disk moves.
  * Inputs: an absolute folder path and a generation. Output: the engine receipt. */
 export function setProjectsHome(path: string, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_projects_home", { path, generation });
+  return wrap(() => saveHome(path, generation));
+}
+
+/** Moves every project folder into a new projects folder, after the owner saw the size.
+ * Inputs: the new absolute folder and a generation. Output: the engine receipt. */
+export function moveProjectsHome(path: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => moveHome(path, generation));
 }
 
 /** Reads every folder in the projects folder with its state: found, setting up, ready or missing.
  * Input: none. Output: at most FOUND_PROJECTS_MAX folders in engine order. */
 export async function loadFoundProjects(): Promise<Result<FoundProject[]>> {
-  const result = await call<FoundProject[]>("desktop_found_projects");
+  const result = await wrap(foundProjects);
   if (result.kind !== "ok") return result;
   if (!Array.isArray(result.value)) return invalid();
   return { kind: "ok", value: result.value.slice(0, FOUND_PROJECTS_MAX) };
@@ -85,26 +109,25 @@ export async function loadFoundProjects(): Promise<Result<FoundProject[]>> {
 /** Measures a folder before it is copied and says whether its code is hosted on GitHub.
  * Input: an absolute folder path. Output: its size in bytes and the GitHub owner/name, if any. */
 export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
-  return call<FolderSize>("desktop_folder_size", { path });
+  return wrap(() => folderSize(path));
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.
  * Inputs: the absolute source folder, move or copy, and a generation. Output: the receipt. */
 export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_add_existing_folder", { source, mode, generation });
+  return wrap(() => addFolder(source, mode, generation));
 }
 
 /** Starts setting up a found folder: the graph builds, then a mapping agent on the pool fills in
- * the project details. Inputs: the folder path, the pool id and a generation.
- * Output: the receipt with the new project's id. */
-export function startOnboarding(path: string, pool: string, generation: number): Promise<Result<OnboardingStarted>> {
-  return call<OnboardingStarted>("desktop_start_onboarding", { path, pool, generation });
+ * the project details. Inputs: the folder path, the pool id and a generation. Output: the receipt. */
+export function startOnboarding(path: string, pool: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => startMapping(path, pool, generation));
 }
 
-/** Reads a project's setup progress, the mapping agent's draft and what it couldn't find.
- * Input: the project id. Output: the onboarding view. */
+/** Reads a project's setup progress, the mapping agent's draft, what it couldn't find and the
+ * overview it wrote. Input: the project id. Output: the onboarding view. */
 export function loadOnboarding(id: string): Promise<Result<OnboardingView>> {
-  return call<OnboardingView>("desktop_onboarding", { id });
+  return wrap(() => onboarding(id));
 }
 
 /** Starts Sign in with GitHub through the device flow; the engine then waits for approval.
@@ -128,6 +151,11 @@ export function gitHubUseCli(): Promise<Result<GitHubStatus>> {
   return wrap(githubUseCli);
 }
 
+/** Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status. */
+export function gitHubSignOut(): Promise<Result<GitHubStatus>> {
+  return wrap(githubSignOut);
+}
+
 /** Reads whether CrazyAgent is signed in to GitHub, as whom, how, and any plain problem.
  * Output: the status. */
 export function loadGitHubStatus(): Promise<Result<GitHubStatus>> {
@@ -149,15 +177,27 @@ export function cloneRepo(fullName: string): Promise<Result<CloneReceipt>> {
   return wrap(() => clone(fullName));
 }
 
-/** Reads the tools setup installs (tmux, uv, graphify) and the default pack with their states.
- * Output: the setup status. */
+/** Reads the tools setup installs (tmux, uv, graphify), the default pack with their states and
+ * whether setup is running. Output: the setup status. */
 export function loadSetupStatus(): Promise<Result<SetupStatus>> {
-  return call<SetupStatus>("desktop_setup_status");
+  return wrap(setupStatus);
 }
 
 /** Installs missing tools and the ticked pack entries. Continuing with MCP servers ticked records
- * the owner's approval of them. Inputs: the ticked pack ids and a generation. Output: the receipt. */
-export function runSetup(pack: string[], generation: number): Promise<Result<IntentReceipt>> {
+ * the owner's approval of them. Input: the ticked pack ids. Output: the status as the run starts. */
+export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
   if (pack.length > SETUP_PACK_MAX) throw new Error(`setup pack holds at most ${SETUP_PACK_MAX} entries`);
-  return call<IntentReceipt>("desktop_run_setup", { pack, generation });
+  return wrap(() => startSetup(pack));
+}
+
+/** Switches one installed pack entry on or off for every project.
+ * Inputs: its id and the state. Output: the new setup status. */
+export function setPackEntry(id: string, on: boolean): Promise<Result<SetupStatus>> {
+  return wrap(() => switchEntry(id, on));
+}
+
+/** Removes one installed pack entry and the skill or server it added.
+ * Input: its id. Output: the new setup status. */
+export function removePackEntry(id: string): Promise<Result<SetupStatus>> {
+  return wrap(() => removeEntry(id));
 }
