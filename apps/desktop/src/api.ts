@@ -1,5 +1,6 @@
-import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
-import { errorMessage, retryBusy } from "./engine-client";
+import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import { bridgeCall, errorMessage } from "./engine-client";
+import type { ActionReceipt, PendingIntent } from "./engine-client";
 import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -17,7 +18,7 @@ const ACCOUNT_PAGES_MAX = 100;
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
-  pending_intent: "We couldn't confirm your last change. Check it and save again.",
+  pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   stale_config: "This changed since you opened it. Review and save again.",
@@ -120,7 +121,7 @@ export function classifyFailure(error: unknown): Failure {
  * Inputs: the command and its arguments. Output: the value, not ready, or a plain error. */
 export async function call<T>(command: string, args?: InvokeArgs): Promise<Result<T>> {
   try {
-    return { kind: "ok", value: await retryBusy(() => native<T>(command, args)) };
+    return { kind: "ok", value: await bridgeCall<T>(command, args) };
   } catch (error) {
     return classifyFailure(error);
   }
@@ -170,9 +171,98 @@ export function status(): Promise<Result<ConnectionStatus>> {
   return call<ConnectionStatus>("desktop_status");
 }
 
-/** Asks the engine to settle an unconfirmed change. Output: ok once it is settled. */
-export function checkUnconfirmed(): Promise<Result<void>> {
-  return change("desktop_reconcile_intent", {});
+/** Reads the change the bridge still keeps unconfirmed. Output: the change, or null. */
+export function keptChange(): Promise<Result<PendingIntent | null>> {
+  return call<PendingIntent | null>("desktop_pending_intent");
+}
+
+/** Asks the engine whether the kept change was recorded, by its operation id and hash,
+ * reconnecting first when a lost reply let go of the engine.
+ * Output: the check's receipt, or why it couldn't run. */
+export async function checkUnconfirmed(): Promise<Result<IntentReceipt>> {
+  const current = await status();
+  if (current.kind === "ok" && !current.value.connected) {
+    const connected = await connect();
+    if (connected.kind !== "ok") return connected;
+  }
+  return call<IntentReceipt>("desktop_reconcile_intent");
+}
+
+/** Sends the exact kept change again; the engine applies it once even if the first send
+ * landed. Output: the receipt, or why it couldn't run. */
+export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_retry_intent");
+}
+
+/** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
+export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
+
+const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
+  add_account: "adding an account",
+  remove_account: "deleting an account",
+  create_connection: "adding a connection",
+  replace_connection: "changing a connection",
+  remove_connection: "removing a connection",
+  create_pool: "creating a pool",
+  replace_pool: "changing a pool",
+  remove_pool: "deleting a pool",
+};
+
+const CHANGE: Record<PendingIntent["kind"], string> = {
+  message: "sending your message",
+  brief: "changing the project brief",
+  approve_baseline: "approving a baseline",
+  revoke_baseline: "revoking a baseline",
+  model_access: "changing accounts and pools",
+  create_project: "creating the project",
+  setup_project: "saving the project setup",
+  research_memory: "saving research to memory",
+  project_documents: "adding project documents",
+  project_context_delete: "removing a project file",
+  memory_review: "reviewing a memory",
+  memory_add: "adding a memory",
+  memory_promote: "promoting a memory",
+  memory_delete: "deleting a memory",
+  memory_forget: "forgetting a memory",
+  memory_remember: "saving a memory",
+  memory_selection: "changing the memory selection",
+  master: "changing the master conversation",
+  owner_profile: "saving your profile",
+  projects_home: "changing the projects folder",
+  move_projects_home: "moving your projects",
+  add_existing_folder: "adding a folder",
+  start_onboarding: "starting project setup",
+  run_setup: "running project setup",
+  pack_set: "changing the default pack",
+  pack_remove: "removing a pack",
+};
+
+/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase. */
+export function changeLabel(intent: PendingIntent): string {
+  if (intent.kind === "model_access" && intent.model_access) return MODEL_ACCESS_CHANGE[intent.model_access.kind];
+  return CHANGE[intent.kind];
+}
+
+function capital(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** The banner line for a change that is still unconfirmed. Inputs: the change and the last
+ * check's outcome, or null before any check. Output: the line naming the change. */
+export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
+  const label = changeLabel(intent);
+  if (outcome === "not_recorded_at_barrier") return `${capital(label)} hasn't reached the engine. Retry sends the same change again.`;
+  return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
+}
+
+/** The toast after a check or retry settles a kept change. Input: the receipt.
+ * Output: whether it went through, or null while the change is still unconfirmed. */
+export function settledLine(receipt: IntentReceipt): string | null {
+  if (receipt.pending) return null;
+  const label = capital(changeLabel(receipt));
+  if (receipt.outcome === "applied") return `${label} went through.`;
+  const code = receipt.rejection ?? (receipt.outcome === "rejected" ? "rejected" : "unavailable");
+  return `${label} didn't go through. ${plainError(code)}`;
 }
 
 export interface OwnerProfile {

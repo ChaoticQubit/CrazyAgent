@@ -12,7 +12,7 @@ test("project failures use project copy first, then the app's shared copy", () =
 });
 
 test("failure copy is plain language and falls back for unknown codes", () => {
-  assert.equal(api.failureCopy("pending_intent"), "Another change is still being saved. Wait for it to finish, then try again.");
+  assert.equal(api.failureCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.failureCopy("document_not_a_regular_file"), "Can't add a folder or a shortcut. Choose the original file.");
   assert.equal(api.failureCopy("made_up_code"), "Something went wrong. Try again.");
   for (const code of ["owner_read_failed", "team_agent_range_invalid", "document_type_unsupported", "project_folder_exists"]) {

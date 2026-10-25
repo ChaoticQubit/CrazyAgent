@@ -1,4 +1,4 @@
-import { call, classifyFailure, connect, plainError, status, type Result } from "./api";
+import { call, classifyFailure, plainError, type Result } from "./api";
 import {
   closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
@@ -127,13 +127,13 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
 }
 
 const copy: Record<string, string> = {
-  pending_intent: "Another change is still being saved. Wait for it to finish, then try again.",
+  pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   not_connected: "CrazyAgent's engine isn't running.",
   not_configured: "CrazyAgent's engine isn't running.",
   owner_unavailable: "CrazyAgent's engine isn't running.",
-  busy: "Another change is still being saved. Wait for it to finish, then try again.",
+  busy: "Another change is still running. Wait for it to finish.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   invalid_project: "This project no longer exists.",
@@ -232,10 +232,10 @@ export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
 export function receiptState(receipt: IntentReceipt): ReceiptState {
-  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
     return { kind: "unconfirmed" };
   }
+  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.outcome === "applied") return { kind: "applied" };
   return { kind: "rejected", code: receipt.outcome };
 }
@@ -253,18 +253,6 @@ export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation:
  * Input: the receipt from Create project. Output: true when it should reconcile once. */
 export function needsReconcile(receipt: IntentReceipt): boolean {
   return receipt.pending && receipt.rejection === null && (receipt.outcome === "unknown" || receipt.outcome === "uncertain");
-}
-
-/** Reconciles the kept New Project intent once by its operation id and hash, reconnecting
- * first when the reply was lost and the bridge let go of the engine.
- * Input: none. Output: the reconcile receipt, or why it couldn't run. */
-export async function reconcileSetup(): Promise<Result<IntentReceipt>> {
-  const current = await status();
-  if (current.kind === "ok" && !current.value.connected) {
-    const connected = await connect();
-    if (connected.kind !== "ok") return connected;
-  }
-  return call<IntentReceipt>("desktop_reconcile_intent");
 }
 
 /** The New Project receipt after one reconcile: the reconcile's answer when it settled the

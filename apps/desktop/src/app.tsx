@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { SessionContext, useSession, type Session } from "./state";
+import { unconfirmedLine } from "./api";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
@@ -80,8 +81,11 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} />}
       sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
-      {session.unconfirmed && <Banner action={<Button size="small" onClick={() => void session.checkUnconfirmed()}>Check again</Button>}>
-        We couldn't confirm your last change. Check it and save again.
+      {session.unconfirmed && <Banner action={<span className="row">
+        <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
+        <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+      </span>}>
+        {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}
       <Screen route={route} session={session} />
       <GoToLayer projects={projects ?? []} />
