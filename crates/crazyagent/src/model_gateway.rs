@@ -25,6 +25,7 @@ mod local_completion_tests;
 
 const OBSERVATION_LIFETIME_MAX_MS: u64 = 86_400_000;
 const SUCCESS_READY_LIFETIME_MS: u64 = 3_600_000;
+const FAILURE_HOLD_MS: u64 = 60_000;
 const ATTEMPTS_MAX: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -821,7 +822,9 @@ fn finish_attempt_inner(
             connection: attempt.connection.clone(),
             sequence,
             observed_at_ms: completion.finished_at_ms,
-            valid_until_ms: completion.finished_at_ms + OBSERVATION_LIFETIME_MAX_MS,
+            valid_until_ms: completion
+                .retry_at_ms
+                .unwrap_or(completion.finished_at_ms + FAILURE_HOLD_MS),
             kind,
         };
         validate_observation(&observation)?;

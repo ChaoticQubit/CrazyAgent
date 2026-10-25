@@ -549,6 +549,11 @@ fn finish(fixture: &mut Fixture, id: &RequestId, completion: AttemptCompletion) 
     tx.commit().unwrap();
 }
 
+fn next_turn(fixture: &mut Fixture, name: &str) {
+    fixture.request.id = RequestId::new(format!("{name}-attempt")).unwrap();
+    fixture.request.task_id = TaskId::new(format!("{name}-task")).unwrap();
+}
+
 fn observe_at(
     fixture: &mut Fixture,
     sequence: u64,
@@ -636,4 +641,57 @@ fn an_older_retry_time_still_denies_a_probe_after_newer_readiness_expired() {
     assert_eq!(state.cooldown_until_ms, Some(5_000));
     fixture.reject(4_999, "gateway_cooldown");
     fixture.begin(5_000).unwrap();
+}
+
+#[test]
+fn a_failed_turn_holds_its_connection_only_until_its_retry_time_or_the_failure_hold() {
+    for (kind, retry_at_ms, held_until_ms, expected) in [
+        (
+            FailureKind::RateLimited,
+            None,
+            102 + FAILURE_HOLD_MS,
+            "gateway_rate_limited",
+        ),
+        (
+            FailureKind::RateLimited,
+            Some(5_000),
+            5_000,
+            "gateway_rate_limited",
+        ),
+        (
+            FailureKind::TransientFailure,
+            None,
+            102 + FAILURE_HOLD_MS,
+            "gateway_transient_failure",
+        ),
+        (
+            FailureKind::QuotaExhausted,
+            None,
+            102 + FAILURE_HOLD_MS,
+            "gateway_quota_exhausted",
+        ),
+        (
+            FailureKind::InvalidAuthentication,
+            None,
+            102 + FAILURE_HOLD_MS,
+            "gateway_invalid_authentication",
+        ),
+    ] {
+        let mut fixture = Fixture::new(CATALOG);
+        let first = fixture.begin(100).unwrap();
+        finish(
+            &mut fixture,
+            &first.attempt.request.id,
+            AttemptCompletion {
+                outcome: AttemptOutcome::Failed(kind),
+                effects: Effects::Uncertain,
+                finished_at_ms: 102,
+                retry_at_ms,
+            },
+        );
+        next_turn(&mut fixture, "next-turn");
+        fixture.reject(held_until_ms - 1, expected);
+        let probe = fixture.begin(held_until_ms).unwrap();
+        assert!(probe.attempt.request.previous_attempt.is_none());
+    }
 }
