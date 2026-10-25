@@ -1,5 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 
 const CHILD: &str = include_str!("../../tests/fixtures/agent_child.py");
 const CRASH_ROOT: &str = "CRAZYAGENT_AGENTS_CRASH_ROOT";
@@ -355,26 +356,156 @@ fn crashing_engine_process() {
 }
 
 #[test]
-fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
-    let case = Case::new();
-    let root = case.path();
+#[ignore = "run only by the escaped holder tests as their crashing engine process"]
+fn escaping_engine_process() {
+    let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let agents = Agents::open(&root).unwrap();
+    let agent = agents
+        .launch(spec(&root, "escaping", Some("escape")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &agent.id, "escaped"));
+    std::fs::write(
+        root.join("ids.json"),
+        serde_json::to_vec(&[&agent.id]).unwrap(),
+    )
+    .unwrap();
+    std::process::exit(0);
+}
+
+fn crash(root: &Path, test: &str) -> Vec<String> {
     let status = crate::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "agents::tests::crashing_engine_process",
-                "--ignored",
-                "--test-threads",
-                "1",
-            ])
-            .env(CRASH_ROOT, &root)
+            .args(["--exact", test, "--ignored", "--test-threads", "1"])
+            .env(CRASH_ROOT, root)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null()),
     )
     .unwrap();
     assert!(status.success());
-    let ids: Vec<String> =
-        serde_json::from_slice(&std::fs::read(root.join("ids.json")).unwrap()).unwrap();
+    serde_json::from_slice(&std::fs::read(root.join("ids.json")).unwrap()).unwrap()
+}
+
+/// Crashes an engine whose one agent started a child in a new session that keeps the
+/// agent's output log, then kills the agent's own group so only that child holds it.
+/// Input: the case root. Output: the agent id and the escaped child's pid.
+fn escaped_after_crash(root: &Path) -> (String, i32) {
+    let ids = crash(root, "agents::tests::escaping_engine_process");
+    let (pid, grandchild) = pids(root, "escaping");
+    let path = root.join("work/escaping/escaped.json");
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let escaped = value["pid"].as_i64().unwrap() as i32;
+    rustix::process::kill_process_group(
+        rustix::process::Pid::from_raw(pid).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    until("the agent's own group to be gone", || {
+        !alive(pid) && !alive(grandchild)
+    });
+    assert!(alive(escaped));
+    (ids[0].clone(), escaped)
+}
+
+fn gone_within(pid: i32, wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    !alive(pid)
+}
+
+fn end_escaped(pid: i32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[test]
+fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group() {
+    let case = Case::new();
+    let root = case.path();
+    let (id, escaped) = escaped_after_crash(&root);
+    let mut foreign = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let recycled = Connection::open(root.join("engine.db"))
+        .unwrap()
+        .execute(
+            "UPDATE agent_runs SET process_group=?2 WHERE id=?1",
+            params![id, foreign.id()],
+        )
+        .unwrap();
+    assert_eq!(recycled, 1);
+    let agents = Agents::open(&root).unwrap();
+    assert!(agents.view(&id).unwrap().reattached);
+
+    let stopped = agents.stop(&id).unwrap();
+
+    let foreign_kept = foreign.try_wait().unwrap().is_none();
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+    end_escaped(escaped);
+    assert!(foreign_kept, "stop signalled a foreign process group");
+    assert!(
+        escaped_ended,
+        "stop left the child that holds the log running"
+    );
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert_eq!(stopped.reason, None);
+}
+
+#[test]
+fn a_reattached_agent_whose_log_was_replaced_is_not_signalled_and_not_called_stopped() {
+    let case = Case::new();
+    let root = case.path();
+    let (id, escaped) = escaped_after_crash(&root);
+    let agents = Agents::open(&root).unwrap();
+    assert!(agents.view(&id).unwrap().reattached);
+    let log = root.join("agents").join(&id).join(launch::DURABLE_OUTPUT);
+    std::fs::rename(&log, log.with_extension("moved")).unwrap();
+    std::fs::write(&log, b"").unwrap();
+
+    let stopped = agents.stop(&id).unwrap();
+
+    let escaped_kept = alive(escaped);
+    end_escaped(escaped);
+    assert!(
+        escaped_kept,
+        "stop signalled through a log path it could not verify"
+    );
+    assert_eq!(stopped.state, AgentState::Failed);
+    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn only_other_write_holders_are_read_from_lsof_and_a_listing_without_this_engine_is_refused() {
+    let own = rustix::process::getpid().as_raw_nonzero().get();
+    let listed = format!("p{own}\nf7\nar\np41\nf1\naw\nf2\nau\np42\nf3\nar\np43\nf4\nau\n");
+    let writers: Vec<i32> = listed_writers(&listed)
+        .unwrap()
+        .into_iter()
+        .map(|pid| pid.as_raw_nonzero().get())
+        .collect();
+    assert_eq!(writers, [41, 43]);
+    assert!(listed_writers("p41\nf1\naw\n").is_none());
+    assert!(listed_writers(&format!("p{own}\nf7\nar\nn/elsewhere\n")).is_none());
+}
+
+#[test]
+fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
+    let case = Case::new();
+    let root = case.path();
+    let ids = crash(&root, "agents::tests::crashing_engine_process");
     let (kept, killed, stopped) = (&ids[0], &ids[1], &ids[2]);
     let (kept_pid, _) = pids(&root, "kept");
     let (killed_pid, killed_grandchild) = pids(&root, "killed");
