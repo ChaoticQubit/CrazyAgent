@@ -447,10 +447,28 @@ export function poolInput(name: string, members: string[]): Result<{ name: strin
   return { kind: "ok", value: { name: trimmed, members } };
 }
 
-/** Creates a pool, or renames and replaces the members of an existing one while keeping its
- * project assignments. Inputs: pool id (absent for a new pool), name, member ids.
- * Output: ok once the engine saved it. */
-export async function savePool(id: string | undefined, name: string, members: string[]): Promise<Result<void>> {
+/** A pool's name and member ids, as one read or one save saw them. */
+export interface PoolBase { name: string; members: string[] }
+
+/** Applies what the owner changed in a pool since they read it onto the pool as it is now, so
+ * a change another client made meanwhile is not undone: members the owner removed leave,
+ * members the owner added join after the current ones, and the name changes only when the
+ * owner renamed it. Inputs: the pool now, the pool as the owner read it, and what the owner
+ * saved. Output: the merged name and members, or a plain error such as the 15-account limit. */
+export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Result<PoolBase> {
+  const removed = new Set(opened.members.filter((id) => !saved.members.includes(id)));
+  const kept = now.members.filter((id) => !removed.has(id));
+  const added = saved.members.filter((id) => !opened.members.includes(id) && !kept.includes(id));
+  const renamed = saved.name.trim() !== opened.name.trim() || !now.name.trim();
+  return poolInput(renamed ? saved.name : now.name, [...kept, ...added]);
+}
+
+/** Creates a pool, or saves the owner's changes to an existing one while keeping its project
+ * assignments and any change made elsewhere since the owner read it (see `mergePool`).
+ * Inputs: pool id (absent for a new pool), name, member ids, and for an existing pool its
+ * name and members as the owner read them. Output: ok once the engine saved it. */
+export async function savePool(id: string | undefined, name: string, members: string[], opened?: PoolBase): Promise<Result<void>> {
+  assert(id === undefined || opened !== undefined, "saving an existing pool needs the read it was edited from");
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
   let ticket: string;
@@ -464,8 +482,11 @@ export async function savePool(id: string | undefined, name: string, members: st
     const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
     if (detail.kind !== "ok") return detail;
     if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+    const now = detail.value.record.pool;
+    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened!, input.value);
+    if (merged.kind !== "ok") return merged;
     ticket = detail.value.ticket;
-    edit = { kind: "replace_pool", pool: { ...detail.value.record.pool, name: input.value.name, members: input.value.members } as AccountPool };
+    edit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
   }
   return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
 }
@@ -720,6 +741,13 @@ export function attachTerminal(agent: string, output: Channel<TerminalMessage>):
  * 1 to 4096 bytes. Output: ok once queued in order. */
 export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result<void>> {
   return call<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one
+ * submission and tells a sub-agent's master. Inputs: the terminal name and the prompt, up to
+ * 4096 bytes. Output: ok once queued in order with typed keys. */
+export function promptTerminal(agent: string, text: string): Promise<Result<void>> {
+  return call<void>("desktop_terminal_prompt", { agent, text });
 }
 
 /** Sets an attached agent terminal's size. Inputs: the terminal name, columns and rows.

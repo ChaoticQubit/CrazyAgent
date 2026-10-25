@@ -1,11 +1,11 @@
 import { Channel } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
-import { attachTerminal, detachTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
+import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
-import { PROMPT_CHARS_MAX, encodeBinary, encodeTyped, endCopy, inputQueue, promptBytes, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -23,7 +23,7 @@ function token(name: string, fallback: string): string {
 export function typingNote(node: GraphNode): string {
   return node.kind === "master"
     ? "Typing goes straight to the master."
-    : "Typing goes straight to this agent. The master gets a note of what you type.";
+    : "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
 }
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
@@ -37,20 +37,20 @@ function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSe
   const [text, setText] = useState("");
   const id = `tg-prompt-${node.id}`;
   const copy = promptCopy(node);
-  const blank = !text.trim();
+  const check = promptText(text);
   const send = () => {
-    if (!live || blank) return;
-    if (onSend(text)) setText("");
+    if (!live || check.kind !== "ok") return;
+    if (onSend(check.text)) setText("");
   };
   return <form className="tg-composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
     <label htmlFor={id} className="pj-sr">{displayText(copy.label)}</label>
-    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} maxLength={PROMPT_CHARS_MAX} disabled={!live}
+    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} disabled={!live}
       placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
       onChange={(event) => setText(event.target.value)}
       onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); send(); } }} />
     <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{live ? keyLabel("Sends the text, then Enter. Cmd+Enter to send.") : "Opens once the terminal is live."}</span>
-      <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || blank}>Send</Button>
+      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Opens once the terminal is live." : check.kind === "too_long" ? check.reason : keyLabel("Sends the text as one message, then Enter. Cmd+Enter to send.")}</span>
+      <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>
     </div>
   </form>;
 }
@@ -98,6 +98,7 @@ export function TerminalPanel({ node, harness, onClose }: {
           selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
         },
       });
+      muteQueries(terminal);
       const fit = new FitAddon();
       terminal.loadAddon(fit);
       terminal.open(element);
@@ -117,13 +118,11 @@ export function TerminalPanel({ node, harness, onClose }: {
         window.cancelAnimationFrame(frame);
         frame = window.requestAnimationFrame(() => { if (fitted && !disposed) fit.fit(); });
       };
-      const type = inputQueue(async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => end(STOPPED_TYPING));
+      const run = jobQueue(() => end(STOPPED_TYPING));
+      const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
       const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
       prompt.current = (text) => {
-        if (!live) return false;
-        const bytes = promptBytes(text, terminal.modes.bracketedPasteMode);
-        if (!bytes.length) return false;
-        type(bytes);
+        if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();
         return true;
       };

@@ -549,6 +549,21 @@ async fn desktop_terminal_input(
 }
 
 #[tauri::command]
+async fn desktop_terminal_prompt(
+    window: WebviewWindow,
+    terminals: State<'_, TerminalState>,
+    agent: String,
+    text: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let agent = bridge::terminal::agent(&agent)?;
+    terminals
+        .0
+        .send(&agent, TerminalRequest::Prompt { text })
+        .await
+}
+
+#[tauri::command]
 async fn desktop_terminal_resize(
     window: WebviewWindow,
     terminals: State<'_, TerminalState>,
@@ -1637,6 +1652,7 @@ pub fn run() {
             desktop_team_graph,
             desktop_terminal_attach,
             desktop_terminal_input,
+            desktop_terminal_prompt,
             desktop_terminal_resize,
             desktop_terminal_detach,
             desktop_update_project_setup,

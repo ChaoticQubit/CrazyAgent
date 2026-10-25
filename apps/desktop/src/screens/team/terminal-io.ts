@@ -1,3 +1,4 @@
+import type { IFunctionIdentifier, IParser } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
 
 export const INPUT_BYTES_MAX = 4096;
@@ -51,11 +52,12 @@ export function terminalSize(cols: number, rows: number): { cols: number; rows: 
   return { cols: clamp(cols), rows: clamp(rows) };
 }
 
-/** Sends typed input in order, one chunk at a time, so a long paste never overtakes later
- * keys. Inputs: the send call, which resolves false once input can no longer be delivered,
- * and a callback for that stop. Output: a function that queues bytes; after a stop, or past
- * `QUEUED_CHUNKS_MAX` waiting chunks, it drops input and reports the stop once. */
-export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped: () => void): (bytes: Uint8Array) => void {
+/** Runs a terminal's sends one at a time in the order queued, so a long paste never overtakes
+ * later keys or a prompt. Input: a callback for the stop. Output: a function that queues one
+ * send, which resolves false once nothing more can be delivered; it returns whether the send
+ * was queued. After a stop, or past `QUEUED_CHUNKS_MAX` waiting sends, it refuses them and
+ * reports the stop once. */
+export function jobQueue(stopped: () => void): (job: () => Promise<boolean>) => boolean {
   let tail: Promise<void> = Promise.resolve();
   let waiting = 0;
   let stop = false;
@@ -64,37 +66,67 @@ export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped:
     stop = true;
     stopped();
   };
+  return (job) => {
+    if (stop) return false;
+    if (waiting >= QUEUED_CHUNKS_MAX) {
+      halt();
+      return false;
+    }
+    waiting += 1;
+    tail = tail
+      .then(async () => { if (!stop && !await job()) halt(); })
+      .catch(halt)
+      .finally(() => { waiting -= 1; });
+    assert(waiting <= QUEUED_CHUNKS_MAX, "the send queue stays bounded");
+    return true;
+  };
+}
+
+/** Queues typed bytes on a terminal's send queue as chunks the bridge accepts. Inputs: the
+ * queue and the send call for one chunk. Output: a function that queues bytes in order. */
+export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): (bytes: Uint8Array) => void {
   return (bytes) => {
     for (const chunk of inputChunks(bytes)) {
-      if (stop) return;
-      if (waiting >= QUEUED_CHUNKS_MAX) return halt();
-      waiting += 1;
-      tail = tail
-        .then(async () => { if (!stop && !await send(chunk)) halt(); })
-        .catch(halt)
-        .finally(() => { waiting -= 1; });
+      if (!run(() => send(chunk))) return;
     }
   };
 }
 
-export const PROMPT_CHARS_MAX = 8000;
-const PASTE_START = "\x1b[200~";
-const PASTE_END = "\x1b[201~";
+/** Sends typed input in order, one chunk at a time, on a queue of its own. Inputs: the send
+ * call, which resolves false once input can no longer be delivered, and a callback for that
+ * stop. Output: a function that queues bytes; after a stop it drops input. */
+export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped: () => void): (bytes: Uint8Array) => void {
+  return keyQueue(jobQueue(stopped), send);
+}
 
-/** Turns a prompt from the composer into the keys an interactive agent app reads: control
- * characters other than tab and newline are dropped, lines end in carriage returns, a
- * multi-line prompt is wrapped as a bracketed paste when the app asked for one, and Enter
- * follows. Inputs: the text and whether the app turned bracketed paste on. Output: the bytes,
- * empty for a blank prompt. */
-export function promptBytes(text: string, bracketed: boolean): Uint8Array {
-  const clean = text.slice(0, PROMPT_CHARS_MAX)
-    .replace(/\r\n?/g, "\n")
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "")
-    .replace(/\s+$/u, "");
-  if (!clean.trim()) return new Uint8Array();
-  const body = clean.replace(/\n/g, "\r");
-  const wrapped = bracketed && clean.includes("\n") ? `${PASTE_START}${body}${PASTE_END}` : body;
-  return encodeTyped(`${wrapped}\r`);
+export const PROMPT_BYTES_MAX = 4096;
+
+/** Checks a composer prompt before it is sent as the owner's explicit message. The engine
+ * types it into the agent as one submission and tells a sub-agent's master; typed keys are
+ * never sent this way. Input: the text. Output: the trimmed text, blank, or too long with
+ * the plain reason. */
+export function promptText(text: string): { kind: "ok"; text: string } | { kind: "blank" } | { kind: "too_long"; reason: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "blank" };
+  const bytes = encoder.encode(trimmed).length;
+  if (bytes > PROMPT_BYTES_MAX) return { kind: "too_long", reason: `Too long: ${bytes} of ${PROMPT_BYTES_MAX} bytes.` };
+  return { kind: "ok", text: trimmed };
+}
+
+const QUERY_CSI: IFunctionIdentifier[] = [
+  { final: "c" }, { prefix: ">", final: "c" }, { prefix: "=", final: "c" },
+  { final: "n" }, { prefix: "?", final: "n" },
+  { intermediates: "$", final: "p" }, { prefix: "?", intermediates: "$", final: "p" },
+];
+const QUERY_DCS: IFunctionIdentifier[] = [{ intermediates: "$", final: "q" }];
+
+/** Stops a view answering the terminal queries an agent's app writes (device attributes,
+ * status and cursor reports, mode and setting requests). tmux owns the agent's terminal and
+ * answers them already; a second answer from the view would be typed into the agent.
+ * Input: the view's terminal. Output: none; the handlers end with the terminal. */
+export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler"> }): void {
+  for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
+  for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
 }
 
 /** What one terminal channel message means for the view. */

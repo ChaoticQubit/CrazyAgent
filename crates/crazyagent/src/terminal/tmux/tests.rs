@@ -65,18 +65,36 @@ fn the_attach_screen_redraws_every_row_and_puts_the_cursor_back() {
         80,
         2,
         (7, 1),
+        Modes::default(),
     );
     assert_eq!(
         screen,
         b"\x1b[0m\x1b[H\x1b[2Jready$ echo hi\r\nhi\x1b[0m\x1b[2;8H".to_vec(),
         "rows past the terminal height are dropped"
     );
-    assert!(render(&[], 80, 24, (500, 500)).ends_with(b"\x1b[24;80H"));
+    assert!(render(&[], 80, 24, (500, 500), Modes::default()).ends_with(b"\x1b[24;80H"));
+}
+
+#[test]
+fn the_attach_screen_first_turns_on_the_input_modes_the_app_set() {
+    let both = Modes {
+        bracketed_paste: true,
+        cursor_keys: true,
+    };
+    assert!(
+        render(&[b"x".to_vec()], 80, 24, (0, 0), both).starts_with(b"\x1b[?2004h\x1b[?1h\x1b[0m")
+    );
+    let paste = Modes {
+        bracketed_paste: true,
+        cursor_keys: false,
+    };
+    assert!(render(&[], 80, 24, (0, 0), paste).starts_with(b"\x1b[?2004h\x1b[0m"));
+    assert!(render(&[], 80, 24, (0, 0), Modes::default()).starts_with(b"\x1b[0m"));
 }
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -87,7 +105,16 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         ),
         (b"%2".to_vec(), b"@2".to_vec(), 80, 24, (8, 0))
     );
-    assert!(located(&[b"  0 0 80 24".to_vec()]).is_none());
+    assert_eq!(
+        found.modes,
+        Modes {
+            bracketed_paste: true,
+            cursor_keys: false
+        }
+    );
+    assert!(located(&[b"%2 @2 8 0 80 24".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 x".to_vec()]).is_none());
+    assert!(located(&[b"  0 0 80 24 0 0".to_vec()]).is_none());
     assert!(located(&[]).is_none());
 }
 
