@@ -257,6 +257,22 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.doesNotMatch(none, /Connecting/);
 });
 
+test("a failed background read keeps the last graph, so an open terminal stays mounted", () => {
+  const ok = { kind: "ok", value: team };
+  const busy = { kind: "error", code: "busy", message: "The engine is busy. Try again." };
+  let state = view.graphRead(view.GRAPH_UNREAD, ok);
+  assert.deepEqual(state, { shown: ok, stale: null });
+  state = view.graphRead(state, busy);
+  assert.equal(state.shown, ok, "the graph that holds the open terminal is still shown");
+  assert.equal(state.stale, "The engine is busy. Try again.");
+  state = view.graphRead(state, { kind: "not_ready" });
+  assert.equal(state.shown, ok);
+  assert.equal(state.stale, "The team graph isn't ready in this build.");
+  state = view.graphRead(state, ok);
+  assert.deepEqual(state, { shown: ok, stale: null });
+  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null }, "with no graph yet the error is the view");
+});
+
 test("the graph view waits for its first read before drawing", () => {
   const html = renderToStaticMarkup(createElement(view.TeamGraphView, { projectId: "chores" }));
   assert.match(html, /aria-busy="true"/);
