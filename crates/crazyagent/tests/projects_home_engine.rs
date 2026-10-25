@@ -620,3 +620,103 @@ async fn a_home_move_whose_record_fails_still_lands_on_the_moved_folders() {
     ready_at(&mut owner, &project, &first.join("reading-list")).await;
     engine.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_set_up_project_past_the_256th_keeps_its_folder_and_its_place_in_the_list() {
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    let project = ProjectId::new("reading").unwrap();
+    owner.generation += 1;
+    let setup = ProjectSetup {
+        about: "Tracks reading lists.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "Reading list".into(),
+        repositories: vec![],
+    };
+    match owner
+        .controller
+        .setup_project(project.clone(), spec, setup, owner.generation)
+        .await
+        .unwrap()
+    {
+        OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
+        other => panic!("{other:?}"),
+    }
+    let folder = home.join("reading-list");
+    ready_at(&mut owner, &project, &folder).await;
+
+    for n in 0..256 {
+        fs::create_dir(home.join(format!("zz-{n:03}"))).unwrap();
+    }
+    let database = engine.root.path().join("engine.db");
+    sql(
+        &database,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 255)
+             INSERT INTO project_setups
+             SELECT printf('a%03d', i), json_set(s.body,
+                 '$.project_id', printf('a%03d', i),
+                 '$.name', printf('zz %03d', i),
+                 '$.folder', '{}/' || printf('zz-%03d', i))
+             FROM n, project_setups s WHERE s.project = 'reading';",
+            home.display()
+        ),
+    );
+    let count: i64 = rusqlite::Connection::open(&database)
+        .unwrap()
+        .query_row("SELECT count(*) FROM project_setups", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 257);
+
+    let found = owner.found().await;
+    let listed = named(&found, "reading-list").map(|entry| (entry.state, entry.project_id.clone()));
+    let trashed = owner
+        .apply(OwnerMutation::DeleteProjectFolder {
+            path: folder.to_str().unwrap().into(),
+        })
+        .await;
+    assert_eq!(
+        (listed, trashed),
+        (
+            Some((FoundState::Ready, Some(project.clone()))),
+            rejected("home_trash_still_set_up")
+        )
+    );
+    assert!(folder.is_dir());
+    assert_eq!(
+        found
+            .iter()
+            .filter(|entry| entry.state == FoundState::Ready && entry.project_id.is_some())
+            .count(),
+        257
+    );
+
+    fs::remove_dir_all(&folder).unwrap();
+    let found = owner.found().await;
+    let missing = named(&found, "Reading list").unwrap();
+    assert_eq!(missing.state, FoundState::Missing);
+    assert_eq!(missing.project_id.as_ref(), Some(&project));
+    assert_eq!(missing.path, folder.to_str().unwrap());
+    engine.stop().await;
+}
