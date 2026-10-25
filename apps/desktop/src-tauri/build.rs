@@ -127,6 +127,12 @@ fn main() {
         "desktop_open_link",
         "desktop_reveal_project_folder",
         "desktop_open_context_item",
+        "desktop_update_settings",
+        "desktop_set_update_channel",
+        "desktop_check_update",
+        "desktop_install_update",
+        "desktop_restart_app",
+        "desktop_link_cli",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

@@ -131,6 +131,12 @@
     "allow-desktop-pick-documents",
     "allow-desktop-open-link",
     "allow-desktop-reveal-project-folder",
-    "allow-desktop-open-context-item"
+    "allow-desktop-open-context-item",
+    "allow-desktop-update-settings",
+    "allow-desktop-set-update-channel",
+    "allow-desktop-check-update",
+    "allow-desktop-install-update",
+    "allow-desktop-restart-app",
+    "allow-desktop-link-cli"
   ]
 }

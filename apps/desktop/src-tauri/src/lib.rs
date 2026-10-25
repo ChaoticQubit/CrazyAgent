@@ -1,4 +1,5 @@
 pub mod bridge;
+mod updates;
 
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
@@ -39,8 +40,9 @@ use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{Mutex, MutexGuard};
+use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
 pub struct NativeState(Arc<Mutex<NativeBridge>>);
 
@@ -1511,11 +1513,66 @@ async fn desktop_logout_native_auth(
     lock(&state)?.logout_native_auth(&ticket).await
 }
 
+#[tauri::command]
+fn desktop_update_settings(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<UpdateSettings, BridgeError> {
+    main_window(&window)?;
+    updates::settings(&app)
+}
+
+#[tauri::command]
+fn desktop_set_update_channel(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, UpdateState>,
+    channel: String,
+) -> Result<UpdateSettings, BridgeError> {
+    main_window(&window)?;
+    updates::set_channel(&app, &state, &channel)
+}
+
+#[tauri::command]
+async fn desktop_check_update(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, UpdateState>,
+) -> Result<Option<AvailableUpdate>, BridgeError> {
+    main_window(&window)?;
+    updates::check(&app, &state).await
+}
+
+#[tauri::command]
+async fn desktop_install_update(
+    window: WebviewWindow,
+    state: State<'_, UpdateState>,
+    progress: Channel<UpdateProgress>,
+) -> Result<InstallOutcome, BridgeError> {
+    main_window(&window)?;
+    updates::install(&state, progress).await
+}
+
+#[tauri::command]
+fn desktop_restart_app(window: WebviewWindow, app: AppHandle) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
+async fn desktop_link_cli(window: WebviewWindow) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    updates::link_cli().await
+}
+
 pub fn run() {
     let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
     let builder = tauri::Builder::default()
         .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
         .manage(TerminalState(Arc::new(Terminals::default())))
+        .manage(UpdateState::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -1644,6 +1701,12 @@ pub fn run() {
             desktop_open_link,
             desktop_reveal_project_folder,
             desktop_open_context_item,
+            desktop_update_settings,
+            desktop_set_update_channel,
+            desktop_check_update,
+            desktop_install_update,
+            desktop_restart_app,
+            desktop_link_cli,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
