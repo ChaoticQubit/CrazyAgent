@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentEvent } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
+import { FRAME_TEXT_MAX } from "./host.codec.ts";
 
 export type MessageFrame =
   | { kind: "message_started" | "message_reset" | "message_discarded" | "message_finished"; turn_id: string; message_id: string }
@@ -31,26 +32,31 @@ function textChunks(value: unknown, maximumBytes: number): string[] {
   const chunks: string[] = [];
   let start = 0;
   let chunkBytes = 0;
+  let chunkJson = 2;
   let totalBytes = 0;
   for (let index = 0; index < value.length;) {
     const unit = value.charCodeAt(index);
     let units = 1;
     let bytes = unit <= 0x7f ? 1 : unit <= 0x7ff ? 2 : 3;
+    let json = unit >= 0x20 ? unit === 0x22 || unit === 0x5c ? 2 : bytes : unit >= 0x08 && unit <= 0x0d && unit !== 0x0b ? 2 : 6;
     if (unit >= 0xd800 && unit <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
       if (!(next >= 0xdc00 && next <= 0xdfff)) reject();
       units = 2;
       bytes = 4;
+      json = 4;
     } else if (unit >= 0xdc00 && unit <= 0xdfff) {
       reject();
     }
     if (totalBytes + bytes > maximumBytes) reject();
-    if (chunkBytes + bytes > 16384) {
+    if (chunkBytes + bytes > 16384 || chunkJson + json > FRAME_TEXT_MAX) {
       chunks.push(value.slice(start, index));
       start = index;
       chunkBytes = 0;
+      chunkJson = 2;
     }
     chunkBytes += bytes;
+    chunkJson += json;
     totalBytes += bytes;
     index += units;
   }

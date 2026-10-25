@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { FRAME_TEXT_MAX, encodeEvent } from "./host.codec.ts";
 import { SdkMessageProjection } from "./host.messages.ts";
 
 const turn = "external-turn-1";
@@ -136,6 +137,26 @@ test("a text exactly at the SDK byte limit remains lossless", () => {
   const deltas = output.filter((item) => item.kind === "message_delta");
   assert.equal(deltas.length, 64);
   assert.equal(deltas.map((item) => item.text).join(""), text);
+});
+
+test("chunks fill the raw and JSON-escaped budgets exactly so every delta frame fits the wire", () => {
+  const projection = new SdkMessageProjection("t".repeat(128), sdkTurn);
+  const controls = Array.from({ length: 32 }, (_, unit) => String.fromCharCode(unit)).join("");
+  let plane = "";
+  for (let unit = 0x20; unit <= 0xffff; unit++) if (unit < 0xd800 || unit > 0xdfff) plane += String.fromCharCode(unit);
+  const text = controls.repeat(1024) + plane + "🙂".repeat(4096) + "\"\\".repeat(8192);
+  const deltas = projection.accept(event("assistant:message", "dense", text)).filter((item) => item.kind === "message_delta");
+  assert.equal(deltas.map((item) => item.text).join(""), text);
+  for (const [index, delta] of deltas.entries()) {
+    const raw = Buffer.byteLength(delta.text);
+    const json = Buffer.byteLength(JSON.stringify(delta.text));
+    assert(raw <= 16384 && json <= FRAME_TEXT_MAX, `chunk ${index} has ${raw} raw and ${json} JSON bytes`);
+    assert(encodeEvent("s".repeat(128), "i".repeat(128), 18446744073709551615n, delta).byteLength <= 65540);
+    const next = deltas[index + 1]?.text;
+    if (next === undefined) continue;
+    const scalar = String.fromCodePoint(next.codePointAt(0));
+    assert(raw + Buffer.byteLength(scalar) > 16384 || json + Buffer.byteLength(JSON.stringify(scalar)) - 2 > FRAME_TEXT_MAX);
+  }
 });
 
 test("closed projections reject further events and invalid turn identities fail admission", () => {

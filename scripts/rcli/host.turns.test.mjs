@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { FRAME_TEXT_MAX, encodeEvent } from "./host.codec.ts";
 import { SdkTurnProjection } from "./host.turns.ts";
 const control = (request, body) => ({ protocol_version: 1, session_id: "session", request_id: request, control: body });
 const prompt = (id, text = "do the work") => control(`request-${id}`, { kind: "prompt", turn_id: id, text });
@@ -151,4 +152,16 @@ const state = new SdkTurnProjection();
 state.admit(prompt("one"));
 state.turns.set("other", state.turns.get("one"));
 assert.throws(() => state.admit(prompt("two")), /host_turn_state_invariant/);
+});
+test("input questions are bounded by their combined JSON size so an admitted question always encodes", () => {
+const options = Array(8).fill("\u0001".repeat(1024));
+const question = "\u0001".repeat(2555) + "xx";
+assert.equal(Buffer.byteLength(JSON.stringify([question, ...options])), FRAME_TEXT_MAX);
+const state = new SdkTurnProjection();
+state.admit(prompt("one")); start(state, "one");
+assert.throws(() => ask(state, [{ question: `${question}x`, options }], "too-large"), /host_turn_rejected/);
+const [frame] = ask(state, [{ question, options }]);
+assert.deepEqual(frame, { kind: "input", turn_id: "one", prompt_id: "input-1", question, choices: options });
+const id = "a".repeat(128);
+assert(encodeEvent(id, id, 18446744073709551615n, { ...frame, turn_id: id, prompt_id: id }).byteLength <= 65540);
 });

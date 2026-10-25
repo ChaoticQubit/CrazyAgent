@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
-import { identifier, type Control, type EventBody } from "./host.codec.ts";
+import { FRAME_TEXT_MAX, identifier, type Control, type EventBody } from "./host.codec.ts";
 import { SdkMessageProjection } from "./host.messages.ts";
 import { normalizeSdkObservation, observationRecord } from "./host.observations.ts";
 type InputFrame = Extract<EventBody, { kind: "input" }>;
@@ -150,7 +150,9 @@ if (this.inputIds.has(id) || !Array.isArray(event.request.questions) || event.re
 const questions = event.request.questions.map((question) => {
 const text = bounded(question.question, 4096);
 if (!Array.isArray(question.options) || question.options.length > 8) reject();
-return { question: text, options: question.options.map((option) => bounded(option, 1024)) };
+const options = question.options.map((option) => bounded(option, 1024));
+if (Buffer.byteLength(JSON.stringify([text, ...options]), "utf8") > FRAME_TEXT_MAX) reject();
+return { question: text, options };
 });
 const pending: PendingInput = { id, questions, answers: [], promptId: this.inputId(), awaitingResponse: false };
 turn.input = pending;
