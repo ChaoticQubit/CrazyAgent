@@ -794,11 +794,12 @@ async fn desktop_native_auth_cancelled_sign_in_releases_settings_changes() {
             fixture.owner_fact(&cancelled).await.fact.phase,
             NativeAuthPhase::Cancelled
         );
-        let alive = std::process::Command::new("/bin/kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
+        let alive = crazyagent::spawn_gate::status(
+            std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
         assert!(!alive.success(), "cancel stops the real login child");
         add_account_ref(&mut bridge, "account-after-cancel", 1).await;
     })
