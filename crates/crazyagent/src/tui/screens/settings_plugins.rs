@@ -1550,6 +1550,10 @@ impl EditServer {
         if self.changing.is_some() {
             return;
         }
+        if self.target.value() == self.server.runs {
+            ctx.say(Message::success("Nothing changed.", ""));
+            return;
+        }
         let url = matches!(self.server.spec, ServerSpec::Http { .. });
         match target_spec(url, self.target.value()) {
             Err(reason) => self.target.error = Some(reason.into()),

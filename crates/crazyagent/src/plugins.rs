@@ -111,18 +111,24 @@ impl ServerSpec {
     }
 
     /// Writes what the server runs as one plain line, such as `/usr/bin/uvx mcp-server-x`.
+    /// A word that is empty or holds whitespace, a quote or a backslash, the command
+    /// included, is single-quoted, so the line reads back as the same words.
     pub fn runs(&self) -> String {
         match self {
             Self::Stdio { command, args } => {
-                let mut line = command.clone();
-                for arg in args {
-                    line.push(' ');
-                    if arg.is_empty() || arg.contains(char::is_whitespace) {
+                let mut line = String::new();
+                for word in std::iter::once(command).chain(args) {
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    let quoted = word.is_empty()
+                        || word.contains(|c: char| c.is_whitespace() || c == '\'' || c == '\\');
+                    if quoted {
                         line.push('\'');
-                        line.push_str(&arg.replace('\'', "'\\''"));
+                        line.push_str(&word.replace('\'', "'\\''"));
                         line.push('\'');
                     } else {
-                        line.push_str(arg);
+                        line.push_str(word);
                     }
                 }
                 line
