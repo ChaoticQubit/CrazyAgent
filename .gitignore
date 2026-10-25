@@ -16,4 +16,4 @@ credentials/
 *.pfx
 docs/
 research_notes/
-reports/
+reports/apps/desktop/src-tauri/binaries/
