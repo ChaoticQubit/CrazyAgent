@@ -124,7 +124,7 @@ mod tests {
     async fn tui_accounts_requests_reach_the_real_engine() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacct-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");

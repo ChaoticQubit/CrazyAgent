@@ -54,7 +54,7 @@ impl Engine {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -76,7 +76,7 @@ impl Engine {
         .unwrap();
         let home = tempfile::Builder::new()
             .prefix("ca-setup-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let engine = Self {
             root,
@@ -864,10 +864,10 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
         (ResearchStatus::Running, true)
     );
     assert!(
-        store.heartbeat(first, "runner-test", 64).unwrap(),
+        store.heartbeat(&claimed, 64).unwrap(),
         "the runner's heartbeat sees the stop and kills the agent's process group"
     );
-    store.cancelled(first, "runner-test").unwrap();
+    store.cancelled(&claimed).unwrap();
     assert_eq!(
         owner.research_jobs(project.clone()).await.unwrap()[0].status,
         ResearchStatus::Cancelled

@@ -245,7 +245,7 @@ impl Folders {
     fn new(prepare: impl FnOnce(&Path)) -> Self {
         let runtime = tempfile::Builder::new()
             .prefix("ca-onboard-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = runtime.path().canonicalize().unwrap();
@@ -257,7 +257,7 @@ impl Folders {
         fs::set_permissions(&project_settings, fs::Permissions::from_mode(0o600)).unwrap();
         let repos = tempfile::Builder::new()
             .prefix("ca-onboard-repos-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let repo = repos.path().canonicalize().unwrap().join(PROJECT);
         rust_repo(&repo);

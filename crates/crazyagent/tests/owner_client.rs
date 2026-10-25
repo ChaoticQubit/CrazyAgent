@@ -66,7 +66,7 @@ async fn owner_fixture() -> (
 ) {
     let root = tempfile::Builder::new()
         .prefix("ca-owner-test-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
@@ -856,7 +856,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
 
 #[tokio::test]
 async fn owner_root_and_socket_replacement_preserve_unknown_artifacts() {
-    let parent = tempfile::tempdir_in("/private/tmp").unwrap();
+    let parent = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let runtime = parent.path().join("runtime");
     std::fs::create_dir(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1538,7 +1538,7 @@ async fn owner_approves_real_coordination_plan_and_discovers_it_without_launch_c
 async fn owner_socket_authenticates_reconnects_and_reconciles_exact_mutation() {
     let root = tempfile::Builder::new()
         .prefix("ca-owner-live-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
@@ -1685,7 +1685,7 @@ async fn owner_socket_authenticates_reconnects_and_reconciles_exact_mutation() {
 async fn worker_socket_rejects_owner_namespace_before_mutation() {
     let root = tempfile::Builder::new()
         .prefix("ca-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("global"), &root.path().join("project")).unwrap();
@@ -1776,7 +1776,7 @@ fn worker_decoder_preserves_every_privileged_command_denial() {
 async fn legacy_actor_rejects_owner_namespace_before_mutation() {
     let root = tempfile::Builder::new()
         .prefix("ca-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("global"), &root.path().join("project")).unwrap();

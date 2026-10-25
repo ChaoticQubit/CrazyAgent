@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::resolve_config;
 use crazyagent::engine::Client;
@@ -582,4 +584,41 @@ async fn revoked_pending_fixture(
         return Err("actual revoked delivery must leave unresolved intent".into());
     }
     Ok(bridge)
+}
+
+#[tokio::test]
+async fn without_the_socket_variable_the_bridge_finds_the_engine_at_the_default_root() {
+    use crazyagent::paths::{Platform, RootEnvironment, data_root};
+    use crazyagent_desktop::desktop_socket;
+
+    let home = tempfile::Builder::new()
+        .prefix("ca-dhome-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let env = RootEnvironment {
+        home: Some(home.path().into()),
+        ..RootEnvironment::default()
+    };
+    let root = data_root(Platform::CURRENT, &env).unwrap();
+    assert!(root.starts_with(home.path()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = desktop_socket(None, &env);
+    assert_eq!(socket, Some(root.join("engine.sock")));
+    assert_eq!(desktop_socket(Some("".into()), &env), socket);
+    assert_eq!(
+        desktop_socket(Some("/chosen/e.sock".into()), &env),
+        Some("/chosen/e.sock".into())
+    );
+    assert_eq!(desktop_socket(None, &RootEnvironment::default()), None);
+    let config = resolve_config(&root.join("g"), &root.join("p")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(&root, "engine.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut bridge = NativeBridge::new(socket);
+    let connected = bridge.connect().await;
+    let cleanup = service.shutdown().await;
+    assert!(cleanup.is_ok(), "real engine cleanup failed");
+    assert!(connected.unwrap().connected);
 }

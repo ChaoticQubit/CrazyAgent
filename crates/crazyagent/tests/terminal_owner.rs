@@ -67,7 +67,7 @@ async fn closed(output: &mut TerminalOutput) -> String {
 async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
     let root = tempfile::Builder::new()
         .prefix("ca-term-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

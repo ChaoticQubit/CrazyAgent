@@ -462,3 +462,49 @@ async fn actual_owner_offline_rejects_settlement_without_rewriting_the_committed
     assert_eq!(result.err().unwrap().0, "owner_runtime_stale");
     assert_eq!(after, before);
 }
+
+#[tokio::test]
+async fn a_turn_submitted_after_a_stopped_prepared_turn_is_admitted_on_its_own_attempt_chain() {
+    let (case, request, applied) = fresh_case(true, PROMPT, 0).await;
+    let (case, binding) = bind_actual(case, &request, &applied).await;
+    let (mut case, first) = prepare_actual(case).await;
+    let stopped = settle(&case, &case.started.host, &binding);
+    let (second, submitted) = apply_actual(&case, 0, "stop-second-submit", MasterOwnerAction::Submit {
+        project_id: case.session.project_id.clone(), session_id: case.session.session_id.clone(),
+        text: PROMPT.into(),
+    }).await;
+    let state = owner_read(&case.storage, &case.started, OwnerRead::ProjectMasterTurns {
+        project_id: case.session.project_id.clone(), session_id: case.session.session_id.clone(),
+        cursor: None, limit: 2,
+    }).await;
+    let OwnerData::ProjectMasterTurns { page } = state.data else {
+        case.close().await;
+        panic!("actual turn page required after the second submit");
+    };
+    let Some(turn) = page.turns.into_iter().find(|turn| turn.id == second.request_id) else {
+        case.close().await;
+        panic!("actual second submitted turn required");
+    };
+    case.turn = turn;
+    case.session = canonical(&case).0;
+    let ordinal = case.turn.ordinal;
+    let admitted = case.runtime(case.prepare()).await;
+    case.close().await;
+    assert_eq!(stopped.unwrap().phase, MasterTurnPhase::Cancelled);
+    assert_eq!(result_tag(&submitted), "Applied");
+    assert_eq!(ordinal, 2);
+    match admitted {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => {
+            assert_eq!(prepared.session.current_turn.as_ref(), Some(&second.request_id));
+            assert_ne!(prepared.attempt.request.id, first.attempt.request.id);
+            assert_ne!(prepared.attempt.request.task_id, first.attempt.request.task_id);
+            assert!(prepared.attempt.request.previous_attempt.is_none());
+            assert!(prepared.attempt.completion.is_none());
+        }
+        Ok(MasterRuntimeResult::Turn(turn)) => {
+            panic!("second turn not admitted: phase={:?} reason={:?}", turn.phase, turn.reason)
+        }
+        Ok(_) => panic!("second turn: another runtime result"),
+        Err(failure) => panic!("second turn: {}", failure.0),
+    }
+}

@@ -35,6 +35,10 @@ pub(crate) enum NativeProfileUsePurpose {
 /// method below is unreachable by construction.
 pub(crate) enum NativeProfileCustody {}
 
+/// A held native profile lock for settling a stale sign-in, which cannot exist without
+/// native profile custody. No value is ever made.
+pub(crate) enum NativeProfileRelease {}
+
 /// A held native profile lease, which cannot exist without native profile custody.
 /// No value is ever made, so every method below is unreachable by construction.
 pub(crate) enum NativeProfileUse {}
@@ -75,6 +79,14 @@ impl NativeProfileCustody {
     /// Returns `native_profile_custody_unavailable`.
     pub(crate) fn capture(_path: &Path, _opened: &Metadata) -> Result<Self, EngineError> {
         Err(EngineError("native_profile_custody_unavailable".into()))
+    }
+
+    pub(crate) fn hold_released_profile(
+        &self,
+        _host: &HostStamp,
+        _key: &str,
+    ) -> Result<Option<NativeProfileRelease>, EngineError> {
+        match *self {}
     }
 
     pub(crate) fn profile_home(&self, _profile_ref: &CredentialRef) -> PathBuf {

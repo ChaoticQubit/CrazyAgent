@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 mod engine_support;
 
 use crazyagent::engine::bootstrap::EngineService;

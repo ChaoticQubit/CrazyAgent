@@ -20,6 +20,8 @@ mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
 mod migrations;
+#[cfg(all(test, unix))]
+pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     native_sign_in, validate_configured_initial_conversation_receipt,
@@ -78,6 +80,10 @@ pub(crate) enum Job {
     NativeAuthCustodyLost(
         Arc<NativeAuthDispatch>,
         oneshot::Sender<Result<NativeAuthFact, EngineError>>,
+    ),
+    NativeAuthCustodyReleased(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
     ),
     NativeAuth(
         Admission,
@@ -347,6 +353,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &native_auth::dispatch_host(&dispatch),
+                                    Some(dispatch.fact()),
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::NativeAuth(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
@@ -454,6 +473,14 @@ impl Storage {
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
+                                if let Err(error) = native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &started.host,
+                                    None,
+                                ) {
+                                    eprintln!("native_auth_recovery_deferred cause={}", error.0);
+                                }
                             }
                             let _ = reply.send(result);
                         }
@@ -3474,7 +3501,7 @@ fallback_allowed = false
     -> ConfiguredInitialConversationFixture {
         let root = tempfile::Builder::new()
             .prefix("ca-cgf-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global_path = root.path().join("global.toml");
@@ -3634,7 +3661,11 @@ fallback_allowed = false
         };
         let request = AttemptRequest {
             id: RequestId::new("configured-gateway-first-attempt").unwrap(),
-            task_id: session.bootstrap_task_id.clone(),
+            task_id: master_session::turn_task_id(
+                &session.session_id,
+                session.current_turn.as_ref().unwrap(),
+            )
+            .unwrap(),
             project_id: project,
             role: crate::coordination::Role::ProjectLeader,
             pool_ref: session.selection.pool_ref.clone(),

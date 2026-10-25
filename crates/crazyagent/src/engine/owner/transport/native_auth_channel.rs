@@ -1163,16 +1163,32 @@ impl Authority {
                 if !slot.retained && !slot.expired {
                     return task_error.map_or(Ok(()), Err);
                 }
-                let dispatch = (!slot.committed).then(|| slot.dispatch.clone()).flatten();
-                current.take();
+                let Some(dispatch) = (!slot.committed).then(|| slot.dispatch.clone()).flatten()
+                else {
+                    current.take();
+                    drop(current);
+                    self.native_auth_changed.notify_waiters();
+                    return task_error.map_or(Ok(()), Err);
+                };
+                current.as_mut().unwrap().cleaning = true;
                 dispatch
             };
+            let released = engine
+                .native_auth_job(|reply| Job::NativeAuthCustodyReleased(dispatch, reply))
+                .await;
+            {
+                let mut current = self
+                    .native_auth
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                assert!(current.as_ref().is_some_and(|slot| slot.cleaning
+                    && slot.child.is_none()
+                    && slot.dispatch_task.is_none()));
+                current.take();
+            }
             self.native_auth_changed.notify_waiters();
-            if let Some(dispatch) = dispatch
-                && let Err(error) = engine
-                    .native_auth_job(|reply| Job::NativeAuthCustodyLost(dispatch, reply))
-                    .await
-                && custody_loss_undelivered(&error)
+            if let Err(error) = released
+                && custody_release_undelivered(&error)
             {
                 return Err(error);
             }
@@ -1181,11 +1197,11 @@ impl Authority {
     }
 }
 
-/// Tells whether recording a lost custody may not have reached the storage actor.
+/// Tells whether releasing an ended dispatch may not have reached the storage actor.
 /// Input: the error from that job. Output: true when the job was not queued or its
 /// reply never arrived. False when storage answered with a refusal, which means the
 /// dispatch scope already changed and its durable fence stays in place for recovery.
-fn custody_loss_undelivered(error: &EngineError) -> bool {
+fn custody_release_undelivered(error: &EngineError) -> bool {
     error.0 == "owner_queue_not_submitted"
         || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
@@ -2165,7 +2181,7 @@ fallback_allowed = false
         async fn open_with(catalog: &str, action: NativeAuthAction) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-auth-observe-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let global = root.path().join("g.toml");

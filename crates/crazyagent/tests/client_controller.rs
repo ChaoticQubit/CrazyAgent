@@ -181,7 +181,7 @@ async fn page(client: &OwnerClient, id: &str) -> crazyagent::engine::owner::Owne
 async fn paused_owned_cli_queues_late_delivery_with_real_receipt_and_one_effect() {
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -292,7 +292,7 @@ async fn paused_owned_cli_queues_late_delivery_with_real_receipt_and_one_effect(
 async fn bootstrap_retains_real_host_control_until_shutdown() {
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config =
@@ -327,7 +327,7 @@ async fn real_host_revoke_reactivate_keeps_other_kind_live() {
     use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config =
@@ -442,7 +442,7 @@ async fn real_host_revoke_reactivate_keeps_other_kind_live() {
 async fn owned_paused_child_is_reaped_during_panic_cleanup() {
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -465,7 +465,7 @@ async fn controller_failed_read_preserves_stale_bounded_state() {
     use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config =
@@ -517,7 +517,7 @@ async fn controller_reads_both_kinds_and_rejects_out_of_bounds_or_wrong_root() {
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config =
@@ -619,7 +619,7 @@ async fn controller_cancellation_retains_exact_intent_before_await() {
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -679,11 +679,11 @@ async fn controller_refuses_different_database_with_pending_intent() {
     use crazyagent::client_controller::OwnerController;
     let first = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let second = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     for root in [first.path(), second.path()] {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -729,7 +729,7 @@ async fn controller_reconcile_barrier_retains_then_real_receipt_settles() {
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -824,7 +824,7 @@ async fn controller_exact_retry_retains_submitted_generation_and_owner_isolation
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -924,7 +924,7 @@ async fn controller_epoch_reconnect_invalidates_cursor_and_preserves_known_pendi
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut first = OwnedCli::start(root.path());
@@ -1013,7 +1013,7 @@ async fn controller_stale_decision_is_inner_rejected_not_success() {
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut process = OwnedCli::start(root.path());
@@ -1091,7 +1091,7 @@ async fn controller_preserves_actual_unavailable_verification_outcome() {
     use crazyagent::client_controller::OwnerController;
     let root = tempfile::Builder::new()
         .prefix("ca-ctl-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config =
@@ -1249,7 +1249,7 @@ mod project_creation {
     fn root() -> tempfile::TempDir {
         let root = tempfile::Builder::new()
             .prefix("ca-create-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         root

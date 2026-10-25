@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent_desktop::bridge::open::{context_file, link_allowed, project_folder};
 use std::os::unix::fs::symlink;
 

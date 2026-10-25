@@ -87,7 +87,7 @@ fn git_entries(folder: &Path) -> Vec<(PathBuf, bool)> {
 async fn a_team_agent_of_an_onboarded_repo_works_on_the_owners_code() {
     let runtime = tempfile::Builder::new()
         .prefix("ca-root-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let root = runtime.path().canonicalize().unwrap();
@@ -97,7 +97,7 @@ async fn a_team_agent_of_an_onboarded_repo_works_on_the_owners_code() {
     let settings = root.join("project.toml");
     let repos = tempfile::Builder::new()
         .prefix("ca-root-repos-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let repo = repos.path().canonicalize().unwrap().join(PROJECT);
     fs::create_dir_all(repo.join("src")).unwrap();

@@ -179,7 +179,7 @@ impl Engine {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-page-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -303,7 +303,7 @@ fn pool_choices_count_accounts_and_the_harnesses_they_run_on() {
 fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
     let bin = tempfile::Builder::new()
         .prefix("ca-tui-harnesses-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     for name in ["codex", "opencode", "cursor-agent"] {
         let path = bin.path().join(name);

@@ -127,7 +127,7 @@ mod tests {
         let real_default = read(&real_home, &["default-keychain", "-d", "user"]);
         let root = tempfile::Builder::new()
             .prefix("ca-keychain-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let home = root.path().join("home");
         std::fs::create_dir(&home).unwrap();

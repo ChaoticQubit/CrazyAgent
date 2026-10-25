@@ -177,7 +177,7 @@ impl Drop for Runner {
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-rd-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     root

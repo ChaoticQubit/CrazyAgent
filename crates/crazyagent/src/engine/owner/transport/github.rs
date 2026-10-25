@@ -167,6 +167,12 @@ impl OwnerClient {
     }
 }
 
+/// Encodes this protocol's refusal of a request the engine did not run.
+/// Input: the refusal code. Output: the reply frame.
+pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
+    encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
+}
+
 /// Serves one GitHub owner request after the owner exchange deadline: the action runs
 /// under its own budget (75 s, a clone 1900 s) and the reply write under the owner wait.
 /// Inputs: the stream, engine, authority, owner packet, admission and request bytes.

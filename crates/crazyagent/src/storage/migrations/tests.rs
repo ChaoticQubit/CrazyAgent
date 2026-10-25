@@ -52,7 +52,7 @@ impl Root {
     fn new() -> Self {
         let dir = tempfile::Builder::new()
             .prefix("ca-mig-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let root = Self { dir };

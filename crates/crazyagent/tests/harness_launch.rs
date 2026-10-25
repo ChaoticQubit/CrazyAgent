@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
@@ -19,7 +19,7 @@ static LOCAL_MODEL_OWNER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn private_dir(prefix: &str) -> tempfile::TempDir {
     let directory = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     directory

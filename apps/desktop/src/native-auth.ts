@@ -6,7 +6,7 @@ export type NativeAuthCommand = NativeAuthMethod | "read" | "cancel" | "logout";
 export type NativeAuthAction = { kind: "sign_in"; method: NativeAuthMethod } | { kind: "logout" };
 export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account" |
   "authenticated_observed" | "unauthenticated_observed" | "cancelling" |
-  "unavailable" | "uncertain";
+  "failed" | "cancelled" | "unavailable" | "uncertain";
 type StatusField = { state: "missing" } | { state: "null" } | { state: "value"; text: string };
 type Challenge = { kind: "codex_browser"; auth_url: string } |
   { kind: "codex_device_code"; user_code: string; verification_url: string } |

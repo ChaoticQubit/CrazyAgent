@@ -240,12 +240,13 @@ test("a failed research row shows its plain reason and Try again", async () => {
 
 test("a stopped or failed master turn offers its own message to send again", () => {
   const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: phase === "succeeded" ? { text: "hi" } : null });
-  assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { 1: "first", 2: "second" }), "second");
-  assert.equal(research.resendText([turn(1, "cancelled")], { 1: "first" }), "first");
-  assert.equal(research.resendText([turn(2, "blocked"), turn(1, "succeeded")], { 1: "a", 2: "b" }), "b");
-  assert.equal(research.resendText([turn(1, "failed"), turn(2, "succeeded")], { 1: "first", 2: "second" }), null);
-  assert.equal(research.resendText([turn(1, "running")], { 1: "first" }), null);
+  assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { t1: "first", t2: "second" }), "second");
+  assert.equal(research.resendText([turn(1, "cancelled")], { t1: "first" }), "first");
+  assert.equal(research.resendText([turn(2, "blocked"), turn(1, "succeeded")], { t1: "a", t2: "b" }), "b");
+  assert.equal(research.resendText([turn(1, "failed"), turn(2, "succeeded")], { t1: "first", t2: "second" }), null);
+  assert.equal(research.resendText([turn(1, "running")], { t1: "first" }), null);
   assert.equal(research.resendText([turn(1, "failed")], {}), null);
+  assert.equal(research.resendText([turn(1, "failed")], { 1: "guessed from the ordinal" }), null);
   assert.equal(research.resendText([], {}), null);
 });
 

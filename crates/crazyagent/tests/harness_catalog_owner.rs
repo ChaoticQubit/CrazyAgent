@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
     let root = tempfile::Builder::new()
         .prefix("ca-harness-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
@@ -52,7 +52,7 @@ async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
 async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine() {
     let root = tempfile::Builder::new()
         .prefix("ca-harness-tui-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

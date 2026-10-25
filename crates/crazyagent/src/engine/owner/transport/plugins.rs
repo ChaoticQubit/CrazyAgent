@@ -464,6 +464,12 @@ impl Engine {
     }
 }
 
+/// Encodes this protocol's refusal of a request the engine did not run.
+/// Input: the refusal code. Output: the reply frame.
+pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
+    encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
+}
+
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
