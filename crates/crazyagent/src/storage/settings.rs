@@ -275,7 +275,50 @@ impl SettingsSources {
     /// Takes the database and pending change, both unused.
     /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
     #[cfg(not(unix))]
-    fn publish(&self, _db: &Connection, _pending: &mut Pending) -> Result<(), EngineError> {
+    fn publish(&self, _db: &Connection, _pending: &mut Pending) -> Result<bool, EngineError> {
+        Err(error("settings_unavailable"))
+    }
+
+    /// Publishes a journaled change into the global settings file.
+    /// Inputs: the database and the pending change. Output: true once the file holds the
+    /// change, or false when another edit changed the sources before the rename, which
+    /// proves the change never took effect and leaves that edit on disk.
+    #[cfg(unix)]
+    fn publish(&self, db: &Connection, pending: &mut Pending) -> Result<bool, EngineError> {
+        match self.replace(db, pending) {
+            Err(e) if e.0 == "settings_source_conflict" && self.unpublished(pending)? => Ok(false),
+            result => result.map(|()| true),
+        }
+    }
+
+    /// Tells whether the global file provably never received a pending change: the journal
+    /// names these sources, and its staged file was either never bound or still sits at the
+    /// temporary name that the rename would have moved. Input: the pending change.
+    #[cfg(unix)]
+    fn unpublished(&self, pending: &Pending) -> Result<bool, EngineError> {
+        if pending.old.source_id != self.source_id {
+            return Ok(false);
+        }
+        let Some(staged) = pending.new_identity else {
+            return Ok(true);
+        };
+        self.global.verify()?;
+        match rustix::fs::statat(
+            &self.global.parent,
+            pending.temporary.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(named) => Ok((named.st_dev as u64, named.st_ino) == staged),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(e) => Err(error(e)),
+        }
+    }
+
+    /// Refuses to remove a staged settings file without directory-relative unlinks.
+    /// Takes the file name, unused.
+    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
+    #[cfg(not(unix))]
+    fn remove_temporary(&self, _name: &str) -> Result<(), EngineError> {
         Err(error("settings_unavailable"))
     }
 
@@ -300,8 +343,11 @@ impl SettingsSources {
         self.global.parent.sync_all().map_err(error)
     }
 
+    /// Stages the pending change in its temporary file and renames it over the global file.
+    /// Inputs: the database and the pending change. Output: unit once the global file holds
+    /// the change, or the error that stopped it.
     #[cfg(unix)]
-    fn publish(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
+    fn replace(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
         let current = self.snapshot()?;
         if current.source_id != pending.old.source_id || current.project != pending.old.project {
             return Err(error("settings_source_conflict"));
@@ -496,7 +542,10 @@ pub(super) fn recover(
     if u64::try_from(revision).map_err(error)? != pending.revision {
         return Err(error("settings_pending_revision_conflict"));
     }
-    sources.publish(db, &mut pending)?;
+    if !sources.publish(db, &mut pending)? {
+        abandon(db, sources, &pending)?;
+        return Ok(());
+    }
     finalize(db, &pending, &next)?;
     *config = next;
     Ok(())
@@ -657,12 +706,39 @@ pub(super) fn apply(
             tx.execute("INSERT INTO settings_publication VALUES(1,?1)", [body])
                 .map_err(error)?;
             tx.commit().map_err(error)?;
-            sources.publish(db, &mut pending)?;
+            if !sources.publish(db, &mut pending)? {
+                return abandon(db, sources, &pending);
+            }
             let result = finalize(db, &pending, &next)?;
             *config = next;
             Ok(result)
         }
     }
+}
+
+/// Settles a journaled change that another edit overtook before the rename: records the
+/// request as rejected with settings_source_conflict and clears the journal, then removes
+/// the staged file, leaving that edit on disk. Inputs: the database, sources and change.
+/// Output: the recorded rejection.
+fn abandon(
+    db: &mut Connection,
+    sources: &SettingsSources,
+    pending: &Pending,
+) -> Result<OwnerApplied, EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let applied = rejected(
+        &tx,
+        &pending.admission,
+        &pending.request,
+        "settings_source_conflict".into(),
+    )?;
+    tx.execute("DELETE FROM settings_publication WHERE singleton=1", [])
+        .map_err(error)?;
+    tx.commit().map_err(error)?;
+    sources.remove_temporary(&pending.temporary)?;
+    Ok(applied)
 }
 
 fn reject(
@@ -675,7 +751,21 @@ fn reject(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_admission(&tx, a)?;
-    let revision = owner_revision(&tx)?;
+    let applied = rejected(&tx, a, request, code)?;
+    tx.commit().map_err(error)?;
+    Ok(applied)
+}
+
+/// Records an owner request as rejected, with no revision change and no event.
+/// Inputs: an open transaction, the request's admission, the request and the code.
+/// Output: the recorded result and its provenance.
+fn rejected(
+    tx: &Transaction<'_>,
+    a: &Admission,
+    request: &OwnerRequest,
+    code: String,
+) -> Result<OwnerApplied, EngineError> {
+    let revision = owner_revision(tx)?;
     let result = OwnerResult::Rejected { code };
     let provenance = OwnerProvenance {
         origin: "native_owner".into(),
@@ -690,12 +780,11 @@ fn reject(
         event_cursor: None,
     };
     owner_record(
-        &tx,
+        tx,
         &provenance,
         &Sha256::digest(serde_json::to_vec(request).map_err(error)?),
         &serde_json::to_vec(&result).map_err(error)?,
     )?;
-    tx.commit().map_err(error)?;
     Ok(OwnerApplied {
         result,
         provenance,
