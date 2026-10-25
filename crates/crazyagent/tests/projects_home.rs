@@ -234,7 +234,7 @@ fn move_renames_into_the_home_and_copy_keeps_the_source_and_its_links() {
     let case = case();
     let moved = case.sources.join("moved");
     sample(&moved);
-    let plan = plan_add(&case.home, &case.engine, text(&moved), AddMode::Move).unwrap();
+    let plan = plan_add(&case.home, &case.engine, text(&moved), AddMode::Move, &[]).unwrap();
     assert_eq!(plan.source(), moved.as_path());
     assert_eq!(plan.destination(), case.home.join("moved").as_path());
     plan.run().unwrap();
@@ -247,7 +247,7 @@ fn move_renames_into_the_home_and_copy_keeps_the_source_and_its_links() {
 
     let copied = case.sources.join("copied");
     sample(&copied);
-    plan_add(&case.home, &case.engine, text(&copied), AddMode::Copy)
+    plan_add(&case.home, &case.engine, text(&copied), AddMode::Copy, &[])
         .unwrap()
         .run()
         .unwrap();
@@ -357,7 +357,7 @@ fn special_files_are_refused_and_nothing_is_left_behind() {
     let _listener = crazyagent::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
     let before = names(&source);
 
-    let refused = plan_add(&case.home, &case.engine, text(&source), AddMode::Copy)
+    let refused = plan_add(&case.home, &case.engine, text(&source), AddMode::Copy, &[])
         .unwrap()
         .run()
         .unwrap_err();
@@ -458,7 +458,7 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     ] {
         for mode in [AddMode::Move, AddMode::Copy] {
             assert_eq!(
-                plan_add(&case.home, &case.engine, &picked, mode)
+                plan_add(&case.home, &case.engine, &picked, mode, &[])
                     .unwrap_err()
                     .0,
                 code,
@@ -469,7 +469,7 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     }
     assert!(source.is_dir() && owner.is_dir() && case.engine.join("inside").is_dir());
     assert_eq!(names(&case.home), ["inner", "taken"]);
-    plan_add(&case.home, &case.engine, text(&source), AddMode::Move).unwrap();
+    plan_add(&case.home, &case.engine, text(&source), AddMode::Move, &[]).unwrap();
     assert!(source.is_dir());
 }
 
@@ -775,4 +775,115 @@ fn a_home_move_across_disks_puts_back_a_folder_whose_source_could_not_be_deleted
             );
         }
     }
+}
+
+fn repo_with_worktree(repo: &Path, worktree: &Path) {
+    fs::create_dir_all(repo).unwrap();
+    fs::write(repo.join("README.md"), "hello\n").unwrap();
+    git(repo, &["init", "-q"]);
+    git(repo, &["add", "README.md"]);
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=Owner",
+            "-c",
+            "user.email=owner@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ],
+    );
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            worktree.to_str().unwrap(),
+        ],
+    );
+}
+
+#[test]
+fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_still_works() {
+    let case = case();
+    let repo = case.sources.join("repo");
+    let worktree = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &worktree);
+    let link = fs::read_to_string(worktree.join(".git")).unwrap();
+    for source in [&repo, &worktree] {
+        assert_eq!(
+            plan_add(&case.home, &case.engine, text(source), AddMode::Move, &[])
+                .unwrap_err()
+                .0,
+            "home_move_worktrees",
+            "{}",
+            source.display()
+        );
+    }
+    assert!(plain_problem("home_move_worktrees").is_some());
+    let copy = plan_add(&case.home, &case.engine, text(&repo), AddMode::Copy, &[]).unwrap();
+    assert_eq!(copy.destination(), case.home.join("repo").as_path());
+
+    let outer = case.sources.join("outer");
+    let project = outer.join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    let registered = [Registered {
+        project_id: ProjectId::new("project").unwrap(),
+        name: "project".into(),
+        folder: project.clone(),
+        onboarding: false,
+    }];
+    for source in [&outer, &project, &project.join("src")] {
+        assert_eq!(
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(source),
+                AddMode::Move,
+                &registered
+            )
+            .unwrap_err()
+            .0,
+            "home_move_project",
+            "{}",
+            source.display()
+        );
+    }
+    assert!(plain_problem("home_move_project").is_some());
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&outer),
+        AddMode::Copy,
+        &registered,
+    )
+    .unwrap();
+
+    let plain = case.sources.join("plain");
+    sample(&plain);
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&plain),
+        AddMode::Move,
+        &registered,
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+    assert!(!plain.exists() && case.home.join("plain").join("README.md").is_file());
+
+    assert!(repo.join(".git").is_dir() && project.is_dir());
+    assert_eq!(fs::read_to_string(worktree.join(".git")).unwrap(), link);
+    assert_eq!(
+        git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "side\n"
+    );
+    assert!(git(&repo, &["worktree", "list"]).contains("repo-side"));
+    assert_eq!(names(&case.home), ["plain"]);
 }

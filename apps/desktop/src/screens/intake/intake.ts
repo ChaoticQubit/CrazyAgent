@@ -95,15 +95,20 @@ export function joinPath(root: string, name: string): string {
   return `${trimSlash(root)}${separator}${name}`;
 }
 
-/** Says what Move or Copy does; Copy shows the size first and warns above 1 GB.
- * Inputs: the mode, the folder size or null while it is read, and the projects folder.
+/** How the owner adds an existing folder: set it up where it is (the default, nothing on disk
+ * moves), or explicitly move or copy it into the projects folder. */
+export type AddWay = "here" | AddFolderMode;
+
+/** Says what using the folder where it is, Move or Copy does; Copy shows the size first and warns
+ * above 1 GB. Inputs: the way, the folder size or null while it is read, and the projects folder.
  * Output: the sentence and whether it is a warning. */
-export function sizeLine(mode: AddFolderMode, bytes: number | null, home: string): { text: string; warn: boolean } {
+export function sizeLine(mode: AddWay, bytes: number | null, home: string): { text: string; warn: boolean } {
   const where = folderLabel(home);
+  if (mode === "here") return { text: "Sets it up where it is. Nothing is moved or copied.", warn: false };
   if (mode === "move") return { text: `Moves the folder into ${where}. It won't stay at its old place.`, warn: false };
   if (bytes === null) return { text: "Checking the folder size...", warn: false };
   if (bytes > COPY_WARN_BYTES) {
-    return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Move is instant on the same disk.`, warn: true };
+    return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Using it where it is needs no copy.`, warn: true };
   }
   return { text: `Copies ${formatBytes(bytes)} into ${where}. The original stays where it is.`, warn: false };
 }

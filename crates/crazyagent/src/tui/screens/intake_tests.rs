@@ -314,6 +314,40 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_existing_folder_is_set_up_where_it_is_by_default() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let source = engine.user().join("outside").join("shop");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+    assert!(shows(&rows, "( ) Move"), "{rows:#?}");
+    assert!(shows(&rows, "Stays where it is"), "{rows:#?}");
+    assert!(shows(&rows, "Set up here"), "{rows:#?}");
+    assert!(!shows(&rows, "Goes to "), "{rows:#?}");
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"add existing"), "{sent:?}");
+    assert!(source.join("README.md").exists());
+    assert!(!home.join("shop").exists());
+    assert_eq!(
+        shell.place(),
+        Some(Place::Onboarding {
+            path: source.canonicalize().unwrap().to_str().unwrap().into(),
+            name: "shop".into(),
+            project: None,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
@@ -331,8 +365,10 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     keys(&mut shell, &format!("{}/", source.display()));
     shell.key(Key::Tab);
     shell.key(Key::Right);
+    shell.key(Key::Right);
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
+    assert!(shows(&rows, "Goes to "), "{rows:#?}");
     assert!(shows(&rows, "Check size"), "{rows:#?}");
     shell.key(Key::Enter);
     assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
@@ -342,6 +378,17 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     assert!(shows(&rows, "Copy anyway"), "{rows:#?}");
 
     shell.key(Key::Left);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "(*) Move"), "{rows:#?}");
+    assert!(shows(&rows, "Goes to "), "{rows:#?}");
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "won't stay at its old place"), "{rows:#?}");
+    assert!(shows(&rows, "Move it now"), "{rows:#?}");
+    assert!(
+        source.join("data.bin").exists(),
+        "nothing moves before the confirm"
+    );
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");

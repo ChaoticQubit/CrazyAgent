@@ -142,7 +142,7 @@ pub(super) fn add_plan(
         return Err(error("stale_revision"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(&saved, &engine_root(path)?, source, mode)
+    home::plan_add(&saved, &engine_root(path)?, source, mode, &registered(&tx)?)
 }
 
 /// Plans a MoveProjectsHome that moves the project folders and records the
