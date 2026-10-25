@@ -28,7 +28,7 @@ test("Edit first opens the memory's own text in an editor with Save edited and C
   const markup = render({ editing: true });
   assert.match(markup, /<label[^>]*>Edit before saving<\/label>/);
   assert.match(markup, /<textarea[^>]*>Competitors charge per seat\.<\/textarea>/);
-  assert.match(markup, /maxlength="4096"/);
+  assert.match(markup, /maxLength="4096"/);
   assert.match(markup, />Save edited</);
   assert.match(markup, />Cancel</);
   assert.doesNotMatch(markup, />Edit first</);
