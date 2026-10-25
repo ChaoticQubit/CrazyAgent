@@ -25,6 +25,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
+const GIT_SAFE: [&str; 6] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+];
 static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
@@ -1458,7 +1466,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     let git = |arguments: &[&str]| -> Result<bool, RunError> {
         let mut command = Command::new(GIT);
         command
-            .args(["-c", "core.hooksPath=/dev/null"])
+            .args(GIT_SAFE)
             .args(arguments)
             .current_dir(root)
             .env_clear()
@@ -1527,19 +1535,13 @@ pub(crate) fn add_worktree(
     }
     fs::create_dir_all(&worktrees)?;
     let mut git = sandbox.command(profile, Path::new(GIT));
-    git.args([
-        "-c",
-        "core.hooksPath=/dev/null",
-        "worktree",
-        "add",
-        "-q",
-        "--detach",
-    ])
-    .arg(worktree)
-    .arg("HEAD")
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    git.args(GIT_SAFE)
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(worktree)
+        .arg("HEAD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     if !wait_bounded(crate::spawn_gate::spawn(&mut git)?, SETUP_TIMEOUT)? {
         return Err(RunError::Invalid("git worktree add failed".into()));
     }
@@ -2364,6 +2366,51 @@ mod tests {
             model: "m".into(),
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
+    }
+
+    #[test]
+    fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        let profiles = base.join("profiles");
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let marker = tmp.join("fsmonitor-ran");
+        let monitor = tmp.join("monitor.sh");
+        fs::write(
+            &monitor,
+            format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+        let configured = crate::spawn_gate::status(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&project)
+                .args(["config", "core.fsmonitor"])
+                .arg(&monitor),
+        )
+        .unwrap();
+        assert!(configured.success());
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = project.join("worktrees").join("agent-one");
+        add_worktree(&sandbox, &profile, &worktree).unwrap();
+        assert!(worktree.join(".git").is_file());
+        assert!(
+            !marker.exists(),
+            "the engine's git ran the project fsmonitor"
+        );
     }
 
     #[test]

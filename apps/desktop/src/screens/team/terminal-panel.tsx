@@ -2,7 +2,7 @@ import { Channel } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
-import { Button, Icon, NotReady, StatusBadge } from "../../ui";
+import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
 import { PROMPT_CHARS_MAX, encodeBinary, encodeTyped, endCopy, inputQueue, promptBytes, terminalEvent, terminalSize } from "./terminal-io";
@@ -47,9 +47,9 @@ function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSe
     <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} maxLength={PROMPT_CHARS_MAX} disabled={!live}
       placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
       onChange={(event) => setText(event.target.value)}
-      onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); send(); } }} />
+      onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); send(); } }} />
     <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{live ? "Sends the text, then Enter. Cmd+Enter to send." : "Opens once the terminal is live."}</span>
+      <span className="tg-terminal-note" id={`${id}-help`}>{live ? keyLabel("Sends the text, then Enter. Cmd+Enter to send.") : "Opens once the terminal is live."}</span>
       <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || blank}>Send</Button>
     </div>
   </form>;

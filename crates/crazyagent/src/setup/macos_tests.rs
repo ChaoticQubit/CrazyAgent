@@ -167,6 +167,25 @@ fn tmux_without_homebrew_and_graphify_without_uv_fail_with_plain_reasons() {
 }
 
 #[test]
+fn a_python_tool_without_a_bundled_lock_is_refused_before_uv_runs() {
+    let root = root();
+    let installer = MacInstaller::with_paths(root.path(), vec![], vec![]);
+    for (package, version) in [("headroom-ai", "0.41.1"), ("left-pad", "1.0.0")] {
+        assert_eq!(
+            installer.install_tool(package, version),
+            Err(InstallError("setup_pin_unlocked")),
+            "{package}=={version}"
+        );
+    }
+    assert_ne!(
+        plain_reason("setup_pin_unlocked"),
+        plain_reason("setup_made_up")
+    );
+    assert!(!root.path().join("setup/uv").exists());
+    assert!(!root.path().join("setup/bin/headroom").exists());
+}
+
+#[test]
 fn the_shipped_pins_name_exact_versions_and_checksums() {
     let Pin::Release {
         version,

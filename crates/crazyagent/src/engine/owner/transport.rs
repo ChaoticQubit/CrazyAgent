@@ -1794,14 +1794,10 @@ async fn serve_authenticated_owner(
             .map(|()| None);
         }
         if selector.get("accounts").is_some() {
-            return accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
-                .await
-                .map(|()| None);
+            return Ok(Some(Deferred::Accounts(a, frame)));
         }
         if selector.get("github").is_some() {
-            return github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
-                .await
-                .map(|()| None);
+            return Ok(Some(Deferred::GitHub(a, frame)));
         }
         if selector.get("account_profile").is_some() {
             return account_profile::serve(
@@ -1846,7 +1842,7 @@ async fn serve_authenticated_owner(
             serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;
         if projects_home::handles(&request) {
-            return Ok(Some((a, request)));
+            return Ok(Some(Deferred::ProjectsHome(a, Box::new(request))));
         }
         let id = request.request_id.clone();
         let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
@@ -1941,19 +1937,38 @@ async fn serve_authenticated_owner(
             .await
             .map(|()| None)
     };
-    if let Ok(Ok(Some((a, request)))) = tokio::time::timeout_at(deadline, exchange).await {
-        let _ = projects_home::serve(
-            &mut stream,
-            &engine,
-            &authority,
-            &auth,
-            &a,
-            request,
-            deadline,
-        )
-        .await;
+    match tokio::time::timeout_at(deadline, exchange).await {
+        Ok(Ok(Some(Deferred::ProjectsHome(a, request)))) => {
+            let _ = projects_home::serve(
+                &mut stream,
+                &engine,
+                &authority,
+                &auth,
+                &a,
+                *request,
+                deadline,
+            )
+            .await;
+        }
+        Ok(Ok(Some(Deferred::GitHub(a, frame)))) => {
+            let _ = github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        Ok(Ok(Some(Deferred::Accounts(a, frame)))) => {
+            let _ = accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        }
+        _ => {}
     }
     let _ = stream.shutdown().await;
+}
+
+/// Owner work that may outlast the owner exchange deadline, read and admitted inside it
+/// and then served under its own bounds: projects home disk work, GitHub calls and
+/// clones, and account checks that reach the network. Each carries the admission and
+/// the validated request or its raw frame.
+enum Deferred {
+    ProjectsHome(Admission, Box<OwnerRequest>),
+    GitHub(Admission, Vec<u8>),
+    Accounts(Admission, Vec<u8>),
 }
 
 async fn write_owner_reply(
@@ -2299,6 +2314,8 @@ async fn observe_dispatch(
                     "core.hooksPath=/dev/null",
                     "-c",
                     "core.fsmonitor=false",
+                    "-c",
+                    "core.pager=cat",
                     "-c",
                     "protocol.allow=never",
                 ])

@@ -2,7 +2,7 @@ import { harnessCatalog, nextGeneration } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import { cancelTeamTask, failureCopy, loadContext, loadPools, loadProjects, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
 import { SessionContext } from "../../state";
-import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, type IconName } from "../../ui";
+import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
@@ -170,7 +170,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey || event.ctrlKey) return;
+      if (!shortcutKey(event)) return;
       const position = Number(event.key) - 1;
       if (Number.isInteger(position) && position >= 0 && position < TABS.length) {
         event.preventDefault();

@@ -3645,7 +3645,7 @@ fallback_allowed = false
             snapshot
         }
 
-        async fn close(self) {
+        async fn close(self) -> tempfile::TempDir {
             let (send, receive) = oneshot::channel();
             self.storage
                 .sender
@@ -3659,6 +3659,7 @@ fallback_allowed = false
                 .unwrap_or_else(|_| panic!("actual actor close queue unavailable"));
             receive.await.unwrap().unwrap();
             assert!(self.root.path().is_dir());
+            self.root
         }
     }
 
@@ -3901,6 +3902,91 @@ fallback_allowed = false
         assert_eq!(result.err().unwrap().0, "settings_source_conflict");
         assert_eq!(case.snapshot(), before);
         case.close().await;
+    }
+
+    #[tokio::test]
+    async fn stopping_observation_waits_for_a_pending_settings_publication() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("registered local RCLI must prepare the actual turn");
+        };
+        let basis = owner_read(
+            &case.storage,
+            &case.started,
+            OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Accounts,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .await;
+        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+            panic!("actual model source basis missing");
+        };
+        let db = Connection::open(&case.path).unwrap();
+        db.execute_batch("CREATE TRIGGER publication_abort BEFORE UPDATE ON settings_publication BEGIN SELECT RAISE(ABORT, 'actual_journal_abort'); END;").unwrap();
+        let (send, receive) = oneshot::channel();
+        case.storage
+            .sender
+            .try_send(Job::OwnerApply(
+                case.started.owners[0].admission.clone(),
+                OwnerRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: RequestId::new("pending-publication").unwrap(),
+                    expected_revision: basis.revision,
+                    operation: OwnerOperation::Apply {
+                        mutation: OwnerMutation::ModelAccess {
+                            expected_config_id: basis.config_id,
+                            expected_source_hash: source_hash,
+                            edit: crate::config::ModelAccessEdit::AddAccount {
+                                account_ref: reference("pending-account"),
+                            },
+                        },
+                    },
+                },
+                send,
+            ))
+            .unwrap_or_else(|_| panic!("actual owner mutation queue unavailable"));
+        assert!(receive.await.unwrap().is_err());
+        db.execute_batch("DROP TRIGGER publication_abort").unwrap();
+        drop(db);
+        let before = case.snapshot();
+        let observed = case
+            .runtime(MasterRuntimeCommand::Observe {
+                host: case.started.host.clone(),
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+                turn_id: case.turn.id.clone(),
+                attempt_id: prepared.attempt.request.id.clone(),
+                observation: MasterRuntimeObservation::Disconnected,
+            })
+            .await;
+        assert_eq!(observed.err().unwrap().0, "settings_publication_pending");
+        assert_eq!(case.snapshot(), before);
+        let path = case.path.clone();
+        let global = case.global.clone();
+        let root = case.close().await;
+        let (storage, config) =
+            Storage::open_with_settings_sources(&path, &global, &root.path().join("project.toml"))
+                .await
+                .unwrap();
+        assert!(
+            config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap()
+                .accounts
+                .contains(&reference("pending-account"))
+        );
+        let (send, receive) = oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::Close(send))
+            .unwrap_or_else(|_| panic!("actual actor close queue unavailable"));
+        receive.await.unwrap().unwrap();
     }
 }
 

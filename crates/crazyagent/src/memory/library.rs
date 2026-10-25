@@ -250,7 +250,8 @@ pub enum LibraryView {
 
 /// Checks a hand-written memory note.
 /// Input: the untrusted note. Output: Ok, or a code naming why it is blank,
-/// too long or holds control characters other than line breaks and tabs.
+/// too long or holds hidden, direction-changing or control characters other than
+/// line breaks and tabs.
 pub fn validate_note(text: &str) -> Result<(), EngineError> {
     let text = text.trim();
     if text.is_empty() {
@@ -259,10 +260,7 @@ pub fn validate_note(text: &str) -> Result<(), EngineError> {
     if text.len() > NOTE_BYTES_MAX {
         return Err(error("memory_note_too_long"));
     }
-    if text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-    {
+    if super::hidden_text(text) {
         return Err(error("memory_note_invalid"));
     }
     Ok(())
@@ -318,7 +316,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
         "memory_note_blank" => Some("Write something to remember."),
         "memory_note_too_long" => Some("Keep the memory under 2000 characters."),
-        "memory_note_invalid" => Some("Remove special control characters from the memory."),
+        "memory_note_invalid" => {
+            Some("Remove hidden, direction-changing or control characters from the memory.")
+        }
         "memory_duplicate" => Some("This memory is already saved."),
         "memory_full" => Some("Memory is full. Delete an old memory first."),
         "memory_missing" => Some("That memory no longer exists."),

@@ -125,7 +125,7 @@ impl HostCase {
             mut connection,
             lock,
             custody,
-        } = open_actor_database(&path, false).unwrap();
+        } = open_actor_database(&path, false, None).unwrap();
         let started = owner_start(&mut connection).unwrap();
         assert!(connection.is_autocommit());
         assert!(custody.is_ok());
@@ -322,7 +322,7 @@ impl HostCase {
             mut connection,
             lock,
             custody,
-        } = open_actor_database(&path, false).unwrap();
+        } = open_actor_database(&path, false, None).unwrap();
         let started = owner_start(&mut connection).unwrap();
         assert_ne!(started.host.engine_epoch, old_epoch);
         assert!(connection.is_autocommit());

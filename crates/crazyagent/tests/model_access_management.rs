@@ -751,6 +751,202 @@ async fn real_sqlite_abort_retains_unknown_and_recovers_exact_old_or_new_file() 
 }
 
 #[tokio::test]
+async fn interrupted_temporary_write_is_staged_again_on_restart() {
+    let f = Fixture::start(true, "version = 1\n").await;
+    let request = f
+        .request(
+            "partial-temporary",
+            crazyagent::config::ModelAccessEdit::AddAccount {
+                account_ref: reference("account"),
+            },
+        )
+        .await;
+    let db = rusqlite::Connection::open(f.root.path().join("engine.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER publication_abort BEFORE UPDATE ON settings_publication BEGIN SELECT RAISE(ABORT, 'actual_journal_abort'); END;").unwrap();
+    assert!(matches!(
+        f.client.request(request.clone()).await.unwrap().response,
+        OwnerResponse::OutcomeUnknown { .. }
+    ));
+    let root = f.close().await;
+    db.execute_batch("DROP TRIGGER publication_abort").unwrap();
+    drop(db);
+    let global = root.path().join("global.toml");
+    let project = root.path().join("project.toml");
+    let temporary = root.path().join(format!(
+        ".crazyagent-publication-{}",
+        request.mutation_hash().unwrap()
+    ));
+    let staged = std::fs::read(&temporary).unwrap();
+    assert!(staged.len() > 1);
+    std::fs::write(&temporary, &staged[..staged.len() / 2]).unwrap();
+    let engine = Arc::new(
+        Engine::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+            .await
+            .unwrap(),
+    );
+    assert!(
+        std::fs::read_to_string(&global)
+            .unwrap()
+            .contains("account")
+    );
+    assert!(!temporary.exists());
+    let config = resolve_config(&global, &project).unwrap();
+    let f = Fixture::bind(root, engine, &config).await;
+    let replay = f.client.request(request).await.unwrap();
+    assert!(
+        matches!(replay.response, OwnerResponse::Applied { operation } if operation.historical_replay && operation.current_revision.value() == 1 && operation.result == OwnerResult::Applied)
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn owner_edit_before_the_rename_abandons_the_pending_publication() {
+    for change_project in [false, true] {
+        let f = Fixture::start(true, "version = 1\n").await;
+        let request = f
+            .request(
+                "abandoned",
+                crazyagent::config::ModelAccessEdit::AddAccount {
+                    account_ref: reference("account"),
+                },
+            )
+            .await;
+        let db = rusqlite::Connection::open(f.root.path().join("engine.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER publication_abort BEFORE UPDATE ON settings_publication BEGIN SELECT RAISE(ABORT, 'actual_journal_abort'); END;").unwrap();
+        assert!(matches!(
+            f.client.request(request.clone()).await.unwrap().response,
+            OwnerResponse::OutcomeUnknown { .. }
+        ));
+        let root = f.close().await;
+        db.execute_batch("DROP TRIGGER publication_abort").unwrap();
+        drop(db);
+        let global = root.path().join("global.toml");
+        let project = root.path().join("project.toml");
+        let temporary = root.path().join(format!(
+            ".crazyagent-publication-{}",
+            request.mutation_hash().unwrap()
+        ));
+        assert!(temporary.exists());
+        let (target, owned) = if change_project {
+            (&project, "[routing]\npriority_weight = 4\n")
+        } else {
+            (&global, "version = 1\ntimeout_ms = 1500\n")
+        };
+        let saved = root.path().join("editor-save.toml");
+        std::fs::write(&saved, owned).unwrap();
+        std::fs::set_permissions(&saved, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&saved, target).unwrap();
+        let engine = Arc::new(
+            Engine::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), owned);
+        assert!(
+            !std::fs::read_to_string(&global)
+                .unwrap()
+                .contains("account")
+        );
+        assert!(!temporary.exists());
+        let config = resolve_config(&global, &project).unwrap();
+        let f = Fixture::bind(root, engine, &config).await;
+        let replay = f.client.request(request).await.unwrap();
+        assert!(
+            matches!(replay.response, OwnerResponse::Applied { operation } if operation.historical_replay && operation.current_revision.value() == 0 && operation.result == OwnerResult::Rejected { code: "settings_source_conflict".into() })
+        );
+        let applied = f
+            .edit(
+                "after-abandon",
+                crazyagent::config::ModelAccessEdit::AddAccount {
+                    account_ref: reference("account"),
+                },
+            )
+            .await;
+        assert_eq!(applied.result, OwnerResult::Applied);
+        assert!(
+            std::fs::read_to_string(&global)
+                .unwrap()
+                .contains("account")
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap().contains("account"),
+            !change_project
+        );
+        assert!(
+            std::fs::read_to_string(target)
+                .unwrap()
+                .contains(owned.lines().last().unwrap())
+        );
+        let root = f.close().await;
+        let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM settings_publication", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_access_read_serves_every_account_the_config_allows() {
+    for count in [65, crazyagent::config::ACCOUNTS_MAX] {
+        let expected: Vec<String> = (0..count).map(|i| format!("account-{i:04}")).collect();
+        let listed: Vec<String> = expected.iter().map(|id| format!("\"{id}\"")).collect();
+        let f = Fixture::start(
+            true,
+            &format!(
+                "version = 1\n[model_access]\naccounts = [{}]\n",
+                listed.join(",")
+            ),
+        )
+        .await;
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let state = read(
+                &f.client,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Accounts,
+                    cursor,
+                    limit: 16,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { items, next, .. } = state.data else {
+                panic!("catalog page required")
+            };
+            assert!(!items.is_empty());
+            for item in items {
+                let ModelAccessRecord::Account { account_ref } = item else {
+                    panic!("account record required")
+                };
+                seen.push(account_ref.as_str().to_owned());
+            }
+            let Some(after) = next else {
+                break;
+            };
+            cursor = Some(after);
+        }
+        assert_eq!(seen, expected);
+        let last = read(
+            &f.client,
+            OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Accounts,
+                id: reference(expected.last().unwrap()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(last.data, OwnerData::ModelAccessRecord { record: ModelAccessRecord::Account { account_ref }, .. } if account_ref.as_str() == expected.last().unwrap())
+        );
+        let next = read(&f.client, OwnerRead::Capabilities).await;
+        assert!(matches!(next.data, OwnerData::Capabilities { .. }));
+        f.close().await;
+    }
+}
+
+#[tokio::test]
 async fn changed_file_or_project_conflicts_without_publication() {
     for change_project in [false, true] {
         let f = Fixture::start(true, "version = 1\n").await;

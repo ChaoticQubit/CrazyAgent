@@ -7,15 +7,14 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, canSend, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Menu, type Tone } from "../../ui";
+import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
 const sentByProject = new Map<string, Record<number, string>>();
 const sentAtByProject = new Map<string, Record<number, number>>();
-const MESSAGE_BYTES_MAX = 8192;
 
 const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", Replied: "ok", "Not signed in": "warn", Stopped: "neutral", "Needs a pool": "warn" };
 
@@ -96,10 +95,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     setNeedsPool(false);
     const live = data.id;
     void act(async () => {
-      const opened = unwrap(await openMasterProject(live));
+      const opened = openedTicket(unwrap(await openMasterProject(live)), live);
       if (current.current !== live) return;
-      setTicket(opened.ticket);
-      await refresh(opened.ticket);
+      setTicket(opened);
+      await refresh(opened);
     });
   }, [data.id]);
 
@@ -158,6 +157,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
 
   const bytes = new TextEncoder().encode(text).length;
   const blocked = working || !ticket || waiting || notReady;
+  const sendable = canSend(text, blocked);
   const again = resendText(turns, sent);
   const latest = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0);
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
@@ -196,15 +196,15 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
-    <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
+    <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); if (sendable) void send(); }}>
       <label htmlFor="pj-composer" className="pj-sr">Message the master</label>
       <textarea className="pj-input" id="pj-composer" rows={3} value={text} aria-describedby="pj-composer-help" data-testid="master-message"
         onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void send(); } }} />
+        onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); if (sendable) void send(); } }} />
       <div className="pj-row between">
-        <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : "Cmd+Enter to send"}</span>
+        <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : keyLabel("Cmd+Enter to send")}</span>
         <span className="pj-row">{waiting && <button type="button" className="btn" onClick={() => void stopReply()}>Stop</button>}
-          <button type="submit" className="btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
+          <button type="submit" className="btn primary" disabled={!sendable} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
       </div>
     </form>
   </div>;

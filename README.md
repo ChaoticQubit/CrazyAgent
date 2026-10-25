@@ -71,17 +71,18 @@ The service is a launchd agent on macOS, a systemd user unit on Linux and a logo
 
 - macOS
 - Rust toolchain with edition 2024 support (tested with Rust 1.99.1)
-- Node.js and npm, for the desktop app
+- Node.js and npm, to build the desktop app's frontend
 - The harnesses you plan to use, installed and on your `PATH`
 
 ## Build
 
 ```sh
 cargo fetch --locked
+npm --prefix apps/desktop ci --ignore-scripts
 make build
 ```
 
-The Makefile runs Cargo offline, so fetch the locked dependencies once first. The binary is `target/debug/crazyagent`.
+The Makefile runs Cargo and npm offline, so fetch the locked dependencies once first. `make build` builds the desktop frontend into `apps/desktop/dist` before the Rust workspace, because the desktop app embeds it. The binary is `target/debug/crazyagent`.
 
 ## Run the engine
 

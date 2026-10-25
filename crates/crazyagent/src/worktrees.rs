@@ -183,6 +183,8 @@ fn git(repository: &Path, args: &[&str]) -> Result<Vec<u8>, EngineError> {
                 "-c",
                 "core.fsmonitor=false",
                 "-c",
+                "core.pager=cat",
+                "-c",
                 "core.attributesFile=/dev/null",
                 "-c",
                 "submodule.recurse=false",

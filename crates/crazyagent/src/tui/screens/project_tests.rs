@@ -408,6 +408,31 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         },
     )
     .await;
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(
+            "This part has hidden or direction-changing characters, so it can't be saved to memory."
+        )
+    );
+    std::fs::write(
+        &report,
+        format!("# Competitors\n\nBuoyWatch charges per seat. red\n\n{long}\n"),
+    )
+    .unwrap();
+    let retry = screen.key(key(KeyCode::Char('m')));
+    assert_eq!(screen.problem, None);
+    let ProjectReply::Change(action) = retry else {
+        panic!("Save to memory must ask the engine again, got {retry:?}");
+    };
+    send(
+        &mut screen,
+        &mut controller,
+        SetupQuery::Change {
+            action: *action,
+            generation: 3,
+        },
+    )
+    .await;
     assert_eq!(screen.problem, None);
     screen.open(Tab::Overview);
     settle(&mut screen, &mut controller, start + 9_000).await;
@@ -474,7 +499,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
             entry_id: entry,
             version,
             decision,
-            generation: 3,
+            generation: 4,
         },
     )
     .await;
@@ -503,7 +528,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         &mut controller,
         SetupQuery::Change {
             action: *action,
-            generation: 4,
+            generation: 5,
         },
     )
     .await;
