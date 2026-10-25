@@ -849,10 +849,10 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
         (ResearchStatus::Running, true)
     );
     assert!(
-        store.heartbeat(first, "runner-test", 64).unwrap(),
+        store.heartbeat(&claimed, 64).unwrap(),
         "the runner's heartbeat sees the stop and kills the agent's process group"
     );
-    store.cancelled(first, "runner-test").unwrap();
+    store.cancelled(&claimed).unwrap();
     assert_eq!(
         owner.research_jobs(project.clone()).await.unwrap()[0].status,
         ResearchStatus::Cancelled

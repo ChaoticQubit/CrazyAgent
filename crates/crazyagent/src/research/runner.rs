@@ -203,6 +203,14 @@ impl From<JobError> for RunError {
     }
 }
 
+/// Refreshes a claim while its run prepares, so slow preparation is not taken back as
+/// stale, and stops the run once the claim was taken back. Inputs: the job store and
+/// the claimed job. Output: `RunError::Jobs(JobError::NotHeld)` when it is no longer held.
+fn still_held(jobs: &ResearchJobs, job: &ResearchJob) -> Result<(), RunError> {
+    jobs.heartbeat(job, 0)?;
+    Ok(())
+}
+
 impl From<SandboxError> for RunError {
     fn from(value: SandboxError) -> Self {
         Self::Sandbox(value)
@@ -450,12 +458,7 @@ impl ResearchRunner {
             process_group,
         };
         let Some(harness) = ResearchHarness::of(&job.harness) else {
-            let status = jobs.fail(
-                job.id,
-                &self.claimer,
-                "This harness cannot run research yet",
-                1,
-            )?;
+            let status = jobs.fail(&job, "This harness cannot run research yet", 1)?;
             return Ok(run(status, None, None));
         };
         let Some(account) = project
@@ -463,16 +466,11 @@ impl ResearchRunner {
             .as_ref()
             .filter(|account| account.harness() == harness)
         else {
-            let status = jobs.needs_pool(job.id, &self.claimer)?;
+            let status = jobs.needs_pool(&job)?;
             return Ok(run(status, None, None));
         };
         if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
-            let status = jobs.fail(
-                job.id,
-                &self.claimer,
-                "This harness is not installed on this computer",
-                1,
-            )?;
+            let status = jobs.fail(&job, "This harness is not installed on this computer", 1)?;
             return Ok(run(status, None, None));
         }
         match self.launch(jobs, &job, project, account) {
@@ -480,22 +478,21 @@ impl ResearchRunner {
                 let report = match self.publish(&job, harness, project.root, &output) {
                     Ok(report) => report,
                     Err(reason) => {
-                        let status =
-                            jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                        let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
                         return Ok(run(status, None, Some(group)));
                     }
                 };
                 let relative = format!("context/research/{}.md", job.kind);
-                jobs.finish(job.id, &self.claimer, &relative)?;
+                jobs.finish(&job, &relative)?;
                 Ok(run(ResearchStatus::Done, Some(report), Some(group)))
             }
             Ok((ending, group, _)) => {
                 if let Ending::Cancelled = ending {
-                    jobs.cancelled(job.id, &self.claimer)?;
+                    jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
                 if let Ending::Interrupted = ending {
-                    let _ = jobs.release(job.id, &self.claimer);
+                    let _ = jobs.release(&job);
                     let status = jobs
                         .get(job.id)?
                         .map_or(ResearchStatus::Queued, |job| job.status);
@@ -506,18 +503,24 @@ impl ResearchRunner {
                     Ending::Overflowed => "Agent output exceeded the limit",
                     _ => "Agent stopped with an error",
                 };
-                let status = jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
                 Ok(run(status, None, Some(group)))
             }
+            Err(RunError::Jobs(JobError::NotHeld)) => {
+                let status = jobs
+                    .get(job.id)?
+                    .map_or(ResearchStatus::Queued, |job| job.status);
+                Ok(run(status, None, None))
+            }
             Err(RunError::Busy) => {
-                jobs.release(job.id, &self.claimer)?;
+                jobs.release(&job)?;
                 let status = jobs
                     .get(job.id)?
                     .map_or(ResearchStatus::Queued, |job| job.status);
                 Ok(run(status, None, None))
             }
             Err(RunError::Account(_)) => {
-                let status = jobs.needs_pool(job.id, &self.claimer)?;
+                let status = jobs.needs_pool(&job)?;
                 Ok(run(status, None, None))
             }
             Err(error) => {
@@ -525,7 +528,7 @@ impl ResearchRunner {
                     RunError::Context(_) => "Could not give the agent this project's context",
                     _ => "Could not prepare the research sandbox",
                 };
-                jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                jobs.fail(&job, reason, self.limits.attempts_max)?;
                 Err(error)
             }
         }
@@ -541,6 +544,7 @@ impl ResearchRunner {
         if !valid_kind(&job.kind) {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
+        still_held(jobs, job)?;
         let root = project.root.canonicalize()?;
         if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
             return Err(RunError::Invalid("project folder must be canonical".into()));
@@ -613,6 +617,7 @@ impl ResearchRunner {
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
         drop(setup);
+        still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
@@ -772,7 +777,7 @@ impl ResearchRunner {
             }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
-                match jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed)) {
+                match jobs.heartbeat(job, counted.load(Ordering::Relaxed)) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
@@ -781,7 +786,7 @@ impl ResearchRunner {
             std::thread::sleep(POLL);
         };
         agent.stop();
-        let _ = jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed));
+        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
 
@@ -812,7 +817,7 @@ impl ResearchRunner {
             }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
-                match jobs.heartbeat(job.id, &self.claimer, counted) {
+                match jobs.heartbeat(job, counted) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
@@ -835,7 +840,7 @@ impl ResearchRunner {
                 }
             }
         };
-        let _ = jobs.heartbeat(job.id, &self.claimer, counted);
+        let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true)) {
             assert!(last.len() as u64 <= counted);
             write_private(output, last.as_bytes())?;
