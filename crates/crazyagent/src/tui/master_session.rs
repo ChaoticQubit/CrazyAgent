@@ -1760,7 +1760,7 @@ async fn read_collection(
     basis: &mut Option<(Cursor, ConfigId, String)>,
 ) -> Result<(), String> {
     let mut cursor = None;
-    for _ in 0..64 {
+    for _ in 0..=crate::config::ACCOUNTS_MAX {
         let state = controller
             .read(OwnerRead::ModelAccessPage {
                 collection,
@@ -1838,7 +1838,10 @@ fn catalog_records(
             _ => return Err("master_catalog_record_kind".into()),
         }
     }
-    if models.accounts.len() > 64 || models.connections.len() > 64 || models.pools.len() > 64 {
+    if models.accounts.len() > crate::config::ACCOUNTS_MAX
+        || models.connections.len() > crate::config::ACCOUNTS_MAX
+        || models.pools.len() > 64
+    {
         return Err("master_catalog_capacity".into());
     }
     Ok(())
