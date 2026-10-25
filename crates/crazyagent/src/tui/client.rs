@@ -4,7 +4,7 @@ use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerPageCursor, OwnerRead, OwnerReadReply,
-    OwnerResponse, OwnerSummary, OwnerView,
+    OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
@@ -178,6 +178,7 @@ pub(super) enum OwnerEvent {
         generation: u64,
         result: Result<OwnerProgress, String>,
     },
+    Settled(Result<(), String>),
 }
 
 struct OwnerReply {
@@ -258,6 +259,22 @@ impl Connection {
                 while let Ok(job) = requests.recv() {
                     if worker_stop.load(Ordering::Relaxed) {
                         break;
+                    }
+                    if let Some(native) = native.as_mut() {
+                        let was_ready = native.ready;
+                        if let Some(outcome) = runtime.block_on(native.settle_stray())
+                            && owner_replies
+                                .send(OwnerReply {
+                                    finished: false,
+                                    event: OwnerEvent::Settled(outcome),
+                                })
+                                .is_err()
+                        {
+                            break;
+                        }
+                        if !report_loss(was_ready, native, None, &mut client, &owner_replies) {
+                            break;
+                        }
                     }
                     match job {
                         Job::Creation(job) => {
@@ -909,6 +926,48 @@ impl NativeOwner {
                         identity: None,
                     },
                 )
+            }
+        }
+    }
+
+    /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
+    /// reply deadline, so it stops blocking every later change: a change the engine refused
+    /// on its only send is dropped, a recorded one is confirmed, and one the engine never
+    /// recorded is sent once more with its original identity and revision.
+    /// Takes the owner; creation, master, conversation and model access settle their own.
+    /// Returns the outcome to tell the owner, or none while nothing was settled.
+    async fn settle_stray(&mut self) -> Option<Result<(), String>> {
+        if !self.ready
+            || self.master_pending.is_some()
+            || self.creation_pending.is_some()
+            || self.conversation_pending.is_some()
+            || self.model_pending.is_some()
+        {
+            return None;
+        }
+        let controller = self.controller.as_mut()?;
+        if !controller.pending()?.uncertain() {
+            controller.discard_refused().ok()?;
+            return None;
+        }
+        let response = match controller.reconcile_pending().await {
+            Ok(OwnerResponse::NotRecordedAtBarrier { .. }) => controller.retry_pending().await,
+            other => other,
+        };
+        match response {
+            Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
+                Some(match operation.result {
+                    OwnerResult::Applied => Ok(()),
+                    OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
+                    _ => Err("change_outcome_unknown".into()),
+                })
+            }
+            Ok(_) => None,
+            Err(error) => {
+                if job_lost(&error.0) {
+                    self.detach();
+                }
+                None
             }
         }
     }

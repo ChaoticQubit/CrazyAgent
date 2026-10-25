@@ -770,6 +770,31 @@ pools = [
     }
 
     #[tokio::test]
+    async fn a_change_the_engine_never_took_is_dropped_before_the_next_job() {
+        let (mut live, _) = Live::start().await;
+        let controller = live.native.controller.as_mut().unwrap();
+        controller.read(OwnerRead::Capabilities).await.unwrap();
+        controller
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("never-sent").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Never sent".into(),
+                        repositories: vec![],
+                    },
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(live.native.settle_stray().await, None);
+        assert!(live.native.controller.as_ref().unwrap().pending().is_none());
+        assert_eq!(live.native.settle_stray().await, None);
+        let project = live.create_project("after-drop").await;
+        assert_eq!(project.as_str(), "after-drop");
+        live.close().await;
+    }
+
+    #[tokio::test]
     async fn a_refusal_keeps_the_trusted_connection_and_a_stopped_engine_loses_it() {
         let (mut live, _) = Live::start().await;
         let profile = |name: &str| crate::owner_profile::OwnerProfile {

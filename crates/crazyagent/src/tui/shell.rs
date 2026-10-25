@@ -533,6 +533,17 @@ impl Shell {
                         Err(code) => store.setup = Load::Failed(code.clone()),
                     }
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Settled(outcome) = event.as_ref()
+                {
+                    self.ctx.say(match outcome {
+                        Ok(()) => Message::success("Your earlier change is saved.", ""),
+                        Err(code) => Message::error(
+                            "Your earlier change was not saved.",
+                            super::screens::settings_accounts::plain(code),
+                        ),
+                    });
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}

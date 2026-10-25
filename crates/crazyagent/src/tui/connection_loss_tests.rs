@@ -1,10 +1,12 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
+use crate::owner_profile::OwnerProfile;
+use crate::tui::seam::{ShellEvent, ShellRequest};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Instant;
 
 struct Live {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     service: EngineService,
     connection: Connection,
     _stop: tokio::sync::watch::Sender<bool>,
@@ -28,7 +30,7 @@ impl Live {
         )
         .unwrap();
         let mut live = Self {
-            _root: root,
+            root,
             service,
             connection: Connection::connect_paired(client).unwrap(),
             _stop: stop,
@@ -55,6 +57,23 @@ impl Live {
             events.push(self.next().await);
         }
         events
+    }
+
+    fn sqlite(&self, sql: &str) {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/sqlite3")
+                .arg(self.root.path().join("engine.db"))
+                .arg(sql)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     async fn stop_engine(&mut self) {
@@ -130,4 +149,78 @@ async fn a_team_read_on_a_stopped_engine_starts_a_reconnect() {
         .team_graph(ProjectId::new("missing").unwrap())
         .unwrap();
     assert_eq!(kinds(&live.answer().await), ["lost", "team"]);
+}
+
+fn profile(name: &str) -> OwnerProfile {
+    OwnerProfile {
+        name: name.into(),
+        role: String::new(),
+        bio: String::new(),
+        preferred_stack: Vec::new(),
+        working_style: Default::default(),
+    }
+}
+
+fn saved(events: &[OwnerEvent]) -> Result<(), String> {
+    events
+        .iter()
+        .find_map(|event| match event {
+            OwnerEvent::Shell(event) => match event.as_ref() {
+                ShellEvent::ProfileSaved(result) => Some(result.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a profile save answers")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_left_unconfirmed_is_settled_by_the_next_job_and_unblocks_changes() {
+    let mut live = Live::start().await;
+    let save = |name: &str| ShellRequest::SaveProfile {
+        profile: profile(name),
+        generation: 1,
+    };
+    live.sqlite(
+        "CREATE TRIGGER ar01_abort BEFORE INSERT ON owner_operations \
+         BEGIN SELECT RAISE(ABORT, 'ar01_abort'); END;",
+    );
+    live.connection.shell(save("Unconfirmed")).unwrap();
+    assert_eq!(
+        saved(&live.answer().await),
+        Err("profile_outcome_unknown".into())
+    );
+    live.sqlite("DROP TRIGGER ar01_abort;");
+
+    live.connection.shell(save("Ada")).unwrap();
+    let mut events = live.answer().await;
+    assert_eq!(
+        saved(&events),
+        Ok(()),
+        "the unconfirmed change no longer blocks the next one"
+    );
+    let settled = events.remove(0);
+    assert!(
+        matches!(settled, OwnerEvent::Settled(Ok(()))),
+        "the engine never recorded it, so it was sent once more and saved first"
+    );
+    let mut shell = crate::tui::shell::Shell::new(crate::tui::ctx::Ctx::new(
+        crate::tui::theme::Depth::NoColor,
+        crate::tui::theme::Colors::Dark,
+        crate::tui::theme::Appearance::Dark,
+        &crate::tui::glyphs::UNICODE,
+        String::new(),
+    ));
+    shell.arrive(crate::tui::run::owner_arrival(settled));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Your earlier change is saved.")
+    );
+    live.connection.shell(ShellRequest::Profile).unwrap();
+    let read = live.answer().await;
+    assert!(
+        matches!(read.as_slice(), [OwnerEvent::Shell(event)]
+            if matches!(event.as_ref(), ShellEvent::Profile(Ok(Some(profile))) if profile.name == "Ada")),
+        "the engine keeps the newer change"
+    );
 }

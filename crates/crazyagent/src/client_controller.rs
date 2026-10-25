@@ -340,6 +340,7 @@ impl OwnerController {
         if pending.identity.database_instance() != self.identity.database_instance() {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
+        let first = !pending.uncertain;
         pending.uncertain = true;
         let request = pending.request.clone();
         if let Some(view) = &mut self.view {
@@ -350,7 +351,7 @@ impl OwnerController {
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         let response = client.request(request).await?.response;
-        self.settle_response(response)
+        self.settle_response(response, first)
     }
 
     /// Reconciles the original mutation through the actual owner actor.
@@ -379,13 +380,17 @@ impl OwnerController {
             view.fresh = false;
         }
         let response = client.request(request).await?.response;
-        self.settle_response(response)
+        self.settle_response(response, false)
     }
 
-    fn settle_response(&mut self, response: OwnerResponse) -> Result<OwnerResponse, EngineError> {
+    fn settle_response(
+        &mut self,
+        response: OwnerResponse,
+        first_send: bool,
+    ) -> Result<OwnerResponse, EngineError> {
         let pending = self
             .pending
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| EngineError("controller_no_pending_intent".into()))?;
         match &response {
             OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
@@ -404,9 +409,25 @@ impl OwnerController {
             OwnerResponse::Read { .. } => {
                 return Err(EngineError("controller_mutation_response".into()));
             }
+            OwnerResponse::Rejected { .. } if first_send => pending.uncertain = false,
             _ => {}
         }
         Ok(response)
+    }
+
+    /// Drops a retained mutation the owner refused on its first and only send, so no copy of
+    /// it can still be recorded. Output: Ok once dropped, `controller_pending_uncertain` while
+    /// any send of it may still be recorded, or no pending intent.
+    pub fn discard_refused(&mut self) -> Result<(), EngineError> {
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_no_pending_intent".into()))?;
+        if pending.uncertain {
+            return Err(EngineError("controller_pending_uncertain".into()));
+        }
+        self.pending = None;
+        Ok(())
     }
 
     /// Explicitly retries the exact retained original mutation.
