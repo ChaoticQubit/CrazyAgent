@@ -244,7 +244,7 @@ fn escaping(tx: &Transaction<'_>) -> Result<(), EngineError> {
 }
 
 /// The production steps followed by test-only steps numbered after them.
-fn steps(extra: &[fn(&Transaction<'_>) -> Result<(), EngineError>]) -> Vec<Step> {
+fn steps(extra: &[StepRun]) -> Vec<Step> {
     let next = latest(STEPS) + 1;
     STEPS
         .iter()

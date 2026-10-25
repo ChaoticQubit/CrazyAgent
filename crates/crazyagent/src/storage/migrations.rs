@@ -24,8 +24,12 @@ const DATABASE: &str = "engine.db";
 /// must leave that transaction open.
 pub(crate) struct Step {
     pub(crate) to: i64,
-    pub(crate) run: fn(&Transaction<'_>) -> Result<(), EngineError>,
+    pub(crate) run: StepRun,
 }
+
+/// The body of one schema step: it changes the database through the open upgrade
+/// transaction and returns the cause when it cannot.
+pub(crate) type StepRun = fn(&Transaction<'_>) -> Result<(), EngineError>;
 
 /// Every engine.db schema step, oldest first, numbered from 2 without gaps. Version 1
 /// is the shape engines up to 0.1 wrote, which never set `PRAGMA user_version`. A step
