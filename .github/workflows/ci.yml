@@ -16,11 +16,13 @@ env:
   BUN_VERSION: "1.4.3"
   RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
   RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
+  TMUX_VERSION: "3.8"
+  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+  CLAUDE_CODE_VERSION: "2.1.309"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
-    e2e_team e2e_tui research_engine smoke team_engine terminal_owner terminal_session terminal_tmux
-    onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
+    research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
   DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
@@ -38,7 +40,7 @@ jobs:
     env:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
-        harness_launch launch_context project_sandbox sandbox_everywhere
+        harness_launch launch_context project_sandbox sandbox_everywhere terminal_session
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -57,7 +59,34 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap libevent-dev libncurses-dev
+      - name: Install tmux
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+          tar -xzf "$work/tmux.tar.gz" -C "$work"
+          cd "$work/tmux-$TMUX_VERSION"
+          ./configure --prefix=/usr/local
+          make -j"$(nproc)"
+          sudo make install
+          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_PACKAGE: claude-code-linux-x64
+          CLAUDE_CODE_SHA256: e960c4437f6f99648437784db43e04ad5f12711aecd710864f96876f94c2fc1a
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/claude-code"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
+          echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c -
+          tar -xzf "$work/claude.tgz" -C "$work" package/claude
+          sudo install -m 0755 "$work/package/claude" /usr/local/bin/claude
+          rm -rf "$work"
+          test "$(/usr/local/bin/claude --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
@@ -114,6 +143,31 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install tmux
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          brew install tmux
+          version="$("$(brew --prefix)/bin/tmux" -V)"
+          echo "$version"
+          [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] || { echo "unexpected tmux version: $version" >&2; exit 1; }
+          (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )) || { echo "tmux 3.4 or later is required: $version" >&2; exit 1; }
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_PACKAGE: claude-code-darwin-arm64
+          CLAUDE_CODE_SHA256: 0e8ce1ddb8566129661bb7698db69db89d904e23b464afc6e85d5bd8879b9a51
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/claude-code"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
+          echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -c -
+          tar -xzf "$work/claude.tgz" -C "$work" package/claude
+          sudo install -m 0755 "$work/package/claude" /usr/local/bin/claude
+          rm -rf "$work"
+          test "$(/usr/local/bin/claude --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
