@@ -744,7 +744,8 @@ pub(crate) fn outcome_unknown() -> EngineError {
 fn public_error(code: &str) -> bool {
     matches!(
         code,
-        "native_auth_request_bounds"
+        "owner_busy"
+            | "native_auth_request_bounds"
             | "native_auth_database_mismatch"
             | "native_auth_method_mismatch"
             | "native_auth_operation_conflict"
