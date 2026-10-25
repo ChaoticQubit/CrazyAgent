@@ -1044,6 +1044,119 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one_already_gone()
+    {
+        use crate::tui::client::OwnerEvent;
+        use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
+        use crate::tui::keys::Key;
+        use crate::tui::screens::Screen;
+        use crate::tui::screens::settings_accounts::Accounts;
+        use crate::tui::seam::{Arrival, Request};
+
+        let root = tempfile::Builder::new()
+            .prefix("ca-tdel-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut service, _stop) = engine(root.path()).await;
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let _ = native.attach().await;
+        assert!(native.ready);
+        for name in ["Laptop", "Mini", "Studio"] {
+            let added = native
+                .settings(SettingsJob::Accounts(AccountsRequest::Add {
+                    draft: AccountDraft {
+                        provider: Provider::Local,
+                        method: SignInMethod::Url,
+                        name: name.into(),
+                        url: None,
+                        model: Some("qwen2.5:0.5b".into()),
+                    },
+                    key: None,
+                }))
+                .await;
+            assert!(matches!(
+                added,
+                SettingsEvent::Accounts(Ok(AccountsReply::Account(_)))
+            ));
+        }
+        let mut lost = false;
+        let accounts = native.all_accounts(2, &mut lost).await.unwrap();
+        let mut ctx = crate::tui::screens::settings_accounts::tests::ctx(80, 24);
+        let mut screen = Accounts::with(accounts.clone());
+        for name in ["Laptop", "Mini", "Studio"] {
+            screen.key(&Key::Char('/'), &mut ctx);
+            for letter in name.chars() {
+                screen.key(&Key::Char(letter), &mut ctx);
+            }
+            screen.key(&Key::Enter, &mut ctx);
+            screen.key(&Key::Char(' '), &mut ctx);
+            screen.key(&Key::Esc, &mut ctx);
+        }
+        assert_eq!(ctx.message().unwrap().lead, "3 selected.");
+        screen.key(&Key::Char('d'), &mut ctx);
+        assert_eq!(
+            screen
+                .modal(&ctx)
+                .expect("a confirm before deleting")
+                .0
+                .title,
+            "Delete accounts"
+        );
+        let laptop = accounts
+            .iter()
+            .find(|account| account.name == "Laptop")
+            .unwrap()
+            .id
+            .clone();
+        let gone = native
+            .settings(SettingsJob::Accounts(AccountsRequest::Remove {
+                id: laptop,
+            }))
+            .await;
+        assert!(matches!(
+            gone,
+            SettingsEvent::Accounts(Ok(AccountsReply::Removed(_)))
+        ));
+        screen.key(&Key::Right, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        assert!(screen.modal(&ctx).is_none());
+        assert!(screen.busy(&ctx));
+        let mut sent = 0;
+        for _ in 0..32 {
+            let Some(request) = ctx.next_request() else {
+                break;
+            };
+            if let Request::Settings(job) = request {
+                sent += 1;
+                let event = native.settings(*job).await;
+                screen.arrive(
+                    &Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event)))),
+                    &mut ctx,
+                );
+            }
+        }
+        assert_eq!(sent, 4, "three removes one at a time, then one list reload");
+        assert!(!screen.busy(&ctx));
+        let message = ctx.message().unwrap();
+        assert_eq!(message.lead, "Deleted 2 accounts.");
+        assert_eq!(
+            message.rest,
+            "Could not delete Laptop: This account no longer exists."
+        );
+        assert!(native.all_accounts(2, &mut lost).await.unwrap().is_empty());
+
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     fn changed(event: SettingsEvent) {
         match event {
             SettingsEvent::PluginChanged(Ok(None)) => {}
