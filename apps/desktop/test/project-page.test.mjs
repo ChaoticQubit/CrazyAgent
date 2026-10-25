@@ -422,6 +422,14 @@ test("selected report text is cleaned before it can be saved to memory", async (
   assert.equal(context.selectionText(""), null);
 });
 
+test("a selection keeps hidden and reordering characters visible, so the saved note is what the owner saw", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  assert.equal(context.selectionText("Use pnpm\u{e0041}\u{e0042} for installs\u200b."), "Use pnpm\\u{e0041}\\u{e0042} for installs\\u200b.");
+  assert.equal(context.selectionText("Rename\u202etxt.exe"), "Rename\\u202etxt.exe");
+  assert.equal(context.selectionText("\u200b"), "\\u200b");
+  assert.equal(context.selectionText("Warn with ⚠\ufe0f"), "Warn with ⚠\ufe0f");
+});
+
 test("a memory note must have text and fit the engine's 2,000 byte limit", async () => {
   const context = await import("../src/screens/project/context.tsx");
   assert.equal(context.noteError("Owners pay per seat."), null);

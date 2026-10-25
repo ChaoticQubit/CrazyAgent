@@ -75,6 +75,19 @@ test("production project parser preserves exact declarations and UTF-8 boundarie
   assert.doesNotMatch(displayed, /[\u202e\u2066]/u);
 });
 
+test("displayText shows zero-width, tag, separator and stray selector characters and keeps emoji whole", async () => {
+  const { displayText } = await import("../src/screens/conversation.tsx");
+  assert.equal(displayText("Use\u200bpnpm"), "Use\\u200bpnpm");
+  assert.equal(displayText("Use pnpm\u{e0041}\u{e0042}"), "Use pnpm\\u{e0041}\\u{e0042}");
+  assert.equal(displayText("a\u2028b\u2029c\u00add\ufeffe\u2060f\u180eg"), "a\\u2028b\\u2029c\\u00add\\ufeffe\\u2060f\\u180eg");
+  assert.equal(displayText("a\ufe0fb\u{e0100}"), "a\\ufe0fb\\u{e0100}");
+  assert.equal(displayText("\u{1f468}\u200d\u200d\u{1f469}"), "\u{1f468}\\u200d\\u200d\u{1f469}");
+  assert.equal(displayText("a\u200db\u200c"), "a\\u200db\\u200c");
+  const emoji = "Family \u{1f468}\u200d\u{1f469}\u200d\u{1f467}, \u26a0\ufe0f warn, \u2764\ufe0f\u200d\u{1f525}\nnext\tline";
+  assert.equal(displayText(emoji), emoji);
+  assert.equal(displayText("\u26a0\ufe0f\ufe0f"), "\u26a0\\ufe0f\\ufe0f");
+});
+
 test("production parser refuses missing, relative, URL, control and oversized declarations", () => {
   for (const name of ["", " \t", "line\nbreak", "nul\0", "control\u0085"]) {
     assert.throws(() => creation.parseProjectSpec(name, "/repo"));

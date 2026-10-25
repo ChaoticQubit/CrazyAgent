@@ -35,10 +35,11 @@ export function sectionText(report: string, heading: string | null): string | nu
   return lines.slice(start, end).join("\n").trim();
 }
 
-/** Cleans text the owner selected in the reader before it is saved: line endings become "\n"
- * and outer space goes. Input: the raw selection. Output: the text, or null when nothing is left. */
+/** Cleans text the owner selected in the reader before it is saved: line endings become "\n",
+ * outer space goes and hidden or direction-changing characters become visible escapes, so the
+ * note holds what the owner saw. Input: the raw selection. Output: the text, or null when empty. */
 export function selectionText(raw: string): string | null {
-  const text = raw.replace(/\r\n?/gu, "\n").trim();
+  const text = displayText(raw.replace(/\r\n?/gu, "\n").trim());
   return text === "" ? null : text;
 }
 
