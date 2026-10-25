@@ -563,3 +563,13 @@ test("a failed add offers a single picked path to retry and never several joined
   assert.equal(research.retryPath(["/Users/mira/a.pdf", "/Users/mira/b.pdf"]), "");
   assert.equal(research.retryPath([]), "");
 });
+
+test("Cmd+Enter and the Send button follow one rule", () => {
+  assert.equal(research.MESSAGE_BYTES_MAX, 8192);
+  assert.equal(research.canSend("hello", false), true);
+  assert.equal(research.canSend("hello", true), false);
+  assert.equal(research.canSend("   ", false), false);
+  assert.equal(research.canSend("a".repeat(8192), false), true);
+  assert.equal(research.canSend("a".repeat(8193), false), false);
+  assert.equal(research.canSend("é".repeat(4097), false), false);
+});

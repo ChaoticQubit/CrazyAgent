@@ -352,6 +352,16 @@ export function sendFailureLine(code: string): string {
   return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
+/** The most bytes one message to the master may hold; the bridge refuses more. */
+export const MESSAGE_BYTES_MAX = 8192;
+
+/** Whether the composer may send its draft now, the one rule for the Send button and Cmd+Enter.
+ * Inputs: the draft and whether sending is blocked (an action running, no ticket, a reply in
+ * progress or the master unreachable). Output: true for a non-blank draft within the byte limit. */
+export function canSend(text: string, blocked: boolean): boolean {
+  return !blocked && text.trim() !== "" && new TextEncoder().encode(text).length <= MESSAGE_BYTES_MAX;
+}
+
 /** The path a failed Add documents offers to retry in its one-path box.
  * Input: the picked paths. Output: the path when exactly one was picked, else empty, so
  * several paths are never joined into one invalid path. */
