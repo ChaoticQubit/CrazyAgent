@@ -2069,13 +2069,23 @@ fn publish_rcli_profile(
         }
         return Ok(record.proof);
     }
-    let count: i64 = tx
-        .query_row(
+    let counted = || -> Result<i64, EngineError> {
+        tx.query_row(
             "SELECT COUNT(*) FROM configured_master_profiles",
             [],
             |row| row.get(0),
         )
+        .map_err(error)
+    };
+    let mut count = counted()?;
+    if count >= SESSIONS_MAX as i64 {
+        tx.execute(
+            "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
+            [count - (SESSIONS_MAX as i64 - 1)],
+        )
         .map_err(error)?;
+        count = counted()?;
+    }
     if count >= SESSIONS_MAX as i64 {
         return Err(error("master_configured_receipt_limit"));
     }
@@ -3900,6 +3910,45 @@ fallback_allowed = false
         let result = case.runtime(case.prepare()).await;
         assert_eq!(result.err().unwrap().0, "settings_source_conflict");
         assert_eq!(case.snapshot(), before);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_profile_capacity_counts_live_sessions_not_closed_history() {
+        let case = Fixture::new(false).await;
+        {
+            let mut db = Connection::open(&case.path).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            let tx = db.transaction().unwrap();
+            for n in 0..SESSIONS_MAX {
+                tx.execute(
+                    "INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?1,'{}')",
+                    [format!("closed-{n:02}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let proof = case.register().await;
+        let db = case.db();
+        let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles"),
+            SESSIONS_MAX as i64
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles WHERE id='closed-00'"),
+            0
+        );
+        let stored: String = db
+            .query_row(
+                "SELECT id FROM configured_master_profiles WHERE session=?1",
+                [case.session.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, proof.registration_id.as_str());
+        drop(db);
         case.close().await;
     }
 }
