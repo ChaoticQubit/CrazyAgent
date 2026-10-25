@@ -798,7 +798,7 @@ pub(super) fn read(
             .collect(),
         (_, None) => Vec::new(),
     };
-    assert!(records.len() <= 64);
+    assert!(records.len() <= crate::config::ACCOUNTS_MAX);
     records.sort_by(|a, b| a.id().cmp(b.id()));
     let data = if let Some(id) = record_id {
         let record = records
