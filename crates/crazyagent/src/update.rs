@@ -29,11 +29,12 @@ const POLL: Duration = Duration::from_millis(20);
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 const KEY_PLACEHOLDER: &str = "REPLACE_WITH_LEADER_PUBKEY";
 const DESKTOP_CONFIG: &str = include_str!("../../../apps/desktop/src-tauri/tauri.conf.json");
-const BINARIES: [&str; 4] = [
+const BINARIES: [&str; 5] = [
     "crazyagent",
     "crazyagent-rcli",
     "crazyagent-runner",
     "crazyagent-landlock",
+    "crazyagent-win-boundary",
 ];
 const USAGE: &str = "usage: crazyagent update [--check] [--channel stable|dev]";
 
