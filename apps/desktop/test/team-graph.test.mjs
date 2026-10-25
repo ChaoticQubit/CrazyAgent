@@ -190,12 +190,15 @@ test("terminal sizes stay inside the engine limits", () => {
 test("queued input reaches the agent in order, one chunk at a time", async () => {
   const sent = [];
   let inFlight = 0;
+  let drained;
+  const allSent = new Promise((resolve) => { drained = resolve; });
   const send = async (chunk) => {
     inFlight += 1;
     assert.equal(inFlight, 1);
     await new Promise((resolve) => setTimeout(resolve, chunk.length > 1 ? 5 : 0));
     sent.push(chunk.length === 1 ? String.fromCharCode(chunk[0]) : chunk.length);
     inFlight -= 1;
+    if (sent.length === 4) drained();
     return true;
   };
   let stops = 0;
@@ -203,7 +206,8 @@ test("queued input reaches the agent in order, one chunk at a time", async () =>
   type(io.encodeTyped("x".repeat(5000)));
   type(io.encodeTyped("b"));
   type(io.encodeTyped("\r"));
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await Promise.race([allSent, new Promise((resolve) => setTimeout(resolve, 5000))]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(sent, [4096, 904, "b", "\r"]);
   assert.equal(stops, 0);
 });
