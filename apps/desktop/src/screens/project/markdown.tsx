@@ -168,10 +168,43 @@ export function parseInline(text: string, depth = 0): Inline[] {
 }
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([^`\s]*)/u;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/u;
+const HEADING_OPEN = /^ {0,3}(#{1,6})(?=[ \t]|$)/u;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u;
 const QUOTE = /^ {0,3}>[ \t]?(.*)$/u;
-const ITEM = /^ {0,6}([-*+]|\d{1,9}[.)])[ \t]+(.*)$/u;
+const ITEM_OPEN = /^ {0,6}([-*+]|\d{1,9}[.)])[ \t]/u;
+
+function blank(character: string | undefined): boolean {
+  return character === " " || character === "\t";
+}
+
+/** Reads an ATX heading line in one pass, without a backtracking regex over its text.
+ * Input: one line. Output: the level and the text between the opening hashes and an
+ * optional closing hash run, or null when the line is not a heading. */
+function headingLine(line: string): { level: number; text: string } | null {
+  const open = HEADING_OPEN.exec(line);
+  if (!open) return null;
+  let start = open[0].length;
+  while (blank(line[start])) start += 1;
+  let end = line.length;
+  while (end > start && blank(line[end - 1])) end -= 1;
+  let hashes = end;
+  while (hashes > start && line[hashes - 1] === "#") hashes -= 1;
+  if (hashes < end && hashes > start && blank(line[hashes - 1])) {
+    end = hashes;
+    while (end > start && blank(line[end - 1])) end -= 1;
+  }
+  return { level: open[1].length, text: line.slice(start, end) };
+}
+
+/** Reads a list item line in one pass. Input: one line. Output: the marker and the item
+ * text after the marker's spacing, or null when the line is not a list item. */
+function itemLine(line: string): { marker: string; text: string } | null {
+  const open = ITEM_OPEN.exec(line);
+  if (!open) return null;
+  let start = open[0].length;
+  while (blank(line[start])) start += 1;
+  return { marker: open[1], text: line.slice(start) };
+}
 
 function cells(line: string): string[] {
   let row = line.trim();
@@ -199,7 +232,7 @@ function separator(line: string | undefined): boolean {
 }
 
 function startsBlock(line: string, next: string | undefined): boolean {
-  return FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || ITEM.test(line) || (line.includes("|") && separator(next));
+  return FENCE.test(line) || headingLine(line) !== null || RULE.test(line) || QUOTE.test(line) || itemLine(line) !== null || (line.includes("|") && separator(next));
 }
 
 /** Parses the Markdown subset research reports use into blocks.
@@ -227,10 +260,10 @@ export function parseMarkdown(source: string): Block[] {
       blocks.push({ kind: "code", lang: fence[2], text: body.join("\n") });
       continue;
     }
-    const heading = HEADING.exec(line);
+    const heading = headingLine(line);
     if (heading) {
-      const hashes = heading[1].length;
-      blocks.push({ kind: "heading", level: hashes, text: line.trimStart().slice(hashes).trim(), children: parseInline(heading[2] ?? "") });
+      const hashes = heading.level;
+      blocks.push({ kind: "heading", level: hashes, text: line.trimStart().slice(hashes).trim(), children: parseInline(heading.text) });
       index += 1;
       continue;
     }
@@ -261,14 +294,14 @@ export function parseMarkdown(source: string): Block[] {
       blocks.push({ kind: "quote", children: parseInline(body.join("\n")) });
       continue;
     }
-    const item = ITEM.exec(line);
+    const item = itemLine(line);
     if (item) {
-      const ordered = /\d/u.test(item[1]);
+      const ordered = /\d/u.test(item.marker);
       const items: string[] = [];
       while (index < lines.length) {
-        const current = ITEM.exec(lines[index]);
-        if (current && /\d/u.test(current[1]) === ordered) {
-          items.push(current[2]);
+        const current = itemLine(lines[index]);
+        if (current && /\d/u.test(current.marker) === ordered) {
+          items.push(current.text);
           index += 1;
         } else if (!current && /^\s{2,}\S/u.test(lines[index]) && items.length) {
           items[items.length - 1] += "\n" + lines[index].trim();

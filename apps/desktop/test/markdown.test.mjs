@@ -135,3 +135,30 @@ test("the renderer never injects raw HTML", () => {
   const source = readFileSync(new URL("../src/screens/project/markdown.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|innerHTML/);
 });
+
+test("heading and list lines that never match parse in linear time", () => {
+  const timed = (source) => {
+    const started = performance.now();
+    const blocks = md.parseMarkdown(source);
+    return { blocks, ms: performance.now() - started };
+  };
+  for (const source of ["#" + " ".repeat(16000) + " ", "-" + " ".repeat(200000) + " ", "1." + "\t".repeat(200000) + " "]) {
+    const { blocks, ms } = timed(source);
+    assert.ok(ms < 1000, `${JSON.stringify(source.slice(0, 3))} took ${ms} ms`);
+    assert.equal(blocks.length, 1);
+  }
+});
+
+test("headings keep their closing-hash and empty-text rules", () => {
+  assert.deepEqual(md.parseMarkdown("# Title ##")[0].children, [{ kind: "text", text: "Title" }]);
+  assert.deepEqual(md.parseMarkdown("## a ## ##  ")[0].children, [{ kind: "text", text: "a ##" }]);
+  assert.deepEqual(md.parseMarkdown("# #")[0].children, [{ kind: "text", text: "#" }]);
+  assert.deepEqual(md.parseMarkdown("#")[0].children, []);
+  assert.deepEqual(md.parseMarkdown("###   ")[0].children, []);
+  assert.deepEqual(md.parseMarkdown("   #\tTabbed\t#\t")[0].children, [{ kind: "text", text: "Tabbed" }]);
+  assert.equal(md.parseMarkdown("####### seven")[0].kind, "paragraph");
+  assert.equal(md.parseMarkdown("#nospace")[0].kind, "paragraph");
+  assert.equal(md.parseMarkdown("    # four spaces")[0].kind, "paragraph");
+  assert.deepEqual(md.parseMarkdown("-   spaced item\n+ next")[0].items, [[{ kind: "text", text: "spaced item" }], [{ kind: "text", text: "next" }]]);
+  assert.equal(md.parseMarkdown("-nospace")[0].kind, "paragraph");
+});
