@@ -1454,6 +1454,7 @@ fn persist_event_ids(
     client_id: &ClientId,
     revision: u64,
 ) -> Result<(), EngineError> {
+    settings::ensure_clear(tx)?;
     let event = Event {
         cursor: Cursor::new(revision),
         request_id: request_id.clone(),

@@ -562,6 +562,8 @@ fn finalize(
     if owner_revision(&tx)? != pending.revision {
         return Err(error("settings_pending_revision_conflict"));
     }
+    tx.execute("DELETE FROM settings_publication WHERE singleton=1", [])
+        .map_err(error)?;
     let revision = pending
         .revision
         .checked_add(1)
@@ -604,8 +606,6 @@ fn finalize(
         &Sha256::digest(serde_json::to_vec(request).map_err(error)?),
         &serde_json::to_vec(&OwnerResult::Applied).map_err(error)?,
     )?;
-    tx.execute("DELETE FROM settings_publication WHERE singleton=1", [])
-        .map_err(error)?;
     tx.commit().map_err(error)?;
     assert_eq!(revision, pending.revision + 1);
     Ok(OwnerApplied {
