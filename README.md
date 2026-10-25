@@ -18,7 +18,56 @@ A Rust engine owns all state and policy. You drive it from a terminal UI or a de
 - **Memory approval.** Nothing enters a project's long-term memory until you approve it.
 - **Desktop app and TUI.** Two complete clients for the same engine. Use either one, or both at once.
 
-## Requirements
+## Install
+
+Download from GitHub Releases:
+
+- Stable: [latest release](https://github.com/ChaoticQubit/CrazyAgent/releases/latest)
+- Dev, rebuilt from every merge to `master`: [dev prerelease](https://github.com/ChaoticQubit/CrazyAgent/releases/tag/dev)
+
+Each release lists a `SHA256SUMS` file. Check a download against it before you open it:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+### macOS
+
+1. Download `CrazyAgent_<version>_aarch64.dmg` for Apple silicon, or `CrazyAgent_<version>_x64.dmg` for an Intel Mac.
+2. Open the disk image and drag CrazyAgent into Applications.
+3. Open CrazyAgent from Applications. On first launch it installs the engine as a background service and offers to install the command line tool.
+
+Stable releases are signed and notarized. A dev release whose notes say "Not code signed" is blocked by macOS on first open: open it once, then choose Open Anyway in System Settings > Privacy & Security.
+
+### Windows
+
+1. Download `CrazyAgent_<version>_x64-setup.exe`.
+2. Run it and follow the installer.
+3. Open CrazyAgent from the Start menu. On first launch it installs the engine as a background service and offers to add the command line tool to your `PATH`.
+
+A dev release whose notes say "Not code signed" shows a SmartScreen warning: choose More info, then Run anyway.
+
+### Linux
+
+Download `CrazyAgent_<version>_amd64.AppImage` and make it executable, or install the Debian package:
+
+```sh
+sudo apt install ./CrazyAgent_<version>_amd64.deb
+```
+
+### Command line only
+
+1. Download `crazyagent-<version>-<target>.tar.gz` for your platform (`.zip` on Windows). The target is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` or `x86_64-pc-windows-msvc`.
+2. Extract it into a folder on your `PATH`, such as `~/.local/bin`. Keep `crazyagent`, `crazyagent-rcli` and the helper binaries together in that folder.
+3. Install and start the engine service for your user account:
+
+```sh
+crazyagent service install
+```
+
+The service is a launchd agent on macOS, a systemd user unit on Linux and a logon task on Windows. `crazyagent service status` shows whether it runs, and `crazyagent service uninstall` removes it.
+
+## Build requirements
 
 - macOS
 - Rust toolchain with edition 2024 support (tested with Rust 1.99.1)
