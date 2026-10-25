@@ -8,7 +8,7 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, useRoute, type Route } from "./ui";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
@@ -92,7 +92,7 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
 function useShortcuts() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey || event.ctrlKey) return;
+      if (!shortcutKey(event)) return;
       if (event.key === "n") { event.preventDefault(); navigate({ name: "new-project", step: "basics" }); }
       else if (event.key === ",") { event.preventDefault(); navigate({ name: "settings", tab: "accounts" }); }
       else if (event.key === "[") { event.preventDefault(); window.history.back(); }

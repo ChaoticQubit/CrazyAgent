@@ -3,7 +3,7 @@ import { delegateTeamTask, keepTeamWarm } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { IntentReceipt, TeamStatus } from "../../engine-client";
-import { Button, Select, Switch } from "../../ui";
+import { Button, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -91,9 +91,9 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />
       <label htmlFor={`tg-hand-text-${projectId}`}>Task</label>
       <textarea id={`tg-hand-text-${projectId}`} className="pj-input" rows={3} value={text} onChange={(event) => { setText(event.target.value); setSent(""); }}
-        aria-describedby={`tg-hand-help-${projectId}`} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void hand(); } }} />
+        aria-describedby={`tg-hand-help-${projectId}`} onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); void hand(); } }} />
       <div className="tg-composer-foot">
-        <span className="tg-terminal-note" id={`tg-hand-help-${projectId}`}>{text && check.kind === "invalid" ? check.reason : "Skips the master. The master sees the task and its result. Cmd+Enter to send."}</span>
+        <span className="tg-terminal-note" id={`tg-hand-help-${projectId}`}>{text && check.kind === "invalid" ? check.reason : keyLabel("Skips the master. The master sees the task and its result. Cmd+Enter to send.")}</span>
         <Button type="submit" variant="primary" size="small" icon="send" disabled={check.kind !== "ok" || busy} pending={busy} pendingLabel="Handing off...">Hand off</Button>
       </div>
     </form> : <p className="tg-terminal-note">This team has no sub-agents. Add some in the project settings to hand tasks to them.</p>}
