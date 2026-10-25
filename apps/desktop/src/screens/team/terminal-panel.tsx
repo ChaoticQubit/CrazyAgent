@@ -5,7 +5,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, promptText, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -98,6 +98,7 @@ export function TerminalPanel({ node, harness, onClose }: {
           selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
         },
       });
+      muteQueries(terminal);
       const fit = new FitAddon();
       terminal.loadAddon(fit);
       terminal.open(element);

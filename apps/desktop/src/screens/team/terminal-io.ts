@@ -1,3 +1,4 @@
+import type { IFunctionIdentifier, IParser } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
 
 export const INPUT_BYTES_MAX = 4096;
@@ -110,6 +111,22 @@ export function promptText(text: string): { kind: "ok"; text: string } | { kind:
   const bytes = encoder.encode(trimmed).length;
   if (bytes > PROMPT_BYTES_MAX) return { kind: "too_long", reason: `Too long: ${bytes} of ${PROMPT_BYTES_MAX} bytes.` };
   return { kind: "ok", text: trimmed };
+}
+
+const QUERY_CSI: IFunctionIdentifier[] = [
+  { final: "c" }, { prefix: ">", final: "c" }, { prefix: "=", final: "c" },
+  { final: "n" }, { prefix: "?", final: "n" },
+  { intermediates: "$", final: "p" }, { prefix: "?", intermediates: "$", final: "p" },
+];
+const QUERY_DCS: IFunctionIdentifier[] = [{ intermediates: "$", final: "q" }];
+
+/** Stops a view answering the terminal queries an agent's app writes (device attributes,
+ * status and cursor reports, mode and setting requests). tmux owns the agent's terminal and
+ * answers them already; a second answer from the view would be typed into the agent.
+ * Input: the view's terminal. Output: none; the handlers end with the terminal. */
+export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler"> }): void {
+  for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
+  for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
 }
 
 /** What one terminal channel message means for the view. */
