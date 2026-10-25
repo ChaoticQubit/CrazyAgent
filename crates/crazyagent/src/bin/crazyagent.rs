@@ -15,6 +15,7 @@ const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui SOCKET\n\
+crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
@@ -41,6 +42,18 @@ fn main() -> ExitCode {
     if args == ["--version"] {
         println!("crazyagent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if args.first().is_some_and(|arg| arg == "update") {
+        return match crazyagent::update::run(&args[1..]) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args == ["tui", "--help"] {
         println!("crazyagent tui SOCKET");

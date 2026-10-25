@@ -9,6 +9,7 @@ import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
+import { UpdatesSettings } from "./updates";
 
 const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Accounts", icon: "key-round" },
@@ -20,6 +21,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
   { id: "profile", label: "Profile", icon: "user-round" },
+  { id: "updates", label: "Updates", icon: "refresh-cw" },
 ];
 
 /** Settings: the header, the tabs and the selected tab's panel.
@@ -37,6 +39,7 @@ export function Settings({ tab, action }: { tab: SettingsTab; action?: SettingsA
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
         : tab === "memory" ? <MemorySettings />
+        : tab === "updates" ? <UpdatesSettings />
         : <ProfileSettings />}
     </div>
   </>;

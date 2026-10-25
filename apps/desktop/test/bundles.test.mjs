@@ -38,7 +38,17 @@ test("platform bundles keep the Ember 4 icons from the main config and carry no 
   for (const name of ["tauri.conf.json", "tauri.linux.conf.json", "tauri.windows.conf.json"]) {
     const platform = config(name);
     assert.deepEqual(platform.bundle.icon ?? main.bundle.icon, main.bundle.icon, name);
-    const signing = keys(platform).filter((key) => SIGNING.test(key));
+    const { pubkey: _updaterKey, ...updater } = platform.plugins?.updater ?? {};
+    const signing = keys({ ...platform, plugins: { ...platform.plugins, updater } }).filter((key) => SIGNING.test(key));
     assert.deepEqual(signing, [], name);
   }
+});
+
+test("the updater config holds only the release public key, never a secret key", () => {
+  const { pubkey } = config("tauri.conf.json").plugins.updater;
+  if (pubkey === "REPLACE_WITH_LEADER_PUBKEY") return;
+  const text = Buffer.from(pubkey, "base64").toString("utf8");
+  assert.match(text, /^untrusted comment: minisign public key/);
+  assert.doesNotMatch(text, /secret key/i);
+  assert.equal(text.trim().split("\n").length, 2);
 });
