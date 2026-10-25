@@ -751,6 +751,55 @@ async fn real_sqlite_abort_retains_unknown_and_recovers_exact_old_or_new_file() 
 }
 
 #[tokio::test]
+async fn interrupted_temporary_write_is_staged_again_on_restart() {
+    let f = Fixture::start(true, "version = 1\n").await;
+    let request = f
+        .request(
+            "partial-temporary",
+            crazyagent::config::ModelAccessEdit::AddAccount {
+                account_ref: reference("account"),
+            },
+        )
+        .await;
+    let db = rusqlite::Connection::open(f.root.path().join("engine.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER publication_abort BEFORE UPDATE ON settings_publication BEGIN SELECT RAISE(ABORT, 'actual_journal_abort'); END;").unwrap();
+    assert!(matches!(
+        f.client.request(request.clone()).await.unwrap().response,
+        OwnerResponse::OutcomeUnknown { .. }
+    ));
+    let root = f.close().await;
+    db.execute_batch("DROP TRIGGER publication_abort").unwrap();
+    drop(db);
+    let global = root.path().join("global.toml");
+    let project = root.path().join("project.toml");
+    let temporary = root.path().join(format!(
+        ".crazyagent-publication-{}",
+        request.mutation_hash().unwrap()
+    ));
+    let staged = std::fs::read(&temporary).unwrap();
+    assert!(staged.len() > 1);
+    std::fs::write(&temporary, &staged[..staged.len() / 2]).unwrap();
+    let engine = Arc::new(
+        Engine::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+            .await
+            .unwrap(),
+    );
+    assert!(
+        std::fs::read_to_string(&global)
+            .unwrap()
+            .contains("account")
+    );
+    assert!(!temporary.exists());
+    let config = resolve_config(&global, &project).unwrap();
+    let f = Fixture::bind(root, engine, &config).await;
+    let replay = f.client.request(request).await.unwrap();
+    assert!(
+        matches!(replay.response, OwnerResponse::Applied { operation } if operation.historical_replay && operation.current_revision.value() == 1 && operation.result == OwnerResult::Applied)
+    );
+    f.close().await;
+}
+
+#[tokio::test]
 async fn changed_file_or_project_conflicts_without_publication() {
     for change_project in [false, true] {
         let f = Fixture::start(true, "version = 1\n").await;

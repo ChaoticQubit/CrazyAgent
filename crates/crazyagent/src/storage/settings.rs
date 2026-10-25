@@ -279,6 +279,27 @@ impl SettingsSources {
         Err(error("settings_unavailable"))
     }
 
+    /// Removes a staged publication file this writer left, so an interrupted write is staged
+    /// again and an abandoned change leaves nothing behind. Input: the temporary file name.
+    /// Output: unit once nothing has that name; anything but a private regular file is refused.
+    #[cfg(unix)]
+    fn remove_temporary(&self, name: &str) -> Result<(), EngineError> {
+        self.global.verify()?;
+        let fd = match rustix::fs::openat(
+            &self.global.parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            Err(e) => return Err(error(e)),
+        };
+        private(&std::fs::File::from(fd).metadata().map_err(error)?, false)?;
+        rustix::fs::unlinkat(&self.global.parent, name, AtFlags::empty()).map_err(error)?;
+        self.global.parent.sync_all().map_err(error)
+    }
+
     #[cfg(unix)]
     fn publish(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
         let current = self.snapshot()?;
@@ -297,22 +318,18 @@ impl SettingsSources {
         }
         let name = OsString::from(&pending.temporary);
         if pending.new_identity.is_none() {
-            let fd = match rustix::fs::openat(
+            self.remove_temporary(&pending.temporary)?;
+            let fd = rustix::fs::openat(
                 &self.global.parent,
                 &name,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::from_raw_mode(0o600),
-            ) {
-                Ok(fd) => Some(fd),
-                Err(rustix::io::Errno::EXIST) => None,
-                Err(e) => return Err(error(e)),
-            };
-            if let Some(fd) = fd {
-                let mut file = std::fs::File::from(fd);
-                file.write_all(pending.new_global.as_bytes())
-                    .map_err(error)?;
-                file.sync_all().map_err(error)?;
-            }
+            )
+            .map_err(error)?;
+            let mut file = std::fs::File::from(fd);
+            file.write_all(pending.new_global.as_bytes())
+                .map_err(error)?;
+            file.sync_all().map_err(error)?;
             let temporary = self.global.read_name(&name)?;
             if temporary.identity.is_none() || temporary.bytes != pending.new_global {
                 return Err(error("settings_temporary_conflict"));
