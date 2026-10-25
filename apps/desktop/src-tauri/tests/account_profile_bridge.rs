@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::{
     ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
@@ -18,7 +20,7 @@ async fn local_none_configuration_uses_real_owner_custody_and_same_request_readb
  {
     let root = tempfile::Builder::new()
         .prefix("ca-profile-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

@@ -231,7 +231,7 @@ impl NativeBridge {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::bridge::ActionOutcome;
@@ -281,7 +281,7 @@ fallback_allowed = false
     async fn real_master_bridge_open_submit_read_and_cancel_preserve_owner_data() {
         let root = tempfile::Builder::new()
             .prefix("ca-desktop-master-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");
@@ -591,7 +591,7 @@ fallback_allowed = false
     async fn real_start_master_uses_only_the_pool_assigned_to_the_project() {
         let root = tempfile::Builder::new()
             .prefix("ca-desktop-default-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");

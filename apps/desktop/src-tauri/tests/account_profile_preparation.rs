@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::{ModelAuthentication, ModelEndpoint};
 use crazyagent::engine::bootstrap::EngineService;
@@ -12,7 +14,7 @@ async fn ordinary_endpoint_preparation_generates_distinct_nonsecret_plans_withou
  {
     let root = tempfile::Builder::new()
         .prefix("ca-profile-plan-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

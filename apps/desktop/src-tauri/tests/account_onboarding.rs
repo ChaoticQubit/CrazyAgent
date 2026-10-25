@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::{ModelAccessEdit, ModelAuthentication, ModelEndpoint};
 use crazyagent::engine::bootstrap::EngineService;
@@ -13,7 +15,7 @@ use std::time::Duration;
 async fn provider_first_managed_accounts_publish_real_distinct_configuration_without_signing_in() {
     let root = tempfile::Builder::new()
         .prefix("ca-onboard-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");
