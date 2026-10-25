@@ -24,6 +24,7 @@ const ABOUT_CHARS_MAX: usize = 2_000;
 const STACK_CHARS_MAX: usize = 1_000;
 const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
+const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -223,7 +224,7 @@ impl OnboardingPage {
     }
 
     fn settled(onboarding: &OnboardingView) -> bool {
-        let done = |step: &Step| matches!(step, Step::Done | Step::Failed { .. });
+        let done = |step: &Step| matches!(step, Step::Done | Step::Off | Step::Failed { .. });
         done(&onboarding.graph) && done(&onboarding.mapping)
     }
 
@@ -378,9 +379,17 @@ impl OnboardingPage {
                 Span::styled(" Running", theme.running),
             ]),
             Step::Done => status("Done", theme, ctx.glyphs),
+            Step::Off => status("Turned off", theme, ctx.glyphs),
             Step::Failed { .. } => status("Failed", theme, ctx.glyphs),
         };
         let mut lines = vec![row(limit, Line::raw(label.to_owned()), state, ctx.glyphs)];
+        if *step == Step::Off {
+            lines.extend(
+                wrap(GRAPH_OFF, limit.saturating_sub(2))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
+        }
         if let Step::Failed { reason } = step {
             lines.extend(
                 wrap(reason, limit.saturating_sub(2))

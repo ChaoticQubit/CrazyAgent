@@ -17,7 +17,8 @@ mod tests;
 const PROJECT_ID_BYTES_MAX: usize = 64;
 const REASON_BYTES_MAX: usize = 256;
 
-/// Where one onboarding step stands: not started, running, finished, or
+/// Where one onboarding step stands: not started, running, finished, off
+/// (the graph step only, while the Graphify entry is not on in Setup), or
 /// failed with a plain reason the owner can act on, such as
 /// "graphify not installed".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub enum Step {
     Waiting,
     Running,
     Done,
+    Off,
     Failed { reason: String },
 }
 
@@ -92,6 +94,7 @@ impl Step {
             Self::Waiting => ("waiting", None),
             Self::Running => ("running", None),
             Self::Done => ("done", None),
+            Self::Off => ("off", None),
             Self::Failed { reason } => ("failed", Some(reason.as_str())),
         }
     }
@@ -102,6 +105,7 @@ impl Step {
             "waiting" => Self::Waiting,
             "running" => Self::Running,
             "done" => Self::Done,
+            "off" => Self::Off,
             "failed" => Self::Failed {
                 reason: reason.unwrap_or_default(),
             },
@@ -288,7 +292,7 @@ pub(crate) fn execute(
         if known != project_id.as_str() {
             return Ok(rejected("onboarding_project_mismatch"));
         }
-        restart(tx, &project_id, pool)?;
+        restart(tx, &project_id, pool, graph_step(tx)?)?;
         return Ok(Outcome::Applied);
     }
     let exists: bool = tx
@@ -348,36 +352,48 @@ pub(crate) fn execute(
     let now = now_ms();
     tx.execute(
         "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
-         VALUES (?1,?2,?3,'waiting','waiting',?4,?5,?5)",
+         VALUES (?1,?2,?3,?6,'waiting',?4,?5,?5)",
         params![
             project_id.as_str(),
             repo_text,
             pool.as_str(),
             serde_json::to_string(&drafted).map_err(error)?,
-            now
+            now,
+            graph_step(tx)?.columns().0
         ],
     )
     .map_err(error)?;
     Ok(Outcome::Applied)
 }
 
+/// Where a new or restarted graph step begins: waiting while the Graphify
+/// pack entry is installed and on, otherwise off so no graph is built.
+fn graph_step(tx: &Transaction<'_>) -> Result<Step, EngineError> {
+    let on = crate::storage::setup::entry_on(tx, crate::setup::pack::GRAPH_ENTRY)?;
+    Ok(if on { Step::Waiting } else { Step::Off })
+}
+
 /// Sends the failed steps of an onboarding back to waiting on `pool`, so a
-/// second start retries them; finished and running steps keep their state.
+/// second start retries them, and a failed or off graph step to `graph`, so
+/// switching Graphify on or off in Setup counts on the next start; finished
+/// and running steps keep their state.
 fn restart(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     pool: &CredentialRef,
+    graph: Step,
 ) -> Result<(), EngineError> {
+    assert!(matches!(graph, Step::Waiting | Step::Off));
     let changed = tx
         .execute(
             "UPDATE onboarding SET pool=?2,
-                graph_reason=CASE WHEN graph_state='failed' THEN NULL ELSE graph_reason END,
-                graph_state=CASE WHEN graph_state='failed' THEN 'waiting' ELSE graph_state END,
+                graph_reason=CASE WHEN graph_state IN ('failed','off') THEN NULL ELSE graph_reason END,
+                graph_state=CASE WHEN graph_state IN ('failed','off') THEN ?4 ELSE graph_state END,
                 mapping_reason=CASE WHEN mapping_state='failed' THEN NULL ELSE mapping_reason END,
                 mapping_state=CASE WHEN mapping_state='failed' THEN 'waiting' ELSE mapping_state END,
                 updated_ms=?3
              WHERE project=?1",
-            params![project_id.as_str(), pool.as_str(), now_ms()],
+            params![project_id.as_str(), pool.as_str(), now_ms(), graph.columns().0],
         )
         .map_err(error)?;
     assert_eq!(changed, 1);

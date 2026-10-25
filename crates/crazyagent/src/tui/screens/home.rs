@@ -1151,9 +1151,9 @@ pub(in crate::tui) mod tests {
         status.dependencies[2].state = DependencyState::Failed {
             reason: "setup_uv_missing".into(),
         };
-        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+        assert_eq!(missing_tools(&status), ["uv", "Graphify command"]);
         status.dependencies[1].state = DependencyState::Checking;
-        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+        assert_eq!(missing_tools(&status), ["uv", "Graphify command"]);
     }
 
     #[test]
@@ -1210,10 +1210,10 @@ pub(in crate::tui) mod tests {
             "{rows:#?}"
         );
         assert!(
-            rows.iter()
-                .any(|row| row.contains("Missing: uv, Graphify.")),
+            rows.iter().any(|row| row.contains("Missing: uv, Graphify")),
             "{rows:#?}"
         );
+        assert!(rows.iter().any(|row| row.contains("command.")), "{rows:#?}");
         assert!(
             rows.iter().any(|row| row.contains("[x] Add an account")),
             "{rows:#?}"

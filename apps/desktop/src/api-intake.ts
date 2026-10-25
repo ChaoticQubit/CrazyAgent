@@ -104,7 +104,6 @@ const COPY: Record<string, string> = {
   setup_owner_unavailable: "CrazyAgent's engine isn't running.",
   setup_store_unavailable: "The app's data folder can't be written.",
   pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
-  pack_required: "This entry is always on and can't be removed.",
   pack_not_installed: "This entry isn't installed yet. Run setup first.",
   pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_too_many: "Pick at most 64 entries.",

@@ -243,7 +243,7 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         .query_row(
             "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding
              WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed')))
+                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')))
              ORDER BY created_ms,project LIMIT 1",
             [],
             |row| {

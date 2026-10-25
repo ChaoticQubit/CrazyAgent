@@ -64,7 +64,7 @@ test("intake failures read as plain sentences", () => {
 test("setup takes at most 64 pack entries and its failures read as plain sentences", async () => {
   assert.throws(() => api.runSetup(Array.from({ length: 65 }, (_, index) => `entry-${index}`)), /64/);
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");
-  assert.equal(api.intakeCopy("pack_required"), "This entry is always on and can't be removed.");
+  assert.equal(api.intakeCopy("pack_required"), "Something went wrong. Try again.");
   assert.equal(api.intakeCopy("setup_busy"), "Setup is already running. Wait for it to finish.");
   assert.equal(api.intakeCopy("owner_outcome_unknown_reconcile_same_identity"), "CrazyAgent didn't answer in time. Try again.");
 });

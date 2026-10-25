@@ -3,8 +3,9 @@
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
+use crazyagent::plugins::Scope;
 use crazyagent::setup::pack::{PackGroup, default_pack};
-use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus, Version};
+use crazyagent::setup::{Dependency, DependencyState, PackEntry, PackState, SetupStatus, Version};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
@@ -136,20 +137,100 @@ async fn setup_status_lists_the_dependencies_and_the_shipped_pack() {
         .iter()
         .find(|entry| entry.id == "graphify")
         .unwrap();
-    assert_eq!(graphify.group, PackGroup::Always);
+    assert_eq!(graphify.group, PackGroup::Graph);
     assert_eq!(graphify.source, "github.com/safishamsi/graphify");
 
     case.close().await;
 }
 
+fn entry<'a>(status: &'a SetupStatus, id: &str) -> &'a PackEntry {
+    status.pack.iter().find(|entry| entry.id == id).unwrap()
+}
+
 #[tokio::test]
-async fn required_unknown_and_uninstalled_entries_are_refused_plainly() {
+async fn graphify_already_in_the_plugin_store_reads_installed_and_switches_like_any_entry() {
+    let case = Case::new().await;
+    let mut owner = case.controller().await;
+    let owned = tempfile::Builder::new()
+        .prefix("ca-setup-owned-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let folder = owned.path().canonicalize().unwrap().join("graphify");
+    fs::create_dir(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        "---\nname: graphify\ndescription: Reads the project's code graph.\n---\n",
+    )
+    .unwrap();
+    let skill = owner
+        .add_skill(Scope::Global, folder.to_str().unwrap().into())
+        .await
+        .unwrap();
+
+    let status = settled(&mut owner).await;
+    assert_eq!(entry(&status, "graphify").state, PackState::On);
+    assert_eq!(
+        result(
+            owner
+                .set_pack_entry("graphify".into(), false, 1)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        entry(&owner.setup_status().await.unwrap(), "graphify").state,
+        PackState::Off
+    );
+    let skills = owner.plugin_skills(None).await.unwrap();
+    assert!(
+        !skills
+            .iter()
+            .find(|item| item.id == skill.id)
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(
+        result(
+            owner
+                .set_pack_entry("graphify".into(), true, 2)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        entry(&owner.setup_status().await.unwrap(), "graphify").state,
+        PackState::On
+    );
+    assert_eq!(
+        result(owner.remove_pack_entry("graphify".into(), 3).await.unwrap()),
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        entry(&owner.setup_status().await.unwrap(), "graphify").state,
+        PackState::Available
+    );
+    assert!(
+        owner
+            .plugin_skills(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.name != "graphify")
+    );
+
+    case.close().await;
+}
+
+#[tokio::test]
+async fn no_entry_is_forced_and_unknown_or_uninstalled_entries_are_refused_plainly() {
     let case = Case::new().await;
     let mut owner = case.controller().await;
 
     assert_eq!(
         result(owner.remove_pack_entry("graphify".into(), 1).await.unwrap()),
-        rejected("pack_required")
+        rejected("pack_not_installed")
     );
     assert_eq!(
         result(
@@ -158,7 +239,7 @@ async fn required_unknown_and_uninstalled_entries_are_refused_plainly() {
                 .await
                 .unwrap()
         ),
-        rejected("pack_required")
+        rejected("pack_not_installed")
     );
     assert_eq!(
         result(

@@ -37,6 +37,7 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
 /// onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
+    let off = crate::onboarding::Step::Off.columns().0;
     let mut statement = tx
         .prepare(
             "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
@@ -60,7 +61,7 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
             serde_json::from_str(&body).map_err(error)?;
         let onboarding = graph
             .zip(mapping)
-            .is_some_and(|(graph, mapping)| graph != done || mapping != done);
+            .is_some_and(|(graph, mapping)| (graph != done && graph != off) || mapping != done);
         projects.push(Registered {
             folder: stored.project_folder(),
             project_id: stored.project_id,

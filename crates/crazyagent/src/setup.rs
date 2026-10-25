@@ -123,12 +123,13 @@ impl Dependency {
         }
     }
 
-    /// The plain name the setup screen shows, such as `Graphify`.
+    /// The plain name the setup screen shows, such as `Graphify command`, kept apart
+    /// from the pack entry of the same tool.
     pub fn label(self) -> &'static str {
         match self {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
-            Self::Graphify => "Graphify",
+            Self::Graphify => "Graphify command",
         }
     }
 }
@@ -373,7 +374,7 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 26] = [
+const REASONS: [(&str, &str); 25] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -442,10 +443,6 @@ const REASONS: [(&str, &str); 26] = [
     (
         "pack_name_taken",
         "A skill or server with this name already exists.",
-    ),
-    (
-        "pack_required",
-        "This entry is always on and can't be removed.",
     ),
     (
         "setup_tool_unsupported",

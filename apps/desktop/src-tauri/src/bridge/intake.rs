@@ -136,7 +136,6 @@ const SETUP_CODES: [&str; 34] = [
     "pack_bundled_unavailable",
     "pack_unknown",
     "pack_name_taken",
-    "pack_required",
     "pack_not_installed",
     "pack_id_invalid",
     "pack_too_many",

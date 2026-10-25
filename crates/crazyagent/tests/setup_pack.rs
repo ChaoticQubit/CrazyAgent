@@ -81,12 +81,13 @@ fn the_shipped_pack_holds_every_grill_entry_with_its_default() {
     }
     let graphify = &manifest.entries[0];
     assert_eq!(graphify.id, "graphify");
-    assert_eq!(graphify.group, PackGroup::Always);
+    assert_eq!(graphify.group, PackGroup::Graph);
+    assert!(graphify.on_by_default);
     assert_eq!(
         manifest
             .entries
             .iter()
-            .filter(|entry| entry.group == PackGroup::Always)
+            .filter(|entry| entry.group == PackGroup::Graph)
             .count(),
         1
     );

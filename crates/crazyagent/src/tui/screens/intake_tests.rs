@@ -542,6 +542,15 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
 }
 
 fn waiting_review() -> (Shell, ProjectId) {
+    onboarding_with(
+        Step::Done,
+        Step::Failed {
+            reason: "No model answered.".into(),
+        },
+    )
+}
+
+fn onboarding_with(graph: Step, mapping: Step) -> (Shell, ProjectId) {
     let project = ProjectId::new("project-notes").unwrap();
     let mut ctx = ctx(80, 40);
     let screen = open(
@@ -556,10 +565,8 @@ fn waiting_review() -> (Shell, ProjectId) {
     while shell.ctx.next_request().is_some() {}
     let draft = OnboardingView {
         project_id: project.clone(),
-        graph: Step::Done,
-        mapping: Step::Failed {
-            reason: "No model answered.".into(),
-        },
+        graph,
+        mapping,
         name: "notes".into(),
         draft: ProjectSetup {
             about: String::new(),
@@ -586,6 +593,23 @@ fn waiting_review() -> (Shell, ProjectId) {
         Ok(IntakeView::Onboarding(Box::new(draft))),
     ));
     (shell, project)
+}
+
+#[test]
+fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
+    let (mut shell, _) = onboarding_with(Step::Off, Step::Running);
+    let rows = render(&mut shell, 80, 40);
+    let off = format!("{} Turned off", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, "Build the code graph"), "{rows:#?}");
+    assert!(shows(&rows, &off), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
 }
 
 #[test]
