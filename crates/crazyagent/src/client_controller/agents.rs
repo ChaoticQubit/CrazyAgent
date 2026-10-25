@@ -8,7 +8,7 @@ const PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
 impl OwnerController {
     fn agents_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 

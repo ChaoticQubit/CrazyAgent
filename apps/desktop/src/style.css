@@ -302,4 +302,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .account-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; height: 100%; }
 .account-pick { width: 16px; height: 16px; margin: 0 0 0 var(--space-3); accent-color: var(--accent-solid); }
 .accounts-selectable .list-head { padding-left: calc(36px + var(--space-3)); }
+.accounts-actions .account-line { grid-template-columns: 36px minmax(0, 1fr) 44px; }
+.accounts-actions:not(.accounts-selectable) .account-line { grid-template-columns: minmax(0, 1fr) 44px; }
+.accounts-actions .list-head { padding-right: calc(44px + var(--space-3)); }
 .toolbar.selection { padding: var(--space-2) 0; }

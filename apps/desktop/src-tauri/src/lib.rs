@@ -729,7 +729,8 @@ async fn desktop_github_status(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_status().await
+    let call = lock(&state)?.github_status()?;
+    call.await
 }
 
 #[tauri::command]
@@ -738,7 +739,8 @@ async fn desktop_github_sign_in(
     state: State<'_, NativeState>,
 ) -> Result<GitHubDeviceCode, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_sign_in().await
+    let call = lock(&state)?.github_sign_in()?;
+    call.await
 }
 
 #[tauri::command]
@@ -748,7 +750,8 @@ async fn desktop_github_token(
     token: String,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_token(token).await
+    let call = lock(&state)?.github_token(token)?;
+    call.await
 }
 
 #[tauri::command]
@@ -757,7 +760,8 @@ async fn desktop_github_use_cli(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_use_cli().await
+    let call = lock(&state)?.github_use_cli()?;
+    call.await
 }
 
 #[tauri::command]
@@ -766,7 +770,8 @@ async fn desktop_github_sign_out(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_sign_out().await
+    let call = lock(&state)?.github_sign_out()?;
+    call.await
 }
 
 #[tauri::command]
@@ -776,7 +781,8 @@ async fn desktop_github_repos(
     page: u32,
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.github_repos(page).await
+    let call = lock(&state)?.github_repos(page)?;
+    call.await
 }
 
 #[tauri::command]
@@ -786,7 +792,8 @@ async fn desktop_clone_repo(
     full_name: String,
 ) -> Result<CloneReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.clone_repo(full_name).await
+    let call = lock(&state)?.clone_repo(full_name)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1313,7 +1320,8 @@ async fn desktop_check_mcp_server(
     id: String,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.check_mcp_server(id).await
+    let call = lock(&state)?.check_mcp_server(id)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1343,7 +1351,8 @@ async fn desktop_stop_agent(
     id: String,
 ) -> Result<AgentView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.stop_agent(id).await
+    let call = lock(&state)?.stop_agent(id)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1353,7 +1362,8 @@ async fn desktop_interrupt_agent(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.interrupt_agent(id).await
+    let call = lock(&state)?.interrupt_agent(id)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1363,7 +1373,8 @@ async fn desktop_restart_agent(
     id: String,
 ) -> Result<AgentView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.restart_agent(id).await
+    let call = lock(&state)?.restart_agent(id)?;
+    call.await
 }
 
 #[tauri::command]

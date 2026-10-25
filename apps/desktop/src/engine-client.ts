@@ -16,10 +16,54 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
   }
 }
 
-/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal.
+export type SettledCall = { ok: true; value: unknown } | { ok: false; failure: unknown };
+
+const unconfirmedWatchers = new Set<() => void>();
+
+/** Whether a bridge reply leaves an owner change unconfirmed: a reply the bridge still marks
+ * pending, or a refusal because an earlier change is still pending.
+ * Input: the settled call. Output: true when the app should check the kept change. */
+export function leavesUnconfirmed(settled: SettledCall): boolean {
+  if (settled.ok) {
+    const value = settled.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) && "pending" in value && value.pending === true;
+  }
+  const failure = settled.failure;
+  return typeof failure === "object" && failure !== null && "code" in failure && failure.code === "pending_intent";
+}
+
+/** Subscribes to bridge replies that leave an owner change unconfirmed, so the app can name
+ * the change and check it. Input: the listener. Output: a function that unsubscribes it. */
+export function watchUnconfirmed(listener: () => void): () => void {
+  unconfirmedWatchers.add(listener);
+  return () => { unconfirmedWatchers.delete(listener); };
+}
+
+/** Tells every watcher when one settled bridge call left a change unconfirmed.
+ * Input: the settled call. Output: none. */
+export function reportReply(settled: SettledCall): void {
+  if (!leavesUnconfirmed(settled)) return;
+  for (const listener of [...unconfirmedWatchers]) listener();
+}
+
+/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal, and
+ * reports a reply that leaves an owner change unconfirmed.
+ * Inputs: the command name and its arguments. Output: the command result or its failure. */
+export async function bridgeCall<T>(command: string, args?: InvokeArgs): Promise<T> {
+  try {
+    const value = await retryBusy(() => native<T>(command, args));
+    reportReply({ ok: true, value });
+    return value;
+  } catch (failure) {
+    reportReply({ ok: false, failure });
+    throw failure;
+  }
+}
+
+/** Calls one native bridge command through the shared bridge call.
  * Inputs: the command name and its arguments. Output: the command result or its failure. */
 function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
-  return retryBusy(() => native<T>(command, args));
+  return bridgeCall<T>(command, args);
 }
 
 export function startNativeAuth(ticket: string, method: NativeAuthMethod): Promise<NativeAuthView> {

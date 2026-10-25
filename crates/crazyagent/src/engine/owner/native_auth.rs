@@ -99,6 +99,16 @@ impl NativeAuthPhase {
             Self::Uncertain => "uncertain",
         }
     }
+
+    /// Tells whether an operation in this phase is still running and may yet change its
+    /// account. Input: the phase. Output: true for starting, awaiting the owner, checking the
+    /// account and cancelling; every other phase has ended or needs recovery.
+    pub fn unfinished(self) -> bool {
+        matches!(
+            self,
+            Self::Starting | Self::AwaitingOwner | Self::CheckingAccount | Self::Cancelling
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

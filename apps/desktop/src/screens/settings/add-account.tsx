@@ -6,7 +6,7 @@ import {
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
-import { SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 export const TILE_LINES: Record<AccountProvider, string> = {
   chatgpt: "Use your ChatGPT plan or an OpenAI key with Codex.",
@@ -133,7 +133,7 @@ export function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPi
   </div>;
 }
 
-function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, onRunning }: {
+function SubscriptionForm({ provider, option, name, onName, onAdded, onCreated, onUseKey, onRunning }: {
   provider: ProviderEntry;
   option: MethodOption;
   name: string;
@@ -141,6 +141,7 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
   onAdded: (account: AccountView, line: string) => void;
   onUseKey: () => void;
   onRunning: (stop: (() => void) | undefined) => void;
+  onCreated: (account: AccountView) => void;
 }) {
   const session = useAppSession();
   const [account, setAccount] = useState<AccountView>();
@@ -178,6 +179,7 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
     if (added.kind !== "ok") return setError(added.kind === "not_ready" ? "Adding accounts isn't ready yet in this build." : added.message);
     setError(undefined);
     setAccount(added.value);
+    onCreated(added.value);
     setQueued(method);
   };
 
@@ -300,8 +302,10 @@ function Done({ account, line }: { account: AccountView; line: string }) {
 }
 
 /** The Add account dialog: provider tiles, sign-in method, the method's form or managed
- * sign-in, then Account added. Inputs: open flag, the current accounts (for default names),
- * close handler and a handler called after each added account. */
+ * sign-in, then Account added. A subscription account the owner leaves before it is signed in
+ * (close, Back, Stop signing in, a key instead) has its sign-in cancelled and is removed.
+ * Inputs: open flag, the current accounts (for default names), close handler and a handler
+ * called after each added or removed account. */
 export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   open: boolean;
   accounts: AccountView[];
@@ -312,10 +316,19 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   const [step, setStep] = useState<Step>({ kind: "provider" });
   const [name, setName] = useState("");
   const [confirmStop, setConfirmStop] = useState(false);
+  const session = useAppSession();
   const stop = useRef<(() => void) | undefined>(undefined);
+  const unfinished = useRef<AccountView | undefined>(undefined);
   const onRunning = useCallback((value: (() => void) | undefined) => { stop.current = value; }, []);
 
-  const reset = () => { setStep({ kind: "provider" }); setName(""); };
+  const leave = () => {
+    const left = unfinished.current;
+    unfinished.current = undefined;
+    stop.current = undefined;
+    if (!left) return;
+    void discardAccount(left, session.noteResult).then((line) => { session.showToast(line); onAdded(); });
+  };
+  const reset = () => { leave(); setStep({ kind: "provider" }); setName(""); };
   const close = () => {
     if (stop.current) return setConfirmStop(true);
     reset();
@@ -331,11 +344,12 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
     else setStep({ kind: "method", provider });
   };
   const back = step.kind === "method" ? () => setStep({ kind: "provider" })
-    : step.kind === "form" ? () => methodOptions(step.provider).length > 1 ? setStep({ kind: "method", provider: step.provider }) : setStep({ kind: "provider" })
+    : step.kind === "form" ? () => { leave(); if (methodOptions(step.provider).length > 1) setStep({ kind: "method", provider: step.provider }); else setStep({ kind: "provider" }); }
     : undefined;
   const added = (account: AccountView, line: string) => {
     if (step.kind !== "form") return;
     stop.current = undefined;
+    unfinished.current = undefined;
     setStep({ kind: "done", provider: step.provider, option: step.option, account, line });
     onAdded();
   };
@@ -361,7 +375,8 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   } else if (step.kind === "form") {
     body = step.option.native
       ? <SubscriptionForm key={step.option.key} provider={step.provider} option={step.option} name={name} onName={setName}
-        onAdded={added} onRunning={onRunning} onUseKey={() => {
+        onAdded={added} onRunning={onRunning} onCreated={(account) => { unfinished.current = account; }} onUseKey={() => {
+          leave();
           const keyOption = methodOptions(step.provider).find((option) => option.entry.method === "api_key");
           if (keyOption) pickMethod(step.provider, keyOption);
         }} />
@@ -377,8 +392,8 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
       {body}
     </Dialog>
     <ConfirmDialog open={confirmStop} title="Stop signing in?" confirmLabel="Stop signing in" cancelLabel="Keep signing in"
-      onCancel={() => setConfirmStop(false)} onConfirm={() => { setConfirmStop(false); stop.current?.(); stop.current = undefined; reset(); onClose(); }}>
-      The account stays in your list as Not signed in. You can sign in from it later.
+      onCancel={() => setConfirmStop(false)} onConfirm={() => { setConfirmStop(false); reset(); onClose(); }}>
+      The sign-in is cancelled and the account you started is removed, since it isn't signed in.
     </ConfirmDialog>
   </>;
 }

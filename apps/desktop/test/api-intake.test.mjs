@@ -55,7 +55,7 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("clone_destination_exists"), "Your projects folder already has a folder with this repository's name.");
   assert.equal(api.intakeCopy("github_sign_in_expired"), "The GitHub code expired before it was entered. Start again.");
   assert.equal(api.intakeCopy("home_move_partial"), "Some projects were moved and couldn't be moved back. Check both folders.");
-  assert.equal(api.intakeCopy("pending_intent"), "Another change is still being saved. Wait for it to finish, then try again.");
+  assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again.");
 });
 

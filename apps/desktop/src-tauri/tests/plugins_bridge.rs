@@ -76,6 +76,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(approved.status, ServerStatus::Approved);
     let checked = bridge
         .check_mcp_server(server.id.clone())
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(checked.tools, vec!["echo", "authorized"]);

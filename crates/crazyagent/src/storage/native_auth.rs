@@ -696,7 +696,7 @@ pub(crate) fn cancel_native_auth(
         return Err(error("native_auth_operation_scope_conflict"));
     }
     let mut fact = load_fact(&tx, &expected.operation_id)?;
-    if !unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain {
+    if !fact.phase.unfinished() && fact.phase != NativeAuthPhase::Uncertain {
         return Err(error("native_auth_not_active"));
     }
     let host = HostStamp {
@@ -1017,22 +1017,12 @@ fn existing(
             |row| row.get(0),
         )
         .map_err(error)?;
-    if (unfinished(fact.phase) || fenced) && fact.binding.engine_epoch != admission.engine_epoch {
+    if (fact.phase.unfinished() || fenced) && fact.binding.engine_epoch != admission.engine_epoch {
         fact.phase = NativeAuthPhase::Uncertain;
         fact.code = Some("native_auth_recovery_required".into());
         store_fact(tx, &fact)?;
     }
     Ok(Some(fact))
-}
-
-fn unfinished(phase: NativeAuthPhase) -> bool {
-    matches!(
-        phase,
-        NativeAuthPhase::Starting
-            | NativeAuthPhase::AwaitingOwner
-            | NativeAuthPhase::CheckingAccount
-            | NativeAuthPhase::Cancelling
-    )
 }
 
 fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, EngineError> {

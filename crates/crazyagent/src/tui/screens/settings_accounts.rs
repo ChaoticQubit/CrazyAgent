@@ -21,7 +21,7 @@ use crate::tui::widgets::{TextField, buttons};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 const FILTER_CHARS_MAX: usize = 96;
 const NAME_CHARS_MAX: usize = crate::accounts::ACCOUNT_NAME_MAX;
@@ -190,6 +190,17 @@ pub struct Accounts {
     filtering: bool,
     attention_only: bool,
     marked: BTreeSet<CredentialRef>,
+    confirm: Option<bool>,
+    deleting: Option<Deleting>,
+}
+
+/// Selected accounts being deleted one at a time: the ones left, the one in flight, and
+/// what happened to the ones before it.
+struct Deleting {
+    left: VecDeque<(CredentialRef, String)>,
+    current: (CredentialRef, String),
+    deleted: usize,
+    failed: Vec<String>,
 }
 
 impl Default for Accounts {
@@ -212,6 +223,8 @@ impl Accounts {
             filtering: false,
             attention_only: false,
             marked: BTreeSet::new(),
+            confirm: None,
+            deleting: None,
         }
     }
 
@@ -322,6 +335,118 @@ impl Accounts {
         list.filter.set(self.filter.value());
         list.marked = self.marked.clone();
         list
+    }
+
+    fn delete_plan(&self, ctx: &Ctx) -> (Vec<&AccountView>, Vec<String>) {
+        let mut delete = Vec::new();
+        let mut kept = Vec::new();
+        for account in sorted(&self.accounts, ctx) {
+            if !self.marked.contains(&account.id) {
+                continue;
+            }
+            if pool_names(&account.id, ctx).is_empty() {
+                delete.push(account);
+            } else {
+                kept.push(account.name.clone());
+            }
+        }
+        (delete, kept)
+    }
+
+    fn ask_delete(&mut self, ctx: &mut Ctx) -> Flow {
+        if self.marked.is_empty() {
+            ctx.say(Message::warning("Select accounts with Space first.", ""));
+            return Flow::Handled;
+        }
+        if self.delete_plan(ctx).0.is_empty() {
+            ctx.say(Message::warning(
+                "Every selected account is in a pool.",
+                "Remove them from their pools first.",
+            ));
+            return Flow::Handled;
+        }
+        self.confirm = Some(false);
+        Flow::Handled
+    }
+
+    fn confirm_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(delete_focused) = &mut self.confirm else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Esc => self.confirm = None,
+            Key::Left | Key::Right | Key::Tab | Key::BackTab => *delete_focused = !*delete_focused,
+            Key::Enter if *delete_focused => {
+                self.confirm = None;
+                let mut left: VecDeque<(CredentialRef, String)> = self
+                    .delete_plan(ctx)
+                    .0
+                    .into_iter()
+                    .map(|account| (account.id.clone(), account.name.clone()))
+                    .collect();
+                if let Some(current) = left.pop_front() {
+                    send(
+                        ctx,
+                        SettingsJob::Accounts(AccountsRequest::Remove {
+                            id: current.0.clone(),
+                        }),
+                    );
+                    self.deleting = Some(Deleting {
+                        left,
+                        current,
+                        deleted: 0,
+                        failed: Vec::new(),
+                    });
+                }
+            }
+            Key::Enter => self.confirm = None,
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    fn removed(&mut self, result: &Result<AccountsReply, String>, ctx: &mut Ctx) {
+        let Some(deleting) = self.deleting.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(AccountsReply::Removed(_)) => {
+                deleting.deleted += 1;
+                self.marked.remove(&deleting.current.0);
+            }
+            Ok(_) => return,
+            Err(code) => deleting
+                .failed
+                .push(format!("{}: {}", deleting.current.1, plain(code))),
+        }
+        if let Some(next) = deleting.left.pop_front() {
+            send(
+                ctx,
+                SettingsJob::Accounts(AccountsRequest::Remove { id: next.0.clone() }),
+            );
+            deleting.current = next;
+            return;
+        }
+        let Some(done) = self.deleting.take() else {
+            return;
+        };
+        let lead = format!(
+            "Deleted {} account{}.",
+            done.deleted,
+            if done.deleted == 1 { "" } else { "s" }
+        );
+        let rest = if done.failed.is_empty() {
+            String::new()
+        } else {
+            format!("Could not delete {}", done.failed.join(" "))
+        };
+        ctx.say(match (done.deleted, done.failed.is_empty()) {
+            (_, true) => Message::success(&lead, ""),
+            (0, false) => Message::error("Could not delete the selected accounts.", &rest),
+            _ => Message::warning(&lead, &rest),
+        });
+        self.reload(ctx);
+        ctx.request(Request::Pools);
     }
 
     fn filter_key(&mut self, key: &Key, ctx: &Ctx) -> Flow {
@@ -571,6 +696,7 @@ impl Screen for Accounts {
         let mut hints = vec![hint("a", "Add account")];
         if !self.marked.is_empty() {
             hints.push(hint("p", "New pool from selected"));
+            hints.push(hint("d", "Delete selected"));
         }
         hints.extend([
             hint("Enter", "Open"),
@@ -595,6 +721,12 @@ impl Screen for Accounts {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.confirm.is_some() {
+            return self.confirm_key(key, ctx);
+        }
+        if self.deleting.is_some() {
+            return Flow::Handled;
+        }
         if self.filtering {
             return self.filter_key(key, ctx);
         }
@@ -631,6 +763,7 @@ impl Screen for Accounts {
                 }
                 Flow::Open(Place::NewPoolFrom(self.marked.iter().cloned().collect()))
             }
+            Key::Char('d') => self.ask_delete(ctx),
             Key::Char(' ') => {
                 let id = self
                     .visible(ctx)
@@ -684,6 +817,10 @@ impl Screen for Accounts {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let Some(SettingsEvent::Accounts(result)) = settings_event(arrival) {
+            self.removed(result, ctx);
+            return Flow::Handled;
+        }
         let Some(SettingsEvent::AllAccounts(result)) = settings_event(arrival) else {
             return Flow::Handled;
         };
@@ -713,7 +850,60 @@ impl Screen for Accounts {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        matches!(self.load, Load::Loading | Load::Idle)
+        matches!(self.load, Load::Loading | Load::Idle) || self.deleting.is_some()
+    }
+
+    fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        let delete_focused = self.confirm?;
+        let (delete, kept) = self.delete_plan(ctx);
+        let count = delete.len();
+        let mut note = String::from("They are in no pool, so no agent uses them.");
+        if delete
+            .iter()
+            .any(|account| account.method == SignInMethod::ApiKey)
+        {
+            note.push_str(" Saved keys are deleted too.");
+        }
+        if !kept.is_empty() {
+            let named = kept.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            let more = kept.len().saturating_sub(3);
+            note.push_str(&format!(
+                " Kept, in a pool: {named}{}.",
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        let mut body = vec![
+            Line::raw(format!(
+                "Delete {count} account{}?",
+                if count == 1 { "" } else { "s" }
+            )),
+            Line::default(),
+        ];
+        body.extend(wrap(&note, 50).into_iter().map(Line::raw));
+        body.push(Line::default());
+        body.push(buttons(
+            &["Cancel", "Delete"],
+            Some(usize::from(delete_focused)),
+            &ctx.theme,
+        ));
+        let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+        Some((
+            Modal {
+                width: 54,
+                title: "Delete accounts".into(),
+                body,
+                top: None,
+            },
+            vec![
+                hint(&arrows, "Choose"),
+                hint("Enter", "Confirm"),
+                hint("Esc", "Cancel"),
+            ],
+        ))
     }
 
     fn place(&self) -> Option<Place> {

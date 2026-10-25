@@ -8,7 +8,7 @@ const PAGES_MAX: usize = 64;
 impl OwnerController {
     fn plugins_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 

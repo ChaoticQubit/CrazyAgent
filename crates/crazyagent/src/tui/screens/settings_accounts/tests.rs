@@ -568,6 +568,57 @@ fn removing_an_account_in_a_pool_is_refused_with_the_reason() {
     assert_eq!(ctx.queued(), 0);
 }
 
+#[test]
+fn delete_selected_asks_first_and_keeps_accounts_that_are_in_a_pool() {
+    let (accounts, pools) = dataset(None);
+    let mut ctx = list_ctx(80, 24, pools);
+    let mut screen = Accounts::with(accounts.clone());
+    assert!(!screen.hints(&ctx).iter().any(|hint| hint.key == "d"));
+    screen.key(&Key::Char('d'), &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Select accounts with Space first."
+    );
+    screen.marked.insert(accounts[0].id.clone());
+    screen.key(&Key::Char('d'), &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
+    let message = ctx.message().unwrap();
+    assert_eq!(message.lead, "Every selected account is in a pool.");
+    assert_eq!(message.rest, "Remove them from their pools first.");
+    screen.marked.insert(accounts[1].id.clone());
+    screen.marked.insert(accounts[200].id.clone());
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .any(|hint| hint.key == "d" && hint.label == "Delete selected")
+    );
+    screen.key(&Key::Char('d'), &mut ctx);
+    let (modal, _) = screen.modal(&ctx).expect("a confirm before deleting");
+    assert_eq!(modal.title, "Delete accounts");
+    let text = modal
+        .body
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("Delete 2 accounts?"), "{text}");
+    assert!(text.contains("Saved keys are deleted too."), "{text}");
+    assert!(
+        text.contains("Kept, in a pool: Claude Pro - personal."),
+        "{text}"
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "Cancel is focused first");
+    assert_eq!(ctx.queued(), 0);
+    assert!(!screen.busy(&ctx));
+    screen.key(&Key::Char('d'), &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(ctx.queued(), 0);
+}
+
 fn add_shell(width: u16, height: u16) -> Shell {
     let ctx = list_ctx(width, height, dataset(None).1);
     let mut shell = Shell::with(ctx, Box::new(AddAccount::new()));

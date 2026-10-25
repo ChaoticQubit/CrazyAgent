@@ -1,4 +1,4 @@
-use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, failure};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
@@ -9,6 +9,7 @@ use crazyagent::setup::SetupStatus;
 use serde::Serialize;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const FOUND_PROJECTS_MAX: usize = 500;
 pub const GIT_CONFIG_BYTES_MAX: u64 = 64 * 1024;
@@ -417,98 +418,84 @@ impl NativeBridge {
         }
     }
 
-    fn github_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
+    fn github_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.controller()?.owner_client().map_err(github_failure)
+        self.controller()?.shared_client().map_err(github_failure)
     }
 
     /// Reads the GitHub sign-in: signed in or not, login, method and any plain problem.
-    pub async fn github_status(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_status()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_status(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_status().await.map_err(github_failure)?)
+        }))
     }
 
     /// Starts the GitHub device sign-in. Output: the code, its page and lifetime.
-    pub async fn github_sign_in(&mut self) -> Result<GitHubDeviceCode, BridgeError> {
-        let code = self
-            .github_ready()?
-            .github_sign_in()
-            .await
-            .map_err(github_failure)?;
-        bounded(code)
+    pub fn github_sign_in(&mut self) -> Result<Unlocked<GitHubDeviceCode>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_sign_in().await.map_err(github_failure)?)
+        }))
     }
 
     /// Sends a pasted GitHub token once through the engine's secret channel; it is never
     /// logged or returned. Input: the token. Output: the status after GitHub checked it.
-    pub async fn github_token(&mut self, token: String) -> Result<GitHubStatus, BridgeError> {
+    pub fn github_token(&mut self, token: String) -> Result<Unlocked<GitHubStatus>, BridgeError> {
         let token = token.trim();
         if token.is_empty() || token.len() > 255 || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(failure("github_token_invalid"));
         }
         let secret = AccountSecret::new(token.as_bytes().to_vec())
             .map_err(|_| failure("github_token_invalid"))?;
-        let status = self
-            .github_ready()?
-            .github_token(secret)
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_token(secret).await.map_err(github_failure)?)
+        }))
     }
 
     /// Reuses a signed-in GitHub CLI on this machine. Output: the new status.
-    pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_use_cli()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_use_cli(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_use_cli().await.map_err(github_failure)?)
+        }))
     }
 
     /// Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status.
-    pub async fn github_sign_out(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_sign_out()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_sign_out(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_sign_out().await.map_err(github_failure)?)
+        }))
     }
 
     /// Lists one page of the signed-in owner's repositories. Input: the page, from 1.
-    pub async fn github_repos(&mut self, page: u32) -> Result<GitHubRepoPage, BridgeError> {
+    pub fn github_repos(&mut self, page: u32) -> Result<Unlocked<GitHubRepoPage>, BridgeError> {
         if page == 0 || page > GITHUB_PAGE_MAX {
             return Err(failure("github_repo_page_invalid"));
         }
-        let repos = self
-            .github_ready()?
-            .github_repos(page)
-            .await
-            .map_err(github_failure)?;
-        bounded(repos)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_repos(page).await.map_err(github_failure)?)
+        }))
     }
 
     /// Clones one repository into the projects home through the engine's credential helper.
     /// Input: "owner/name". Output: the repository and the folder it landed in.
-    pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, BridgeError> {
+    pub fn clone_repo(&mut self, full_name: String) -> Result<Unlocked<CloneReceipt>, BridgeError> {
         let valid = full_name
             .split_once('/')
             .is_some_and(|(owner, name)| name_part(owner) && name_part(name));
         if !valid {
             return Err(failure("github_repo_name_invalid"));
         }
-        let receipt = self
-            .github_ready()?
-            .clone_repo(full_name)
-            .await
-            .map_err(github_failure)?;
-        bounded(receipt)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.clone_repo(full_name).await.map_err(github_failure)?)
+        }))
     }
 
     async fn setup_change(
