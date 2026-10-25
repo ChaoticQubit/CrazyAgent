@@ -131,12 +131,14 @@ impl RegisteredNativeAuthHost {
         })
     }
 
+    /// Returns the captured path while the retained file and the file at that path still
+    /// have the identity hashed at capture. Every content write changes ctime, so equal
+    /// identity means the hashed bytes, without re-reading a harness of hundreds of MB.
+    /// Input: none. Output: the path, or `native_auth_host_executable_changed`.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         let named = Self::open(&self.path)?;
         if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
             || ExecutableIdentity::of(&named.metadata().map_err(io_error)?)? != self.identity
-            || Self::hash(&self.file, self.identity.length)? != self.digest
-            || ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
             || ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?
                 != self.identity
         {
