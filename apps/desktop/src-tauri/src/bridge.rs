@@ -986,6 +986,8 @@ fn rejection_code(code: &str) -> &'static str {
         "research_report_missing" => "research_report_missing",
         "research_section_missing" => "research_section_missing",
         "memory_text_too_long" => "memory_text_too_long",
+        "memory_text_hidden" => "memory_text_hidden",
+        "invalid_knowledge_text" => "invalid_knowledge_text",
         "memory_entry_exists" => "memory_entry_exists",
         "project_folder_missing" => "project_folder_missing",
         "context_item_protected" => "context_item_protected",

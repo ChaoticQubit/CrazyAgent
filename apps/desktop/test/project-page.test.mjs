@@ -414,12 +414,36 @@ test("project Settings, General edits the saved details with the New Project con
   assert.doesNotMatch(markup, /role="alert"/);
 });
 
+test("project Settings never seeds its forms from another project's setup, so a save can't write it into this one", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  const other = { kind: "ok", value: {
+    project_id: "p-2", name: "Bravo Notes", about: "Bravo's own details.", tech_stack: ["Go"], platforms: ["web_app"], research: ["competitor_research"],
+    pool: null, team: { master: "claude", master_tools: false, sub_harnesses: ["codex"], min_agents: 2, max_agents: 3 }, documents: [], folder: "/tmp/bravo-notes", created_ms: 0, revision: 9,
+  } };
+  for (const section of ["general", "team"]) {
+    const markup = renderToStaticMarkup(createElement(settings.SettingsTab, { data: { ...tabData([]), setup: other }, section }));
+    assert.match(markup, /role="status">Loading\.\.\.</, section);
+    assert.doesNotMatch(markup, /Bravo|<form|Save changes|Save team/, section);
+  }
+  const own = { kind: "ok", value: { ...other.value, project_id: "p-1", name: "Harbor Notes" } };
+  const general = renderToStaticMarkup(createElement(settings.SettingsTab, { data: { ...tabData([]), setup: own }, section: "general" }));
+  assert.match(general, /id="ps-name"[^>]*value="Harbor Notes"/);
+});
+
 test("selected report text is cleaned before it can be saved to memory", async () => {
   const context = await import("../src/screens/project/context.tsx");
   assert.equal(context.selectionText("  Owners pay per seat.  "), "Owners pay per seat.");
   assert.equal(context.selectionText("line one\r\nline two"), "line one\nline two");
   assert.equal(context.selectionText(" \n\t "), null);
   assert.equal(context.selectionText(""), null);
+});
+
+test("a selection keeps hidden and reordering characters visible, so the saved note is what the owner saw", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  assert.equal(context.selectionText("Use pnpm\u{e0041}\u{e0042} for installs\u200b."), "Use pnpm\\u{e0041}\\u{e0042} for installs\\u200b.");
+  assert.equal(context.selectionText("Rename\u202etxt.exe"), "Rename\\u202etxt.exe");
+  assert.equal(context.selectionText("\u200b"), "\\u200b");
+  assert.equal(context.selectionText("Warn with ⚠\ufe0f"), "Warn with ⚠\ufe0f");
 });
 
 test("a memory note must have text and fit the engine's 2,000 byte limit", async () => {
@@ -531,4 +555,58 @@ test("Project Settings sends the engine's team fields only, never the tools choi
     about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
     team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
   });
+});
+
+test("the master ticket is used only for the project that was opened", () => {
+  const opened = { project_id: "alpha", ticket: "7", brief: null, fresh: true, revision: "1" };
+  assert.equal(research.openedTicket(opened, "alpha"), "7");
+  assert.throws(() => research.openedTicket(opened, "beta"), (failure) => failure.code === "master_project_mismatch");
+});
+
+test("a master opened for another project has its own plain sentence", () => {
+  assert.equal(api.failureCopy("master_project_mismatch"), "The conversation opened for another project. Open this project again.");
+});
+
+test("files named like object built-ins get the plain file icon instead of crashing the tree", () => {
+  for (const path of ["context/documents/a.constructor", "context/research/b.__PROTO__", "context/documents/c.hasownproperty", "context/documents/d.tostring"]) {
+    assert.equal(research.fileIcon(path), "file", path);
+  }
+});
+
+test("an engine code named like an object built-in gets the plain fallback sentence", () => {
+  for (const code of ["constructor", "__proto__", "toString"]) {
+    assert.equal(typeof api.failureCopy(code), "string", code);
+    assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
+  }
+});
+
+test("a context read that answers after the reader moved on is dropped", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  const late = [];
+  const stop = context.followContext("alpha", "context/brief.md", false, (result) => late.push(result));
+  stop();
+  await settle();
+  assert.deepEqual(late, []);
+  const kept = [];
+  context.followContext("alpha", "context/brief.md", false, (result) => kept.push(result));
+  await settle();
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].kind, "error");
+});
+
+test("a failed add offers a single picked path to retry and never several joined into one", () => {
+  assert.equal(research.retryPath(["/Users/mira/a.pdf"]), "/Users/mira/a.pdf");
+  assert.equal(research.retryPath(["/Users/mira/a.pdf", "/Users/mira/b.pdf"]), "");
+  assert.equal(research.retryPath([]), "");
+});
+
+test("Cmd+Enter and the Send button follow one rule", () => {
+  assert.equal(research.MESSAGE_BYTES_MAX, 8192);
+  assert.equal(research.canSend("hello", false), true);
+  assert.equal(research.canSend("hello", true), false);
+  assert.equal(research.canSend("   ", false), false);
+  assert.equal(research.canSend("a".repeat(8192), false), true);
+  assert.equal(research.canSend("a".repeat(8193), false), false);
+  assert.equal(research.canSend("é".repeat(4097), false), false);
 });

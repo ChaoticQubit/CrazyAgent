@@ -134,7 +134,7 @@ const COPY: Record<string, string> = {
 /** Plain sentence for one intake, GitHub or setup failure code.
  * Input: the code. Output: the intake copy, then the project and app copy, then the fallback. */
 export function intakeCopy(code: string): string {
-  return COPY[code] ?? failureCopy(code);
+  return Object.hasOwn(COPY, code) ? COPY[code] : failureCopy(code);
 }
 
 function failure<T>(code: string): Result<T> {

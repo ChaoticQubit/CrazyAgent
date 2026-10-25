@@ -7,8 +7,6 @@ import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { SuggestionEditor } from "../settings/memory";
-import { useLinkOpener } from "./links";
-import { MarkdownView } from "./markdown";
 import { memoryGroups, changeOutcome } from "./research";
 import { useLoad } from "../../state";
 import { NotReady, ProjectEmpty } from "./shared";
@@ -28,15 +26,14 @@ async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: 
 }
 
 /** One research memory waiting for the owner, like the TUI's y Save to memory, n Dismiss and
- * e Edit first; Edit first swaps the text for an editor that saves the owner's words.
- * Inputs: the project id, the memory, whether it is being edited or saved, a link opener and
- * the actions. Output: the row. */
-export function MemorySuggestion({ projectId, item, editing, busy, onOpenLink, onSave, onDismiss, onEdit, onSaveEdited, onCancel }: {
+ * e Edit first. The row shows the exact stored text with hidden characters as escapes, never a
+ * formatted view, and Edit first swaps it for an editor that saves the owner's words.
+ * Inputs: the project id, the memory, whether it is being edited or saved, and the actions. */
+export function MemorySuggestion({ projectId, item, editing, busy, onSave, onDismiss, onEdit, onSaveEdited, onCancel }: {
   projectId: string;
   item: MemoryItem;
   editing: boolean;
   busy: boolean;
-  onOpenLink: (href: string) => void;
   onSave: () => void;
   onDismiss: () => void;
   onEdit: () => void;
@@ -48,11 +45,23 @@ export function MemorySuggestion({ projectId, item, editing, busy, onOpenLink, o
       label="Edit before saving" pending={busy} onSave={onSaveEdited} onCancel={onCancel} />
   </li>;
   return <li className="pj-memory">
-    <MarkdownView source={item.text} onOpenLink={onOpenLink} />
+    <p className="pj-note-text">{displayText(item.text)}</p>
     <span className="pj-row"><StatusBadge word="Suggested" />
       <Button size="small" variant="primary" pending={busy} pendingLabel="Saving..." onClick={onSave}>Save to memory</Button>
       <Button size="small" icon="pencil" disabled={busy} onClick={onEdit}>Edit first</Button>
       <Button size="small" variant="quiet" disabled={busy} onClick={onDismiss}>Dismiss</Button></span>
+  </li>;
+}
+
+/** One saved project memory with its exact stored text, hidden characters as escapes, next to
+ * Use in all projects and Delete. Inputs: the memory, whether it is busy and the two actions.
+ * Output: the row. */
+export function SavedMemoryRow({ item, busy, onPromote, onDelete }: { item: MemoryItem; busy: boolean; onPromote: () => void; onDelete: () => void }) {
+  return <li className="pj-memory">
+    <p className="pj-note-text">{displayText(item.text)}</p>
+    <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
+      <Button size="small" variant="quiet" disabled={busy} onClick={onPromote}>Use in all projects</Button>
+      <Button size="small" variant="danger-text" disabled={busy} onClick={onDelete}>Delete</Button></span>
   </li>;
 }
 
@@ -68,7 +77,6 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [notes, reloadNotes] = useLoad(() => savedMemories(data.id, ""), [data.id]);
   const [forgetting, setForgetting] = useState<SavedMemory | null>(null);
-  const open = useLinkOpener(data.notify);
 
   useEffect(() => {
     let live = true;
@@ -129,7 +137,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     {groups.suggested.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-suggested">
       <h3 id="pj-mem-suggested">Suggested</h3>
       <ul className="pj-rows">{groups.suggested.map((item) => <MemorySuggestion key={item.id} projectId={data.id} item={item}
-        editing={editing === item.id} busy={busy === item.id} onOpenLink={open}
+        editing={editing === item.id} busy={busy === item.id}
         onSave={() => void review(item, { decision: "Keep" }, "Saved to memory.")}
         onDismiss={() => void review(item, { decision: "Reject" }, "Dismissed.")}
         onEdit={() => setEditing(item.id)} onCancel={() => setEditing(null)}
@@ -137,12 +145,8 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     </section>}
     {groups.saved.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-saved">
       <h3 id="pj-mem-saved">Saved</h3>
-      <ul className="pj-rows">{groups.saved.map((item) => <li key={item.id} className="pj-memory">
-        <MarkdownView source={item.text} onOpenLink={open} />
-        <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
-          <Button size="small" variant="quiet" disabled={busy === item.id} onClick={() => void promote(item)}>Use in all projects</Button>
-          <Button size="small" variant="danger-text" disabled={busy === item.id} onClick={() => setDeleting(item)}>Delete</Button></span>
-      </li>)}</ul>
+      <ul className="pj-rows">{groups.saved.map((item) => <SavedMemoryRow key={item.id} item={item} busy={busy === item.id}
+        onPromote={() => void promote(item)} onDelete={() => setDeleting(item)} />)}</ul>
     </section>}
     {ownNotes.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-notes">
       <h3 id="pj-mem-notes">Your notes</h3>

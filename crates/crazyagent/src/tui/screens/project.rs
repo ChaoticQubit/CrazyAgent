@@ -1640,6 +1640,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "research_section_missing" => "That part of the report is gone. Open the report again.",
         "memory_entry_exists" => "This report is already saved to memory.",
         "memory_text_too_long" => "This report is too long to save to memory as one entry.",
+        "memory_text_hidden" => {
+            "This part has hidden or direction-changing characters, so it can't be saved to memory."
+        }
         "context_item_protected" => "The project brief can't be deleted.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
