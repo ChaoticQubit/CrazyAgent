@@ -339,7 +339,7 @@ pub(crate) fn recover_native_auth(
     if fact.phase == NativeAuthPhase::Cancelling {
         fact.phase = NativeAuthPhase::Cancelled;
         fact.code = None;
-    } else if unfinished(fact.phase) || fact.phase == NativeAuthPhase::Uncertain {
+    } else if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain {
         fact.phase = NativeAuthPhase::Failed;
         fact.code = Some("native_auth_interrupted".into());
     }
@@ -354,7 +354,7 @@ pub(crate) fn recover_native_auth(
     tx.commit().map_err(error)?;
     drop(release);
     assert!(db.is_autocommit());
-    assert!(!unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain);
+    assert!(!fact.phase.unfinished() && fact.phase != NativeAuthPhase::Uncertain);
     Ok(Some(fact))
 }
 
