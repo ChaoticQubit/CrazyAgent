@@ -44,8 +44,9 @@ mod slow_remote {
     use crate::client_controller::OwnerController;
     use crate::credentials::{SecretString, Store, platform_store, reference};
     use crate::engine::owner::{OwnerResponse, OwnerResult};
-    use crate::github::test_server::{Answer, Server};
+    use crate::github::test_server::{Answer, Server, base64};
     use crate::github::{Endpoints, GitHub, namespace, use_loopback};
+    use crate::projects_home::FoundState;
     use crate::protocol::CredentialRef;
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
@@ -261,6 +262,186 @@ mod slow_remote {
             assert_eq!(page.repos[0].full_name, "octo-cat/tool");
             assert_eq!(page.next, None);
             assert!(!client.github_sign_out().await.unwrap().signed_in);
+        })
+        .await;
+    }
+
+    fn holds(folder: &Path, needle: &[u8]) -> bool {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if kind.is_dir() {
+                holds(&entry.path(), needle)
+            } else if kind.is_file() {
+                std::fs::read(entry.path())
+                    .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+            } else {
+                false
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn an_owner_token_sign_in_lets_the_engine_clone_into_the_home_with_no_token_on_disk() {
+        run_case(false, |context| async move {
+            let source = tempfile::tempdir().unwrap();
+            let work = source.path().join("work");
+            std::fs::create_dir(&work).unwrap();
+            git(&["init", "--quiet", "--initial-branch=main"], &work);
+            std::fs::write(work.join("README.md"), "hello\n").unwrap();
+            git(&["add", "README.md"], &work);
+            git(&["commit", "--quiet", "-m", "first"], &work);
+            bare(&work, &source.path().join("octo-cat").join("tool.git"));
+
+            let token = "gho_engineclone0123456789";
+            let bearer = format!("Bearer {token}");
+            let basic = format!(
+                "Basic {}",
+                base64(format!("x-access-token:{token}").as_bytes())
+            );
+            let expected = basic.clone();
+            let served = source.path().to_path_buf();
+            let server = Server::start(move |seen, _| {
+                if seen.path == "/user" {
+                    return if seen.header("authorization") == Some(bearer.as_str()) {
+                        Answer::json(200, serde_json::json!({ "login": "octo-cat" }))
+                    } else {
+                        Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
+                    };
+                }
+                if seen.header("authorization") != Some(basic.as_str()) {
+                    let mut answer = Answer::bytes(401, Vec::new());
+                    answer
+                        .headers
+                        .push(("WWW-Authenticate".into(), "Basic realm=\"git\"".into()));
+                    return answer;
+                }
+                let relative = seen.path.trim_start_matches('/');
+                assert!(!relative.contains(".."));
+                match std::fs::read(served.join(relative)) {
+                    Ok(bytes) => Answer::bytes(200, bytes),
+                    Err(_) => Answer::bytes(404, Vec::new()),
+                }
+            });
+
+            let root = context.state.clone();
+            let space = namespace(&root);
+            let store = platform_store(&space)
+                .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
+            let kept = Forget {
+                root: root.clone(),
+                store: Arc::clone(&store),
+                item: reference(&format!("{space}.github"), "token").unwrap(),
+            };
+            use_loopback(&root, Some(server.port));
+
+            let home = tempfile::Builder::new()
+                .prefix("ca-gh-home-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let home = std::fs::canonicalize(home.path()).unwrap();
+            let mut controller =
+                OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            let response = controller
+                .set_projects_home(home.to_str().unwrap().into(), 1)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &response,
+                    OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+                ),
+                "{response:?}"
+            );
+            controller.detach();
+
+            let (client, _) =
+                OwnerClient::discover(&root, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            let status = client
+                .github_token(AccountSecret::new(token.as_bytes().to_vec()).unwrap())
+                .await
+                .unwrap();
+            assert!(status.signed_in);
+            assert_eq!(status.login.as_deref(), Some("octo-cat"));
+            assert_eq!(status.method, GitHubMethod::Token);
+            assert!(
+                store.get(&kept.item).is_ok(),
+                "the engine keeps the token in the credential store"
+            );
+
+            let receipt = client
+                .clone_repo("octo-cat/tool".into())
+                .await
+                .unwrap_or_else(|error| panic!("the engine clone answered {}", error.0));
+            let project = home.join("tool");
+            assert_eq!(receipt.full_name, "octo-cat/tool");
+            assert_eq!(receipt.path, project.to_string_lossy());
+            assert_eq!(
+                std::fs::read_to_string(project.join("README.md")).unwrap(),
+                "hello\n"
+            );
+            let config = std::fs::read_to_string(project.join(".git").join("config")).unwrap();
+            assert!(
+                config.contains(&format!(
+                    "url = http://127.0.0.1:{}/octo-cat/tool.git",
+                    server.port
+                )),
+                "{config}"
+            );
+            for kept_text in [token, "x-access-token", "@127.0.0.1"] {
+                assert!(!config.contains(kept_text), "{kept_text} in {config}");
+            }
+            assert!(
+                !holds(&project, token.as_bytes()),
+                "no file in the clone holds the token"
+            );
+            assert!(
+                server
+                    .seen()
+                    .iter()
+                    .any(|seen| seen.header("authorization") == Some(expected.as_str())),
+                "git sent the kept token through the engine's credential helper"
+            );
+
+            let mut controller =
+                OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let entry = loop {
+                let found = controller.found_projects().await.unwrap();
+                if let Some(entry) = found.into_iter().find(|entry| entry.name == "tool") {
+                    break entry;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the clone must show on Home as Found"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            assert_eq!(entry.state, FoundState::Found);
+            assert!(entry.git && entry.project_id.is_none(), "{entry:?}");
+            controller.detach();
+
+            assert!(!client.github_sign_out().await.unwrap().signed_in);
+            assert_eq!(
+                store.get(&kept.item).unwrap_err().0,
+                "credential_missing",
+                "signing out deletes the kept token"
+            );
+            assert!(
+                !holds(&root, token.as_bytes()),
+                "the engine root keeps only a reference to the token"
+            );
         })
         .await;
     }

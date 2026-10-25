@@ -41,8 +41,9 @@ pub fn cut(text: &str, limit: usize, ellipsis: &str) -> String {
 }
 
 /// Wraps text on spaces to a width; words longer than the width are split.
-/// Inputs: text and width. Output: lines no wider than the width; explicit
-/// newlines start new lines; empty text gives no lines.
+/// Inputs: text and width. Output: lines no wider than the width, except that a
+/// character wider than the width gets a line of its own; explicit newlines start
+/// new lines; empty text gives no lines.
 pub fn wrap(text: &str, limit: usize) -> Vec<String> {
     assert!(limit > 0);
     let mut lines = Vec::new();
@@ -70,7 +71,11 @@ pub fn wrap(text: &str, limit: usize) -> Vec<String> {
                         used += char_width(*character);
                         used > limit
                     })
-                    .map_or(rest.len(), |(index, _)| index);
+                    .map_or(rest.len(), |(index, character)| match index {
+                        0 => character.len_utf8(),
+                        _ => index,
+                    });
+                assert!(split > 0);
                 lines.push(rest[..split].to_owned());
                 rest = &rest[split..];
             }
@@ -310,6 +315,31 @@ mod tests {
         assert_eq!(wrap("", 10), Vec::<String>::new());
         assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrap("one\ntwo three", 5), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrap_gives_a_character_wider_than_the_width_its_own_line() {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send([
+                wrap("漢", 1),
+                wrap("a漢b", 1),
+                wrap("漢字 x", 1),
+                wrap("漢字", 3),
+            ]);
+        });
+        let wrapped = receive
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("wrap must return for every width");
+        assert_eq!(
+            wrapped,
+            [
+                vec!["漢"],
+                vec!["a", "漢", "b"],
+                vec!["漢", "字", "x"],
+                vec!["漢", "字"]
+            ]
+        );
     }
 
     #[test]

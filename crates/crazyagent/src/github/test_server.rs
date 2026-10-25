@@ -148,3 +148,26 @@ fn serve(stream: TcpStream, handler: &Handler, recorded: &Mutex<Vec<Seen>>) {
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.write_all(&answer.body);
 }
+
+/// Encodes bytes as standard Base64 with padding, the form of an HTTP Basic credential.
+/// Input: the bytes. Output: the Base64 text.
+pub(crate) fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::new();
+    for chunk in bytes.chunks(3) {
+        let joined = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |value, (index, byte)| {
+                value | (u32::from(*byte) << (16 - 8 * index))
+            });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                text.push(TABLE[((joined >> (18 - 6 * index)) & 63) as usize] as char);
+            } else {
+                text.push('=');
+            }
+        }
+    }
+    text
+}

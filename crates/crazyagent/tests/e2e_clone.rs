@@ -173,7 +173,8 @@ async fn github(engine: &Engine) -> OwnerClient {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_clone_through_the_engine_credential_helper_lands_in_the_home_with_no_token_on_disk() {
+async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_the_engine_signs_it_out()
+ {
     let mut engine = Engine::start("ca-e2e-clone-");
     let disk = scratch("ca-e2e-git-");
     let home = disk.path().join("Projects");
@@ -228,6 +229,10 @@ async fn a_clone_through_the_engine_credential_helper_lands_in_the_home_with_no_
         .use_token(SecretString::new(token.as_bytes().to_vec()).unwrap())
         .unwrap();
     assert!(signed.signed_in);
+    assert!(
+        store.get(&kept.item).is_ok(),
+        "the sign-in is kept under the engine's credential reference"
+    );
     let status = client.github_status().await.unwrap();
     assert!(
         status.signed_in,
