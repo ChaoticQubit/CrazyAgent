@@ -1266,7 +1266,7 @@ fn picker_box(
     body.push(Row::default());
     if wizard.harnesses.is_some() {
         body.push(Row::of(
-            "Harnesses that are not installed cannot be picked.",
+            "Harnesses that are not installed or can't run team agents cannot be picked.",
             look.fg,
         ));
         body.push(Row::of(

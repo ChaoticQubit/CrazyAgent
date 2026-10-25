@@ -5,7 +5,7 @@ use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
 use super::{Flow, Place, ProjectTab, Screen};
 use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
-use crate::harnesses::{HarnessEntry, HarnessStatus};
+use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
@@ -146,18 +146,18 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
 }
 
 /// Builds the Team step's harness choices from the engine's harness catalog.
-/// Takes the catalog entries in owner priority order.
-/// Returns one choice per entry with its state and, when control is limited, the engine's sentence.
+/// Takes the catalog entries in owner priority order. Returns one choice per entry with its
+/// state, CantStart when it cannot run team agents, and the limited-control sentence, if any.
 pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<HarnessChoice> {
     entries
         .iter()
         .map(|entry| HarnessChoice {
             id: entry.id.clone(),
             name: entry.name.clone(),
-            state: match entry.status {
-                HarnessStatus::Ready => HarnessState::Ready,
-                HarnessStatus::NotInstalled => HarnessState::NotInstalled,
-                HarnessStatus::Limited { .. } => HarnessState::CantStart,
+            state: match (&entry.status, &entry.team) {
+                (HarnessStatus::NotInstalled, _) => HarnessState::NotInstalled,
+                (_, TeamUse::Unavailable { .. }) => HarnessState::CantStart,
+                (_, TeamUse::Available) => HarnessState::Ready,
             },
             limited: (control_word(entry) == "Limited control").then(|| control_sentence(entry)),
         })

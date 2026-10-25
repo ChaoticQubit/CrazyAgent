@@ -4,16 +4,18 @@ import "./load-source.mjs";
 
 const wizard = await import("../src/screens/new-project/wizard.ts");
 
-const harness = (id, name, status, tools = { kind: "switchable" }, kinds = ["subscription", "api_key"]) => ({
-  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds,
+const available = { kind: "available" };
+const noReader = { kind: "unavailable", reason: "CrazyAgent cannot read its replies yet" };
+const harness = (id, name, status, tools = { kind: "switchable" }, kinds = ["subscription", "api_key"], team = available) => ({
+  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds, team,
 });
 const ready = { kind: "ready" };
 const missing = { kind: "not_installed" };
 const catalog = [
   harness("codex", "Codex", ready),
   harness("claude", "Claude Code", ready),
-  harness("cursor", "Cursor CLI", { kind: "limited", reason: "no CrazyAgent launch adapter yet" }, { kind: "limited", reason: "tools can't be turned off" }),
-  harness("gemini", "Gemini CLI", missing),
+  harness("cursor", "Cursor CLI", { kind: "limited", reason: "no CrazyAgent launch adapter yet" }, { kind: "limited", reason: "tools can't be turned off" }, undefined, noReader),
+  harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader),
 ];
 const engineTeam = (master, agents) => ({
   master, master_tools: true, sub_harnesses: agents ? [{ harness: master, agents, tools: true }] : [], min_agents: 1, max_agents: 1 + agents,
@@ -129,9 +131,10 @@ test("harness choices list every harness and say why one can't be picked", () =>
   assert.deepEqual(wizard.harnessChoices(catalog).map((choice) => [choice.id, choice.group, choice.disabled]), [
     ["codex", "Ready", false],
     ["claude", "Ready", false],
-    ["cursor", "Limited control", false],
+    ["cursor", "Limited control", true],
     ["gemini", "Not installed", true],
   ]);
+  assert.equal(wizard.harnessChoices(catalog)[2].label, "Cursor CLI - Can't run team agents");
   assert.equal(wizard.harnessChoices(catalog)[3].label, "Gemini CLI - Not installed");
 });
 
@@ -144,6 +147,8 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamErrors({ ...ok, min_agents: 5, max_agents: 6 }, catalog).range, "This team has 4 agents. Set At least to 4 or less.");
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 65 }, catalog).range, "At most can be up to 64.");
   assert.equal(wizard.teamErrors({ ...ok, master: "gemini" }, catalog).master, "Gemini CLI isn't installed on this Mac. Pick another harness.");
+  assert.equal(wizard.teamErrors({ ...ok, master: "cursor" }, catalog).master, "Cursor CLI can't run team agents yet. Pick another harness.");
+  assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }] }, catalog).rows, ["Cursor CLI can't run team agents yet. Pick another harness."]);
   assert.equal(wizard.teamErrors({ ...ok, master: "" }, catalog).master, "Pick a harness for the master.");
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "codex", agents: 16, tools: true }], max_agents: 17 }, catalog).rows, ["Each harness runs 1 to 15 agents."]);
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "codex", agents: 1.5, tools: true }] }, catalog).rows, ["Each harness runs 1 to 15 agents."]);
