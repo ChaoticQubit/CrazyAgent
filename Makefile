@@ -10,11 +10,11 @@ fmt-check:
 	cargo fmt --all -- --check
 
 lint:
-	cargo clippy --workspace --all-targets --offline -- -D warnings
+	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
 test:
-	cargo build -p crazyagent --bin crazyagent --offline
-	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --offline
+	cargo build -p crazyagent --bin crazyagent --locked --offline
+	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --locked --offline
 	$(MAKE) test-node
 
 test-node:
@@ -34,7 +34,7 @@ test-node:
 		apps/desktop/test/native/log-producers.test.mjs
 
 build:
-	cargo build --workspace --offline
+	cargo build --workspace --locked --offline
 
 check:
 	$(MAKE) fmt-check
