@@ -73,6 +73,25 @@ export function setupNote(failures: { name: string; message: string }[]): string
   return `${list} ${names.length === 1 ? "isn't" : "aren't"} ready for agents yet. ${failures[0]!.message}`;
 }
 
+/** Sets accounts up for agents one at a time. Inputs: the accounts and the session's result
+ * recorder. Output: the accounts that are not ready, each with a plain message. */
+export async function readyEach(targets: { id: string; name: string }[], note: <T>(result: Result<T>) => Result<T>): Promise<{ name: string; message: string }[]> {
+  const failures: { name: string; message: string }[] = [];
+  for (const target of targets) {
+    const ready = note(await readyForAgents(target.id));
+    if (ready.kind !== "ok") failures.push({ name: target.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
+  }
+  return failures;
+}
+
+/** The setup step after any save that adds pool members, from the pool editor or Add to
+ * pool: each newly added saved-key or URL account is set up for agents. Inputs: the members
+ * before and after the save, the known accounts and the session's result recorder. Output:
+ * the note naming the accounts that are not ready, or undefined when all are. */
+export async function readyAdded(previous: string[], members: string[], accounts: AccountView[], note: <T>(result: Result<T>) => Result<T>): Promise<string | undefined> {
+  return setupNote(await readyEach(setupTargets(previous, members, accounts), note));
+}
+
 /** The pool list as a pure view. Inputs: the pools read and the new, edit, delete and retry
  * actions. */
 export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }: {
@@ -245,20 +264,11 @@ export function Pools({ creating }: { creating: boolean }) {
     if (taken.length) setDraft(taken);
   }, [creating]);
 
-  const prepare = async (targets: { id: string; name: string }[]) => {
-    const failures: { name: string; message: string }[] = [];
-    for (const target of targets) {
-      const ready = session.noteResult(await readyForAgents(target.id));
-      if (ready.kind !== "ok") failures.push({ name: target.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
-    }
-    return failures;
-  };
-
   const prepareAll = async (pool: PoolSummary) => {
     setRefusal(undefined);
     const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
     const ids = keyedMembers(pool);
-    const failures = await prepare(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })));
+    const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult);
     setRefusal(setupNote(failures));
     if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
   };
@@ -273,8 +283,7 @@ export function Pools({ creating }: { creating: boolean }) {
     return <PoolEditorView key={editing.id ?? `new-${draft.join(",")}`} pool={pool} accounts={accounts} initialMembers={editing.id ? [] : draft} onCancel={() => { setDraft([]); leave(); }} onSave={async (name, members) => {
       const saved = session.noteResult(await savePool(editing.id, name, members, editing.opened));
       if (saved.kind !== "ok") return saved;
-      const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
-      setRefusal(setupNote(await prepare(targets.map((account) => ({ id: account.id, name: account.name })))));
+      setRefusal(await readyAdded(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : [], session.noteResult));
       session.showToast(`${name.trim()} saved.`);
       reload();
       setDraft([]);

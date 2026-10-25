@@ -6,6 +6,7 @@ import {
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
+import { readyAdded } from "./pools";
 import { SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 export const TILE_LINES: Record<AccountProvider, string> = {
@@ -263,7 +264,7 @@ function AddToPool({ account }: { account: AccountView }) {
   const session = useAppSession();
   const [pools] = useLoad(poolSummaries);
   const [chosen, setChosen] = useState("");
-  const [state, setState] = useState<{ kind: "idle" | "saving" | "added" } | { kind: "error"; message: string }>({ kind: "idle" });
+  const [state, setState] = useState<{ kind: "idle" | "saving" } | { kind: "added"; note?: string } | { kind: "error"; message: string }>({ kind: "idle" });
   if (pools.kind === "loading") return <Skeleton shape="line" />;
   if (pools.kind === "not_ready") return <NotReady what="Pools" compact />;
   if (pools.kind === "error") return <Notice tone="danger">Couldn't load pools.</Notice>;
@@ -271,15 +272,20 @@ function AddToPool({ account }: { account: AccountView }) {
   const options = pools.value.map((pool) => ({ value: pool.id, label: pool.name,
     disabledReason: pool.members.length >= POOL_MEMBER_MAX ? "full, 15 of 15" : pool.members.some((member) => member.id === account.id) ? "already in it" : undefined }));
   const target = pools.value.find((pool) => pool.id === chosen);
-  if (state.kind === "added") return <p className="live" role="status"><Icon name="check" />Added to {target?.name}.</p>;
+  if (state.kind === "added") return <div className="stack-small">
+    <p className="live" role="status"><Icon name="check" />Added to {target?.name}.</p>
+    {state.note && <Notice tone="warn" alert>{state.note}</Notice>}
+  </div>;
   return <div className="row">
     <Select id="add-to-pool" label="Pool" value={chosen} onValue={setChosen} options={[{ value: "", label: "Choose a pool" }, ...options]} />
     <Button disabled={!target} pending={state.kind === "saving"} pendingLabel="Adding..." onClick={async () => {
       if (!target) return;
       setState({ kind: "saving" });
       const listed = { name: target.name, members: target.members.map((member) => member.id) };
-      const saved = session.noteResult(await savePool(target.id, target.name, [...listed.members, account.id], listed));
-      setState(saved.kind === "ok" ? { kind: "added" } : { kind: "error", message: saved.kind === "not_ready" ? "Not ready yet." : saved.message });
+      const members = [...listed.members, account.id];
+      const saved = session.noteResult(await savePool(target.id, target.name, members, listed));
+      if (saved.kind !== "ok") return setState({ kind: "error", message: saved.kind === "not_ready" ? "Not ready yet." : saved.message });
+      setState({ kind: "added", note: await readyAdded(listed.members, members, [account], session.noteResult) });
     }}>Add to pool</Button>
     {state.kind === "error" && <Notice tone="danger" alert>{state.message}</Notice>}
   </div>;
