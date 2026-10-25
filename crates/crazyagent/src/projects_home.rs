@@ -24,6 +24,14 @@ const RESERVED_NAMES: [&str; 22] = [
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
+);
+CREATE TABLE IF NOT EXISTS projects_home_move (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    exchange INTEGER NOT NULL CHECK(exchange > 0),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
+    folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -97,6 +105,11 @@ impl HomeAction {
         }
     }
 }
+
+/// What the owner transport's disk work for a projects home mutation gave:
+/// Ok(Some(real source)) once an add ran, Ok(None) once a home move ran, or
+/// Err with the refusal code of the plan or of the disk work.
+pub type HomeEffect = Result<Option<PathBuf>, String>;
 
 /// A project the engine has set up, as the projects home sees it.
 /// Input to `found`: the project, its name, its folder on disk and whether
@@ -379,7 +392,8 @@ pub fn plan_move(
 }
 
 /// Confirms that an add the owner asked for actually landed in the home.
-/// Input: the canonical home, the source text and the mode. Output: Ok when
+/// Input: the canonical home, the real source `plan_add` resolved (never the
+/// owner's text, which may reach it through a link) and the mode. Output: Ok when
 /// the folder is in the home and, for Move, gone from its old place, or for
 /// Copy, still there; otherwise `home_add_unverified`.
 pub fn verify_added(home: &Path, source: &str, mode: AddMode) -> Result<(), EngineError> {
@@ -450,7 +464,8 @@ pub fn found(
     entries
 }
 
-/// Creates the projects home table when the engine database opens.
+/// Creates the projects home table, and the table that holds a home move
+/// recorded before its folders move, when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
@@ -541,6 +556,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
         "home_move_partial" => {
             "Some projects were moved and could not be moved back. Check both folders."
+        }
+        "home_move_in_progress" => {
+            "Your projects folder is still being moved. Try again when it finishes."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
