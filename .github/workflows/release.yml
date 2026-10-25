@@ -65,8 +65,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Release $version on channel $channel"
 
+  ci:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   build:
-    needs: prepare
+    needs: [prepare, ci]
     timeout-minutes: 150
     permissions:
       contents: read
