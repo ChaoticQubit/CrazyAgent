@@ -2492,7 +2492,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ScopeRevoked => "Access to this project was revoked",
         MasterReason::CapacityUnavailable => "Another turn is still running; wait for it",
         MasterReason::BudgetExhausted => "Budget exhausted",
-        MasterReason::ProfileBusy => "Account is busy with a sign-in or another turn",
+        MasterReason::ProfileBusy => "Account is busy with a sign-in or sign-out",
         MasterReason::ApprovalRequired => "Needs your approval",
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",

@@ -1,6 +1,6 @@
 use super::*;
 use crate::engine::NativeProfileCustody;
-use crate::engine::bootstrap::{EngineService, NativeProfileUsePurpose};
+use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{
     HostStamp, ModelAccessCollection, OwnerClient, OwnerClientKind, OwnerData, OwnerMutation,
     OwnerOperation, OwnerRead, OwnerReadReply, OwnerReply, OwnerRequest, OwnerResponse,
@@ -864,15 +864,14 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     let database = case.root.path().join("engine.db");
     let mut custody =
         NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
-    let guard = custody
-        .acquire_configured_rcli_use(
-            &case.runtime().identity(),
-            prepared.profile.binding(),
-            &proof.profile_ref,
-            &case.turn.id,
-            case.turn.ordinal,
-        )
-        .unwrap();
+    let key = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
+    );
+    let account_change = custody
+        .hold_released_profile(&case.runtime().identity(), &key)
+        .unwrap()
+        .expect("no agent holds the configured profile yet");
     let before = case.snapshot();
     assert_eq!(case.persisted_turn().await.phase, MasterTurnPhase::Prepared);
     assert_eq!(before.effects.each_ref().map(Vec::len), [1, 1, 0, 0, 1, 1]);
@@ -892,16 +891,6 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     assert_eq!(after.captures, before.captures);
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.events.len(), before.events.len() + 1);
-    guard
-        .revalidate(
-            &case.runtime().identity(),
-            prepared.profile.binding(),
-            &case.turn.id,
-            case.turn.ordinal,
-            NativeProfileUsePurpose::Execution,
-        )
-        .unwrap();
-    assert_eq!(guard.profile_path().unwrap(), case.home);
     assert!(matches!(
         custody.acquire_configured_rcli_use(
             &case.runtime().identity(),
@@ -912,7 +901,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
         ),
         Err(error) if error.0 == "native_profile_in_use"
     ));
-    drop(guard);
+    drop(account_change);
     let released = custody
         .acquire_configured_rcli_use(
             &case.runtime().identity(),
@@ -923,6 +912,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
         )
         .unwrap();
     released.revalidate_retained().unwrap();
+    assert_eq!(released.profile_path().unwrap(), case.home);
     drop(released);
     drop(custody);
     drop(prepared);

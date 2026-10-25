@@ -270,6 +270,36 @@ pub(crate) enum NativeProfileUsePurpose {
     Execution,
 }
 
+impl NativeProfileUsePurpose {
+    /// Takes this purpose's lock on one profile file without waiting: shared for an agent's
+    /// execution, so any number of agents run on one signed-in account at once, and
+    /// exclusive for sign-in, refresh and logout, which wait until no agent holds it.
+    /// Inputs: the purpose and the open file. Output: the held lock or `native_profile_in_use`.
+    fn lock(self, file: &File) -> Result<(), EngineError> {
+        let operation = if self == Self::Execution {
+            FlockOperation::NonBlockingLockShared
+        } else {
+            FlockOperation::NonBlockingLockExclusive
+        };
+        take_lock(file, operation)
+    }
+}
+
+/// Takes one non-blocking lock on a profile file.
+/// Inputs: the open file and the shared or exclusive operation. Output: the held lock,
+/// `native_profile_in_use` while a conflicting lock is held, or the lock failure.
+fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> {
+    flock(file, operation).map_err(|error| {
+        failure(
+            if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
+                "native_profile_in_use"
+            } else {
+                "native_profile_lock_unavailable"
+            },
+        )
+    })
+}
+
 /// The sign-in lock of one native profile, taken while a stale sign-in is settled so no
 /// custodian can start on that profile meanwhile. Holds no file when the profile does not
 /// exist. Dropping it unlocks the open file description.
@@ -532,19 +562,7 @@ impl NativeProfileCustody {
             purpose,
         };
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
-        flock(
-            &guard.manifest.file,
-            FlockOperation::NonBlockingLockExclusive,
-        )
-        .map_err(|error| {
-            failure(
-                if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
-                    "native_profile_in_use"
-                } else {
-                    "native_profile_lock_unavailable"
-                },
-            )
-        })?;
+        purpose.lock(&guard.manifest.file)?;
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
         remember_profile(&mut self.profiles, key, hash);

@@ -108,15 +108,7 @@ fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> 
 }
 
 pub(super) fn lock(file: &File) -> Result<(), EngineError> {
-    flock(file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-        failure(
-            if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
-                "native_profile_in_use"
-            } else {
-                "native_profile_lock_unavailable"
-            },
-        )
-    })
+    take_lock(file, FlockOperation::NonBlockingLockExclusive)
 }
 
 impl ConfiguredRcliUse {
@@ -482,8 +474,8 @@ impl NativeProfileCustody {
             purpose: NativeProfileUsePurpose::Execution,
         };
         guard.revalidate_retained()?;
-        lock(&guard.manifest.file)?;
-        lock(&guard.home.file)?;
+        guard.purpose.lock(&guard.manifest.file)?;
+        guard.purpose.lock(&guard.home.file)?;
         guard.revalidate_retained()?;
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
         remember_profile(

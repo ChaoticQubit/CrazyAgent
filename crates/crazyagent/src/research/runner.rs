@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     #[test]
-    fn two_research_launches_never_hold_one_managed_profile_at_once() {
+    fn three_research_launches_share_one_managed_profile_while_a_sign_in_waits() {
         let root = engine_root();
         let runner = ResearchRunner::new(
             &root.database,
@@ -2111,13 +2111,38 @@ mod tests {
             )
         };
         let binding = binding(&host, &connection, custody_id);
-        let first = runner.lease(&host, &binding, "job-1-1", 1).unwrap();
-        assert_eq!(lease_home(&first).unwrap(), default_home);
+        let leases = (1..=3)
+            .map(|job| {
+                runner
+                    .lease(&host, &binding, &format!("job-{job}-1"), 1)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for lease in &leases {
+            assert_eq!(lease_home(lease).unwrap(), default_home);
+        }
+        let mut sign_in =
+            NativeProfileCustody::capture(&root.database, &fs::metadata(&root.database).unwrap())
+                .unwrap();
+        let operation = RequestId::new("sign-in").unwrap();
+        let authentication = NativeProfileUsePurpose::Authentication;
+        assert_eq!(
+            sign_in
+                .acquire_use(&host, &binding, &operation, 1, authentication)
+                .err()
+                .expect("a sign-in waits for running agents")
+                .0,
+            PROFILE_BUSY
+        );
+        drop(leases);
+        let signing_in = sign_in
+            .acquire_use(&host, &binding, &operation, 1, authentication)
+            .unwrap();
         assert!(matches!(
-            runner.lease(&host, &binding, "job-2-1", 1),
+            runner.lease(&host, &binding, "job-4-1", 1),
             Err(RunError::Busy)
         ));
-        drop(first);
+        drop(signing_in);
         let holding = AtomicU64::new(0);
         let most = AtomicU64::new(0);
         let granted = AtomicU64::new(0);
@@ -2147,12 +2172,9 @@ mod tests {
                 });
             }
         });
-        assert_eq!(most.load(Ordering::SeqCst), 1);
-        assert!(granted.load(Ordering::SeqCst) > 0);
-        assert_eq!(
-            granted.load(Ordering::SeqCst) + refused.load(Ordering::SeqCst),
-            120
-        );
+        assert!(most.load(Ordering::SeqCst) >= 1);
+        assert_eq!(refused.load(Ordering::SeqCst), 0);
+        assert_eq!(granted.load(Ordering::SeqCst), 120);
         assert!(runner.lease(&host, &binding, "job-3-1", 1).is_ok());
     }
 
