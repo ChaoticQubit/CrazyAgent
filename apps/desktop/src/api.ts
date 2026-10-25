@@ -60,6 +60,8 @@ const COPY: Record<string, string> = {
   account_method_unavailable: "This sign-in method isn't available for this provider.",
   account_identity_unavailable: "Couldn't create the account. Try again.",
   account_in_pool: "This account is in a pool. Remove it from the pool first.",
+  native_auth_recovery_required: "A sign-in is still running. Finish or cancel it, then try again.",
+  native_auth_cancel_pending: "The sign-in is still stopping. Try again in a moment.",
   account_not_found: "This account no longer exists.",
   native_profile_not_managed: "This account doesn't use a subscription sign-in.",
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",

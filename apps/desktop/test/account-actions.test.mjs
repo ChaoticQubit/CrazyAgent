@@ -64,6 +64,11 @@ test("cancelling a sign-in reaches the engine and says plainly when the engine c
   assert.equal(cancelError("native_auth_not_active"), undefined);
 });
 
+test("a change refused while a sign-in runs, or a cancel still stopping, says so plainly", () => {
+  assert.equal(api.plainError("native_auth_recovery_required"), "A sign-in is still running. Finish or cancel it, then try again.");
+  assert.equal(api.plainError("native_auth_cancel_pending"), "The sign-in is still stopping. Try again in a moment.");
+});
+
 test("an abandoned Add account removes its half-made account, or says where it stays", async () => {
   assert.equal(await discardAccount(account("a"), (result) => result),
     "Couldn't remove the unfinished account Claude a. It stays in your list as Not signed in. Delete it there.");

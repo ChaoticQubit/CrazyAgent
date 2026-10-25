@@ -51,14 +51,25 @@ export function cancelError(code: string): string | undefined {
   return plainError(code);
 }
 
+const SETTLE_TRIES = 20;
+const SETTLE_MS = 500;
+
 /** Cancels the running sign-in of one account, outside any open sign-in panel: reads its
- * sign-in record, then asks the engine to cancel that operation. Input: the account id.
- * Output: ok once cancelled or already stopped, otherwise the refusal in plain words. */
+ * sign-in record, asks the engine to cancel that operation and waits up to 10 s for it to
+ * stop, since the app refuses other changes until it has. Input: the account id. Output: ok
+ * once stopped or already stopped, otherwise the refusal in plain words. */
 export async function cancelSignIn(accountId: string): Promise<Result<void>> {
   const record = await signInRecord(accountId);
   if (record.kind !== "ok") return record;
   try {
-    await cancelNativeAuth(record.value.ticket);
+    let view = await cancelNativeAuth(record.value.ticket);
+    for (let tries = 0; ACTIVE_PHASES.includes(view.phase); tries += 1) {
+      if (tries === SETTLE_TRIES) return { kind: "error", code: "native_auth_cancel_pending", message: plainError("native_auth_cancel_pending") };
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      const again = await signInRecord(accountId);
+      if (again.kind !== "ok") return again;
+      view = await readNativeAuth(again.value.ticket);
+    }
     return { kind: "ok", value: undefined };
   } catch (failure) {
     const code = nativeAuthFailureCode(failure);

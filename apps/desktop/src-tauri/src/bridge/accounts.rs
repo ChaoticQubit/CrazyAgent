@@ -98,6 +98,7 @@ impl NativeBridge {
         draft: AccountDraft,
         key: Option<String>,
     ) -> Result<AccountView, BridgeError> {
+        self.allow_new_auth()?;
         let key = key
             .filter(|value| !value.is_empty())
             .map(|value| AccountSecret::new(value.into_bytes()))
@@ -111,6 +112,7 @@ impl NativeBridge {
 
     /// Renames one account. Inputs: account id and the new name.
     pub async fn rename_account(&self, id: &str, name: String) -> Result<AccountView, BridgeError> {
+        self.allow_new_auth()?;
         self.accounts()?
             .rename_account(account_id(id)?, name)
             .await
@@ -119,6 +121,7 @@ impl NativeBridge {
 
     /// Removes one account that is in no pool. Input: account id.
     pub async fn remove_account(&self, id: &str) -> Result<(), BridgeError> {
+        self.allow_new_auth()?;
         self.accounts()?
             .remove_account(account_id(id)?)
             .await

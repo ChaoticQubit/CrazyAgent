@@ -1,3 +1,5 @@
+use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
+use crazyagent::client_controller::OwnerController;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
@@ -770,6 +772,16 @@ async fn login_pid(running: &std::path::Path) -> String {
     panic!("the real login child never started");
 }
 
+fn claude_draft(name: &str) -> AccountDraft {
+    AccountDraft {
+        provider: Provider::Claude,
+        method: SignInMethod::Subscription,
+        name: name.into(),
+        url: None,
+        model: None,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_native_auth_cancelled_sign_in_releases_settings_changes() {
     run_case(|fixture| async move {
@@ -802,6 +814,65 @@ async fn desktop_native_auth_cancelled_sign_in_releases_settings_changes() {
         .unwrap();
         assert!(!alive.success(), "cancel stops the real login child");
         add_account_ref(&mut bridge, "account-after-cancel", 1).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desktop() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        login_pid(&running).await;
+        for refused in [
+            bridge
+                .add_account(claude_draft("Added while signing in"), None)
+                .await
+                .map(|_| ()),
+            bridge
+                .rename_account("connection-z", "Renamed while signing in".into())
+                .await
+                .map(|_| ()),
+            bridge.remove_account("connection-api").await,
+        ] {
+            assert_eq!(
+                refused.unwrap_err().code,
+                "native_auth_recovery_required",
+                "the desktop does not move the settings a running sign-in is bound to"
+            );
+        }
+        let observer = OwnerController::attach(
+            &fixture.root.path().join("s"),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        observer
+            .add_account(claude_draft("Added in the terminal app"), None)
+            .await
+            .unwrap();
+        let moved = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(moved.source_hash, detail.source_hash);
+        assert_eq!(
+            bridge
+                .cancel_native_auth(&moved.ticket)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            "native_profile_source_conflict"
+        );
+        add_account_ref(&mut bridge, "account-after-source-change", 1).await;
+        bridge
+            .add_account(claude_draft("Added after the source moved"), None)
+            .await
+            .unwrap();
     })
     .await;
 }
