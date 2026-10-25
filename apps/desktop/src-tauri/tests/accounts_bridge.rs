@@ -1,7 +1,7 @@
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
 use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::engine::owner::ModelAccessCollection;
+use crazyagent::engine::owner::{ModelAccessCollection, NativeAuthMethod};
 use crazyagent::protocol::CredentialRef;
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::os::unix::fs::PermissionsExt;
@@ -232,6 +232,135 @@ async fn desktop_configures_a_pooled_key_account_from_the_saved_key() -> TestRes
     assert_eq!(configured.code, "rcli_private_key_writer_unavailable");
     let settings = std::fs::read_to_string(&global)?;
     assert!(settings.contains(added.id.as_str()) && !settings.contains(&secret));
+
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_account_actions_cancel_and_delete_on_the_real_engine() -> TestResult<()> {
+    let root = tempfile::Builder::new()
+        .prefix("ca-dact-")
+        .tempdir_in("/private/tmp")?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await?;
+    let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+    bridge.connect().await?;
+    let claude = |name: &str| AccountDraft {
+        provider: Provider::Claude,
+        method: SignInMethod::Subscription,
+        name: name.into(),
+        url: None,
+        model: None,
+    };
+    let first = bridge
+        .add_account(claude("Claude one"), None)
+        .await
+        .unwrap();
+    let second = bridge
+        .add_account(claude("Claude two"), None)
+        .await
+        .unwrap();
+    let pooled = bridge
+        .add_account(
+            AccountDraft {
+                provider: Provider::Openrouter,
+                method: SignInMethod::ApiKey,
+                name: "Pooled router".into(),
+                url: None,
+                model: Some("openai/gpt-4o".into()),
+            },
+            Some(format!("sk-dact-{}", std::process::id())),
+        )
+        .await
+        .unwrap();
+
+    let detail = bridge
+        .inspect_model_access(ModelAccessCollection::Connections, first.id.as_str())
+        .await
+        .unwrap();
+    let started = bridge
+        .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&started)?["code"],
+        "native_auth_host_unavailable"
+    );
+    let listed = bridge.list_accounts(None, 200).await.unwrap().accounts;
+    let shown = listed
+        .iter()
+        .find(|account| account.id == first.id)
+        .expect("the account is listed");
+    assert_eq!(
+        shown.status_label, "Not signed in",
+        "a sign-in that failed is not shown as signing in"
+    );
+    let detail = bridge
+        .inspect_model_access(ModelAccessCollection::Connections, first.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge
+            .cancel_native_auth(&detail.ticket)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "native_auth_not_active",
+        "cancelling a sign-in that already stopped is reported as not running"
+    );
+
+    let page = bridge
+        .model_access_page(ModelAccessCollection::Pools, false)
+        .await
+        .unwrap();
+    let pool = AccountPool {
+        id: CredentialRef::new("actions-pool").unwrap(),
+        name: None,
+        members: vec![pooled.id.clone()],
+        projects: Vec::new(),
+        roles: Vec::new(),
+        fallback_allowed: false,
+        provider_quota_policy: ProviderQuotaPolicy::BoundedAttempt,
+    };
+    let receipt = bridge
+        .edit_model_access(&page.ticket, ModelAccessEdit::CreatePool { pool }, 1)
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::Applied);
+    assert_eq!(
+        bridge
+            .remove_account(pooled.id.as_str())
+            .await
+            .unwrap_err()
+            .code,
+        "account_in_pool"
+    );
+
+    for account in [&first, &second] {
+        bridge.remove_account(account.id.as_str()).await.unwrap();
+    }
+    let left = bridge.list_accounts(None, 200).await.unwrap().accounts;
+    assert_eq!(
+        left.iter()
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>(),
+        vec![pooled.id.clone()],
+        "both selected accounts are gone and the pooled one stays"
+    );
 
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
