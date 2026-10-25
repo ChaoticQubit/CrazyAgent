@@ -496,3 +496,92 @@ fn sandboxed_agent_git_has_no_credential_helper_and_gets_no_password() {
     assert!(!output.status.success());
     assert!(!holds(&output.stdout, "password="));
 }
+
+#[test]
+fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
+    let case = case();
+    let generation = case.runtime.join("o1a2b3c4d");
+    let runner = case.runtime.join("r00");
+    let terminal = case.runtime.join("terminal");
+    for folder in [&generation, &runner, &terminal] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let sockets = [
+        terminal.join("tmux.sock"),
+        case.runtime.join("ordinary-engine.sock"),
+        generation.join("owner.sock"),
+        runner.join("control.sock"),
+    ];
+    let _listeners: Vec<_> = sockets
+        .iter()
+        .map(|path| crazyagent::spawn_gate::bind_unix_std(path).unwrap())
+        .collect();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let served = free.local_addr().unwrap().port();
+    drop(free);
+    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let guarded = open.secret_paths();
+    for place in [&terminal, &sockets[1], &generation, &runner] {
+        assert!(
+            guarded.contains(place),
+            "{} is not guarded",
+            place.display()
+        );
+    }
+    walled(
+        sandbox(&case)
+            .allow_read(&runner)
+            .unwrap()
+            .guard_engine(&case.runtime),
+    );
+    let closed = sandbox(&case).guard_engine(&case.runtime).unwrap();
+    for (sandbox, name) in [(&open, "open.sb"), (&closed, "closed.sb")] {
+        let profile = case.profiles.join(name);
+        for socket in &sockets {
+            let output = shell(
+                sandbox,
+                &profile,
+                &format!("/usr/bin/nc -U -w 2 {} </dev/null", quoted(socket)),
+            );
+            assert!(
+                !output.status.success(),
+                "{name}: the agent connected to {}",
+                socket.display()
+            );
+        }
+        let listing = shell(sandbox, &profile, &format!("ls {}", quoted(&terminal)));
+        assert!(
+            !listing.status.success(),
+            "{name}: the agent listed the terminal folder"
+        );
+    }
+    let profile = case.profiles.join("open-ip.sb");
+    let reach = shell(
+        &open,
+        &profile,
+        &format!("/usr/bin/nc -z -w 2 127.0.0.1 {port}"),
+    );
+    assert!(
+        reach.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reach.stderr)
+    );
+    let serve = shell(
+        &open,
+        &profile,
+        &format!(
+            "/usr/bin/nc -l 127.0.0.1 {served} >/dev/null & sleep 1; /usr/bin/nc -z -w 2 127.0.0.1 {served}; s=$?; kill $! 2>/dev/null; exit $s"
+        ),
+    );
+    assert!(
+        serve.status.success(),
+        "{}",
+        String::from_utf8_lossy(&serve.stderr)
+    );
+    assert!(!open.profile().contains("network*"));
+}
