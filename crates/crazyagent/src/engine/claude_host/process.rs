@@ -4,6 +4,8 @@ use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::sandbox::InstalledSandbox;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -16,6 +18,11 @@ use tokio::sync::{mpsc, watch};
 
 const POLL_TIME: Duration = Duration::from_millis(5);
 const READ_BATCH: usize = 16;
+
+/// How long cleanup lets the harness exit on its own before it kills the harness group, and
+/// how long it still drains the pipes once that group is empty: a pipe still open after it
+/// is held by a process that left the group.
+const GRACE: Duration = Duration::from_millis(100);
 
 pub(super) struct Channels {
     pub(super) input: Receiver<Turn>,
@@ -32,7 +39,9 @@ struct PendingInput {
 
 struct Process {
     child: Child,
-    profile: NativeProfileUse,
+    group: Pid,
+    group_absent: bool,
+    profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -128,8 +137,10 @@ pub(super) fn run(
         }
     };
     let mut process = Process {
+        group: Pid::from_child(&child),
+        group_absent: false,
         child,
-        profile,
+        profile: Some(profile),
         stdin: None,
         stdout: None,
         stderr: None,
@@ -238,7 +249,11 @@ impl Process {
         if self.pending.is_none() {
             match self.input.try_recv() {
                 Ok(turn) => {
-                    if self.profile.revalidate_retained().is_err() {
+                    if self
+                        .profile
+                        .as_ref()
+                        .is_none_or(|profile| profile.revalidate_retained().is_err())
+                    {
                         let fault = Fault::Host("claude_host_profile_changed");
                         let _ = turn.reply.send(Err(fault));
                         self.fail(fault);
@@ -421,6 +436,48 @@ impl Process {
         }
     }
 
+    /// Notes when no process of the harness group is left. Only a reaped harness can leave its
+    /// group empty, and a group that refuses the probe still counts as present.
+    /// Takes nothing; records a fault when the group cannot be observed.
+    fn observe_group(&mut self) {
+        if self.status.is_none() || self.group_absent {
+            return;
+        }
+        match rustix::process::test_kill_process_group(self.group) {
+            Err(Errno::SRCH) => self.group_absent = true,
+            Ok(()) | Err(Errno::PERM) => {}
+            Err(_) => self.fail(Fault::Host("claude_host_group_unobservable")),
+        }
+    }
+
+    /// Kills every process left in the harness group, and the harness itself while it is not
+    /// reaped, in case it left its group. A group whose members are all still exiting can
+    /// refuse the signal, and an exiting harness is already gone for `kill`; both are retried.
+    /// Takes nothing. Returns whether a kill signal reached a process.
+    fn kill_group(&mut self) -> bool {
+        let mut sent = match rustix::process::kill_process_group(self.group, Signal::KILL) {
+            Ok(()) => true,
+            Err(Errno::SRCH | Errno::PERM) => false,
+            Err(_) => {
+                self.fail(Fault::Host("claude_host_kill_failed"));
+                false
+            }
+        };
+        if self.status.is_none() {
+            match self.child.kill() {
+                Ok(()) => sent = true,
+                Err(error) if error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) => {}
+                Err(_) => {
+                    self.reap();
+                    if self.status.is_none() {
+                        self.fail(Fault::Host("claude_host_kill_failed"));
+                    }
+                }
+            }
+        }
+        sent
+    }
+
     fn cleanup(&mut self) {
         self.report.send_replace(Status {
             phase: Phase::Closing,
@@ -441,34 +498,36 @@ impl Process {
         assert!(self.pending.is_none());
         let started = Instant::now();
         let cleanup_deadline = started + self.limits.cleanup_time;
-        let kill_at = started + Duration::from_millis(100).min(self.limits.cleanup_time);
+        let kill_at = started + GRACE.min(self.limits.cleanup_time);
         let mut uncertain = false;
         let mut killed = false;
+        let mut group_gone_at = None;
         loop {
             self.read_stdout(false);
             self.read_stderr();
             self.reap();
+            self.observe_group();
+            let now = Instant::now();
             if let Some(status) = self.status
-                && self.stdout.is_none()
-                && self.stderr.is_none()
+                && self.group_absent
             {
-                if !status.success() && !(killed && status.signal() == Some(9)) {
-                    self.fail(Fault::Exit(status.code()));
-                }
-                break;
-            }
-            if self.status.is_none() && Instant::now() >= kill_at {
-                match self.child.kill() {
-                    Ok(()) => killed = true,
-                    Err(_) => {
-                        self.reap();
-                        if self.status.is_none() {
-                            self.fail(Fault::Host("claude_host_kill_failed"));
-                        }
+                let gone = *group_gone_at.get_or_insert(now);
+                let open = self.stdout.is_some() || self.stderr.is_some();
+                if !open || now >= gone + GRACE {
+                    if open {
+                        self.stdout = None;
+                        self.stderr = None;
+                        self.fail(Fault::Host("claude_host_cleanup_uncertain"));
                     }
+                    if !status.success() && !(killed && status.signal() == Some(9)) {
+                        self.fail(Fault::Exit(status.code()));
+                    }
+                    break;
                 }
+            } else if now >= kill_at {
+                killed |= self.kill_group();
             }
-            if !uncertain && Instant::now() >= cleanup_deadline {
+            if !uncertain && now >= cleanup_deadline {
                 uncertain = true;
                 self.fail(Fault::Host("claude_host_cleanup_uncertain"));
                 self.report.send_replace(Status {
@@ -481,9 +540,11 @@ impl Process {
         assert!(self.status.is_some());
         assert!(self.stdout.is_none());
         assert!(self.stderr.is_none());
+        assert!(self.group_absent);
         if self.protocol.state() == State::Active && !self.stop.load(Ordering::Acquire) {
             self.fail(Fault::Host("claude_host_incomplete_turn"));
         }
+        self.profile = None;
         self.report.send_replace(Status {
             phase: Phase::Retired,
             fault: self.fault,
@@ -493,7 +554,7 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        if self.status.is_none() || self.stdout.is_some() || self.stderr.is_some() {
+        if self.profile.is_some() {
             self.stop.store(true, Ordering::Release);
             self.fail(Fault::Host("claude_host_custodian_interrupted"));
             self.cleanup();

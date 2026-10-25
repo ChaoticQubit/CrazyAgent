@@ -20,6 +20,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(all(test, unix))]
+mod master_host_fixture;
 #[cfg(unix)]
 mod native_auth_host;
 #[cfg(not(unix))]
