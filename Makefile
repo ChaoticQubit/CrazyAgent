@@ -1,7 +1,7 @@
-.PHONY: help fmt fmt-check lint test test-node build check
+.PHONY: help fmt fmt-check lint test test-node build check desktop-dist
 
 help:
-	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust and Node test suites' 'make test-node  Run first-party Node tests' 'make build      Build the Rust workspace offline' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
+	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust and Node test suites' 'make test-node  Run first-party Node tests' 'make build      Build the Rust workspace offline' 'make desktop-dist  Build the desktop frontend the desktop crate embeds' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
 
 fmt:
 	cargo fmt --all
@@ -9,10 +9,10 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
-lint:
+lint: desktop-dist
 	cargo clippy --workspace --all-targets --offline -- -D warnings
 
-test:
+test: desktop-dist
 	cargo build -p crazyagent --bin crazyagent --offline
 	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --offline
 	$(MAKE) test-node
@@ -33,8 +33,11 @@ test-node:
 		apps/desktop/test/native/run-layout.test.mjs \
 		apps/desktop/test/native/log-producers.test.mjs
 
-build:
+build: desktop-dist
 	cargo build --workspace --offline
+
+desktop-dist:
+	npm --prefix apps/desktop run build
 
 check:
 	$(MAKE) fmt-check
