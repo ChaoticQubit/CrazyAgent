@@ -284,7 +284,8 @@ function draw(value: SvgShape) {
 
 /** Renders one vendored Lucide line icon as inline SVG in the current text color.
  * Inputs: icon name, pixel size, an optional accessible label (decorative when absent),
- * optional class and spin. Output: an svg element. */
+ * optional class and spin. Output: an svg element; a name outside the vendored set, such as
+ * one built from a file name, draws the plain file icon. */
 export function Icon({ name, size = 16, label, className, spin = false }: {
   name: IconName;
   size?: number;
@@ -292,7 +293,8 @@ export function Icon({ name, size = 16, label, className, spin = false }: {
   className?: string;
   spin?: boolean;
 }) {
-  const value = shape(name, ICON_SOURCES[name]);
+  const known: IconName = Object.hasOwn(ICON_SOURCES, name) ? name : "file";
+  const value = shape(known, ICON_SOURCES[known]);
   return <svg className={["icon", spin ? "spin" : "", className ?? ""].filter(Boolean).join(" ")} width={size} height={size}
     viewBox={value.viewBox} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
     focusable="false" aria-hidden={label ? undefined : true} role={label ? "img" : undefined} aria-label={label}>{draw(value)}</svg>;

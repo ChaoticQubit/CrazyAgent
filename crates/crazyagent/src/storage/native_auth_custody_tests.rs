@@ -168,7 +168,7 @@ impl CustodyCase {
             mut connection,
             lock,
             custody,
-        } = open_actor_database(&path, false).unwrap();
+        } = open_actor_database(&path, false, None).unwrap();
         let started = owner_start(&mut connection).unwrap();
         Self {
             db: connection,
@@ -604,7 +604,7 @@ fn native_auth_custody_reopen_preserves_dispatch_fence_and_reports_uncertainty()
         mut connection,
         lock: _reopened_lock,
         custody: _reopened_custody,
-    } = open_actor_database(&path, false).unwrap();
+    } = open_actor_database(&path, false, None).unwrap();
     let restarted = owner_start(&mut connection).unwrap();
     let observed = native_auth::read_native_auth(
         &mut connection,

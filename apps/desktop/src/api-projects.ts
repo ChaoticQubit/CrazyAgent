@@ -189,6 +189,7 @@ const copy: Record<string, string> = {
   research_report_missing: "This report hasn't been written yet.",
   research_section_missing: "That section isn't in the report anymore.",
   research_section_invalid: "That section can't be saved. Pick another heading.",
+  memory_text_hidden: "This part has hidden or direction-changing characters, so it can't be saved to memory.",
   documents_empty: "Pick at least one file.",
   invalid_memory: "This memory no longer exists. The list was reloaded.",
   knowledge_entry_missing: "This memory no longer exists. The list was reloaded.",
@@ -198,6 +199,7 @@ const copy: Record<string, string> = {
   context_item_unreadable: "This file can't be read.",
   context_path_invalid: "This file can't be opened here.",
   master_open_unavailable: "This project needs a pool before the master can reply.",
+  master_project_mismatch: "The conversation opened for another project. Open this project again.",
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
@@ -209,7 +211,7 @@ const copy: Record<string, string> = {
 /** Plain sentence for one engine failure code.
  * Input: the code. Output: what happened and what to do, or the generic fallback. */
 export function failureCopy(code: string): string {
-  return copy[code] ?? plainError(code);
+  return Object.hasOwn(copy, code) ? copy[code] : plainError(code);
 }
 
 /** Adds a project and the master role to a pool without changing anything else.

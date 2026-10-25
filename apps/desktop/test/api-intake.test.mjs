@@ -79,3 +79,9 @@ test("every refusal code the native bridge can return has a plain sentence", () 
   assert.ok(codes.size > 100);
   for (const code of codes) assert.notEqual(api.intakeCopy(code), "Something went wrong. Try again.", code);
 });
+
+test("an intake code named like an object built-in gets the plain fallback sentence", () => {
+  for (const code of ["constructor", "__proto__", "toString"]) {
+    assert.equal(api.intakeCopy(code), api.intakeCopy("some_unknown_code"), code);
+  }
+});

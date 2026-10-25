@@ -198,6 +198,7 @@ fn approved_direct(engine: &Engine, project: &ProjectId) -> ApprovedMemories {
 fn notes_and_searches_are_bounded_with_plain_problems() {
     validate_note("Prefer Rust for engines.").unwrap();
     validate_note("Line one\n\tLine two").unwrap();
+    validate_note("Warn with \u{26a0}\u{fe0f} and \u{1f468}\u{200d}\u{1f469}").unwrap();
     validate_note(&"n".repeat(NOTE_BYTES_MAX)).unwrap();
     validate_note(&format!("  {}  ", "n".repeat(NOTE_BYTES_MAX))).unwrap();
     for (text, code) in [
@@ -205,6 +206,12 @@ fn notes_and_searches_are_bounded_with_plain_problems() {
         ("n".repeat(NOTE_BYTES_MAX + 1), "memory_note_too_long"),
         ("bell\u{7}".to_owned(), "memory_note_invalid"),
         ("escape\u{1b}[31m".to_owned(), "memory_note_invalid"),
+        (
+            "Use pnpm\u{e0041}\u{e0042}".to_owned(),
+            "memory_note_invalid",
+        ),
+        ("Use pnpm\u{202e}llatsni".to_owned(), "memory_note_invalid"),
+        ("Use\u{200b}pnpm".to_owned(), "memory_note_invalid"),
     ] {
         assert_eq!(validate_note(&text).unwrap_err().0, code);
         assert!(plain_problem(code).is_some(), "{code}");

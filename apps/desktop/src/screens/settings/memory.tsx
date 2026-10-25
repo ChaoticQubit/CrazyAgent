@@ -5,6 +5,8 @@ import {
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, SearchField, Select, Skeleton, TextArea } from "../../ui";
+import { displayText } from "../conversation";
+import "../project/projects.css";
 
 const NOTE_MAX = 2000;
 const NOT_READY = "This change isn't ready in this build yet.";
@@ -47,7 +49,8 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
 
 /** One research suggestion rewritten in the owner's words before it is saved, like the TUI's
  * edit key. Inputs: the suggestion, an optional field label, whether a save is running, and
- * the save and cancel actions. Output: the inline editor, starting from the suggested text. */
+ * the save and cancel actions. Output: the inline editor, starting from the suggested text with
+ * hidden characters shown as escapes. */
 export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel }: {
   suggestion: Suggestion;
   label?: string;
@@ -55,7 +58,7 @@ export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel 
   onSave: (text: string) => void;
   onCancel: () => void;
 }) {
-  const [text, setText] = useState(suggestion.text);
+  const [text, setText] = useState(() => displayText(suggestion.text));
   const [error, setError] = useState<string>();
   const id = `memory-edit-${suggestion.project_id}-${suggestion.id}`;
   const save = () => {
@@ -65,7 +68,7 @@ export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel 
   };
   return <form className="stack-small grow" onSubmit={(event) => { event.preventDefault(); save(); }}
     onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } }}>
-    <TextArea id={id} label={label ?? `Edit before saving (from ${suggestion.project_name})`} value={text} onValue={setText} rows={3}
+    <TextArea id={id} label={label ?? `Edit before saving (from ${displayText(suggestion.project_name)})`} value={text} onValue={setText} rows={3}
       maxLength={MEMORY_TEXT_BYTES_MAX} counterAt={MEMORY_TEXT_BYTES_MAX - 400} error={error} />
     <span className="row">
       <Button type="submit" variant="primary" size="small" icon="brain" pending={pending} pendingLabel="Saving...">Save edited</Button>
@@ -113,7 +116,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   } else {
     list = <div className="rows">
       {saved.value.items.map((memory) => <div className="item-row" key={memory.id}>
-        <div className="stack-small"><span>{memory.text}</span><span className="muted small">{memorySource(memory, names)}</span></div>
+        <div className="stack-small"><p className="pj-note-text">{displayText(memory.text)}</p><span className="muted small">{displayText(memorySource(memory, names))}</span></div>
         <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
       </div>)}
       {saved.value.next !== null && <div className="item-row"><span /><Button size="small" onClick={onMore}>Show older</Button></div>}
@@ -130,7 +133,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
             onSave={(text) => onSaveEdited(suggestion, text)} />
         </div>;
         return <div className="item-row" key={key}>
-          <div className="stack-small"><span>{suggestion.text}</span><span className="muted small">From {suggestion.project_name}</span></div>
+          <div className="stack-small"><p className="pj-note-text">{displayText(suggestion.text)}</p><span className="muted small">From {displayText(suggestion.project_name)}</span></div>
           <span className="row">
             <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
             <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
