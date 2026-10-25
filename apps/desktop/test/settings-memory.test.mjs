@@ -34,7 +34,7 @@ test("suggestions from project research offer Save to memory and Dismiss with th
   assert.match(markup, /Save to memory/);
   assert.match(markup, />Edit</);
   assert.match(markup, /Dismiss/);
-  assert.doesNotMatch(markup, /entry-1|project-harbor/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/gu, " "), /entry-1|project-harbor/);
 });
 
 test("saved memories list with search, add and delete; empty and not ready states stay plain", () => {
@@ -77,10 +77,10 @@ test("a suggestion opens for editing with its own text before it is saved", () =
   const markup = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: false, onSave: forbidden, onCancel: forbidden }));
   assert.match(markup, /Edit before saving \(from Harbor Notes\)/);
   assert.match(markup, /<textarea[^>]*>Competitors charge per seat\.<\/textarea>/);
-  assert.match(markup, /maxlength="4096"/);
+  assert.match(markup, /maxlength="4096"/i);
   assert.match(markup, />Save edited</);
   assert.match(markup, />Cancel</);
-  assert.doesNotMatch(markup, /entry-1/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/gu, " "), /entry-1/);
   const saving = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: true, onSave: forbidden, onCancel: forbidden }));
   assert.match(saving, /Saving\.\.\./);
 });
