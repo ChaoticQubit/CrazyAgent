@@ -568,8 +568,9 @@ fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
         screen.problem.as_deref(),
         Some("Not connected to the engine. Retrying.")
     );
+    assert_eq!(screen.next_query(20), None);
     assert_eq!(
-        screen.next_query(20),
+        screen.next_query(10 + REFRESH_MS),
         Some(SetupQuery::Setup {
             project: project.clone()
         })
@@ -581,7 +582,7 @@ fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
         Ok(SetupView::Setup(None)),
     );
     assert!(screen.setup_missing);
-    assert_eq!(screen.next_query(30), None);
+    assert_eq!(screen.next_query(20 + REFRESH_MS), None);
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     assert!(text(&drawn.rows).contains("Its master conversation still works in Conversation."));
 }
@@ -1487,6 +1488,14 @@ async fn failed_and_empty_reads_settle_back_off_and_say_why() {
     let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
     assert!(shown.contains("That file is already gone."), "{shown}");
     assert!(!shown.contains("Loading..."), "{shown}");
+    screen.read("context/documents/gone.md");
+    assert!(
+        settle(&mut screen, &mut controller, start + 300 + REFRESH_MS)
+            .await
+            .contains(&"item"),
+        "opening a failed file again asks for it again"
+    );
+    screen.problem = None;
 
     tokio::time::timeout(std::time::Duration::from_secs(10), service.shutdown())
         .await

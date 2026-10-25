@@ -180,8 +180,8 @@ pub(in crate::tui) struct Transcript {
 }
 
 /// A loaded context file for the reader.
-/// Holds the path inside the project folder, the text read so far and where the next chunk starts.
-/// Rendered lines are cached per width.
+/// Holds the path inside the project folder, the text read so far, where the next chunk starts,
+/// whether a chunk has arrived and why the read failed. Rendered lines are cached per width.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::tui) struct Preview {
     pub path: String,
@@ -189,6 +189,8 @@ pub(in crate::tui) struct Preview {
     pub binary: bool,
     pub next: Option<u64>,
     pub scroll: usize,
+    pub loaded: bool,
+    pub problem: Option<String>,
     cache: Option<(usize, Vec<MdLine>)>,
 }
 
@@ -466,6 +468,7 @@ pub(in crate::tui) struct ProjectScreen {
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
+    setup_failed_ms: Option<i64>,
     setup_due: bool,
     waiting: Option<SetupQuery>,
 }
@@ -514,6 +517,7 @@ impl ProjectScreen {
             jobs_read_ms: None,
             context_read_ms: None,
             memories_read_ms: None,
+            setup_failed_ms: None,
             setup_due: false,
             waiting: None,
         }
@@ -543,20 +547,21 @@ impl ProjectScreen {
         }
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
-        let query = if (self.setup.is_none() || self.setup_due) && !self.setup_missing {
+        let setup_wanted = (self.setup.is_none() || self.setup_due) && !self.setup_missing;
+        let query = if setup_wanted && due(self.setup_failed_ms) {
             SetupQuery::Setup { project }
-        } else if self.setup_missing {
+        } else if self.setup_missing || self.setup.is_none() {
             return None;
         } else if self.jobs_read_ms.is_none() || (due(self.jobs_read_ms) && self.jobs_live()) {
             SetupQuery::Jobs { project }
         } else if let Some(job) = self.log_due(now_ms) {
             SetupQuery::Log { project, job }
-        } else if self.context.is_none()
-            || (matches!(self.tab, Tab::Context) && due(self.context_read_ms))
+        } else if due(self.context_read_ms)
+            && (self.context.is_none() || matches!(self.tab, Tab::Context))
         {
             SetupQuery::Context { project }
-        } else if self.memories.is_none()
-            || (matches!(self.tab, Tab::Overview) && due(self.memories_read_ms))
+        } else if due(self.memories_read_ms)
+            && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
             SetupQuery::Memories {
                 project,
@@ -565,7 +570,7 @@ impl ProjectScreen {
         } else if let Some(preview) = self
             .preview
             .as_ref()
-            .filter(|p| p.text.is_empty() && !p.binary)
+            .filter(|p| p.text.is_empty() && !p.binary && !p.loaded && p.problem.is_none())
         {
             SetupQuery::Item {
                 project,
@@ -669,8 +674,20 @@ impl ProjectScreen {
                     return;
                 }
                 match query {
-                    SetupQuery::Setup { .. } => self.setup_due = false,
+                    SetupQuery::Setup { .. } => {
+                        self.setup_due = false;
+                        self.setup_failed_ms = Some(self.now_ms);
+                    }
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
+                    SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
+                    SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
+                    SetupQuery::Item { path, .. } => {
+                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                            preview.next = None;
+                            preview.problem = Some(plain_problem(&problem));
+                            preview.cache = None;
+                        }
+                    }
                     SetupQuery::Log { job, .. } => self.log_read(*job, None),
                     SetupQuery::Change {
                         action:
@@ -688,6 +705,7 @@ impl ProjectScreen {
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
                 self.setup_due = false;
+                self.setup_failed_ms = None;
             }
             SetupView::Setup(None) => self.setup_missing = true,
             SetupView::Jobs(jobs) => {
@@ -706,6 +724,7 @@ impl ProjectScreen {
             }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                    preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
                             preview.text.push_str(&text);
@@ -1271,7 +1290,11 @@ impl ProjectScreen {
         if let Some(index) = self.tree().iter().position(|item| item.path == path) {
             self.tree_cursor = index;
         }
-        if self.preview.as_ref().is_none_or(|p| p.path != path) {
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|p| p.path != path || p.problem.is_some())
+        {
             self.preview = Some(Preview {
                 path: path.to_owned(),
                 ..Preview::default()
