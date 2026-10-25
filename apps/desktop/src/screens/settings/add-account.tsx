@@ -186,7 +186,10 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
   </div>;
 }
 
-function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
+/** The form for a saved-key or URL account: name, the base URL, the key in a masked field
+ * that is cleared once sent, and the model, each shown only when the method uses it. Inputs:
+ * the provider, the method option, the name and its setter, and the handler for the saved account. */
+export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
   provider: ProviderEntry;
   option: MethodOption;
   name: string;

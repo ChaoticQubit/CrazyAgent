@@ -1,56 +1,47 @@
+import "../test/load-source.mjs";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
-import { registerHooks } from "node:module";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { transformSync } from "rolldown/utils";
 
-const sourceRoot = new URL("../src/", import.meta.url).href;
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith(".") && context.parentURL?.startsWith(sourceRoot)) {
-      for (const extension of [".ts", ".tsx"]) {
-        const candidate = new URL(specifier + extension, context.parentURL);
-        if (existsSync(candidate)) return nextResolve(candidate.href, context);
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (!url.startsWith(sourceRoot) || !/\.tsx?$/.test(url)) return nextLoad(url, context);
-    const transformed = transformSync(fileURLToPath(url), readFileSync(new URL(url), "utf8"), {
-      target: "es2022", sourceType: "module", jsx: { runtime: "automatic" },
-    });
-    assert.deepEqual(transformed.errors, [], "production source must load before behavior assertions");
-    return { format: "module", source: transformed.code, shortCircuit: true };
-  },
-});
-const screen = await import("../src/screens/account-onboarding.tsx");
+const { KeyOrUrlForm, methodOptions } = await import("../src/screens/settings/add-account.tsx");
+const { SessionContext, useSession } = await import("../src/state.ts");
 
-test("ordinary configured account fields expose endpoint and model without routing identities", () => {
-  assert.equal(typeof screen.ConfiguredAccountFields, "function", "production must render the ordinary configured endpoint form");
-  const markup = renderToStaticMarkup(createElement(screen.ConfiguredAccountFields, {
-    provider: "api_key", url: "https://api.example.test/v1", model: "model-a", disabled: false,
-  }));
-  assert.match(markup, /data-testid="account-onboarding-url"/);
-  assert.match(markup, /data-testid="account-onboarding-model"/);
-  assert.match(markup, /https:\/\/api.example.test\/v1/);
-  assert.doesNotMatch(markup, /(?:Harness reference|Profile reference|Credential reference|Account reference|type="password")/);
+const field = (url, key, model) => ({ url, key, model });
+const compatible = { provider: "openai_compatible", name: "OpenAI-compatible", methods: [
+  { method: "url", label: "Connect a URL", url_preset: null, ...field("required", "optional", "required") }] };
+const openrouter = { provider: "openrouter", name: "OpenRouter", methods: [
+  { method: "api_key", label: "Use an API key", url_preset: null, ...field("hidden", "required", "required") }] };
+const forbidden = () => { throw new Error("static rendering must not save anything"); };
+
+function Form({ provider }) {
+  const [option] = methodOptions(provider);
+  return createElement(SessionContext.Provider, { value: useSession() },
+    createElement(KeyOrUrlForm, { provider, option, name: "Account 1", onName: forbidden, onAdded: forbidden }));
+}
+
+test("ordinary URL account fields carry endpoint and model without routing identities", () => {
+  const markup = renderToStaticMarkup(createElement(Form, { provider: compatible }));
+  assert.match(markup, /<label for="account-url">Base URL<\/label>/);
+  const url = markup.match(/<input\b[^>]*id="account-url"[^>]*>/)?.[0];
+  assert.ok(url, "the base URL has its own field");
+  assert.match(url, /type="url"/);
+  assert.match(markup, /<label for="account-model">Model<\/label>/);
+  assert.match(markup, /API key \(optional\)/);
+  assert.doesNotMatch(markup, /(?:Harness reference|Profile reference|Credential reference|Account reference)/);
   assert.doesNotMatch(markup, /(?:Authenticated|Model ready|setup unavailable)/);
 });
 
-test("the separate key form uses a masked uncontrolled field and explicitly forbids secret replay", () => {
-  assert.equal(typeof screen.AccountSecretForm, "function", "production must provide separate transient private key entry");
-  const markup = renderToStaticMarkup(createElement(screen.AccountSecretForm, { disabled: false }));
-  const input = markup.match(/<input\b[^>]*data-testid="account-profile-secret"[^>]*>/)?.[0];
-  assert.ok(input, "private entry must be visibly distinct from nonsecret account metadata");
+test("the key field is masked, uncontrolled, bounded and never shown again", () => {
+  const markup = renderToStaticMarkup(createElement(Form, { provider: openrouter }));
+  assert.doesNotMatch(markup, /id="account-url"/);
+  const input = markup.match(/<input\b[^>]*id="account-key"[^>]*>/)?.[0];
+  assert.ok(input, "the key has its own field");
   assert.match(input, /type="password"/);
   assert.match(input, /maxLength="8192"/i);
   assert.match(input, /autoComplete="off"/i);
   assert.doesNotMatch(input, /\b(?:value|name)=/);
-  assert.match(markup, /Save private key/);
-  assert.match(markup, /never automatically resent/i);
+  assert.match(markup, /Sent once to CrazyAgent&#x27;s engine, which keeps it privately\. You won&#x27;t see it again\./);
+  assert.match(markup, />Save key<\/button>/);
   assert.doesNotMatch(markup, /(?:Authenticated|Model ready)/);
 });
