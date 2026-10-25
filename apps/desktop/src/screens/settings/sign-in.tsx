@@ -84,8 +84,9 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
       claudeInput: nativeClaudeInputAllowed(state, false), codeSent: state.claude_input?.status === "accepted" };
     case "authenticated_observed": return operation.action.kind === "logout" ? { kind: "start" }
       : { kind: "signed_in", line: signedInLine(state.presentation?.account) };
-    case "uncertain": return { kind: "failed", ...signInFailure(CHECK[0]!, provider) };
-    default: return { kind: "failed", ...signInFailure(operation.code ?? (operation.phase === "unavailable" ? "native_auth_host_unavailable" : "native_auth_authentication_failed"), provider) };
+    case "uncertain": return { kind: "failed", text: plainError("native_auth_recovery_required"), hint: "check" };
+    default: return { kind: "failed", ...signInFailure(operation.code ?? (operation.phase === "unavailable" ? "native_auth_host_unavailable"
+      : operation.phase === "cancelled" ? "native_auth_cancelled" : "native_auth_authentication_failed"), provider) };
   }
 }
 

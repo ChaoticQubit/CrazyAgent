@@ -63,6 +63,7 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
+  native_auth_recovery_required: "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
