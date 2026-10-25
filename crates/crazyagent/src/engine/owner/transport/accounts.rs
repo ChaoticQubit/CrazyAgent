@@ -729,6 +729,7 @@ async fn check(root: &Root, listed: Listed) -> Result<(AccountView, Vec<String>)
     let Some(url) = http_url(&listed.connection) else {
         return Ok((view(&listed, base), Vec::new()));
     };
+    crate::accounts::account_url(url.as_str())?;
     let key = match &listed.connection.auth {
         ModelAuthentication::ApiKey { credential_ref } => read_key(root, credential_ref)?,
         _ => None,

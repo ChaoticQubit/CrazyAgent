@@ -530,7 +530,7 @@ pub fn plain(code: &str) -> &'static str {
         }
         "account_secret_invalid" => "This key cannot be saved. Paste the whole key on one line.",
         "account_url_invalid" | "account_url_bounds" => {
-            "This address is not a valid http or https URL."
+            "Use an https address. Plain http works only on this Mac."
         }
         "account_unreachable" | "account_url_unreachable" => {
             "Could not reach this address. Is the server running?"

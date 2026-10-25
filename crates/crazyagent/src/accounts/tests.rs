@@ -226,6 +226,53 @@ fn drafts_reject_unknown_methods_bad_names_and_bad_nonces() {
 }
 
 #[test]
+fn plain_http_is_accepted_only_for_this_machine() {
+    let mut any = draft(Provider::OpenaiCompatible, SignInMethod::Url);
+    any.model = Some("m".into());
+    for remote in [
+        "http://models.example.test/v1",
+        "http://192.168.1.5:8000/v1",
+        "http://10.0.0.1",
+        "http://0.0.0.0:8000/v1",
+        "http://[::ffff:127.0.0.1]:8000/v1",
+        "http://localhost.example.test/v1",
+    ] {
+        assert_eq!(
+            account_url(remote).unwrap_err().0,
+            "account_url_invalid",
+            "{remote}"
+        );
+        any.url = Some(remote.into());
+        for key in [true, false] {
+            assert_eq!(
+                any.build(key, "0123456789abcdef0123").unwrap_err().0,
+                "account_url_invalid",
+                "{remote} key={key}"
+            );
+        }
+    }
+    for local in [
+        "http://127.0.0.1:8000/v1",
+        "http://127.8.9.10:8000/v1",
+        "http://localhost:8000/v1",
+        "http://LOCALHOST/v1",
+        "http://[::1]:8000/v1",
+        "https://models.example.test/v1",
+    ] {
+        assert!(account_url(local).is_ok(), "{local}");
+        any.url = Some(local.into());
+        assert!(any.build(true, "0123456789abcdef0123").is_ok(), "{local}");
+    }
+    let mut ollama = draft(Provider::Local, SignInMethod::Url);
+    ollama.model = Some("m".into());
+    ollama.url = Some("http://192.168.1.5:11434/v1".into());
+    assert_eq!(
+        ollama.build(false, "0123456789abcdef0123").unwrap_err().0,
+        "account_local_url_required"
+    );
+}
+
+#[test]
 fn account_count_bound_is_large_but_finite() {
     let refs = |count: usize| -> Vec<CredentialRef> {
         (0..count)

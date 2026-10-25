@@ -460,6 +460,18 @@ fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
     Ok(config)
 }
 
+/// Refuses a connection being saved whose address is plain HTTP to another machine,
+/// with the same rule as an added account. Input: the connection. Output: Ok, or
+/// `account_url_invalid`.
+fn saved_endpoint(connection: &ModelConnection) -> Result<(), ConfigError> {
+    match &connection.endpoint {
+        ModelEndpoint::Http { url } => crate::accounts::account_url(url)
+            .map(|_| ())
+            .map_err(|error| ConfigError(error.0)),
+        ModelEndpoint::Native {} => Ok(()),
+    }
+}
+
 /// Applies one owner edit to the global settings text. `registered` carries saved accounts
 /// that the edit's pool uses but the config does not hold yet; they are added first, in the
 /// same publication. Inputs: global and project text, the edit and those accounts.
@@ -471,6 +483,12 @@ pub(crate) fn edit_model_access(
     registered: &[ModelConnection],
 ) -> Result<(String, EffectiveConfig), ConfigError> {
     edit.validate()?;
+    if let ModelAccessEdit::CreateConnection { connection }
+    | ModelAccessEdit::ReplaceConnection { connection }
+    | ModelAccessEdit::AddConnectedAccount { connection } = edit
+    {
+        saved_endpoint(connection)?;
+    }
     let mut catalog = resolve_config_bytes(global, project)?
         .settings
         .model_access
@@ -479,6 +497,7 @@ pub(crate) fn edit_model_access(
         if catalog.connections.iter().any(|c| c.id == connection.id) {
             continue;
         }
+        saved_endpoint(connection)?;
         if !catalog.accounts.contains(&connection.account_ref) {
             catalog.accounts.push(connection.account_ref.clone());
         }
@@ -992,6 +1011,67 @@ pools = [{ id = "pool", members = ["key-connection", "local-connection"], projec
             again.settings.allowed_destinations,
             config.settings.allowed_destinations
         );
+    }
+
+    #[test]
+    fn connections_are_saved_with_plain_http_only_to_this_machine() {
+        let connection = |url: &str| ModelConnection {
+            id: CredentialRef::new("lab-connection").unwrap(),
+            provider: CredentialRef::new("openai-compatible").unwrap(),
+            harness: CredentialRef::new("rcli").unwrap(),
+            protocol: CredentialRef::new("openai-chat").unwrap(),
+            account_ref: CredentialRef::new("local-account").unwrap(),
+            endpoint: ModelEndpoint::Http { url: url.into() },
+            model: ModelReference {
+                id: "m".into(),
+                author: CredentialRef::new("openai-compatible").unwrap(),
+            },
+            auth: ModelAuthentication::ApiKey {
+                credential_ref: CredentialRef::new("lab-key").unwrap(),
+            },
+        };
+        let remote = connection("http://192.0.2.1:8000/v1");
+        let refused = |result: Result<(String, EffectiveConfig), ConfigError>| {
+            assert_eq!(result.unwrap_err().0, "account_url_invalid");
+        };
+        refused(edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &ModelAccessEdit::CreateConnection {
+                connection: remote.clone(),
+            },
+            &[],
+        ));
+        refused(edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &assigned_pool(&["demo"]),
+            std::slice::from_ref(&remote),
+        ));
+        let (bytes, _) = edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &ModelAccessEdit::CreateConnection {
+                connection: connection("http://127.0.0.1:8000/v1"),
+            },
+            &[],
+        )
+        .unwrap();
+        refused(edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplaceConnection { connection: remote },
+            &[],
+        ));
+        edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplaceConnection {
+                connection: connection("https://models.example.test/v1"),
+            },
+            &[],
+        )
+        .unwrap();
     }
 
     #[test]
