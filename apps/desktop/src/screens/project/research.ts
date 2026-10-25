@@ -335,12 +335,12 @@ export function signInLine(pool: PoolSummary | undefined): string | null {
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.
- * Inputs: the turns and the messages this window sent, by ordinal. Output: the message, or
+ * Inputs: the turns and the messages this window sent, by turn id. Output: the message, or
  * null when the latest turn replied, is still going or its text is not in this window. */
-export function resendText(turns: MasterTurn[], sent: Record<number, string>): string | null {
+export function resendText(turns: MasterTurn[], sent: Record<string, string>): string | null {
   const latest = turns.reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
   if (latest === null || !RESENDABLE.has(latest.phase)) return null;
-  return sent[latest.ordinal] ?? null;
+  return sent[latest.id] ?? null;
 }
 
 const SEND_FALLBACK = "Couldn't send. Try again.";

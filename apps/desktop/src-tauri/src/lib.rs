@@ -878,9 +878,12 @@ async fn desktop_master_turns(
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
+    cursor: Option<crazyagent::master_session::MasterCursor>,
 ) -> Result<bridge::master::MasterTurns, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.master_turns(&ticket, &session_id, None).await
+    lock(&state)?
+        .master_turns(&ticket, &session_id, cursor)
+        .await
 }
 
 #[tauri::command]

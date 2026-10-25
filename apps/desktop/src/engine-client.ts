@@ -1400,15 +1400,40 @@ export interface MasterState {
 
 export interface MasterTurns {
   ticket: string;
-  page: { turns: MasterTurn[] };
+  page: { turns: MasterTurn[]; next: unknown };
 }
 
 export function masterState(ticket: string): Promise<MasterState> {
   return invoke<MasterState>("desktop_master_state", { ticket });
 }
 
-export function masterTurns(ticket: string, sessionId: string): Promise<MasterTurns> {
-  return invoke<MasterTurns>("desktop_master_turns", { ticket, sessionId });
+export function masterTurns(ticket: string, sessionId: string, cursor: unknown = null): Promise<MasterTurns> {
+  return invoke<MasterTurns>("desktop_master_turns", { ticket, sessionId, cursor });
+}
+
+const MASTER_TURNS_MAX = 1024;
+const MASTER_READ_TRIES = 3;
+
+/** Reads every turn of one master session, oldest first, by following the engine's pages.
+ * Inputs: the selection ticket and the session id. Output: the turns with the ordinals the
+ * engine returned; a read the engine keeps changing under it fails with resync_required. */
+export async function allMasterTurns(ticket: string, sessionId: string): Promise<MasterTurn[]> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const turns: MasterTurn[] = [];
+      let cursor: unknown = null;
+      for (let pages = 0; pages <= MASTER_TURNS_MAX; pages += 1) {
+        const { page } = await masterTurns(ticket, sessionId, cursor);
+        turns.push(...page.turns);
+        if (page.next === null) return turns;
+        cursor = page.next;
+      }
+      throw { code: "projection_limit" };
+    } catch (failure) {
+      const resync = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "resync_required";
+      if (!resync || attempt >= MASTER_READ_TRIES) throw failure;
+    }
+  }
 }
 
 export function openMaster(ticket: string, generation: number): Promise<IntentReceipt> {
