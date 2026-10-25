@@ -287,16 +287,16 @@ export function teamNotes(team: TeamPlan, harnesses: HarnessEntry[] | null): str
 const GROUPS = { ready: "Ready", limited: "Limited control", not_installed: "Not installed" } as const;
 
 /** Orders every catalog harness for a picker: Ready, Limited control, Not installed.
- * Input: the catalog. Output: options; a harness that is not installed can't be picked. */
+ * Input: the catalog. Output: options; a harness that is not installed or can't run team
+ * agents can't be picked. */
 export function harnessChoices(harnesses: HarnessEntry[]): { id: string; label: string; group: string; disabled: boolean }[] {
   return (["ready", "limited", "not_installed"] as const).flatMap((kind) => harnesses
     .filter((harness) => harness.status.kind === kind)
-    .map((harness) => ({
-      id: harness.id,
-      label: kind === "not_installed" ? `${harness.name} - Not installed` : harness.name,
-      group: GROUPS[kind],
-      disabled: kind === "not_installed",
-    })));
+    .map((harness) => {
+      const blocked = harness.team.kind === "unavailable";
+      const label = kind === "not_installed" ? `${harness.name} - Not installed` : blocked ? `${harness.name} - Can't run team agents` : harness.name;
+      return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || blocked };
+    }));
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -311,6 +311,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
+    if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
     return undefined;
   };
   errors.master = harnessProblem(team.master, "the master");

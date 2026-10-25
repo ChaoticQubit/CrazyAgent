@@ -50,10 +50,12 @@ pub enum Transcript {
 
 /// Whether a harness has an interactive app the engine can run in a terminal pane.
 /// `HeadlessOnly` keeps the existing piped launch and carries the plain reason.
+/// `Unavailable` has an app whose replies the engine cannot read yet, so no launch works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Support {
     Terminal,
     HeadlessOnly { reason: &'static str },
+    Unavailable { reason: &'static str },
 }
 
 /// What one run adds to a launch request: the session id the harness records under and
@@ -176,12 +178,15 @@ const PLAIN: [Plain; 20] = [
 ];
 
 /// Tells whether a catalog harness runs as its own interactive app in a terminal pane.
-/// Input: a catalog id or a connection harness name. Output: `Terminal`, or `HeadlessOnly`
-/// with the reason for RCLI, which runs only as a master, and for unknown names.
+/// Input: a catalog id or a connection harness name. Output: `Terminal` when the engine reads
+/// its session record, `Unavailable` for the other apps until a reader exists, or
+/// `HeadlessOnly` with the reason for RCLI, which runs only as a master, and unknown names.
 pub fn support(harness: &str) -> Support {
     match super::spec(harness).map(|spec| spec.id) {
         Some("codex" | "claude-code") => Support::Terminal,
-        Some(id) if PLAIN.iter().any(|plain| plain.id == id) => Support::Terminal,
+        Some(id) if PLAIN.iter().any(|plain| plain.id == id) => Support::Unavailable {
+            reason: "CrazyAgent cannot read its replies yet",
+        },
         Some("rcli") => Support::HeadlessOnly {
             reason: "runs only as a CrazyAgent master",
         },

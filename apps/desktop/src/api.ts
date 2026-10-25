@@ -398,6 +398,7 @@ export interface HarnessEntry {
   tools: { kind: "switchable" } | { kind: "limited"; reason: string };
   model_selection: boolean;
   account_kinds: HarnessAccountKind[];
+  team: { kind: "available" } | { kind: "unavailable"; reason: string };
 }
 
 /** Reads the harness catalog with what is installed on this Mac. Output: harnesses in
