@@ -593,7 +593,7 @@ fallback_allowed = false
     async fn real_master_turns_page_past_one_page_and_refuse_a_stale_cursor() {
         let root = tempfile::Builder::new()
             .prefix("ca-desktop-pages-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");

@@ -129,7 +129,7 @@ async fn current(client: &OwnerClient, project: &ProjectId) -> Option<MasterSess
 async fn a_project_opens_its_master_again_after_more_closed_sessions_than_the_live_cap() {
     let root = tempfile::Builder::new()
         .prefix("ca-cap-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let repository = root.path().join("repository");
