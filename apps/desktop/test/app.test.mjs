@@ -277,3 +277,15 @@ test("each project gets its own page, so a switch never keeps the last project's
   assert.equal(page("beta").key, "beta");
   assert.equal(page("beta").props.name, "Beta");
 });
+
+test("each project's onboarding review and settings get their own page, so a switch never seeds from the last project", async () => {
+  const { Screen } = await import("../src/app.tsx");
+  const { OnboardingReview } = await import("../src/screens/intake/onboarding.tsx");
+  const projects = { kind: "ok", value: [{ id: "alpha", name: "Alpha" }, { id: "beta", name: "Beta" }] };
+  const review = (id) => Screen({ route: { name: "onboarding", id }, session: session({ projects }) });
+  assert.equal(review("alpha").type, OnboardingReview);
+  assert.equal(review("alpha").key, "alpha");
+  assert.equal(review("beta").key, "beta");
+  const settings = (id) => Screen({ route: { name: "project", id, tab: "settings" }, session: session({ projects }) });
+  assert.notEqual(settings("alpha").key, settings("beta").key);
+});

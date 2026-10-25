@@ -414,6 +414,22 @@ test("project Settings, General edits the saved details with the New Project con
   assert.doesNotMatch(markup, /role="alert"/);
 });
 
+test("project Settings never seeds its forms from another project's setup, so a save can't write it into this one", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  const other = { kind: "ok", value: {
+    project_id: "p-2", name: "Bravo Notes", about: "Bravo's own details.", tech_stack: ["Go"], platforms: ["web_app"], research: ["competitor_research"],
+    pool: null, team: { master: "claude", master_tools: false, sub_harnesses: ["codex"], min_agents: 2, max_agents: 3 }, documents: [], folder: "/tmp/bravo-notes", created_ms: 0, revision: 9,
+  } };
+  for (const section of ["general", "team"]) {
+    const markup = renderToStaticMarkup(createElement(settings.SettingsTab, { data: { ...tabData([]), setup: other }, section }));
+    assert.match(markup, /role="status">Loading\.\.\.</, section);
+    assert.doesNotMatch(markup, /Bravo|<form|Save changes|Save team/, section);
+  }
+  const own = { kind: "ok", value: { ...other.value, project_id: "p-1", name: "Harbor Notes" } };
+  const general = renderToStaticMarkup(createElement(settings.SettingsTab, { data: { ...tabData([]), setup: own }, section: "general" }));
+  assert.match(general, /id="ps-name"[^>]*value="Harbor Notes"/);
+});
+
 test("selected report text is cleaned before it can be saved to memory", async () => {
   const context = await import("../src/screens/project/context.tsx");
   assert.equal(context.selectionText("  Owners pay per seat.  "), "Owners pay per seat.");

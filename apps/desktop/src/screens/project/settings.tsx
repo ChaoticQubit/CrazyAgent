@@ -211,14 +211,16 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, and Remove project.
+/** Project Settings tab: General, Pool, Team, Plugins and skills, and Remove project. A setup
+ * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
-  const setup = valueOf(data.setup);
+  const loaded = valueOf(data.setup);
+  const setup = loaded && loaded.project_id !== data.id ? null : loaded;
   const needsSetup = (body: () => ReactNode) => setup ? body()
     : data.setup?.kind === "not_ready" ? <NotReady what="project details aren't in this build." />
-      : data.setup === undefined ? <p className="pj-muted" role="status">Loading...</p>
+      : data.setup === undefined || loaded !== setup ? <p className="pj-muted" role="status">Loading...</p>
         : <p className="pj-muted">This project was created before project setup, so it has no team or details to change.</p>;
   return <div className="pj-settings">
     <nav className="pj-subnav" aria-label="Project settings">
