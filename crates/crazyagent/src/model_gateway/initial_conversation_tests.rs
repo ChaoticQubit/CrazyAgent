@@ -695,3 +695,64 @@ fn a_failed_turn_holds_its_connection_only_until_its_retry_time_or_the_failure_h
         assert!(probe.attempt.request.previous_attempt.is_none());
     }
 }
+
+#[test]
+fn a_busy_day_of_observations_keeps_the_connection_admissible_and_its_history_bounded() {
+    let mut fixture = Fixture::new(CATALOG);
+    observe_at(
+        &mut fixture,
+        1,
+        1_000,
+        1_100,
+        ObservationKind::RateLimited {
+            retry_at_ms: Some(1_100),
+        },
+    );
+    observe_at(
+        &mut fixture,
+        2,
+        1_001,
+        1_000_000,
+        ObservationKind::TransientFailure {
+            retry_at_ms: Some(900_000),
+        },
+    );
+    for sequence in 3..=300 {
+        observe_at(
+            &mut fixture,
+            sequence,
+            1_000 + sequence,
+            1_000 + sequence + 3_600_000,
+            ObservationKind::Ready {
+                remaining: None,
+                capabilities: vec![],
+            },
+        );
+    }
+    let busy = connection_state(&fixture.database, &fixture.binding.connection, 1_400).unwrap();
+    assert_eq!(busy.health, Health::Ready);
+    assert_eq!(busy.cooldown_until_ms, Some(900_000));
+    let rows: i64 = fixture
+        .database
+        .query_row(
+            "SELECT count(*) FROM model_gateway_observations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
+    let rested = connection_state(&fixture.database, &fixture.binding.connection, 900_000).unwrap();
+    assert_eq!(rested.health, Health::Ready);
+    assert_eq!(rested.cooldown_until_ms, None);
+    next_turn(&mut fixture, "rested-turn");
+    let tx = fixture.database.transaction().unwrap();
+    begin_attempt(
+        &tx,
+        &fixture.config,
+        &fixture.config,
+        &fixture.request,
+        900_000,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
