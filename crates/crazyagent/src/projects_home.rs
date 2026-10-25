@@ -70,12 +70,12 @@ pub struct FoundProject {
     pub project_id: Option<ProjectId>,
 }
 
-/// How an existing folder is brought into the projects home: moved (the
-/// default, a rename on the same disk) or copied with the source left alone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How an existing folder is brought into the projects home when the owner
+/// explicitly asks for that instead of using it where it is: moved (a rename
+/// on the same disk) or copied with the source left alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddMode {
-    #[default]
     Move,
     Copy,
 }
@@ -197,17 +197,34 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
     Ok(home)
 }
 
+/// True when moving `folder` would break git links kept outside it: the
+/// folder is a linked worktree or submodule (its `.git` is a file or a link),
+/// or its repository has linked worktrees. An unreadable `.git` counts.
+fn git_links(folder: &Path) -> bool {
+    let git = folder.join(".git");
+    match std::fs::symlink_metadata(&git) {
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        Ok(metadata) if !metadata.is_dir() => true,
+        Ok(_) => match std::fs::read_dir(git.join("worktrees")) {
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            Ok(mut entries) => entries.next().is_some(),
+        },
+    }
+}
+
 /// Plans bringing an existing folder into the projects home.
-/// Input: the canonical home, the engine data folder, the owner's source text
-/// and the mode. Output: the real source and the free destination in the home,
-/// or a refusal for sources inside the home, the home itself, `/`, the user's
-/// home folder, any folder holding the home or engine data, hidden folders and
-/// names already taken in the home.
+/// Input: the canonical home, the engine data folder, the owner's source
+/// text, the mode and the set-up projects. Output: the real source and the
+/// free destination in the home, or a refusal for sources inside the home,
+/// the home itself, `/`, the user's home folder, any folder holding the home
+/// or engine data, hidden folders, names already taken in the home, and a
+/// Move of a folder with git worktree links or nested with a set-up project.
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
     mode: AddMode,
+    registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
     path_text(source, "home_source_invalid")?;
     let real = real_folder(
@@ -230,6 +247,17 @@ pub fn plan_add(
         return Err(refused("home_source_hidden"));
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
+    if mode == AddMode::Move {
+        if git_links(&real) {
+            return Err(refused("home_move_worktrees"));
+        }
+        if registered
+            .iter()
+            .any(|project| overlaps(&real, &project.folder))
+        {
+            return Err(refused("home_move_project"));
+        }
+    }
     let destination = destination(home, name)?;
     Ok(AddPlan::new(real, destination, mode))
 }
@@ -542,6 +570,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "Rename the folder so it has a plain name first."
         }
         "home_destination_exists" => "Your projects folder already has a folder with that name.",
+        "home_move_worktrees" => {
+            "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it."
+        }
+        "home_move_project" => {
+            "This folder holds or sits inside a project you already added. Use it where it is or copy it."
+        }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
         "home_copy_failed" | "home_move_failed" => {

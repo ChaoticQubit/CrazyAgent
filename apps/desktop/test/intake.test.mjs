@@ -91,14 +91,15 @@ test("a picked Windows folder is accepted, checked against a Windows projects fo
   assert.equal(intake.joinPath("/Users/mira/Projects/", "shop"), "/Users/mira/Projects/shop");
 });
 
-test("Move is the default and Copy shows the size first, with a warning above 1 GB", () => {
+test("using a folder where it is is the default and Copy shows the size first, with a warning above 1 GB", () => {
   const home = "/Users/mira/Projects";
+  assert.deepEqual(intake.sizeLine("here", null, home), { text: "Sets it up where it is. Nothing is moved or copied.", warn: false });
   assert.deepEqual(intake.sizeLine("move", null, home), { text: "Moves the folder into ~/Projects. It won't stay at its old place.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", null, home), { text: "Checking the folder size...", warn: false });
   assert.deepEqual(intake.sizeLine("copy", 512 * 1024 * 1024, home), { text: "Copies 512 MB into ~/Projects. The original stays where it is.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", GB, home), { text: "Copies 1 GB into ~/Projects. The original stays where it is.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", 2.5 * GB, home),
-    { text: "This copies 2.5 GB into ~/Projects. That takes a while and uses as much disk again. Move is instant on the same disk.", warn: true });
+    { text: "This copies 2.5 GB into ~/Projects. That takes a while and uses as much disk again. Using it where it is needs no copy.", warn: true });
 });
 
 test("the device code shows how long it still works and only GitHub pages open", () => {
@@ -304,14 +305,22 @@ test("setting up a found folder asks for a pool first", () => {
   assert.match(html(SetUpDialogBody, { folder: folder("found"), pools: ok([]), pool: "", onPool: noop, problem: "" }), /Create a pool first/);
 });
 
-test("adding an existing folder shows Move by default, the Copy size warning and the clone suggestion", () => {
+test("adding an existing folder uses it where it is by default, shows the target before a Move or Copy, the Copy size warning and the clone suggestion", () => {
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
-  const none = html(AddFolderView, { ...base, source: null, size: null, mode: "move" });
+  const none = html(AddFolderView, { ...base, source: null, size: null, mode: "here" });
   assert.match(none, /<h1>Add an existing folder<\/h1>/);
   assert.match(none, />Choose folder<\/button>/);
-  assert.doesNotMatch(none, /Move into projects folder/);
+  assert.doesNotMatch(none, /Set up here|Move into projects folder/);
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "here" });
+  assert.match(here, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
+  assert.match(here, /role="radio" aria-checked="false"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.match(here, /~\/Code\/shop<\/span> stays where it is\./);
+  assert.match(here, /Nothing is moved or copied\./);
+  assert.match(here, />Set up here<\/button>/);
+  assert.doesNotMatch(here, /goes to|into projects folder/);
   const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "move" });
   assert.match(move, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.match(move, /goes to <span class="pj-mono">~\/Projects\/shop<\/span>/);
   assert.match(move, /Moves the folder into ~\/Projects\./);
   assert.match(move, />Move into projects folder<\/button>/);
   const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB }), mode: "copy" });
@@ -429,6 +438,8 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   assert.ok(found.includes(svg("circle-x", 12)), "Folder missing carries its status icon");
 
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "here" });
+  assert.ok(here.includes(`${svg("list-checks", 15)}Set up here</button>`), here);
   const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
   assert.ok(move.includes(`${svg("folder-input", 15)}Move into projects folder</button>`), move);
   assert.ok(move.includes(`${svg("git-branch", 15)}Clone instead</button>`), move);

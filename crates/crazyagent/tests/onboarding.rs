@@ -599,6 +599,36 @@ async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adding_a_repo_in_place_onboards_it_where_it_is_and_keeps_its_worktree_links() {
+    let mut bench = Bench::start(|repo| {
+        let side = repo.parent().unwrap().join("demo-side");
+        git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                side.to_str().unwrap(),
+            ],
+        );
+    })
+    .await;
+    let side = bench.repo.parent().unwrap().join("demo-side");
+    let link = fs::read_to_string(side.join(".git")).unwrap();
+    let project = bench.start_onboarding().await;
+    let waiting = bench.view(&project).await;
+    assert_eq!(waiting.project_id, project);
+    assert!(bench.repo.join(".git").is_dir());
+    assert!(bench.repo.join(".crazyagent").is_dir());
+    assert_eq!(fs::read_to_string(side.join(".git")).unwrap(), link);
+    assert_eq!(git(&side, &["rev-parse", "--abbrev-ref", "HEAD"]), "side\n");
+    assert!(git(&bench.repo, &["worktree", "list"]).contains("demo-side"));
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
