@@ -519,3 +519,16 @@ test("Pause all agents says what stops, or that nothing is running", () => {
   assert.deepEqual(research.pauseSummary([teamTask(1, "done"), teamTask(2, "cancelled")]), { count: 0, line: "No team agents are working or waiting." });
   assert.deepEqual(research.pauseSummary([]), { count: 0, line: "No team agents are working or waiting." });
 });
+
+test("Project Settings sends the engine's team fields only, never the tools choice kept while a harness forces tools on", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  const stored = { about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main" };
+  const team = {
+    master: "cursor", master_tools: true, master_tools_wanted: false,
+    sub_harnesses: [{ harness: "cursor", agents: 2, tools: true, tools_wanted: false }], min_agents: 1, max_agents: 3,
+  };
+  assert.deepEqual(settings.setupOf(stored, team), {
+    about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
+    team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
+  });
+});

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { keyLabel, shortcutKey } from "./keys";
 import { Dialog } from "./overlay";
 import { formatRoute, navigate, type Route } from "./router";
 
@@ -129,18 +130,19 @@ export function GoToDialog({ open, projects, onGo, onClose }: {
 export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   return <Dialog open={open} title="Keyboard shortcuts" onClose={onClose}>
     <dl className="shortcuts">
-      {SHORTCUTS.map(([keys, what]) => <div key={keys} className="shortcut"><dt><kbd>{keys}</kbd></dt><dd>{what}</dd></div>)}
+      {SHORTCUTS.map(([keys, what]) => <div key={keys} className="shortcut"><dt><kbd>{keyLabel(keys)}</kbd></dt><dd>{what}</dd></div>)}
     </dl>
   </Dialog>;
 }
 
-/** Go to and the shortcuts list for the whole app: Cmd+K opens Go to, Cmd+/ the shortcuts.
+/** Go to and the shortcuts list for the whole app: Cmd+K opens Go to, Cmd+/ the shortcuts
+ * (Ctrl on Windows and Linux).
  * Input: the projects Go to lists. Output: the two dialogs, closed until asked for. */
 export function GoToLayer({ projects }: { projects: readonly { id: string; name: string }[] }) {
   const [open, setOpen] = useState<"go-to" | "shortcuts" | null>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey || event.ctrlKey) return;
+      if (!shortcutKey(event)) return;
       if (event.key === "k") { event.preventDefault(); setOpen("go-to"); }
       else if (event.key === "/") { event.preventDefault(); setOpen("shortcuts"); }
     };

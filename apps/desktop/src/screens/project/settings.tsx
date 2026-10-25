@@ -3,13 +3,14 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { assignPool, failureCopy, loadProjectCatalog, loadProjects, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
-import type { ProjectCatalog, StoredSetup, TeamPlan } from "../../api-projects";
+import type { ProjectCatalog, StoredSetup } from "../../api-projects";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
-import { basicsErrors, draftOf, editRequest, poolName, teamValid } from "../new-project/wizard";
+import { basicsErrors, draftOf, editRequest, poolName, teamValid, wireTeam } from "../new-project/wizard";
+import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel } from "./overview";
 import { changeOutcome } from "./research";
 import { SessionContext, useLoad } from "../../state";
@@ -33,8 +34,10 @@ function hashSection(): string | null {
   return query ? new URLSearchParams(query).get("section") : null;
 }
 
-function setupOf(setup: StoredSetup, team: TeamPlan) {
-  return { about: setup.about, tech_stack: setup.tech_stack, platforms: setup.platforms, research: setup.research, pool: setup.pool, team, documents: [] };
+/** The project setup Project Settings saves: the stored details with this team, as the engine
+ * takes it. Inputs: the stored setup and the edited team. Output: the setup to send. */
+export function setupOf(setup: Pick<StoredSetup, "about" | "tech_stack" | "platforms" | "research" | "pool">, team: TeamDraft) {
+  return { about: setup.about, tech_stack: setup.tech_stack, platforms: setup.platforms, research: setup.research, pool: setup.pool, team: wireTeam(team), documents: [] };
 }
 
 /** Plans Save pool: assign the chosen pool when it isn't assigned yet, take the project off the
@@ -96,7 +99,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
 
 function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup }) {
   const harnesses = valueOf(data.harnesses);
-  const [team, setTeam] = useState(setup.team);
+  const [team, setTeam] = useState<TeamDraft>(setup.team);
   const [note, setNote] = useState("");
   async function save() {
     const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
@@ -111,7 +114,7 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
     <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={setup.research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save; waiting research moves to the new team.</span>
-      <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(team) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
+      <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
   </div>;
 }
 

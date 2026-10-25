@@ -25,6 +25,8 @@ test-node:
 		scripts/rcli/host.entry.test.mjs \
 		scripts/rcli/host.observations.test.mjs \
 		scripts/rcli/build-closure.test.mjs \
+		scripts/rcli/build-native.test.mjs \
+		scripts/rcli/host.bounds.test.mjs \
 		apps/desktop/test/model-access.test.mjs \
 		apps/desktop/test/projects.test.mjs \
 		apps/desktop/test/native/refresh-barrier.test.mjs \

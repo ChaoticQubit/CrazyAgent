@@ -10,7 +10,7 @@ import { MarkdownView } from "./markdown";
 import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Menu, type Tone } from "../../ui";
+import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
 const sentByProject = new Map<string, Record<number, string>>();
@@ -200,9 +200,9 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       <label htmlFor="pj-composer" className="pj-sr">Message the master</label>
       <textarea className="pj-input" id="pj-composer" rows={3} value={text} aria-describedby="pj-composer-help" data-testid="master-message"
         onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void send(); } }} />
+        onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); void send(); } }} />
       <div className="pj-row between">
-        <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : "Cmd+Enter to send"}</span>
+        <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : keyLabel("Cmd+Enter to send")}</span>
         <span className="pj-row">{waiting && <button type="button" className="btn" onClick={() => void stopReply()}>Stop</button>}
           <button type="submit" className="btn primary" disabled={blocked || !text.trim() || bytes > MESSAGE_BYTES_MAX} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
       </div>

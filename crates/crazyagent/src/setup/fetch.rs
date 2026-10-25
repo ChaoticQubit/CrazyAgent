@@ -265,8 +265,8 @@ pub fn server_name(entry: &PackManifestEntry) -> Result<String, InstallError> {
     Ok(name)
 }
 
-/// How one MCP server entry is set up: an optional Python tool that `uv tool install`
-/// must install first, then how the server starts.
+/// How one MCP server entry is set up: an optional Python tool setup must install first
+/// from its bundled hash lock, then how the server starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerPlan {
     pub tool: Option<(String, String)>,

@@ -47,7 +47,7 @@ test("the controls show the keep-ready switch and the hand-off form for a team w
   assert.match(html, /role="switch" class="switch" aria-checked="true"/);
   assert.match(html, /Keep 1 sub-agent ready/);
   assert.match(html, /<h4>Hand a task to a sub-agent<\/h4>/);
-  assert.match(html, /<option value="">Any sub-agent<\/option><option value="codex">codex<\/option><option value="claude">claude<\/option>/);
+  assert.match(html, /<option value="" selected="">Any sub-agent<\/option><option value="codex">codex<\/option><option value="claude">claude<\/option>/);
   assert.match(html, /<button type="submit" class="btn primary small" disabled=""/);
   assert.match(html, /Skips the master\. The master sees the task and its result\./);
   const lone = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "solo", status: status({ min_agents: 0, harnesses: [harness("codex", "master")] }), reload() {} }));

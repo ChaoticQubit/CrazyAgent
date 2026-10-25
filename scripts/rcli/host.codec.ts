@@ -5,6 +5,7 @@ import type { MessageFrame } from "./host.messages.ts";
 import { validateObservationFrame, type ObservationFrame } from "./host.observations.ts";
 
 const FRAME_MAX = 65_536;
+export const FRAME_TEXT_MAX = FRAME_MAX - 1_024;
 const QUEUE_MAX = 64;
 const QUEUE_BYTES_MAX = 1_048_576;
 const U64_MAX = 18_446_744_073_709_551_615n;

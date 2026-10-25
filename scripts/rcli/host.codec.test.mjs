@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { BoundedEventWriter, decodeControl, encodeEvent, readControls } from "./host.codec.ts";
+import { BoundedEventWriter, FRAME_TEXT_MAX, decodeControl, encodeEvent, readControls } from "./host.codec.ts";
 import { SdkMessageProjection } from "./host.messages.ts";
 
 function framed(value) {
@@ -83,6 +83,16 @@ test("message deltas use UTF-8 byte bounds and preserve whitespace", () => {
     assert.throws(() => encodeEvent("session-a", "instance-a", 1n,
       { kind: "message_delta", turn_id: "turn-a", message_id: "msg-1", text }));
   }
+});
+
+test("text at the shared JSON budget fits one frame with maximal identities and sequence", () => {
+  const id = "a".repeat(128);
+  const text = "\u0001".repeat(10751) + "\n\n";
+  assert.equal(Buffer.byteLength(JSON.stringify(text)), FRAME_TEXT_MAX);
+  const body = { kind: "message_delta", turn_id: id, message_id: id, text };
+  const frame = encodeEvent(id, id, 18446744073709551615n, body);
+  assert(frame.byteLength - 4 <= 65536);
+  assert.deepEqual(unpack(frame).event, body);
 });
 
 test("message frames reject invalid identities and unexpected fields", () => {

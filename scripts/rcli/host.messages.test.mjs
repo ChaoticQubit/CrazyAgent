@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SdkMessageProjection } from "./host.messages.ts";
+import { FRAME_TEXT_MAX, encodeEvent } from "./host.codec.ts";
+import { MESSAGE_JSON_MAX, SdkMessageProjection } from "./host.messages.ts";
 
 const turn = "external-turn-1";
 const sdkTurn = "sdk-turn-1";
@@ -98,8 +99,6 @@ test("rejected SDK input has no partial publication or identity allocation", () 
     [],
     { ...event("assistant:delta", "bad", "text"), turnId: "other-turn" },
     event("assistant:delta", "bad", "\ud800"),
-    event("assistant:message", "bad", "x".repeat(1048577)),
-    event("assistant:message", "bad", "🙂".repeat(262145)),
     event("assistant:delta", "", "text"),
     event("assistant:delta", "x".repeat(257), "text"),
     { ...event("assistant:message", "bad", "text"), extra: "unsupported" },
@@ -129,13 +128,57 @@ test("the active turn retains at most 128 SDK message identities including disca
   assert.throws(() => projection.accept(event("assistant:delta", "too-many", "x")), /host_sdk_event_rejected/);
 });
 
-test("a text exactly at the SDK byte limit remains lossless", () => {
+test("a text exactly at the escaped message limit remains lossless", () => {
   const projection = new SdkMessageProjection(turn, sdkTurn);
-  const text = "🙂".repeat(262144);
+  const text = "🙂".repeat((MESSAGE_JSON_MAX - 4) / 4) + "xx";
+  assert.equal(Buffer.byteLength(JSON.stringify(text)), MESSAGE_JSON_MAX);
   const output = projection.accept(event("assistant:message", "max", text));
   const deltas = output.filter((item) => item.kind === "message_delta");
-  assert.equal(deltas.length, 64);
+  assert.equal(deltas.length, 28);
   assert.equal(deltas.map((item) => item.text).join(""), text);
+  assert.equal(output.length, 30);
+  assert.equal(projection.overflowed, false);
+});
+
+test("over-limit text discards its message, marks the turn and drops later events for it", () => {
+  const limit = "x".repeat(MESSAGE_JSON_MAX - 2);
+  for (const large of [`${limit}x`, "\u0001".repeat(Math.ceil((MESSAGE_JSON_MAX - 2) / 6)), "x".repeat(1048577), "🙂".repeat(262145)]) {
+    const projection = new SdkMessageProjection(turn, sdkTurn);
+    assert.deepEqual(projection.accept(event("assistant:message", "hidden", large)), []);
+    assert.equal(projection.overflowed, true);
+    assert.deepEqual(projection.accept(event("assistant:delta", "hidden", "late")), []);
+    assert.deepEqual(projection.accept(event("assistant:message:discard", "hidden")), []);
+    assert.deepEqual(projection.accept(event("assistant:delta", "shown", "draft")), [
+      frame("message_started", "msg-1"), frame("message_delta", "msg-1", "draft"),
+    ]);
+    assert.deepEqual(projection.accept(event("assistant:message", "shown", large)), [frame("message_discarded", "msg-1")]);
+    assert.deepEqual(projection.accept(event("assistant:message", "shown", "final")), []);
+  }
+  for (const malformed of [`\ud800${limit}`, `${limit}\ud800`]) {
+    const fresh = new SdkMessageProjection(turn, sdkTurn);
+    assert.throws(() => fresh.accept(event("assistant:message", "bad", malformed)), /host_sdk_event_rejected/);
+    assert.equal(fresh.overflowed, false);
+  }
+});
+
+test("chunks fill the raw and JSON-escaped budgets exactly so every delta frame fits the wire", () => {
+  const projection = new SdkMessageProjection("t".repeat(128), sdkTurn);
+  const controls = Array.from({ length: 32 }, (_, unit) => String.fromCharCode(unit)).join("");
+  let plane = "";
+  for (let unit = 0x20; unit <= 0xffff; unit++) if (unit < 0xd800 || unit > 0xdfff) plane += String.fromCharCode(unit);
+  const text = controls.repeat(1024) + plane + "🙂".repeat(4096) + "\"\\".repeat(8192);
+  const deltas = projection.accept(event("assistant:message", "dense", text)).filter((item) => item.kind === "message_delta");
+  assert.equal(deltas.map((item) => item.text).join(""), text);
+  for (const [index, delta] of deltas.entries()) {
+    const raw = Buffer.byteLength(delta.text);
+    const json = Buffer.byteLength(JSON.stringify(delta.text));
+    assert(raw <= 16384 && json <= FRAME_TEXT_MAX, `chunk ${index} has ${raw} raw and ${json} JSON bytes`);
+    assert(encodeEvent("s".repeat(128), "i".repeat(128), 18446744073709551615n, delta).byteLength <= 65540);
+    const next = deltas[index + 1]?.text;
+    if (next === undefined) continue;
+    const scalar = String.fromCodePoint(next.codePointAt(0));
+    assert(raw + Buffer.byteLength(scalar) > 16384 || json + Buffer.byteLength(JSON.stringify(scalar)) - 2 > FRAME_TEXT_MAX);
+  }
 });
 
 test("closed projections reject further events and invalid turn identities fail admission", () => {

@@ -602,8 +602,9 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
+        text.push_str(&self.git_link_denies());
         text.push_str(
             "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",
         );
@@ -641,6 +642,37 @@ impl ProjectSandbox {
                 .all(|service| !KEYCHAIN_SERVICES.contains(service))
         );
         assert!(text.len() <= PROFILE_BYTES_MAX);
+        text
+    }
+
+    /// The Seatbelt rules that keep the owner's git reading the metadata the engine made.
+    /// No agent may move the project folder, the git worktrees folders or a worktree, which
+    /// would carry protected files out of their denied paths and back. A worktree's `.git`
+    /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
+    /// does, but never rewritten or removed, and no `config.worktree` may be written.
+    /// Input: the policy. Output: the rule text.
+    fn git_link_denies(&self) -> String {
+        let project = self.project_root.display();
+        let pattern = seatbelt_pattern(&self.project_root);
+        let admin = format!("{pattern}/\\.git/worktrees/[^/]+");
+        let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
+        let mut moves = format!(
+            "(deny file-write-unlink\n  (literal \"{project}\")\n  (literal \"{project}/.git/worktrees\")\n  (literal \"{project}/worktrees\")\n  (literal \"{project}/.crazyagent/worktrees\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
+        );
+        let mut links = format!(
+            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/(commondir|gitdir)$\")\n  (regex #\"^{checkouts}/\\.git$\")"
+        );
+        for worktree in &self.worktrees {
+            moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
+            links.push_str(&format!(
+                "\n  (literal \"{}\")",
+                worktree.join(".git").display()
+            ));
+        }
+        let text = format!(
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n"
+        );
+        assert!(text.matches("(regex #\"^/").count() == 5);
         text
     }
 
@@ -855,6 +887,22 @@ impl Sandbox for InstalledSandbox {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         InstalledSandbox::wrap(self, harness)
     }
+}
+
+/// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.
+/// Input: a path that passes `clean_absolute`, so it holds no quote or backslash.
+/// Output: the pattern text, without anchors.
+fn seatbelt_pattern(path: &Path) -> String {
+    let text = path.display().to_string();
+    assert!(text.starts_with('/') && !text.contains('"') && !text.contains('\\'));
+    let mut pattern = String::with_capacity(text.len() * 2);
+    for character in text.chars() {
+        if ".^$*+?()[]{}|".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern
 }
 
 fn invalid(reason: &str) -> SandboxError {
