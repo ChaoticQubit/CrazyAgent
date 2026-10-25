@@ -782,7 +782,12 @@ impl NativeOwner {
                         code,
                     )
                     .await
-                    .map_err(|_| "native_auth_claude_input_outcome_unknown".to_owned())?;
+                    .map_err(|error| {
+                        if connection_lost(&error.0) {
+                            *lost = true;
+                        }
+                        "native_auth_claude_input_outcome_unknown".to_owned()
+                    })?;
                 let reply = controller
                     .read_native_auth(crate::engine::owner::NativeAuthQuery {
                         request_id: fresh_id()?,
@@ -793,7 +798,7 @@ impl NativeOwner {
                 (ticket, reply)
             }
         };
-        let reply = reply.map_err(|error| bounded_problem(&error.0))?;
+        let reply = reply.map_err(|error| problem(&error, lost))?;
         Ok((ticket, SignInView::of(&reply)))
     }
 
@@ -1462,5 +1467,67 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_read_on_a_stopped_engine_drops_the_trusted_connection() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tsign-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let _ = native.attach().await;
+        assert!(native.ready);
+        let controller = native.controller.as_mut().unwrap();
+        let read = controller.read(OwnerRead::Capabilities).await.unwrap();
+        let ticket = SignInTicket {
+            scope: crate::engine::owner::NativeAuthScope {
+                expected_database_instance: controller.identity().database_instance().into(),
+                connection: CredentialRef::new("missing-login").unwrap(),
+                expected_config_id: read.config_id,
+                expected_source_hash: "a".repeat(64),
+            },
+            operation: fresh_id().unwrap(),
+        };
+        let check = || {
+            SettingsJob::SignIn(SignInJob::Read {
+                ticket: ticket.clone(),
+            })
+        };
+
+        let refused = native.settings(check()).await;
+        assert!(matches!(refused, SettingsEvent::SignIn(Err(_))));
+        assert!(
+            native.ready,
+            "a sign-in the engine refuses keeps the connection"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let unanswered = native.settings(check()).await;
+        assert!(matches!(unanswered, SettingsEvent::SignIn(Err(_))));
+        assert!(
+            !native.ready,
+            "a sign-in read the stopped engine never answers drops the connection"
+        );
     }
 }

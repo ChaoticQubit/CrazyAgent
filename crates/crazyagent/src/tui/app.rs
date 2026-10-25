@@ -865,7 +865,8 @@ impl App {
             OwnerEvent::Shell(_)
             | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
-            | OwnerEvent::Intake(_) => {}
+            | OwnerEvent::Intake(_)
+            | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
                     self.setup_view = Some((event.query, view));
