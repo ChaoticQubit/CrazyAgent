@@ -1517,7 +1517,7 @@ async fn master_cursor_rejects_unbounded_ordinal_and_unknown_serialized_fields()
 }
 
 #[tokio::test]
-async fn master_retained_session_bound_does_not_evict_closed_history() {
+async fn master_live_session_bound_reopens_without_evicting_closed_history() {
     let f = Fixture::start(CATALOG).await;
     let owner = f.owner(OwnerClientKind::Tui).await;
     f.create(&owner, "p").await;
@@ -1536,13 +1536,14 @@ async fn master_retained_session_bound_does_not_evict_closed_history() {
         }
         f.close(&owner, &format!("close-{index}"), &session).await;
     }
-    let overflow = f
-        .open_request(&owner, "overflow-open", "p", selection(MasterBackend::Rcli))
+    let (_, reopened) = f
+        .open(&owner, "reopen", "p", selection(MasterBackend::Rcli))
         .await;
-    rejected(owner.request(overflow).await.unwrap());
     let current = f.session(&owner, "p").await.unwrap();
-    assert_eq!(current.phase, MasterSessionPhase::Closed);
+    assert_eq!(current.session_id, reopened.session_id);
+    assert_eq!(current.phase, MasterSessionPhase::Configured);
     let first = first.unwrap();
+    assert_ne!(first.session_id, reopened.session_id);
     let page = f.page(&owner, &first).await;
     assert_eq!(page.session_id, first.session_id);
     assert!(page.turns.is_empty());
