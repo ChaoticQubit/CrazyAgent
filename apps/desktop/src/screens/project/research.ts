@@ -352,16 +352,16 @@ export function sendFailureLine(code: string): string {
   return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
-const FILE_ICONS: Record<string, IconName> = {
-  md: "file-text", txt: "file-text", csv: "file-spreadsheet", png: "file-image", jpg: "file-image", jpeg: "file-image",
-};
+const FILE_ICONS = new Map<string, IconName>([
+  ["md", "file-text"], ["txt", "file-text"], ["csv", "file-spreadsheet"], ["png", "file-image"], ["jpg", "file-image"], ["jpeg", "file-image"],
+]);
 
 /** Picks the icon for a project folder file from its extension.
  * Input: the file path. Output: a text, spreadsheet or image icon, or the plain file icon. */
 export function fileIcon(path: string): IconName {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const dot = name.lastIndexOf(".");
-  return dot > 0 ? FILE_ICONS[name.slice(dot + 1).toLowerCase()] ?? "file" : "file";
+  return dot > 0 ? FILE_ICONS.get(name.slice(dot + 1).toLowerCase()) ?? "file" : "file";
 }
 
 /** Splits a project's memories into the ones waiting for the owner and the saved ones;

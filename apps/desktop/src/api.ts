@@ -98,7 +98,7 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
 /** Turns an engine error code into one plain sentence for the owner.
  * Input: an error code. Output: the copy for it, or the generic fallback. */
 export function plainError(code: string): string {
-  if (COPY[code]) return COPY[code];
+  if (Object.hasOwn(COPY, code)) return COPY[code];
   return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : FALLBACK;
 }
 

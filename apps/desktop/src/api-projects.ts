@@ -210,7 +210,7 @@ const copy: Record<string, string> = {
 /** Plain sentence for one engine failure code.
  * Input: the code. Output: what happened and what to do, or the generic fallback. */
 export function failureCopy(code: string): string {
-  return copy[code] ?? plainError(code);
+  return Object.hasOwn(copy, code) ? copy[code] : plainError(code);
 }
 
 /** Adds a project and the master role to a pool without changing anything else.

@@ -529,3 +529,16 @@ test("the master ticket is used only for the project that was opened", () => {
 test("a master opened for another project has its own plain sentence", () => {
   assert.equal(api.failureCopy("master_project_mismatch"), "The conversation opened for another project. Open this project again.");
 });
+
+test("files named like object built-ins get the plain file icon instead of crashing the tree", () => {
+  for (const path of ["context/documents/a.constructor", "context/research/b.__PROTO__", "context/documents/c.hasownproperty", "context/documents/d.tostring"]) {
+    assert.equal(research.fileIcon(path), "file", path);
+  }
+});
+
+test("an engine code named like an object built-in gets the plain fallback sentence", () => {
+  for (const code of ["constructor", "__proto__", "toString"]) {
+    assert.equal(typeof api.failureCopy(code), "string", code);
+    assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
+  }
+});
