@@ -74,6 +74,23 @@ test("a picked folder must be one project folder outside the projects folder", (
   assert.equal(intake.folderName("/Users/mira/Code/shop/"), "shop");
 });
 
+test("a picked Windows folder is accepted, checked against a Windows projects folder and named like one", () => {
+  const home = "C:\\Users\\mira\\Projects";
+  assert.equal(intake.pickedFolderProblem("C:\\Users\\mira\\Code\\shop", home), null);
+  assert.equal(intake.pickedFolderProblem("C:\\Users\\mira\\Code\\shop\\", home), null);
+  assert.equal(intake.pickedFolderProblem("D:/work/shop", home), null);
+  assert.equal(intake.pickedFolderProblem("\\\\nas\\share\\shop", home), null);
+  assert.equal(intake.pickedFolderProblem("C:\\Users\\mira\\Projects\\shop", home), "This folder is already in your projects folder. It shows on Home.");
+  assert.equal(intake.pickedFolderProblem("C:\\Users\\mira", home), "This folder holds your projects folder. Choose one project's folder.");
+  assert.equal(intake.pickedFolderProblem("C:\\Users\\mira\\Projects-old\\shop", home), null);
+  assert.equal(intake.pickedFolderProblem("C:\\", home), "Choose the folder again with Choose folder.");
+  assert.equal(intake.pickedFolderProblem("Code\\shop", home), "Choose the folder again with Choose folder.");
+  assert.equal(intake.pickedFolderProblem("C:Code\\shop", home), "Choose the folder again with Choose folder.");
+  assert.equal(intake.folderName("C:\\Users\\mira\\Code\\shop\\"), "shop");
+  assert.equal(intake.joinPath(home, "shop"), "C:\\Users\\mira\\Projects\\shop");
+  assert.equal(intake.joinPath("/Users/mira/Projects/", "shop"), "/Users/mira/Projects/shop");
+});
+
 test("Move is the default and Copy shows the size first, with a warning above 1 GB", () => {
   const home = "/Users/mira/Projects";
   assert.deepEqual(intake.sizeLine("move", null, home), { text: "Moves the folder into ~/Projects. It won't stay at its old place.", warn: false });
