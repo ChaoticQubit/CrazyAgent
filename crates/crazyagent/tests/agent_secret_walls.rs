@@ -496,3 +496,167 @@ fn sandboxed_agent_git_has_no_credential_helper_and_gets_no_password() {
     assert!(!output.status.success());
     assert!(!holds(&output.stdout, "password="));
 }
+
+#[test]
+fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
+    let case = case();
+    let generation = case.runtime.join("o1a2b3c4d");
+    let runner = case.runtime.join("r00");
+    let terminal = case.runtime.join("terminal");
+    for folder in [&generation, &runner, &terminal] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let sockets = [
+        terminal.join("tmux.sock"),
+        case.runtime.join("ordinary-engine.sock"),
+        generation.join("owner.sock"),
+        runner.join("control.sock"),
+    ];
+    let _listeners: Vec<_> = sockets
+        .iter()
+        .map(|path| crazyagent::spawn_gate::bind_unix_std(path).unwrap())
+        .collect();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let served = free.local_addr().unwrap().port();
+    drop(free);
+    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let guarded = open.secret_paths();
+    for place in [&terminal, &sockets[1], &generation, &runner] {
+        assert!(
+            guarded.contains(place),
+            "{} is not guarded",
+            place.display()
+        );
+    }
+    walled(
+        sandbox(&case)
+            .allow_read(&runner)
+            .unwrap()
+            .guard_engine(&case.runtime),
+    );
+    let closed = sandbox(&case).guard_engine(&case.runtime).unwrap();
+    for (sandbox, name) in [(&open, "open.sb"), (&closed, "closed.sb")] {
+        let profile = case.profiles.join(name);
+        for socket in &sockets {
+            let output = shell(
+                sandbox,
+                &profile,
+                &format!("/usr/bin/nc -U -w 2 {} </dev/null", quoted(socket)),
+            );
+            assert!(
+                !output.status.success(),
+                "{name}: the agent connected to {}",
+                socket.display()
+            );
+        }
+        let listing = shell(sandbox, &profile, &format!("ls {}", quoted(&terminal)));
+        assert!(
+            !listing.status.success(),
+            "{name}: the agent listed the terminal folder"
+        );
+    }
+    let profile = case.profiles.join("open-ip.sb");
+    let reach = shell(
+        &open,
+        &profile,
+        &format!("/usr/bin/nc -z -w 2 127.0.0.1 {port}"),
+    );
+    assert!(
+        reach.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reach.stderr)
+    );
+    let serve = shell(
+        &open,
+        &profile,
+        &format!(
+            "/usr/bin/nc -l 127.0.0.1 {served} >/dev/null & sleep 1; /usr/bin/nc -z -w 2 127.0.0.1 {served}; s=$?; kill $! 2>/dev/null; exit $s"
+        ),
+    );
+    assert!(
+        serve.status.success(),
+        "{}",
+        String::from_utf8_lossy(&serve.stderr)
+    );
+    assert!(!open.profile().contains("network*"));
+}
+
+#[test]
+fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
+    let case = case();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("tty.sb");
+    sandbox.install(&profile).unwrap();
+    let named = case.profiles.join("other-tty");
+    let mut holder = crazyagent::spawn_gate::spawn(
+        Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null", "/bin/sh", "-c"])
+            .arg("/usr/bin/tty > \"$0\"; exec /bin/sleep 30")
+            .arg(&named)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let other = loop {
+        if let Ok(text) = fs::read_to_string(&named)
+            && text.ends_with('\n')
+        {
+            break text.trim().to_owned();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the holder pty never named itself"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(other.starts_with("/dev/ttys"), "{other}");
+    let other = quoted(Path::new(&other));
+    let probe = format!(
+        "own=$(/usr/bin/tty) || own=none; echo \"own=$own\"\n\
+         /bin/stty -g >/dev/null 2>&1 && echo raw=ok || echo raw=denied\n\
+         ( exec 3<>/dev/tty ) 2>/dev/null && echo devtty=ok || echo devtty=denied\n\
+         ( exec 3<{other} ) 2>/dev/null && echo read_other=ok || echo read_other=denied\n\
+         ( exec 3>{other} ) 2>/dev/null && echo write_other=ok || echo write_other=denied\n\
+         n=$(/usr/bin/script -q /dev/null /usr/bin/tty </dev/null 2>&1)\n\
+         case $n in *\"/dev/ttys\"*) echo nested=ok ;; *) echo \"nested=failed $n\" ;; esac\n"
+    );
+    let inner = sandbox.command(&profile, Path::new("/bin/sh"));
+    let mut command = Command::new("/usr/bin/script");
+    command
+        .args(["-q", "/dev/null"])
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .arg("-c")
+        .arg(&probe)
+        .env_clear()
+        .envs(
+            inner
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(&case.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut command).unwrap();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    for expected in [
+        "own=/dev/ttys",
+        "raw=ok",
+        "devtty=ok",
+        "nested=ok",
+        "read_other=denied",
+        "write_other=denied",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+}

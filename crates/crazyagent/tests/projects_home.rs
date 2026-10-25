@@ -644,3 +644,135 @@ fn moving_the_home_moves_every_project_folder_or_puts_them_all_back() {
     }
     assert_eq!(names(&next), ["alpha", "beta"]);
 }
+
+#[cfg(target_os = "macos")]
+struct Volume {
+    mount: PathBuf,
+    _image: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl Volume {
+    fn attach() -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let image = tempfile::tempdir_in("/private/tmp").unwrap();
+        let disk = image.path().join("second.dmg");
+        let mount = image.path().join("mount");
+        fs::create_dir(&mount).unwrap();
+        for args in [
+            vec![
+                "create",
+                "-quiet",
+                "-size",
+                "16m",
+                "-fs",
+                "APFS",
+                "-volname",
+                "ca-home-move",
+                text(&disk),
+            ],
+            vec![
+                "attach",
+                "-quiet",
+                "-nobrowse",
+                "-mountpoint",
+                text(&mount),
+                text(&disk),
+            ],
+        ] {
+            let status =
+                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                    .unwrap();
+            assert!(status.success(), "{args:?}");
+        }
+        let volume = Self {
+            mount: mount.canonicalize().unwrap(),
+            _image: image,
+        };
+        assert_ne!(
+            fs::metadata(&volume.mount).unwrap().dev(),
+            fs::metadata(volume._image.path()).unwrap().dev()
+        );
+        volume
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Volume {
+    fn drop(&mut self) {
+        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+            "detach",
+            "-quiet",
+            "-force",
+            text(&self.mount),
+        ]));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tool(program: &str, args: &[&str], path: &Path) {
+    let status =
+        crazyagent::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
+    assert!(status.success(), "{program} {args:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_move_across_disks_puts_back_a_folder_whose_source_could_not_be_deleted() {
+    let volume = Volume::attach();
+    for (case_name, code, left) in [
+        ("deletion never starts", "home_move_failed", vec![]),
+        ("deletion stops partway", "home_move_failed", vec![]),
+        (
+            "source cannot be refilled",
+            "home_move_partial",
+            vec!["beta"],
+        ),
+    ] {
+        let case = case();
+        for name in ["alpha", "gamma"] {
+            sample(&case.home.join(name));
+        }
+        let beta = case.home.join("beta");
+        sample(&beta.join("inner"));
+        let reference = case.root.join("reference");
+        copy_tree(&beta, &reference).unwrap();
+        if case_name == "deletion never starts" {
+            tool("/usr/bin/chflags", &["uchg"], &beta.join("inner"));
+        } else {
+            tool("/bin/chmod", &["+a", "everyone deny delete_child"], &beta);
+        }
+        if case_name == "source cannot be refilled" {
+            tool(
+                "/bin/chmod",
+                &["+a", "everyone deny add_file,add_subdirectory"],
+                &beta.join("inner"),
+            );
+        }
+        let next = volume.mount.join(format!("next-{}", case_name.len()));
+        fs::create_dir(&next).unwrap();
+
+        let plan = plan_move(&case.home, &next, &case.engine).unwrap();
+        assert_eq!(plan.folders(), ["alpha", "beta", "gamma"]);
+        let failure = plan.run().unwrap_err().0;
+        tool("/usr/bin/chflags", &["-R", "nouchg"], &beta);
+        tool("/bin/chmod", &["-N"], &beta);
+        tool("/bin/chmod", &["-N"], &beta.join("inner"));
+        assert_eq!(failure, code, "{case_name}");
+        assert_eq!(names(&case.home), ["alpha", "beta", "gamma"], "{case_name}");
+        assert_eq!(names(&next), left, "{case_name}");
+        if left.is_empty() {
+            verify_tree(&reference, &beta).unwrap();
+        } else {
+            verify_tree(&reference, &next.join("beta")).unwrap();
+            assert_eq!(names(&beta), ["inner"], "{case_name}");
+            assert!(names(&beta.join("inner")).is_empty(), "{case_name}");
+        }
+        for name in ["alpha", "gamma"] {
+            assert_eq!(
+                fs::read_to_string(case.home.join(name).join("README.md")).unwrap(),
+                "hello\n"
+            );
+        }
+    }
+}
