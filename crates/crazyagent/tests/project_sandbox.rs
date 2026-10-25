@@ -235,6 +235,203 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
     );
 }
 
+/// Runs git the way the owner does, outside every sandbox, with no global or system
+/// configuration. Input: the folder, the agent home as HOME and the arguments.
+/// Output: the command's output.
+fn owner_git(folder: &Path, home: &Path, arguments: &[&str]) -> Output {
+    crazyagent::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.email=owner@local", "-c", "user.name=owner"])
+            .args(arguments)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// Builds one attack's shell script from its case and the config line it appends.
+type Attack = fn(&Case, &str) -> String;
+
+/// A fresh project for one attack: a committed repository, an engine-made worktree in
+/// `<project>/worktrees/engine-one` and a protected `.crazyagent/context/brief.md`.
+/// Output: the case, its sandbox, its installed profile path and the worktree.
+fn git_case() -> (Case, ProjectSandbox, PathBuf, PathBuf) {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("engine-one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let brief = case.project.join(".crazyagent").join("context");
+    fs::create_dir_all(&brief).unwrap();
+    fs::write(brief.join("brief.md"), "brief\n").unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("agent.sb");
+    (case, sandbox, profile, worktree)
+}
+
+#[test]
+fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
+    const MARK: &str = "/private/tmp/crazyagent-agent-chosen-program";
+    let marked = format!("printf '[core]\\n\\tfsmonitor = {MARK}\\n' >>");
+    let attacks: [(&str, Attack); 14] = [
+        (
+            "rename .git, edit its config, rename it back",
+            |_, marked| format!("mv .git .g; {marked} .g/config; mv .g .git"),
+        ),
+        ("edit .git/config through a hard link", |_, marked| {
+            format!("ln .git/config cfg; {marked} cfg")
+        }),
+        ("replace .git with a gitdir: file", |case, marked| {
+            let evil = quoted(&case.tmp.join("evil"));
+            format!(
+                "cp -R .git {evil}; {marked} {evil}/config; rm -rf .git; printf 'gitdir: %s\\n' {evil} > .git"
+            )
+        }),
+        ("replace .git with a symbolic link", |case, marked| {
+            let evil = quoted(&case.tmp.join("evil"));
+            format!("cp -R .git {evil}; {marked} {evil}/config; rm -rf .git; ln -s {evil} .git")
+        }),
+        (
+            "move the project out, edit, move it back",
+            |case, marked| {
+                let project = quoted(&case.project);
+                let moved = quoted(&case.tmp.join("moved"));
+                format!("mv {project} {moved}; {marked} {moved}/.git/config; mv {moved} {project}")
+            },
+        ),
+        ("point .git/commondir at an agent copy", |case, marked| {
+            let evil = quoted(&case.tmp.join("evil"));
+            format!(
+                "cp -R .git {evil}; {marked} {evil}/config; printf '%s\\n' {evil} > .git/commondir"
+            )
+        }),
+        (
+            "point the worktree's .git file at an agent copy",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; printf 'gitdir: %s\\n' {evil} > worktrees/engine-one/.git"
+                )
+            },
+        ),
+        (
+            "move the worktree out, rewrite its .git file, move it back",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                let moved = quoted(&case.tmp.join("wt"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; mv worktrees/engine-one {moved}; printf 'gitdir: %s\\n' {evil} > {moved}/.git; mv {moved} worktrees/engine-one"
+                )
+            },
+        ),
+        (
+            "move the worktrees folder, rewrite a .git file, move it back",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; mv worktrees w; printf 'gitdir: %s\\n' {evil} > w/engine-one/.git; mv w worktrees"
+                )
+            },
+        ),
+        (
+            "point the worktree's commondir at an agent copy",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; printf '%s\\n' {evil} > .git/worktrees/engine-one/commondir"
+                )
+            },
+        ),
+        (
+            "move .git/worktrees, rewrite a commondir, move it back",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; mv .git/worktrees .git/w; printf '%s\\n' {evil} > .git/w/engine-one/commondir; mv .git/w .git/worktrees"
+                )
+            },
+        ),
+        (
+            "rewrite the worktree's .git file through a hard link",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; ln worktrees/engine-one/.git link; printf 'gitdir: %s\\n' {evil} > link"
+                )
+            },
+        ),
+        (
+            "rewrite the worktree's commondir through a hard link",
+            |case, marked| {
+                let evil = quoted(&case.tmp.join("evil"));
+                format!(
+                    "cp -R .git {evil}; {marked} {evil}/config; ln .git/worktrees/engine-one/commondir link; printf '%s\\n' {evil} > link"
+                )
+            },
+        ),
+        (
+            "move .crazyagent, edit the protected brief, move it back",
+            |_, _| {
+                "mv .crazyagent .c; echo agent > .c/context/brief.md; mv .c .crazyagent".to_owned()
+            },
+        ),
+    ];
+    let mut landed = Vec::new();
+    for (name, script) in attacks {
+        let (case, sandbox, profile, worktree) = git_case();
+        let brief = case.project.join(".crazyagent/context/brief.md");
+        let _ = run(&sandbox, &profile, &script(&case, &marked));
+        for folder in [&case.project, &worktree] {
+            let seen = owner_git(folder, &case.home, &["config", "--get", "core.fsmonitor"]);
+            if String::from_utf8_lossy(&seen.stdout).contains(MARK) {
+                landed.push(format!("{name}: owner git in {}", folder.display()));
+            }
+        }
+        if fs::read_to_string(&brief).unwrap_or_default() != "brief\n" {
+            landed.push(format!("{name}: {}", brief.display()));
+        }
+    }
+    assert_eq!(landed, Vec::<String>::new());
+    let (case, sandbox, profile, worktree) = git_case();
+    let committed = run(
+        &sandbox,
+        &profile,
+        "cd worktrees/engine-one && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && cd ../.. && echo root > root.txt && git add root.txt && git -c user.email=agent@local -c user.name=agent commit -q -m root && echo ok",
+    );
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&committed.stdout), "ok\n");
+    assert!(case.project.join(".git").is_dir());
+    assert!(worktree.join(".git").is_file());
+}
+
 #[test]
 fn network_is_open_only_when_tools_are_on() {
     let case = case();
