@@ -118,6 +118,18 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) lease: WorktreeLease,
 }
 
+impl PreparedMasterTurn {
+    /// Tells whether the prepared attempt is on the gateway task of the session's current turn.
+    /// Input: the prepared turn. Output: true only when the session has a current turn and the
+    /// attempt's task is the one derived from that session and turn.
+    pub(crate) fn attempt_on_current_turn(&self) -> bool {
+        self.session.current_turn.as_ref().is_some_and(|turn| {
+            turn_task_id(&self.session.session_id, turn)
+                .is_ok_and(|task| task == self.attempt.request.task_id)
+        })
+    }
+}
+
 pub(crate) enum MasterRuntimeResult {
     #[cfg(all(test, unix))]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
@@ -702,7 +714,7 @@ fn validate_runtime_record(
         if model_gateway::read_attempt(tx, &attempt.request.id)?.as_ref() != Some(attempt)
             || attempt.config_id != session.config_id
             || attempt.request.project_id != session.project_id
-            || attempt.request.task_id != session.bootstrap_task_id
+            || attempt.request.task_id != turn_task_id(&session.session_id, &turn.id)?
             || attempt.request.role != Role::ProjectLeader
             || attempt.request.pool_ref != session.selection.pool_ref
             || attempt.request.target_profile_ref != session.selection.target_profile_ref
@@ -1214,13 +1226,18 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         engine_epoch: proof.engine_epoch.clone(),
     };
     let actual = configured_auth(tx, current, &host, &session)?;
+    let turn_task = session
+        .current_turn
+        .as_ref()
+        .map(|turn| turn_task_id(&session.session_id, turn))
+        .transpose()?;
     if actual != *proof
         || pinned.id != current.id
         || pinned.id != proof.config_id
         || binding != &MasterBootstrapAuth::RcliConfigured(actual).binding()
         || generation != proof.generation
         || request.project_id != session.project_id
-        || request.task_id != session.bootstrap_task_id
+        || turn_task.as_ref() != Some(&request.task_id)
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
         || request.target_profile_ref != session.selection.target_profile_ref
@@ -1540,7 +1557,7 @@ fn bundle(
     };
     assert_eq!(
         prepared.attempt.request.task_id,
-        prepared.session.bootstrap_task_id
+        turn_task_id(&prepared.session.session_id, &turn.id)?
     );
     Ok(MasterRuntimeResult::Prepared(Box::new(prepared)))
 }
@@ -1648,7 +1665,7 @@ fn prepare_turn(
     let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
-        task_id: session.bootstrap_task_id.clone(),
+        task_id: turn_task_id(&session.session_id, &turn.id)?,
         project_id: session.project_id.clone(),
         role: Role::ProjectLeader,
         pool_ref: session.selection.pool_ref.clone(),
@@ -1656,10 +1673,9 @@ fn prepare_turn(
         route: session.selection.route.clone(),
         previous_attempt: None,
     };
-    let first_admission = !gateway_attempted(tx, session)?;
     tx.execute_batch("SAVEPOINT master_admission")
         .map_err(error)?;
-    let admitted = if first_admission && request.route.required_capabilities.is_empty() {
+    let admitted = if request.route.required_capabilities.is_empty() {
         match &auth {
             MasterBootstrapAuth::NativeSignIn(fact) => {
                 model_gateway::begin_initial_conversation_attempt(
@@ -1735,19 +1751,15 @@ fn prepare_turn(
     bundle(tx, session.clone(), turn)
 }
 
-/// Tells whether any gateway attempt exists for the session's bootstrap task.
-/// Input: the session. Output: false until a turn first reaches gateway admission,
-/// so the initial conversation admission applies to that turn whatever its ordinal.
-fn gateway_attempted(
-    tx: &Transaction<'_>,
-    session: &MasterSessionView,
-) -> Result<bool, EngineError> {
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM model_gateway_attempts WHERE task_id=?1)",
-        [session.bootstrap_task_id.as_str()],
-        |row| row.get(0),
-    )
-    .map_err(error)
+/// Names the gateway task of one owner turn, so every turn starts its own attempt chain
+/// and a failed or stopped turn never blocks the next one.
+/// Inputs: the master session id and the turn's request id.
+/// Output: a stable task id derived from both, distinct for every turn of every session.
+pub(crate) fn turn_task_id(session: &SessionId, turn: &RequestId) -> Result<TaskId, EngineError> {
+    let digest = crate::memory::hash(format!("{}\n{}", session.as_str(), turn.as_str()).as_bytes());
+    let task = TaskId::new(format!("master-turn-{digest}")).map_err(error)?;
+    assert!(task.as_str().starts_with("master-turn-"));
+    Ok(task)
 }
 
 fn observe_turn(
@@ -3697,7 +3709,7 @@ fallback_allowed = false
         assert_eq!(prepared.attempt.request.project_id, case.session.project_id);
         assert_eq!(
             prepared.attempt.request.task_id,
-            case.session.bootstrap_task_id
+            turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
         );
         assert_eq!(prepared.attempt.request.role, Role::ProjectLeader);
         assert!(

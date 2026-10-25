@@ -317,7 +317,7 @@ impl OwnerRuntimeHandle {
             || prepared.session.session_id != *session_id
             || prepared.session.current_turn.as_ref() != Some(turn_id)
             || prepared.attempt.request.project_id != *project_id
-            || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+            || !prepared.attempt_on_current_turn()
             || prepared.attempt.connection != prepared.profile.binding().connection
         {
             return Err(failure("master_runtime_binding"));
