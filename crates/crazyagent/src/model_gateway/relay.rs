@@ -297,9 +297,10 @@ fn refuse(stream: &mut TcpStream, status: u16) -> std::io::Result<()> {
 }
 
 fn exchange(reader: &mut impl BufRead, stream: &mut TcpStream, shared: &Shared) -> Result<(), u16> {
-    let incoming = read_request(reader)?;
+    let mut incoming = read_head(reader)?;
     let scheme = authorized(&incoming, &shared.token).ok_or(401_u16)?;
     confined(&incoming.target, &shared.upstream)?;
+    incoming.body = read_body(reader, &incoming.headers)?;
     let body_file = if incoming.body.is_empty() {
         None
     } else {
@@ -421,10 +422,10 @@ fn header_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
-/// Reads one HTTP/1.x request from the harness: GET or POST, an origin-form target, at
-/// most 100 headers in 64 KiB and a body of at most 64 MiB by Content-Length or chunks.
-/// Output: the request, or the HTTP status to refuse it with.
-pub(crate) fn read_request(reader: &mut impl BufRead) -> Result<Incoming, u16> {
+/// Reads the request line and headers only, so the relay can check the token before it
+/// reads any body: GET or POST, an origin-form target, at most 100 headers in 64 KiB.
+/// Output: the request with an empty body, or the HTTP status to refuse it with.
+fn read_head(reader: &mut impl BufRead) -> Result<Incoming, u16> {
     let mut total = 0;
     let line = read_line(reader, &mut total)?;
     let mut words = line.split(' ');
@@ -459,6 +460,18 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Result<Incoming, u16> {
         }
         headers.push((name.to_ascii_lowercase(), value.to_owned()));
     }
+    Ok(Incoming {
+        method: method.to_owned(),
+        target: target.to_owned(),
+        headers,
+        body: Vec::new(),
+    })
+}
+
+/// Reads the body the headers announce: at most 64 MiB by Content-Length or chunks.
+/// Inputs: the reader positioned after the headers and the request's headers.
+/// Output: the body, or 400, 413 or 501 to refuse it with.
+fn read_body(reader: &mut impl BufRead, headers: &[(String, String)]) -> Result<Vec<u8>, u16> {
     let find = |wanted: &str| {
         headers
             .iter()
@@ -482,12 +495,8 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Result<Incoming, u16> {
             reader.read_exact(&mut body).map_err(|_| 400_u16)?;
             body
         };
-    Ok(Incoming {
-        method: method.to_owned(),
-        target: target.to_owned(),
-        headers,
-        body,
-    })
+    assert!(body.len() <= BODY_BYTES_MAX);
+    Ok(body)
 }
 
 fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {

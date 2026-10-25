@@ -21,13 +21,17 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
+        Self::start_with(5000).await
+    }
+
+    async fn start_with(timeout_ms: u32) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-acct-")
             .tempdir_in("/private/tmp")
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::write(&global, format!("version = 1\ntimeout_ms = {timeout_ms}\n")).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (shutdown, stopped) = watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -148,6 +152,10 @@ fn holders(root: &Path, secret: &[u8]) -> Vec<PathBuf> {
 }
 
 async fn serve_once(listener: &TcpListener, status: &str, body: &str) -> String {
+    serve_after(listener, Duration::ZERO, status, body).await
+}
+
+async fn serve_after(listener: &TcpListener, delay: Duration, status: &str, body: &str) -> String {
     let (mut stream, request) = loop {
         let (mut stream, _) = crazyagent::spawn_gate::accept_tcp(listener).await.unwrap();
         let mut request = Vec::new();
@@ -163,6 +171,7 @@ async fn serve_once(listener: &TcpListener, status: &str, body: &str) -> String 
             break (stream, request);
         }
     };
+    tokio::time::sleep(delay).await;
     let reply = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -518,6 +527,59 @@ async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() 
         holders(fixture.root.path(), secret.as_bytes()).is_empty(),
         "removing the account removes its key"
     );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_check_slower_than_the_owner_wait_still_answers() {
+    let fixture = Fixture::start_with(1000).await;
+    let client = fixture.client().await;
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Slow lab server",
+                Some(url),
+                Some("lab-model"),
+            ),
+            key("slow-lab-key"),
+        )
+        .await
+        .unwrap();
+    let (waiting, _) = OwnerClient::discover(
+        fixture.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    let slow = Duration::from_millis(2500);
+    let started = Instant::now();
+    let (request, checked) = tokio::join!(
+        serve_after(
+            &listener,
+            slow,
+            "200 OK",
+            r#"{"data":[{"id":"lab-model"}]}"#
+        ),
+        waiting.check_account(account.id.clone()),
+    );
+    assert!(
+        request.starts_with("GET /v1/models HTTP/1.1\r\n"),
+        "{request}"
+    );
+    let checked = checked.unwrap_or_else(|error| panic!("the check answered {}", error.0));
+    assert!(started.elapsed() >= slow);
+    assert_eq!(checked.models, ["lab-model"]);
+    assert_eq!(checked.account.status_label, "Key saved");
     fixture.stop().await;
 }
 

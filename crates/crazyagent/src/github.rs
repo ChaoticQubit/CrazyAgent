@@ -14,7 +14,7 @@ mod http;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]
-mod test_server;
+pub(crate) mod test_server;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/github_tests.rs"]
 mod tests;
@@ -106,6 +106,37 @@ fn pending() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, Pending>> {
     PENDING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+static LOOPBACK: Mutex<BTreeMap<PathBuf, u16>> = Mutex::new(BTreeMap::new());
+
+/// Points the engine at one root to a GitHub stand-in on 127.0.0.1, or back to the real
+/// GitHub with `None`. Test builds only; every other root keeps the real GitHub.
+/// Inputs: the engine root and the stand-in's port.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn use_loopback(root: &Path, port: Option<u16>) {
+    let mut roots = LOOPBACK.lock().unwrap_or_else(PoisonError::into_inner);
+    match port {
+        Some(port) => roots.insert(root.to_path_buf(), port),
+        None => roots.remove(root),
+    };
+}
+
+/// The GitHub an engine root talks to. Input: the engine root. Output: the real GitHub.
+#[cfg(not(all(test, target_os = "macos")))]
+fn endpoints(_root: &Path) -> Endpoints {
+    Endpoints::github()
+}
+
+/// The GitHub an engine root talks to: the stand-in `use_loopback` set for that root,
+/// else the real GitHub. Input: the engine root. Output: the endpoints.
+#[cfg(all(test, target_os = "macos"))]
+fn endpoints(root: &Path) -> Endpoints {
+    let roots = LOOPBACK.lock().unwrap_or_else(PoisonError::into_inner);
+    roots
+        .get(root)
+        .map_or_else(Endpoints::github, |port| Endpoints::loopback(*port))
+}
+
 /// Names the credential store namespace of one engine root, so two engine folders never
 /// share or overwrite each other's GitHub token. Input: the engine root.
 /// Output: `dev.crazyagent.e` and 12 hex digits of the root path's SHA-256.
@@ -190,7 +221,7 @@ impl GitHub {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         let namespace = namespace(root);
         let store = crate::credentials::platform_store(&namespace)?;
-        Ok(Self::new(root, namespace, store, Endpoints::github()))
+        Ok(Self::new(root, namespace, store, endpoints(root)))
     }
 
     /// Builds the account from parts, such as a loopback GitHub stand-in.

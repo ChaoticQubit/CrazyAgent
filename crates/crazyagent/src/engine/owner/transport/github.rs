@@ -167,6 +167,10 @@ impl OwnerClient {
     }
 }
 
+/// Serves one GitHub owner request after the owner exchange deadline: the action runs
+/// under its own budget (75 s, a clone 1900 s) and the reply write under the owner wait.
+/// Inputs: the stream, engine, authority, owner packet, admission and request bytes.
+/// Output: the reply written, a rejection code included.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -175,17 +179,25 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let envelope: Envelope =
-        serde_json::from_slice(bytes).map_err(|_| failure("github_request_invalid"))?;
-    let token = if envelope.secret_present {
-        Some(receive_token(stream).await)
-    } else {
-        None
+    let Envelope {
+        github: action,
+        secret_present,
+    } = serde_json::from_slice(bytes).map_err(|_| failure("github_request_invalid"))?;
+    let time = action.time();
+    let work = async {
+        let token = if secret_present {
+            Some(receive_token(stream).await)
+        } else {
+            None
+        };
+        match token.transpose() {
+            Ok(token) => handle(engine, authority, packet, admission, action, token).await,
+            Err(error) => Err(error),
+        }
     };
-    let outcome = match token.transpose() {
-        Ok(token) => handle(engine, authority, packet, admission, envelope.github, token).await,
-        Err(error) => Err(error),
-    };
+    let outcome = tokio::time::timeout(time, work)
+        .await
+        .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
@@ -199,7 +211,10 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    tokio::time::timeout(engine.timeout, stream.write_all(&frame))
+        .await
+        .map_err(|_| unknown())?
+        .map_err(io_error)
 }
 
 /// The engine root the GitHub sign-in lives under: the parent of the owner runtime's
