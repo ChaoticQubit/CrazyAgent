@@ -1,19 +1,31 @@
-use super::process::{CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest};
+use super::process::{
+    CLOSE_TIME, CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest,
+};
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(unix)]
+use rustix::io::Errno;
+#[cfg(unix)]
+use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const READ_BYTES: usize = 4096;
 const READS_PER_POLL: usize = 16;
+
+/// How long custody still drains the harness pipes once the harness is reaped and its group
+/// is empty; a pipe still open after it is held by a process that left the group.
+const DRAIN_TIME: Duration = Duration::from_millis(100);
 
 struct PendingWrite {
     request: WriteRequest,
@@ -29,6 +41,9 @@ struct OwnedChild {
     stdout_eof: bool,
     stderr_eof: bool,
     status: Option<ExitStatus>,
+    group_absent: bool,
+    group_gone_at: Option<Instant>,
+    abandoned: bool,
     pending: Option<PendingWrite>,
     kill_sent: bool,
     accounting_failed: bool,
@@ -66,6 +81,8 @@ pub(super) fn run(
         child.input(&mut input);
         child.read_output(output_limit);
         child.observe_exit();
+        child.observe_group();
+        child.release_held_pipes();
         if child.complete() {
             child.publish_completion();
             return;
@@ -107,6 +124,9 @@ fn start(
         stdout_eof: false,
         stderr_eof: false,
         status: None,
+        group_absent: false,
+        group_gone_at: None,
+        abandoned: false,
         pending: None,
         kill_sent: false,
         accounting_failed: false,
@@ -123,6 +143,8 @@ fn start(
 fn selected_command(command: Command) -> Command {
     let mut selected = Command::new(command.get_program());
     selected.args(command.get_args()).env_clear();
+    #[cfg(unix)]
+    selected.process_group(0);
     if let Some(cwd) = command.get_current_dir() {
         selected.current_dir(cwd);
     }
@@ -255,6 +277,7 @@ impl OwnedChild {
     fn stop(&mut self) {
         self.stdin = None;
         self.pending = None;
+        self.kill_group();
         if self.status.is_some() || self.kill_sent {
             return;
         }
@@ -270,11 +293,94 @@ impl OwnedChild {
         }
     }
 
-    fn complete(&self) -> bool {
-        self.status.is_some() && self.stdout_eof && self.stderr_eof && !self.accounting_failed
+    /// Kills every process left in the harness group; the harness runs as its group leader.
+    /// A group whose members are all still exiting can refuse the signal; `stop` retries it.
+    /// Takes nothing; records an uncertain cleanup for any other refusal.
+    #[cfg(unix)]
+    fn kill_group(&mut self) {
+        if self.group_absent {
+            return;
+        }
+        match rustix::process::kill_process_group(Pid::from_child(&self.child), Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH | Errno::PERM) => {}
+            Err(_) => self.cleanup_uncertain("codex_host_kill_uncertain"),
+        }
     }
 
-    fn publish_completion(&self) {
+    /// Stands in for the group kill where processes have no groups: `stop` kills the child.
+    #[cfg(not(unix))]
+    fn kill_group(&mut self) {}
+
+    /// Notes when no process of the harness group is left. Only a reaped harness can leave
+    /// its group empty, and a group that refuses the probe still counts as present.
+    /// Takes nothing; records an uncertain cleanup when the group cannot be observed.
+    fn observe_group(&mut self) {
+        if self.status.is_none() || self.group_absent {
+            return;
+        }
+        #[cfg(unix)]
+        match rustix::process::test_kill_process_group(Pid::from_child(&self.child)) {
+            Err(Errno::SRCH) => {}
+            Ok(()) | Err(Errno::PERM) => return,
+            Err(_) => {
+                self.cleanup_uncertain("codex_host_group_uncertain");
+                return;
+            }
+        }
+        self.group_absent = true;
+    }
+
+    /// Gives up the pipes once the harness is reaped, its group has been empty for
+    /// `DRAIN_TIME` and a pipe is still open, which only a process outside the group can hold.
+    /// Takes nothing; the completion then reports an uncertain cleanup.
+    fn release_held_pipes(&mut self) {
+        if self.status.is_none() || !self.group_absent || (self.stdout_eof && self.stderr_eof) {
+            return;
+        }
+        let gone = *self.group_gone_at.get_or_insert_with(Instant::now);
+        if gone.elapsed() < DRAIN_TIME {
+            return;
+        }
+        self.stdout = None;
+        self.stderr = None;
+        self.stdout_eof = true;
+        self.stderr_eof = true;
+        self.abandoned = true;
+    }
+
+    fn cleanup_uncertain(&self, code: &'static str) {
+        self.shared.fail(code);
+        if let Ok(mut state) = self.shared.lock() {
+            state.cleanup_error = Some(code);
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.status.is_some()
+            && self.group_absent
+            && self.stdout_eof
+            && self.stderr_eof
+            && !self.accounting_failed
+    }
+
+    /// Settles custody that ended before completion: kills the harness group until the
+    /// harness is reaped and the group is empty, for at most `CLOSE_TIME`, so dropping it
+    /// releases the profile lease only once its processes are gone or were sent a kill.
+    fn settle(&mut self) {
+        let deadline = Instant::now() + CLOSE_TIME;
+        while !(self.status.is_some() && self.group_absent) {
+            if Instant::now() >= deadline {
+                self.cleanup_uncertain("codex_host_cleanup_uncertain");
+                return;
+            }
+            self.stop();
+            self.observe_exit();
+            self.observe_group();
+            std::thread::sleep(POLL_TIME);
+        }
+    }
+
+    fn publish_completion(&mut self) {
         assert!(self.complete());
         assert!(self.status.is_some());
         if let Some(profile) = &self.profile
@@ -282,10 +388,11 @@ impl OwnedChild {
         {
             self.shared.fail("codex_host_profile_invalid");
         }
+        self.profile = None;
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
             state.complete = true;
-            state.cleanup_error = None;
+            state.cleanup_error = self.abandoned.then_some("codex_host_cleanup_uncertain");
         }
     }
 }
@@ -295,10 +402,8 @@ impl Drop for Custody {
         if let Some(mut retained) = self.0.take()
             && !retained.complete()
         {
-            retained.stop();
-            retained.observe_exit();
             retained.shared.accounting_failed();
-            std::mem::forget(retained);
+            retained.settle();
         }
     }
 }
