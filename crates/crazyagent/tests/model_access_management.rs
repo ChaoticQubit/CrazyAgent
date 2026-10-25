@@ -889,6 +889,64 @@ async fn owner_edit_before_the_rename_abandons_the_pending_publication() {
 }
 
 #[tokio::test]
+async fn model_access_read_serves_every_account_the_config_allows() {
+    for count in [65, crazyagent::config::ACCOUNTS_MAX] {
+        let expected: Vec<String> = (0..count).map(|i| format!("account-{i:04}")).collect();
+        let listed: Vec<String> = expected.iter().map(|id| format!("\"{id}\"")).collect();
+        let f = Fixture::start(
+            true,
+            &format!(
+                "version = 1\n[model_access]\naccounts = [{}]\n",
+                listed.join(",")
+            ),
+        )
+        .await;
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let state = read(
+                &f.client,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Accounts,
+                    cursor,
+                    limit: 16,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { items, next, .. } = state.data else {
+                panic!("catalog page required")
+            };
+            assert!(!items.is_empty());
+            for item in items {
+                let ModelAccessRecord::Account { account_ref } = item else {
+                    panic!("account record required")
+                };
+                seen.push(account_ref.as_str().to_owned());
+            }
+            let Some(after) = next else {
+                break;
+            };
+            cursor = Some(after);
+        }
+        assert_eq!(seen, expected);
+        let last = read(
+            &f.client,
+            OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Accounts,
+                id: reference(expected.last().unwrap()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(last.data, OwnerData::ModelAccessRecord { record: ModelAccessRecord::Account { account_ref }, .. } if account_ref.as_str() == expected.last().unwrap())
+        );
+        let next = read(&f.client, OwnerRead::Capabilities).await;
+        assert!(matches!(next.data, OwnerData::Capabilities { .. }));
+        f.close().await;
+    }
+}
+
+#[tokio::test]
 async fn changed_file_or_project_conflicts_without_publication() {
     for change_project in [false, true] {
         let f = Fixture::start(true, "version = 1\n").await;
