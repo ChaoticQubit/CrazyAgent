@@ -1202,29 +1202,27 @@ impl OwnerServer {
         auth: [u8; 37],
         deadline: Instant,
         tasks: &mut Tasks,
-    ) -> Result<(), EngineError> {
+    ) {
         if &auth[..4] == terminal::MAGIC {
-            while tasks.terminals.try_join_next().is_some() {}
+            while let Some(result) = tasks.terminals.try_join_next() {
+                log_panic(&result, "owner_terminal_panicked");
+            }
             if tasks.terminals.len() >= crate::terminal::VIEWERS_MAX {
-                return Ok(());
+                return;
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
             tasks.terminals.spawn(async move {
                 terminal::serve(stream, auth, engine, authority, deadline).await;
             });
-            return Ok(());
+            return;
         }
         if &auth[..4] == b"CAN1" {
             while let Some(result) = tasks.custody.try_join_next() {
-                if let Err(error) = result
-                    && !error.is_cancelled()
-                {
-                    return Err(io_error(error));
-                }
+                log_panic(&result, "owner_custody_panicked");
             }
             if !tasks.custody.is_empty() || self.authority.can_start_native_auth(&auth).is_err() {
-                return Ok(());
+                return;
             }
             let engine = self.engine.clone();
             let authority = Arc::downgrade(&self.authority);
@@ -1236,11 +1234,11 @@ impl OwnerServer {
             self.authority.track_native_auth(&auth, task);
         } else {
             while let Some(result) = tasks.clients.try_join_next() {
-                result.map_err(io_error)?;
+                log_panic(&result, "owner_client_panicked");
             }
             if tasks.clients.len() >= CLIENTS_MAX {
                 self.refuse_busy(stream, Some((auth, deadline)), &mut tasks.refusals);
-                return Ok(());
+                return;
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
@@ -1248,7 +1246,6 @@ impl OwnerServer {
                 serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
             });
         }
-        Ok(())
     }
 
     /// Answers a connection the server has no room for with `owner_busy` in its own
@@ -1262,11 +1259,7 @@ impl OwnerServer {
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
         while let Some(result) = refusals.try_join_next() {
-            if let Err(error) = result
-                && error.is_panic()
-            {
-                eprintln!("owner_refusal_panicked");
-            }
+            log_panic(&result, "owner_refusal_panicked");
         }
         if refusals.len() >= REFUSALS_MAX {
             eprintln!("owner_connection_closed_busy");
@@ -1313,26 +1306,24 @@ impl OwnerServer {
                     self.authority.expire_native_auth(&self.engine).await;
                 }
                 result=tasks.clients.join_next(), if !tasks.clients.is_empty() => {
-                    if let Some(Err(e))=result {break Err(io_error(e));}
+                    if let Some(result)=result {log_panic(&result, "owner_client_panicked");}
                 }
                 result=tasks.custody.join_next(), if !tasks.custody.is_empty() => {
-                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                    if let Some(result)=result {log_panic(&result, "owner_custody_panicked");}
                 }
                 result=tasks.terminals.join_next(), if !tasks.terminals.is_empty() => {
-                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                    if let Some(result)=result {log_panic(&result, "owner_terminal_panicked");}
                 }
                 result=tasks.refusals.join_next(), if !tasks.refusals.is_empty() => {
-                    if let Some(Err(e))=result && e.is_panic() {eprintln!("owner_refusal_panicked");}
+                    if let Some(result)=result {log_panic(&result, "owner_refusal_panicked");}
                 }
                 result=handshakes.join_next(), if !handshakes.is_empty() => {
                     match result {
                         Some(Ok(Some((stream, auth, deadline)))) => {
-                            if let Err(error) = self.accept_owner_handshake(stream, auth, deadline, &mut tasks) {
-                                break Err(error);
-                            }
+                            self.accept_owner_handshake(stream, auth, deadline, &mut tasks);
                         }
-                        Some(Err(error)) => break Err(io_error(error)),
-                        _ => {}
+                        Some(result) => log_panic(&result, "owner_handshake_panicked"),
+                        None => {}
                     }
                 }
                 accepted=crate::spawn_gate::accept_unix(&self.listener) => {
@@ -1804,7 +1795,8 @@ async fn serve_owner(
 
 /// Serves one admitted owner or runner connection. Its handshake deadline bounds the
 /// admission, the frame read and the request, except deferred work, which runs under
-/// its own bounds. Inputs: the stream, handshake packet, engine, authority and deadline.
+/// its own bounds. A panic in the request is answered `owner_request_failed` and logged
+/// by code only. Inputs: the stream, handshake packet, engine, authority and deadline.
 /// Output: none; the reply is written to the stream and the stream is closed.
 async fn serve_authenticated_owner(
     mut stream: UnixStream,
@@ -1815,7 +1807,7 @@ async fn serve_authenticated_owner(
 ) {
     let admitted = tokio::time::timeout_at(deadline, admit(&mut stream, &auth, &authority)).await;
     if let Ok(Ok((admission, frame))) = admitted {
-        serve_admitted(
+        let served = contained(serve_admitted(
             &mut stream,
             &auth,
             &engine,
@@ -1823,10 +1815,41 @@ async fn serve_authenticated_owner(
             admission,
             &frame,
             deadline,
-        )
+        ))
         .await;
+        if served.is_none() {
+            eprintln!("owner_request_panicked");
+            let refused = refuse(&mut stream, &auth, &frame, "owner_request_failed");
+            let _ = tokio::time::timeout(engine.timeout, refused).await;
+        }
     }
     let _ = stream.shutdown().await;
+}
+
+/// Runs one future and turns a panic inside it into `None`, so a panicking owner request
+/// ends only itself; the future is dropped and never polled again after the panic.
+/// Input: the future. Output: its value, or `None` when it panicked.
+async fn contained<F: std::future::Future>(work: F) -> Option<F::Output> {
+    let mut work = std::pin::pin!(work);
+    std::future::poll_fn(|context| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work.as_mut().poll(context)))
+        {
+            Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Some(value)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(None),
+        }
+    })
+    .await
+}
+
+/// Logs a server task that ended in a panic by a fixed code, so the server keeps serving
+/// its other connections. Inputs: the task's join result and the code. Output: none.
+fn log_panic<T>(result: &Result<T, tokio::task::JoinError>, code: &str) {
+    if let Err(error) = result
+        && error.is_panic()
+    {
+        eprintln!("{code}");
+    }
 }
 
 /// Admits one owner or runner connection and reads its request frame.
@@ -1861,6 +1884,8 @@ enum Protocol {
     Agents,
     NativeAuth,
     Owner,
+    #[cfg(test)]
+    TestPanic,
 }
 
 /// Names the protocol of an owner request body from its selector key.
@@ -1868,6 +1893,10 @@ enum Protocol {
 fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
     let selector: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
+    #[cfg(test)]
+    if selector.get("test_panic").is_some() {
+        return Ok(Protocol::TestPanic);
+    }
     let named = [
         ("claude_auth_input", Protocol::ClaudeInput),
         ("accounts", Protocol::Accounts),
@@ -1944,6 +1973,8 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::Owner => {}
+            #[cfg(test)]
+            Protocol::TestPanic => panic!("owner_test_panic"),
         }
         let request: OwnerRequest =
             serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
@@ -2113,6 +2144,8 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
+        #[cfg(test)]
+        Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {
             let request: OwnerRequest =
                 serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;

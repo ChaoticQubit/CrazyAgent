@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
+use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
 const OWNER_WAIT_MS: u64 = 5000;
@@ -159,5 +160,36 @@ async fn an_owner_client_past_the_handshake_queue_is_refused_plainly() {
 
     drop(silent);
     served_again(&client, "after-queue").await;
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_owner_request_is_answered_and_the_server_keeps_serving() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let mut stream = admitted(&client).await;
+    stream
+        .write_all(&encode_frame(&json!({ "test_panic": {} })).unwrap())
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream))
+        .await
+        .unwrap()
+        .unwrap_or_else(|error| panic!("the panicking request answered {}", error.0));
+    let reply: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
+    assert_eq!(
+        reply,
+        json!({ "kind": "rejected", "code": "owner_request_failed" })
+    );
+
+    let after = client
+        .request(read_capabilities("after-panic"))
+        .await
+        .unwrap_or_else(|error| panic!("after the panic the owner answered {}", error.0));
+    assert!(
+        matches!(after.response, OwnerResponse::Read { .. }),
+        "{after:?}"
+    );
+    assert!(!client.github_status().await.unwrap().signed_in);
     fixture.stop().await;
 }
