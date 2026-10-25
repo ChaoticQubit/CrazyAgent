@@ -214,7 +214,9 @@ impl NativeBridge {
                 if let Some(operation) = self.native_auth.as_mut() {
                     if error.code == "native_auth_outcome_unknown_read_same_operation" {
                         operation.unresolved = true;
-                    } else if operation.generation.is_none() {
+                    } else if operation.generation.is_none()
+                        || error.code == "native_auth_not_active"
+                    {
                         operation.unresolved = false;
                     }
                 }
@@ -229,12 +231,7 @@ impl NativeBridge {
         }
         let operation = self.native_auth.as_mut().expect("validated auth operation");
         operation.generation = Some(reply.fact.generation);
-        operation.unresolved = !matches!(
-            reply.fact.phase,
-            NativeAuthPhase::Unavailable
-                | NativeAuthPhase::AuthenticatedObserved
-                | NativeAuthPhase::UnauthenticatedObserved
-        );
+        operation.unresolved = reply.fact.phase.unfinished();
         let view = presentation::project(ticket, reply)?;
         if view.display_error.is_none()
             && let Some(presentation::Challenge::ClaudeOfficial {
