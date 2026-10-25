@@ -244,6 +244,25 @@ impl TeamPlan {
         Ok(())
     }
 
+    /// Refuses a plan the owner writes when it adds a harness that cannot run team agents.
+    /// Takes the written plan and the saved plan it replaces; a harness the saved plan already
+    /// names is kept, so an old plan still saves unchanged. Returns `team_harness_unavailable`.
+    fn check_writable(&self, saved: Option<&TeamPlan>) -> Result<(), &'static str> {
+        let added = self.harnesses().any(|id| {
+            crate::team::launch_harness(id).is_none()
+                && !saved.is_some_and(|saved| saved.harnesses().any(|known| known == id))
+        });
+        if added {
+            return Err("team_harness_unavailable");
+        }
+        Ok(())
+    }
+
+    fn harnesses(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.master.as_str())
+            .chain(self.sub_harnesses.iter().map(|slot| slot.harness.as_str()))
+    }
+
     /// Counts the master and every sub-harness agent.
     /// Takes the team plan.
     /// Returns the total number of agents the plan describes.
@@ -1817,6 +1836,11 @@ fn update(
     {
         return Ok(rejected("pool_missing"));
     }
+    if let Some(team) = &setup.team
+        && let Err(code) = team.check_writable(Some(&stored.team))
+    {
+        return Ok(rejected(code));
+    }
     let Ok(context) = open_beneath(&stored.state_folder(), &[CONTEXT_DIRECTORY]) else {
         return Ok(rejected("project_folder_missing"));
     };
@@ -2098,6 +2122,9 @@ fn check_new(
         }
     };
     team.validate()?;
+    if let Err(code) = team.check_writable(None) {
+        return Ok(Err(code.into()));
+    }
     let Some(home) = crate::projects_home::load(tx)? else {
         return Ok(Err("projects_home_unset".into()));
     };

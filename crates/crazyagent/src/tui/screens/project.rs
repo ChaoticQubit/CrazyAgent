@@ -1697,6 +1697,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "project_spec_bounds" => "Enter a project name of 1 to 256 characters.",
         "project_setup_bounds" => "Some answers are too long or repeated. Check each one.",
+        "team_harness_unavailable" => {
+            "A harness in this team can't run team agents yet. Pick another harness."
+        }
         "project_about_invalid" => {
             "The description is too long or has characters that can't be saved."
         }

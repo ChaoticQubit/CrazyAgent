@@ -1777,6 +1777,11 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
             "A document is over the limits or not a supported type. Check Documents.".into(),
             Step::Documents,
         ),
+        "team_harness_unavailable" => (
+            "Could not create the project.",
+            "A harness in this team can't run team agents yet. Pick another harness.".into(),
+            Step::Team,
+        ),
         code if code.starts_with("team_") => (
             "Could not create the project.",
             "The team does not fit the limits. Check Team.".into(),

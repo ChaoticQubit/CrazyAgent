@@ -167,6 +167,7 @@ const copy: Record<string, string> = {
   projects_root_not_a_directory: "CrazyAgent can't write the project folder. Check the disk and try again.",
   project_setup_missing: "This project was created before project setup existed.",
   team_harness_invalid: "Pick a harness for the master and for each agent row.",
+  team_harness_unavailable: "A harness in this team can't run team agents yet. Pick another harness.",
   team_harnesses_too_many: "Use at most 8 agent harnesses.",
   team_agent_count_invalid: "Each harness runs 1 to 15 agents.",
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
