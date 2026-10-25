@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
+import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolBase, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
@@ -233,7 +233,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
   const [pools, reload] = useLoad(poolSummaries);
   const [accounts] = useLoad(listAccounts);
-  const [editing, setEditing] = useState<{ id?: string } | undefined>(creating ? {} : undefined);
+  const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
   const [draft, setDraft] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<PoolSummary>();
   const [removing, setRemoving] = useState(false);
@@ -271,7 +271,7 @@ export function Pools({ creating }: { creating: boolean }) {
   if (editing) {
     const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
     return <PoolEditorView key={editing.id ?? `new-${draft.join(",")}`} pool={pool} accounts={accounts} initialMembers={editing.id ? [] : draft} onCancel={() => { setDraft([]); leave(); }} onSave={async (name, members) => {
-      const saved = session.noteResult(await savePool(editing.id, name, members));
+      const saved = session.noteResult(await savePool(editing.id, name, members, editing.opened));
       if (saved.kind !== "ok") return saved;
       const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
       setRefusal(setupNote(await prepare(targets.map((account) => ({ id: account.id, name: account.name })))));
@@ -297,7 +297,7 @@ export function Pools({ creating }: { creating: boolean }) {
 
   return <div className="stack">
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
-    <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id })}
+    <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
       onDelete={(pool) => { setRefusal(undefined); setDeleting(pool); }} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel="Delete pool" pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>

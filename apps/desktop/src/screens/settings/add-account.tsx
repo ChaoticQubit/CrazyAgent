@@ -277,7 +277,8 @@ function AddToPool({ account }: { account: AccountView }) {
     <Button disabled={!target} pending={state.kind === "saving"} pendingLabel="Adding..." onClick={async () => {
       if (!target) return;
       setState({ kind: "saving" });
-      const saved = session.noteResult(await savePool(target.id, target.name, [...target.members.map((member) => member.id), account.id]));
+      const listed = { name: target.name, members: target.members.map((member) => member.id) };
+      const saved = session.noteResult(await savePool(target.id, target.name, [...listed.members, account.id], listed));
       setState(saved.kind === "ok" ? { kind: "added" } : { kind: "error", message: saved.kind === "not_ready" ? "Not ready yet." : saved.message });
     }}>Add to pool</Button>
     {state.kind === "error" && <Notice tone="danger" alert>{state.message}</Notice>}
