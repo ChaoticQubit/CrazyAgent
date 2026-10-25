@@ -77,6 +77,8 @@ pub(super) fn clone_command(
         .arg(format!("credential.helper={helper}"))
         .args(["-c", "credential.interactive=never"])
         .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.pager=cat"])
         .args(["-c", "core.askPass=/usr/bin/false"])
         .args(["-c", "protocol.allow=never"])
         .arg("-c")
