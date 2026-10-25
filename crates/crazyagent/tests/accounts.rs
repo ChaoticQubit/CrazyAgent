@@ -52,10 +52,15 @@ impl Fixture {
     }
 
     async fn restart(&mut self) {
+        self.restart_after(|_| {}).await;
+    }
+
+    async fn restart_after(&mut self, change: impl FnOnce(&Path)) {
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
             .await
             .unwrap()
             .unwrap();
+        change(self.root.path());
         let stopped = self._shutdown.subscribe();
         self.service = EngineService::start_with_settings_sources(
             self.root.path(),
@@ -527,6 +532,108 @@ async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() 
         holders(fixture.root.path(), secret.as_bytes()).is_empty(),
         "removing the account removes its key"
     );
+    fixture.stop().await;
+}
+
+/// Rewrites the saved address of one account in the stopped engine's registry, as an
+/// account saved before plain-http addresses outside this machine were refused would hold.
+/// Inputs: the engine root, the account id and the old address. Output: none.
+fn saved_before_the_fix(root: &Path, id: &CredentialRef, url: &str) {
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let body: Vec<u8> = db
+        .query_row(
+            "SELECT body FROM accounts WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    record["connection"]["endpoint"]["url"] = url.into();
+    let changed = db
+        .execute(
+            "UPDATE accounts SET body = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_vec(&record).unwrap(), id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// Accepts every connection already waiting on `listener`, or arriving within a short
+/// window, and reads what each one sent until it closes or goes quiet.
+/// Input: the listener. Output: the bytes of each connection, in arrival order.
+async fn received(listener: &TcpListener) -> Vec<Vec<u8>> {
+    let mut requests = Vec::new();
+    while let Ok(Ok((mut stream, _))) = tokio::time::timeout(
+        Duration::from_millis(300),
+        crazyagent::spawn_gate::accept_tcp(listener),
+    )
+    .await
+    {
+        let mut request = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(300), stream.read_to_end(&mut request))
+            .await;
+        requests.push(request);
+    }
+    requests
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saved_key_never_goes_out_over_plain_http_to_another_host() {
+    let mut fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let secret = format!("sk-remote-{}", std::process::id());
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let remote = format!("http://0.0.0.0:{port}/v1");
+    let lab = |url: &str| {
+        draft(
+            Provider::OpenaiCompatible,
+            SignInMethod::Url,
+            "Lab server",
+            Some(url.into()),
+            Some("lab-model"),
+        )
+    };
+    assert_eq!(
+        client
+            .add_account(lab(&remote), key(&secret))
+            .await
+            .unwrap_err()
+            .0,
+        "account_url_invalid"
+    );
+    assert!(
+        holders(fixture.root.path(), secret.as_bytes()).is_empty(),
+        "a refused account keeps no key"
+    );
+
+    let account = client
+        .add_account(lab(&format!("http://127.0.0.1:{port}/v1")), key(&secret))
+        .await
+        .unwrap();
+    drop(client);
+    received(&listener).await;
+    fixture
+        .restart_after(|root| saved_before_the_fix(root, &account.id, &remote))
+        .await;
+    let client = fixture.client().await;
+    let checked = client.check_account(account.id.clone()).await;
+    let requests = received(&listener).await;
+    assert!(
+        !requests.iter().any(|request| request
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())),
+        "the saved key went out over plain http to a host outside this machine"
+    );
+    assert!(
+        requests.is_empty(),
+        "Check connected over plain http to a host outside this machine"
+    );
+    assert_eq!(checked.unwrap_err().0, "account_url_invalid");
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert!(holders(fixture.root.path(), secret.as_bytes()).is_empty());
     fixture.stop().await;
 }
 
