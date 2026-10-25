@@ -523,3 +523,27 @@ async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_
     );
     assert!(fixture.lease("claude-group-next", 3).is_ok());
 }
+
+#[tokio::test]
+async fn closing_a_claude_master_is_not_failed_by_the_exit_its_closed_input_causes() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(
+        &mut fixture,
+        "#!/bin/sh\necho $$ > leader.pid\n/bin/cat > /dev/null\nexit 1\n",
+    )
+    .await;
+    let ready = fixture.project.join("leader.pid");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let closed = claude.close().await;
+    assert!(closed.is_ok(), "{closed:?}");
+    assert!(fixture.lease("claude-group-next", 3).is_ok());
+}

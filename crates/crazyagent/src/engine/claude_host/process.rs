@@ -519,7 +519,10 @@ impl Process {
                         self.stderr = None;
                         self.fail(Fault::Host("claude_host_cleanup_uncertain"));
                     }
-                    if !status.success() && !(killed && status.signal() == Some(9)) {
+                    if !status.success()
+                        && !self.stop.load(Ordering::Acquire)
+                        && !(killed && status.signal() == Some(9))
+                    {
                         self.fail(Fault::Exit(status.code()));
                     }
                     break;
