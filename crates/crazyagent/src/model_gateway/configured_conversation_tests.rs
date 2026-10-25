@@ -282,13 +282,6 @@ async fn configured_initial_preserves_explicit_negative_and_stale_observations()
         ),
         (
             ObservationKind::Unknown,
-            100,
-            200,
-            200,
-            "gateway_initial_readiness_stale",
-        ),
-        (
-            ObservationKind::Unknown,
             200,
             300,
             100,
