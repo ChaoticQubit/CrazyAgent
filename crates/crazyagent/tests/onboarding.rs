@@ -926,3 +926,73 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_until_both_steps_ar
     );
     bench.stop().await;
 }
+
+/// Counts the rows `table` still holds for the bench project in the engine database.
+/// Takes the bench root and the table. Returns the row count.
+fn project_rows(root: &Path, table: &str) -> i64 {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_working_project() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let database = rusqlite::Connection::open(bench.root.join("engine.db")).unwrap();
+    database
+        .execute_batch(&format!(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES ('{PROJECT}','owner','Old question','answered',1);
+             INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('{PROJECT}','owner','codex',0,'Old step','done',1,1);
+             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);"
+        ))
+        .unwrap();
+    drop(database);
+    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+        assert_eq!(project_rows(&bench.root, table), 1, "{table}");
+    }
+
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+        assert_eq!(project_rows(&bench.root, table), 0, "{table} after removal");
+    }
+    assert!(
+        bench.owner.onboarding(project.clone()).await.is_err(),
+        "a removed project's waiting steps are gone, so no worker can claim them"
+    );
+
+    let again = bench.start_onboarding().await;
+    assert_eq!(again, project);
+    let setup = bench.owner.project_setup(project.clone()).await.unwrap();
+    assert_eq!(
+        setup.map(|setup| setup.project_id),
+        Some(project.clone()),
+        "re-adding the folder recreates the project"
+    );
+    let view = bench.view(&project).await;
+    assert_eq!(view.project_id, project);
+    let team = bench.owner.team_status(project.clone()).await.unwrap();
+    assert!(team.messages.is_empty(), "{:?}", team.messages);
+    assert!(team.tasks.is_empty(), "{:?}", team.tasks);
+    assert!(
+        bench
+            .owner
+            .research_jobs(project.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(project_rows(&bench.root, "onboarding"), 1);
+    bench.stop().await;
+}
