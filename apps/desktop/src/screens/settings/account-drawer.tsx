@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { checkAccount, removeAccount, renameAccount, type AccountView, type PoolSummary } from "../../api";
+import { checkAccount, renameAccount, type AccountView, type PoolSummary } from "../../api";
 import { useAppSession } from "../../state";
-import { Button, ConfirmDialog, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
+import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
 import { nameError } from "./add-account";
-import { SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { cancelSignIn, SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
-/** The body of the Remove account confirmation. Inputs: the number of pools the account is
- * in. Output: the sentence. */
-export function removeBody(poolCount: number): string {
-  if (poolCount === 0) return "It isn't in any pool.";
-  return `It leaves ${poolCount} ${poolCount === 1 ? "pool" : "pools"}. Projects using ${poolCount === 1 ? "that pool" : "those pools"} keep running on their other accounts.`;
+/** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
+export function andList(names: readonly string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** Why an account can or cannot be deleted: the engine refuses one a pool uses. Input: the
+ * names of the pools it is in. Output: the sentence. */
+export function removeBody(poolNames: readonly string[]): string {
+  if (poolNames.length === 0) return "It isn't in any pool.";
+  return `It is in ${andList(poolNames)}. Remove it from ${poolNames.length === 1 ? "that pool" : "those pools"} first.`;
 }
 
 /** The support text for one account: names and statuses only, never a key, URL secret or
@@ -35,14 +40,17 @@ function SignInAgain({ account, onSignedIn }: { account: AccountView; onSignedIn
     onClaudeCode={signIn.sendClaudeCode} />;
 }
 
-/** The account details drawer: rename, status with its action, model, pools, support copy
- * and Remove account. Inputs: the account (or undefined when closed), pools, and handlers for
- * close and for any change that needs the list reloaded. */
-export function AccountDrawer({ account, pools, onClose, onChanged }: {
+/** The account details drawer: rename, status with its action (Sign in again, Cancel sign-in,
+ * Check again), model, pools, support copy and Delete account. Inputs: the account (or
+ * undefined when closed), pools, whether sign-in opens at once, and handlers for close, for any
+ * change that needs the list reloaded and for Delete, which the page confirms. */
+export function AccountDrawer({ account, pools, signIn = false, onClose, onChanged, onDelete }: {
   account: AccountView | undefined;
   pools: PoolSummary[] | undefined;
+  signIn?: boolean;
   onClose: () => void;
   onChanged: (account?: AccountView) => void;
+  onDelete: (account: AccountView) => void;
 }) {
   const session = useAppSession();
   const [name, setName] = useState(account?.name ?? "");
@@ -51,17 +59,16 @@ export function AccountDrawer({ account, pools, onClose, onChanged }: {
   const [signingIn, setSigningIn] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkLine, setCheckLine] = useState<string>();
-  const [confirm, setConfirm] = useState(false);
-  const [removing, setRemoving] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string>();
   const accountId = account?.id;
   useEffect(() => {
     setName(account?.name ?? "");
     setNameMessage(undefined);
-    setSigningIn(false);
+    setSigningIn(signIn);
     setCheckLine(undefined);
     setError(undefined);
-  }, [accountId]);
+  }, [accountId, signIn]);
 
   if (!account) return null;
   const memberOf = pools?.filter((pool) => pool.members.some((member) => member.id === account.id)) ?? [];
@@ -89,18 +96,18 @@ export function AccountDrawer({ account, pools, onClose, onChanged }: {
     } else setCheckLine(result.kind === "not_ready" ? "Checking isn't ready yet in this build." : result.message);
   };
 
-  const remove = async () => {
-    setRemoving(true);
-    const result = session.noteResult(await removeAccount(account.id));
-    setRemoving(false);
-    setConfirm(false);
-    if (result.kind === "ok") { session.showToast(`${account.name} removed.`); onChanged(); onClose(); }
-    else setError(result.kind === "not_ready" ? "Removing accounts isn't ready yet in this build." : result.message);
+  const cancel = async () => {
+    setCancelling(true);
+    const result = session.noteResult(await cancelSignIn(account.id));
+    setCancelling(false);
+    if (result.kind === "ok") { setError(undefined); session.showToast("Sign-in cancelled."); onChanged(); }
+    else setError(result.kind === "not_ready" ? "Cancelling sign-in isn't ready yet in this build." : result.message);
   };
 
   return <>
     <Drawer open title={account.name} onClose={onClose}
-      footer={<Button variant="danger-text" icon="trash" onClick={() => setConfirm(true)}>Remove account</Button>}>
+      footer={<span className="row"><Button variant="danger-text" icon="trash" disabled={memberOf.length > 0} onClick={() => onDelete(account)}>Delete account</Button>
+        {memberOf.length > 0 && <span className="small secondary">{removeBody(memberOf.map((pool) => pool.name))}</span>}</span>}>
       <div className="row"><ProviderMark provider={account.provider} name={account.provider_name} large />
         <div className="stack-small"><strong>{account.provider_name}</strong><span className="secondary">{account.method_label}</span></div></div>
       <form className="row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>
@@ -115,7 +122,9 @@ export function AccountDrawer({ account, pools, onClose, onChanged }: {
         <dt>Pools</dt><dd>{memberOf.length === 0 ? <span className="secondary">Not in a pool</span>
           : <ul className="plain-list">{memberOf.map((pool) => <li key={pool.id}><a href="#/settings/pools">{pool.name}</a></li>)}</ul>}</dd>
       </dl>
-      {subscription && account.status !== "signed_in" && !signingIn &&
+      {subscription && account.status === "signing_in" && !signingIn &&
+        <span><Button icon="x" pending={cancelling} pendingLabel="Cancelling..." onClick={() => void cancel()}>Cancel sign-in</Button></span>}
+      {subscription && account.status !== "signed_in" && account.status !== "signing_in" && !signingIn &&
         <span><Button variant="primary" icon="log-in" onClick={() => setSigningIn(true)}>Sign in again</Button></span>}
       {subscription && signingIn && <SignInAgain account={account} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">
@@ -127,9 +136,5 @@ export function AccountDrawer({ account, pools, onClose, onChanged }: {
         void navigator.clipboard?.writeText(supportDetails(account)).then(() => session.showToast("Details copied."), () => undefined);
       }}>Copy details for support</Button></span>
     </Drawer>
-    <ConfirmDialog open={confirm} title={`Remove ${account.name}?`} confirmLabel="Remove account" pending={removing}
-      onCancel={() => setConfirm(false)} onConfirm={() => void remove()}>
-      {removeBody(memberOf.length)}
-    </ConfirmDialog>
   </>;
 }

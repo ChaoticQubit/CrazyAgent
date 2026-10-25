@@ -201,10 +201,10 @@ test("failure panels name the fix: a new code, a key instead of a missing harnes
   assert.match(panel(answered({ phase: "authenticated_observed", challenge: null, account: null })), /Signed in\./);
 });
 
-test("account drawer copy: removal names the pools it leaves, support details carry no ids or keys", () => {
-  assert.equal(removeBody(0), "It isn't in any pool.");
-  assert.equal(removeBody(1), "It leaves 1 pool. Projects using that pool keep running on their other accounts.");
-  assert.equal(removeBody(2), "It leaves 2 pools. Projects using those pools keep running on their other accounts.");
+test("account drawer copy: delete names the pools that still use it, support details carry no ids or keys", () => {
+  assert.equal(removeBody([]), "It isn't in any pool.");
+  assert.equal(removeBody(["Main"]), "It is in Main. Remove it from that pool first.");
+  assert.equal(removeBody(["Main", "Spare", "Night"]), "It is in Main, Spare and Night. Remove it from those pools first.");
   const details = supportDetails(account({ method: "api_key", method_label: "Use an API key", model: "gpt-5", status: "key_saved", status_label: "Key saved" }));
   assert.equal(details, "Account: ChatGPT 1\nProvider: ChatGPT / Codex\nSign-in method: Use an API key\nStatus: Key saved\nModel: gpt-5");
   assert.doesNotMatch(details, /chatgpt-account-1/);
