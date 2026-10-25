@@ -13,7 +13,7 @@ impl Case {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-agents-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         install_fixture(root.path());

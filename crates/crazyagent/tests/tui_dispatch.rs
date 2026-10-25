@@ -658,7 +658,7 @@ async fn exercise(root: PathBuf, config: EffectiveConfig, service: Arc<Mutex<Eng
 async fn real_tui_inspects_exact_reserved_denial_after_task_selection_and_owner_reconnect() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-d-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let root = root.keep();

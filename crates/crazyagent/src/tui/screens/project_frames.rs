@@ -88,7 +88,7 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
 async fn project_frames_from_a_real_engine_match_the_design() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-frames-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
@@ -106,7 +106,7 @@ async fn project_frames_from_a_real_engine_match_the_design() {
         .unwrap();
     let owner = tempfile::Builder::new()
         .prefix("ca-tui-frames-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(owner.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let owner_home = std::fs::canonicalize(owner.path()).unwrap();

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
@@ -84,7 +86,7 @@ async fn flow(root: &Path) -> Result<(), String> {
 async fn the_desktop_bridge_reads_and_saves_the_owner_profile_and_lists_pools() {
     let root = tempfile::Builder::new()
         .prefix("ca-desk-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

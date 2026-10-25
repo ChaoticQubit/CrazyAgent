@@ -16,7 +16,7 @@ struct Found {
 fn found() -> Found {
     let root = tempfile::Builder::new()
         .prefix("ca-th-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     for name in ["codex", "claude"] {
         let path = root.path().join(name);

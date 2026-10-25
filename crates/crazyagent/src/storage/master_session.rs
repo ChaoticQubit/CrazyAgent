@@ -3377,7 +3377,7 @@ fallback_allowed = false
         async fn new_with_message(with_repository: bool, message: &str) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrc-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let global = root.path().join("global.toml");

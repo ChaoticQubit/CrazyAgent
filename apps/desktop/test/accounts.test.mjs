@@ -6,7 +6,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const auth = await import("../src/native-auth.ts");
 const { SignInPanel, signInStage, signInFailure, signedInLine, signInRunning } = await import("../src/screens/settings/sign-in.tsx");
-const { methodOptions, defaultAccountName, urlError, nameError, addedLine, TILE_LINES } = await import("../src/screens/settings/add-account.tsx");
+const { methodOptions, defaultAccountName, urlError, nameError, addedLine, TILE_LINES, ProviderTiles, MethodMenu, KeyOrUrlForm } =
+  await import("../src/screens/settings/add-account.tsx");
+const { SessionContext, useSession } = await import("../src/state.ts");
 const { removeBody, supportDetails } = await import("../src/screens/settings/account-drawer.tsx");
 const { AccountsView, filterAccounts, accountCount } = await import("../src/screens/settings/accounts.tsx");
 
@@ -239,4 +241,63 @@ test("the account list filters, counts and windows 1000 accounts without renderi
   assert.match(empty, /Add a ChatGPT, Claude, API key or local model account\. You can add as many as you like\./);
   const notReady = renderToStaticMarkup(createElement(AccountsView, { accounts: { kind: "not_ready" }, pools: { kind: "not_ready" }, onAdd: forbidden, onOpen: forbidden, onRetry: forbidden }));
   assert.match(notReady, /Not ready yet/);
+});
+
+const compatible = { provider: "openai_compatible", name: "Any OpenAI-compatible URL", methods: [
+  { method: "url", label: "Connect a URL", url_preset: null, ...field("required", "optional", "required") }] };
+const routing = /(?:Harness reference|Protocol reference|Profile reference|Credential reference|Account reference|Provider reference|Model author reference|rcli|openai-chat|anthropic-messages)/;
+const claims = /(?:Signed in as|Account authenticated|Authenticated|Model ready)/;
+
+function WithSession({ children }) {
+  return createElement(SessionContext.Provider, { value: useSession() }, children);
+}
+
+const keyForm = (provider) => renderToStaticMarkup(createElement(WithSession, null, createElement(KeyOrUrlForm, {
+  provider, option: methodOptions(provider)[0], name: "Unit account", onName: forbidden, onAdded: forbidden })));
+
+test("Add account starts provider-first: managed sign-in, key and URL providers, no routing fields, no secret entry", () => {
+  const tiles = renderToStaticMarkup(createElement(ProviderTiles, { catalog: [...catalog, compatible], onPick: forbidden }));
+  for (const provider of [...catalog, compatible]) {
+    assert.ok(tiles.includes(`<span class="title">${provider.name}</span>`), provider.name);
+    assert.ok(tiles.includes(`<span class="detail">${TILE_LINES[provider.provider]}</span>`), provider.provider);
+  }
+  const methods = renderToStaticMarkup(createElement(MethodMenu, { provider: catalog[0], onPick: forbidden }));
+  assert.match(methods, /Sign in with ChatGPT<span class="badge tone-info">Recommended<\/span>/);
+  assert.match(methods, /Use the Codex sign-in on this Mac/);
+  assert.match(methods, /Use an API key/);
+  for (const markup of [tiles, methods]) {
+    assert.doesNotMatch(markup, routing);
+    assert.doesNotMatch(markup, /type="password"/);
+    assert.doesNotMatch(markup, claims);
+    assert.ok(Buffer.byteLength(markup, "utf8") < 65536);
+  }
+});
+
+test("URL accounts show the base URL and model without routing identities; only the key field is masked", () => {
+  const local = keyForm(catalog[3]);
+  assert.match(local, /<input\b[^>]*id="account-url"[^>]*value="http:\/\/127\.0\.0\.1:11434\/v1"/);
+  assert.match(local, /id="account-model"/);
+  assert.doesNotMatch(local, /type="password"/);
+  const endpoint = keyForm(compatible);
+  assert.match(endpoint, /id="account-url"/);
+  assert.match(endpoint, /id="account-model"/);
+  assert.deepEqual([...endpoint.matchAll(/<input\b[^>]*type="password"[^>]*>/g)].map((match) => match[0].match(/id="([^"]+)"/)?.[1]), ["account-key"]);
+  assert.match(endpoint, /API key \(optional\)/);
+  for (const markup of [local, endpoint]) {
+    assert.doesNotMatch(markup, routing);
+    assert.doesNotMatch(markup, claims);
+  }
+});
+
+test("the API key field is masked and uncontrolled, and its copy says the key is sent once and never shown again", () => {
+  const markup = keyForm(catalog[2]);
+  const input = markup.match(/<input\b[^>]*id="account-key"[^>]*>/)?.[0];
+  assert.ok(input, "a key account shows the key field");
+  assert.match(input, /type="password"/);
+  assert.match(input, /maxLength="8192"/i);
+  assert.match(input, /autoComplete="off"/i);
+  assert.doesNotMatch(input, /\b(?:value|name)=/);
+  assert.match(markup, /Sent once to CrazyAgent&#x27;s engine, which keeps it privately\. You won&#x27;t see it again\./);
+  assert.match(markup, />Save key<\/button>/);
+  assert.doesNotMatch(markup, claims);
 });

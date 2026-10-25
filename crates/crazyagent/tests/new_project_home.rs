@@ -92,7 +92,7 @@ fn one_folder_name_rule_covers_new_projects_and_intake() {
     }
     assert!(plain_problem("home_folder_name_invalid").is_some());
 
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = temp.path().canonicalize().unwrap();
     fs::create_dir(home.join("taken")).unwrap();
     assert_eq!(destination(&home, "free").unwrap(), home.join("free"));
@@ -109,7 +109,7 @@ fn one_folder_name_rule_covers_new_projects_and_intake() {
 
 #[test]
 fn the_state_folder_is_crazyagent_when_present_and_never_a_link() {
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let home_project = root.join("home-project");
     fs::create_dir_all(home_project.join(CRAZYAGENT_DIRECTORY)).unwrap();
@@ -132,7 +132,7 @@ fn the_state_folder_is_crazyagent_when_present_and_never_a_link() {
 
 #[test]
 fn only_plain_unused_top_level_home_folders_can_be_deleted() {
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let home = root.join("home");
     for folder in [
@@ -202,7 +202,7 @@ impl Engine {
     async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-new-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -263,7 +263,7 @@ fn spec(name: &str) -> ProjectSpec {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
     let engine = Engine::start().await;
-    let place = tempfile::tempdir_in("/private/tmp").unwrap();
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = place.path().canonicalize().unwrap().join("projects");
     fs::create_dir(&home).unwrap();
     let mut owner = OwnerController::attach(
@@ -458,7 +458,7 @@ fn staging_left(home: &Path) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
     let engine = Engine::with_settings("").await;
-    let place = tempfile::tempdir_in("/private/tmp").unwrap();
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = place.path().canonicalize().unwrap().join("projects");
     fs::create_dir(&home).unwrap();
     let mut owner = OwnerController::attach(

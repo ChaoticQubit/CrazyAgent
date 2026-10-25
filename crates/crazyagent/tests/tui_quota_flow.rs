@@ -246,7 +246,7 @@ fn run_case(root: &Path) {
 fn real_pty_pool_quota_create_inspect_edit_readback() {
     let root = tempfile::Builder::new()
         .prefix("ca-q586-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let result = std::panic::catch_unwind(|| run_case(root.path()));

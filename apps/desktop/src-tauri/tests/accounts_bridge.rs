@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
 use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
@@ -59,7 +61,7 @@ fn accounts_commands_are_registered_in_all_four_places() {
 async fn desktop_accounts_commands_reach_the_real_engine() -> TestResult<()> {
     let root = tempfile::Builder::new()
         .prefix("ca-dacct-")
-        .tempdir_in("/private/tmp")?;
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;
@@ -171,7 +173,7 @@ async fn desktop_accounts_commands_reach_the_real_engine() -> TestResult<()> {
 async fn desktop_configures_a_pooled_key_account_from_the_saved_key() -> TestResult<()> {
     let root = tempfile::Builder::new()
         .prefix("ca-dkey-")
-        .tempdir_in("/private/tmp")?;
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;

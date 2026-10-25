@@ -2784,7 +2784,7 @@ fallback_allowed = false
     {
         let root = tempfile::Builder::new()
             .prefix("ca-gateway-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = gateway_actor_config(root.path(), GATEWAY_ACTOR_CATALOG);
@@ -3032,7 +3032,7 @@ fallback_allowed = false
 
     #[test]
     fn cleanup_preserves_hardlinked_capability() {
-        let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+        let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let root = Root::open(directory.path()).unwrap();
         let file = root.open_key(KEYS[0], true).unwrap();
@@ -3053,7 +3053,7 @@ fallback_allowed = false
 
     #[tokio::test]
     async fn partial_bind_failure_removes_created_keys_and_stops_owner() {
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let long = root.path().join("x".repeat(100));
         std::fs::create_dir(&long).unwrap();
@@ -3089,7 +3089,7 @@ fallback_allowed = false
     #[tokio::test]
     async fn actual_socket_backpressure_holds_delivery_barrier_until_drained() {
         use crate::verification::*;
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();

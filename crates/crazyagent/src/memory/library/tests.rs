@@ -30,7 +30,7 @@ impl Engine {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-mem-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -42,7 +42,7 @@ impl Engine {
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let home = tempfile::Builder::new()
             .prefix("ca-mem-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let (stop, _) = tokio::sync::watch::channel(false);
         let mut engine = Self {

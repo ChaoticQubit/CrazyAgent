@@ -17,7 +17,7 @@ struct Case {
 }
 
 fn case() -> Case {
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let home = root.join("home");
     let sources = root.join("sources");

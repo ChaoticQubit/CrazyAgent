@@ -56,3 +56,12 @@ test("a pool form refuses a sixteenth account before the engine sees it", () => 
   const fifteen = { ...form, members: Array.from({ length: 15 }, (_, index) => `c-${index}`).join(", ") };
   assert.equal(modelAccess.editFromForm(fifteen).pool.members.length, 15);
 });
+
+test("a pool scoped to only projects or only roles keeps that exact partial scope through an edit", () => {
+  const catalogPool = { id: "catalog-pool", members: ["catalog-connection"], projects: [], roles: [], fallback_allowed: false };
+  for (const pool of [{ ...catalogPool, projects: ["project-first"] }, { ...catalogPool, roles: ["builder"] }]) {
+    const before = structuredClone(pool);
+    assert.deepEqual(modelAccess.editFromForm(modelAccess.formFromRecord({ kind: "pool", pool }, "retained-draft")), { kind: "replace_pool", pool: before });
+    assert.deepEqual(pool, before);
+  }
+});

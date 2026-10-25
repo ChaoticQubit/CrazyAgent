@@ -25,7 +25,7 @@ impl Fixture {
     fn new(project_present: bool) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-settings-source-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global_parent = root.path().join("global");

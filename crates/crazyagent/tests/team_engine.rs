@@ -179,15 +179,17 @@ fn require_model() {
 }
 
 fn runtime() -> PathBuf {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../.local-state")
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .canonicalize()
         .unwrap();
     assert!(
-        base.ends_with("CrazyAgent/.local-state"),
+        checkout.join("Cargo.lock").is_file(),
         "{}",
-        base.display()
+        checkout.display()
     );
+    let base = checkout.join(".local-state");
+    fs::create_dir_all(&base).unwrap();
     let runtime = base.join(format!("t-team-{}", std::process::id()));
     if runtime.exists() {
         fs::remove_dir_all(&runtime).unwrap();

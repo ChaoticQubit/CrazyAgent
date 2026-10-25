@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "crazyagent-win-sandbox",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crazyagent",
  "getrandom 0.4.3",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-win-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",

@@ -106,7 +106,9 @@ function stepTitle(step: Step): string {
     : step.kind === "done" ? "Account added" : step.option.title;
 }
 
-function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (provider: ProviderEntry) => void }) {
+/** Step 1 of Add account: one tile per catalog provider with its name and plain line.
+ * Inputs: the catalog and the pick handler. Output: the tiles, with no secret entry. */
+export function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (provider: ProviderEntry) => void }) {
   return <div className="tiles">
     {catalog.map((provider) => <button type="button" key={provider.provider} className="tile" onClick={() => onPick(provider)}>
       <ProviderMark provider={provider.provider} name={provider.name} large />
@@ -116,7 +118,9 @@ function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: 
   </div>;
 }
 
-function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (option: MethodOption) => void }) {
+/** Step 2 of Add account: the provider's sign-in methods from `methodOptions`.
+ * Inputs: the provider and the pick handler. Output: one button per method. */
+export function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (option: MethodOption) => void }) {
   return <div className="methods">
     {methodOptions(provider).map((option) => <button type="button" key={option.key} className="method" onClick={() => onPick(option)}>
       <Icon name={option.native ? "log-in" : option.entry.method === "url" ? "link" : "key-round"} />
@@ -185,7 +189,10 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
   </div>;
 }
 
-function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
+/** The key or URL form: name, base URL, masked key and model as the method entry asks.
+ * The key stays in an uncontrolled field and is sent once. Inputs: the provider, method,
+ * name and handlers. Output: the form; saving calls the engine through the app session. */
+export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
   provider: ProviderEntry;
   option: MethodOption;
   name: string;
