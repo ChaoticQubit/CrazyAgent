@@ -450,30 +450,30 @@ impl ResearchRunner {
             process_group,
         };
         let Some(harness) = ResearchHarness::of(&job.harness) else {
-            jobs.fail(
+            let status = jobs.fail(
                 job.id,
                 &self.claimer,
                 "This harness cannot run research yet",
                 1,
             )?;
-            return Ok(run(ResearchStatus::Failed, None, None));
+            return Ok(run(status, None, None));
         };
         let Some(account) = project
             .account
             .as_ref()
             .filter(|account| account.harness() == harness)
         else {
-            jobs.needs_pool(job.id, &self.claimer)?;
-            return Ok(run(ResearchStatus::NeedsPool, None, None));
+            let status = jobs.needs_pool(job.id, &self.claimer)?;
+            return Ok(run(status, None, None));
         };
         if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
-            jobs.fail(
+            let status = jobs.fail(
                 job.id,
                 &self.claimer,
                 "This harness is not installed on this computer",
                 1,
             )?;
-            return Ok(run(ResearchStatus::Failed, None, None));
+            return Ok(run(status, None, None));
         }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
@@ -517,8 +517,8 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Account(_)) => {
-                jobs.needs_pool(job.id, &self.claimer)?;
-                Ok(run(ResearchStatus::NeedsPool, None, None))
+                let status = jobs.needs_pool(job.id, &self.claimer)?;
+                Ok(run(status, None, None))
             }
             Err(error) => {
                 let reason = match error {

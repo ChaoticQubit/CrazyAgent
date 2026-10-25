@@ -282,8 +282,9 @@ impl ResearchJobs {
         )
     }
 
-    /// Records a failed attempt: requeues while attempts remain under
-    /// `attempts_max`, otherwise marks the job failed. Returns the new status.
+    /// Records a failed attempt: a job whose cancel was requested ends cancelled,
+    /// otherwise it requeues while attempts remain under `attempts_max`, otherwise
+    /// it is marked failed. Returns the new status.
     pub fn fail(
         &self,
         id: i64,
@@ -299,7 +300,8 @@ impl ResearchJobs {
             .connection
             .query_row(
                 "UPDATE research_jobs
-                 SET status = CASE WHEN attempts < ?4 THEN 'queued' ELSE 'failed' END,
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+                                   WHEN attempts < ?4 THEN 'queued' ELSE 'failed' END,
                      error = ?3, finished_ms = ?5, claimer = NULL
                  WHERE id = ?1 AND claimer = ?2 AND status = 'running'
                  RETURNING status",
@@ -311,19 +313,34 @@ impl ResearchJobs {
         let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
         assert!(matches!(
             status,
-            ResearchStatus::Queued | ResearchStatus::Failed
+            ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
         ));
         Ok(status)
     }
 
-    /// Parks a held job until its project has a pool, without using an attempt.
-    pub fn needs_pool(&self, id: i64, claimer: &str) -> Result<(), JobError> {
-        self.transition(
-            id,
-            claimer,
-            "status = 'needs_pool', attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL",
-            &[],
-        )
+    /// Parks a held job until its project has a pool, without using an attempt; a
+    /// job whose cancel was requested ends cancelled instead. Returns the new status.
+    pub fn needs_pool(&self, id: i64, claimer: &str) -> Result<ResearchStatus, JobError> {
+        let status = self
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'needs_pool' END,
+                     finished_ms = CASE WHEN cancel_requested = 1 THEN ?3 ELSE finished_ms END,
+                     attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL
+                 WHERE id = ?1 AND claimer = ?2 AND status = 'running'
+                 RETURNING status",
+                params![id, claimer, now_ms()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::NeedsPool | ResearchStatus::Cancelled
+        ));
+        Ok(status)
     }
 
     /// Requeues every job of `project` for `harness` that waited for a pool.

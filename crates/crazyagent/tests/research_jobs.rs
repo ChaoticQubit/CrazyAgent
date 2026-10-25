@@ -343,3 +343,34 @@ fn work_claims_and_parking_are_scoped_to_one_harness() {
         third
     );
 }
+
+#[test]
+fn a_job_cancelled_while_its_run_prepares_stays_cancelled_when_the_run_fails_or_parks() {
+    let (_temp, path) = store();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let failing = jobs.enqueue("project-a", "market", "codex", true).unwrap();
+    let parked = jobs.enqueue("project-a", "design", "codex", true).unwrap();
+    jobs.claim("project-a", "runner", 2).unwrap().unwrap();
+    jobs.claim("project-a", "runner", 2).unwrap().unwrap();
+    assert!(jobs.request_cancel(failing).unwrap());
+    assert!(jobs.request_cancel(parked).unwrap());
+    let status = jobs
+        .fail(
+            failing,
+            "runner",
+            "Could not prepare the research sandbox",
+            3,
+        )
+        .unwrap();
+    assert_eq!(status, ResearchStatus::Cancelled);
+    jobs.needs_pool(parked, "runner").unwrap();
+    for id in [failing, parked] {
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(job.status, ResearchStatus::Cancelled, "job {id}");
+        assert!(job.claimer.is_none());
+        assert!(job.finished_ms.is_some());
+        assert!(!jobs.request_cancel(id).unwrap());
+    }
+    assert!(jobs.claim("project-a", "runner", 2).unwrap().is_none());
+    assert!(jobs.work().unwrap().is_empty());
+}
