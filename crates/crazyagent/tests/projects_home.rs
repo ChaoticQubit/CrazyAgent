@@ -645,6 +645,34 @@ fn moving_the_home_moves_every_project_folder_or_puts_them_all_back() {
     assert_eq!(names(&next), ["alpha", "beta"]);
 }
 
+#[test]
+fn a_home_move_covers_every_folder_or_refuses_before_anything_moves() {
+    let case = case();
+    let all: Vec<String> = (0..=FOLDERS_MAX).map(|n| format!("f{n:04}")).collect();
+    assert_eq!(all.len(), FOLDERS_MAX + 1);
+    for name in &all {
+        fs::create_dir(case.home.join(name)).unwrap();
+    }
+    let next = case.root.join("next");
+    fs::create_dir(&next).unwrap();
+
+    assert_eq!(
+        plan_move(&case.home, &next, &case.engine).unwrap_err().0,
+        "home_move_too_many"
+    );
+    let sentence = plain_problem("home_move_too_many").unwrap();
+    assert!(sentence.contains(&FOLDERS_MAX.to_string()), "{sentence}");
+    assert_eq!(names(&case.home), all);
+    assert!(names(&next).is_empty());
+
+    fs::remove_dir(case.home.join(&all[FOLDERS_MAX])).unwrap();
+    let plan = plan_move(&case.home, &next, &case.engine).unwrap();
+    assert_eq!(plan.folders(), &all[..FOLDERS_MAX]);
+    plan.run().unwrap();
+    assert_eq!(names(&next), &all[..FOLDERS_MAX]);
+    assert!(names(&case.home).is_empty());
+}
+
 #[cfg(target_os = "macos")]
 struct Volume {
     mount: PathBuf,

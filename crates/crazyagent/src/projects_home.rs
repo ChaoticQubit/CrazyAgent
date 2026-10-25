@@ -365,9 +365,9 @@ pub fn forgotten(folder: &str) -> String {
 
 /// Plans moving every project folder from the current home to a new one.
 /// Input: the current home, the new folder the owner picked and the engine
-/// data folder. Output: the plan with the top-level folders to move, or a
+/// data folder. Output: the plan with every top-level folder to move, or a
 /// refusal for an unsafe new home, the same home, homes inside one another,
-/// or a folder name already taken in the new home.
+/// more than `FOLDERS_MAX` folders, or a name already taken in the new home.
 pub fn plan_move(
     current: &Path,
     picked: &Path,
@@ -380,7 +380,7 @@ pub fn plan_move(
     if overlaps(&next, current) {
         return Err(refused("home_move_nested"));
     }
-    let folders = scan(current)?;
+    let folders = watch::scan_all(current)?.ok_or_else(|| refused("home_move_too_many"))?;
     if folders
         .iter()
         .any(|name| std::fs::symlink_metadata(next.join(name)).is_ok())
@@ -554,6 +554,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_add_unverified" => "The folder did not arrive in your projects folder.",
         "home_move_same" => "That is already your projects folder.",
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
+        "home_move_too_many" => {
+            "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved."
+        }
         "home_move_partial" => {
             "Some projects were moved and could not be moved back. Check both folders."
         }
