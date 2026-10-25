@@ -345,3 +345,107 @@ fn only_agent_worktrees_in_the_crazyagent_folder_are_writable() {
         assert!(!policy.write.contains(&refused), "{}", refused.display());
     }
 }
+
+const REACH: &str = "import os, socket, sys
+try:
+    socket.socketpair()
+    print('pair=ok')
+except OSError:
+    print('pair=refused')
+try:
+    socket.socket(socket.AF_UNIX).connect(sys.argv[1])
+    print('unix=ok')
+except OSError:
+    print('unix=refused')
+try:
+    socket.create_connection(('127.0.0.1', int(sys.argv[2])), 5).close()
+    print('tcp=ok')
+except OSError:
+    print('tcp=refused')
+print('runtime=present' if os.path.exists(sys.argv[3]) else 'runtime=absent')
+";
+
+fn reach(
+    sandbox: Option<&dyn Sandbox>,
+    case: &Case,
+    socket: &Path,
+    port: u16,
+    runtime: &Path,
+) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", REACH])
+        .arg(socket)
+        .arg(port.to_string())
+        .arg(runtime)
+        .current_dir(case.project.join("worktrees"));
+    let mut command = match sandbox {
+        Some(sandbox) => sandbox.wrap(&harness).unwrap(),
+        None => harness,
+    };
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let runtime = case.outside.parent().unwrap().join("runtime");
+    let terminal = runtime.join("terminal");
+    fs::create_dir_all(&terminal).unwrap();
+    let socket = terminal.join("tmux.sock");
+    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let guarded = || {
+        policy(&case, SandboxNetwork::Open)
+            .guard_engine(&runtime)
+            .unwrap()
+    };
+    assert_eq!(
+        reach(None, &case, &socket, port, &runtime),
+        "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
+        "the unsandboxed control must reach the socket"
+    );
+    let landlock = LinuxSandbox::detect(guarded(), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock and seccomp: {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        reach(Some(&landlock), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=ok\nruntime=present\n"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        guarded(),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reach(Some(&bubblewrap), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=ok\nruntime=absent\n"
+    );
+}

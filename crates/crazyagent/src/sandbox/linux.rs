@@ -6,6 +6,11 @@ use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
 };
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule, TargetArch,
+};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::process::CommandExt;
@@ -28,6 +33,8 @@ const CONNECT: &str = "--connect";
 const LIMIT_NETWORK: &str = "--limit-network";
 const PROBE: &str = "--probe";
 const FS_ABI: ABI = ABI::V3;
+#[cfg(target_arch = "x86_64")]
+const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 const NET_ABI: ABI = ABI::V4;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
@@ -185,6 +192,49 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     created.restrict_self()
 }
 
+/// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
+/// socket and a new io_uring ring both fail with `EACCES`. Landlock does not mediate a
+/// pathname socket connect, and a ring could create a socket without `socket(2)`;
+/// `socketpair(2)` stays allowed since it reaches no path. Output: the installed filter, or
+/// the reason this kernel or architecture cannot hold it.
+fn refuse_unix_sockets() -> Result<(), String> {
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    rules.insert(libc::SYS_socket, unix_domain()?);
+    rules.insert(libc::SYS_io_uring_setup, Vec::new());
+    #[cfg(target_arch = "x86_64")]
+    {
+        rules.insert(X32_SYSCALL_BIT | libc::SYS_socket, unix_domain()?);
+        rules.insert(X32_SYSCALL_BIT | libc::SYS_io_uring_setup, Vec::new());
+    }
+    let arch: TargetArch = std::env::consts::ARCH
+        .try_into()
+        .map_err(|error| format!("seccomp: {error}"))?;
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::EACCES as u32),
+        arch,
+    )
+    .map_err(|error| format!("seccomp: {error}"))?;
+    let program: BpfProgram = filter
+        .try_into()
+        .map_err(|error| format!("seccomp: {error}"))?;
+    assert!(!program.is_empty());
+    seccompiler::apply_filter(&program).map_err(|error| format!("seccomp: {error}"))
+}
+
+fn unix_domain() -> Result<Vec<SeccompRule>, String> {
+    let family = SeccompCondition::new(
+        0,
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        libc::AF_UNIX as u64,
+    )
+    .map_err(|error| format!("seccomp: {error}"))?;
+    let rule = SeccompRule::new(vec![family]).map_err(|error| format!("seccomp: {error}"))?;
+    Ok(vec![rule])
+}
+
 fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
     let held = match status.ruleset {
         RulesetStatus::FullyEnforced => true,
@@ -195,8 +245,9 @@ fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
-/// A probe applies an empty ruleset to itself and exits 0 when this kernel holds it; a run
-/// applies the policy to itself and then replaces itself with the harness. Output: the exit
+/// A probe applies an empty ruleset and the Unix-socket filter to itself and exits 0 when
+/// this kernel holds both; a run applies the policy and the filter to itself and then
+/// replaces itself with the harness. Output: the exit
 /// code, 2 for refused arguments, 3 when the kernel cannot hold the policy, 126 when the
 /// harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
@@ -234,6 +285,10 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             eprintln!("crazyagent-landlock: {error}");
             return ExitCode::from(3);
         }
+    }
+    if let Err(reason) = refuse_unix_sockets() {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
     }
     let Some((program, args)) = launch else {
         return ExitCode::SUCCESS;
