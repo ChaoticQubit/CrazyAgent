@@ -1,7 +1,9 @@
 use super::settings::{draw_page, step};
+use super::settings_add_account::{KEY_CHARS_MAX, key_problem};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod};
 use crate::config::POOL_MEMBERS_MAX;
+use crate::engine::owner::AccountSecret;
 use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
@@ -722,6 +724,7 @@ impl Screen for Accounts {
 enum DetailMode {
     View,
     Rename(TextField),
+    ReplaceKey(TextField),
     Remove { remove_focused: bool },
 }
 
@@ -734,6 +737,7 @@ pub struct AccountDetails {
     focus: usize,
     mode: DetailMode,
     waiting: bool,
+    replacing: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -768,6 +772,7 @@ impl AccountDetails {
             focus: 0,
             mode: DetailMode::View,
             waiting: false,
+            replacing: false,
         }
     }
 
@@ -793,9 +798,16 @@ impl AccountDetails {
 
     fn run(&mut self, action: Action, ctx: &mut Ctx) -> Flow {
         match action {
-            Action::SignIn | Action::ReplaceKey => Flow::Replace(Box::new(
+            Action::SignIn => Flow::Replace(Box::new(
                 super::settings_add_account::AddAccount::again(self.account.clone()),
             )),
+            Action::ReplaceKey => {
+                let field = TextField::secret("New API key", KEY_CHARS_MAX)
+                    .counted()
+                    .note("Replaces the saved key. The old key is deleted.");
+                self.mode = DetailMode::ReplaceKey(field);
+                Flow::Handled
+            }
             Action::CheckAgain => {
                 self.waiting = true;
                 send(
@@ -948,6 +960,14 @@ impl AccountDetails {
                 lines.push(Line::default());
                 lines.push(buttons(&["Save name", "Cancel"], None, theme));
             }
+            DetailMode::ReplaceKey(field) => {
+                let top = lines.len() as u16;
+                let (field_lines, at) = field.lines(limit.min(64), true, theme, ctx.glyphs);
+                cursor = at.map(|at| Position::new(at.x, top + at.y));
+                lines.extend(field_lines);
+                lines.push(Line::default());
+                lines.push(buttons(&["Save key", "Cancel"], None, theme));
+            }
             _ => {
                 let labels: Vec<&str> =
                     self.actions().iter().map(|action| action.label()).collect();
@@ -975,6 +995,41 @@ impl AccountDetails {
                     SettingsJob::Accounts(AccountsRequest::Rename {
                         id: self.account.id.clone(),
                         name,
+                    }),
+                );
+                self.mode = DetailMode::View;
+            }
+            other => {
+                field.error = None;
+                field.key(other);
+            }
+        }
+        Flow::Handled
+    }
+
+    fn replace_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let DetailMode::ReplaceKey(field) = &mut self.mode else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Esc => self.mode = DetailMode::View,
+            Key::Enter => {
+                field.error = key_problem(self.account.provider, field.len(), true);
+                if field.error.is_some() {
+                    return Flow::Handled;
+                }
+                let Ok(secret) = AccountSecret::new(field.take_secret()) else {
+                    field.error =
+                        Some("This key cannot be saved. Paste the whole key on one line.".into());
+                    return Flow::Handled;
+                };
+                self.waiting = true;
+                self.replacing = true;
+                send(
+                    ctx,
+                    SettingsJob::Accounts(AccountsRequest::ReplaceKey {
+                        id: self.account.id.clone(),
+                        key: secret,
                     }),
                 );
                 self.mode = DetailMode::View;
@@ -1028,6 +1083,11 @@ impl Screen for AccountDetails {
                 hint("Ctrl-U", "Clear"),
                 hint("Esc", "Cancel"),
             ],
+            DetailMode::ReplaceKey(_) => vec![
+                hint("Enter", "Save key"),
+                hint("Ctrl-U", "Clear"),
+                hint("Esc", "Cancel"),
+            ],
             _ => vec![
                 hint(&arrows, "Choose"),
                 hint("Enter", "Select"),
@@ -1037,12 +1097,13 @@ impl Screen for AccountDetails {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.mode, DetailMode::Rename(_))
+        matches!(self.mode, DetailMode::Rename(_) | DetailMode::ReplaceKey(_))
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             DetailMode::Rename(_) => return self.rename_key(key, ctx),
+            DetailMode::ReplaceKey(_) => return self.replace_key(key, ctx),
             DetailMode::Remove { .. } => return self.remove_key(key, ctx),
             DetailMode::View => {}
         }
@@ -1077,7 +1138,15 @@ impl Screen for AccountDetails {
             return Flow::Handled;
         }
         self.waiting = false;
+        let replacing = std::mem::take(&mut self.replacing);
         match result {
+            Ok(AccountsReply::Account(account)) if replacing => {
+                self.account = account.clone();
+                ctx.say(Message::success(
+                    "Key replaced.",
+                    "Agents use the new key from their next start.",
+                ));
+            }
             Ok(AccountsReply::Account(account)) => {
                 self.account = account.clone();
                 ctx.say(Message::success("Saved.", ""));
@@ -1161,7 +1230,11 @@ impl Screen for AccountDetails {
     }
 
     fn draft(&self) -> bool {
-        matches!(self.mode, DetailMode::Rename(_))
+        match &self.mode {
+            DetailMode::Rename(_) => true,
+            DetailMode::ReplaceKey(field) => !field.is_empty(),
+            _ => false,
+        }
     }
 }
 

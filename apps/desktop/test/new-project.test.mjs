@@ -6,8 +6,8 @@ const wizard = await import("../src/screens/new-project/wizard.ts");
 
 const available = { kind: "available" };
 const noReader = { kind: "unavailable", reason: "CrazyAgent cannot read its replies yet" };
-const harness = (id, name, status, tools = { kind: "switchable" }, kinds = ["subscription", "api_key"], team = available) => ({
-  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds, team,
+const harness = (id, name, status, tools = { kind: "switchable" }, kinds = ["subscription", "api_key"], team = available, aliases = []) => ({
+  id, name, status, status_label: "", executable: null, headless: "", tools, model_selection: true, account_kinds: kinds, team, aliases,
 });
 const ready = { kind: "ready" };
 const missing = { kind: "not_installed" };
@@ -209,6 +209,17 @@ test("pools are summarised by provider and the biggest pool is preselected", () 
   assert.equal(wizard.preselectPool([]), null);
   assert.equal(wizard.poolFits(catalog[0], members), true);
   assert.equal(wizard.poolFits(harness("opencode", "OpenCode", ready, undefined, ["api_key"]), [member("a", "codex", managed)]), false);
+});
+
+test("Claude subscriptions fit Claude Code under the catalog id and aliases the engine serves", () => {
+  const claudeCode = harness("claude-code", "Claude Code", ready, undefined, ["subscription", "api_key", "local"], available, ["claude"]);
+  const managed = { method: "native_managed", profile_ref: "profile-claude" };
+  const account = (id, harnessName) => ({ id, provider: "anthropic", harness: harnessName, protocol: "native", account_ref: id, endpoint: { kind: "native" }, model: { id: "claude", author: "anthropic" }, auth: managed });
+  const claudes = ["c1", "c2", "c3", "c4"].map((id) => account(id, "claude"));
+  assert.equal(wizard.poolFits(claudeCode, claudes), true);
+  assert.equal(wizard.poolFits(claudeCode, [account("c5", "claude-code")]), true);
+  assert.equal(wizard.poolFits(claudeCode, [account("x1", "codex")]), false);
+  assert.equal(wizard.poolFits(harness("codex", "Codex", ready), claudes), false);
 });
 
 test("a pool shows its name from the engine and falls back to its id", () => {

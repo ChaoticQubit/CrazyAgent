@@ -258,3 +258,25 @@ fn connection_harness_names_resolve_to_their_catalog_entry() {
         assert_eq!(spec(listed.id).unwrap().id, listed.id);
     }
 }
+
+#[test]
+fn each_entry_names_the_connection_harnesses_that_resolve_to_it() {
+    let entries = catalog(&Search::new(Vec::new(), None, Vec::new()));
+    let claude = entry(&entries, "claude-code");
+    assert_eq!(claude.aliases, ["claude"]);
+    let value = serde_json::to_value(claude).unwrap();
+    assert_eq!(value["aliases"][0], "claude");
+    for listed in &entries {
+        for alias in &listed.aliases {
+            assert_eq!(spec(alias).unwrap().id, listed.id, "{alias}");
+        }
+    }
+    assert!(entry(&entries, "codex").aliases.is_empty());
+    assert_eq!(
+        entries
+            .iter()
+            .map(|listed| listed.aliases.len())
+            .sum::<usize>(),
+        1
+    );
+}

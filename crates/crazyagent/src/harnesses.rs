@@ -109,6 +109,7 @@ pub struct HarnessEntry {
     pub model_selection: bool,
     pub account_kinds: Vec<AccountKind>,
     pub team: TeamUse,
+    pub aliases: Vec<String>,
 }
 
 /// Where the catalog looks for harness executables.
@@ -255,6 +256,11 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                         reason: reason.into(),
                     },
                 },
+                aliases: CONNECTION_NAMES
+                    .iter()
+                    .filter(|(_, catalog)| *catalog == spec.id)
+                    .map(|(name, _)| (*name).to_owned())
+                    .collect(),
             }
         })
         .collect();

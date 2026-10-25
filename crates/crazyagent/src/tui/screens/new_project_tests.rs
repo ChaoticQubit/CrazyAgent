@@ -429,6 +429,23 @@ fn harness_ids_from_pools_teams_and_the_catalog_name_the_same_harness() {
 }
 
 #[test]
+fn a_claude_subscription_counts_for_the_real_catalog_entry_and_its_aliases() {
+    let entries =
+        crate::harnesses::catalog(&crate::harnesses::Search::new(Vec::new(), None, Vec::new()));
+    let claude = entries
+        .iter()
+        .find(|entry| entry.name == "Claude Code")
+        .unwrap();
+    assert!(!claude.aliases.is_empty());
+    let mut wizard = wizard();
+    wizard.pool = Some(CredentialRef::new("pool-main").unwrap());
+    assert_eq!(wizard.pool_accounts(&claude.id), Some(1));
+    for alias in &claude.aliases {
+        assert_eq!(wizard.pool_accounts(alias), Some(1), "{alias}");
+    }
+}
+
+#[test]
 fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
     use std::os::unix::fs::PermissionsExt;
     let bin = tempfile::Builder::new()
