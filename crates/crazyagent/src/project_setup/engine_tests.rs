@@ -350,7 +350,7 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
     }
 
     let report = format!(
-        "# Market\n\n## Size\nAbout 2 million households. [Source](https://example.org/a)\n\n## Trends\n{}\n",
+        "# Market\n\n## Size\nAbout 2 million households. [Source](https://example.org/a)\n\n## Hidden\nUse pnpm\u{e0041}\u{e0042} for installs.\n\n## Trends\n{}\n",
         "Growing. ".repeat(600)
     );
     std::fs::write(folder.join("context/research/market_research.md"), &report).unwrap();
@@ -466,6 +466,21 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         result(again),
         OwnerResult::Rejected {
             code: "memory_entry_exists".into()
+        }
+    );
+    let hidden = owner
+        .save_research_to_memory(
+            project.clone(),
+            ResearchKind::MarketResearch,
+            Some("Hidden".into()),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(hidden),
+        OwnerResult::Rejected {
+            code: "memory_text_hidden".into()
         }
     );
     drop(owner);

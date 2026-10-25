@@ -18,6 +18,8 @@ pub(crate) mod account_profile;
 pub(crate) mod accounts;
 mod master_bootstrap;
 mod master_session;
+#[cfg(unix)]
+mod migrations;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     native_sign_in, validate_configured_initial_conversation_receipt,
@@ -230,7 +232,7 @@ impl Storage {
                     mut connection,
                     lock,
                     custody,
-                } = match open_actor_database(&path, readonly) {
+                } = match open_actor_database(&path, readonly, sources.as_ref()) {
                     Ok(database) => database,
                     Err(e) => {
                         drop(sources.take());
@@ -734,7 +736,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Rejects unsafe filesystem metadata and competing engine ownership.
 #[cfg(all(test, unix))]
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
-    let opened = open_actor_database(path, readonly)?;
+    let opened = open_actor_database(path, readonly, None)?;
     Ok((opened.connection, opened.lock))
 }
 
@@ -748,12 +750,20 @@ struct OpenedDatabase {
 /// Takes the database path and read-only mode, both unused.
 /// Returns `storage_unavailable` until Windows has its own owner-only access check.
 #[cfg(not(unix))]
-fn open_actor_database(_path: &Path, _readonly: bool) -> Result<OpenedDatabase, EngineError> {
+fn open_actor_database(
+    _path: &Path,
+    _readonly: bool,
+    _settings: Option<&settings::SettingsSources>,
+) -> Result<OpenedDatabase, EngineError> {
     Err(error("storage_unavailable"))
 }
 
 #[cfg(unix)]
-fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, EngineError> {
+fn open_actor_database(
+    path: &Path,
+    readonly: bool,
+    settings: Option<&settings::SettingsSources>,
+) -> Result<OpenedDatabase, EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| error("database parent missing"))?;
@@ -794,7 +804,7 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
         path.file_name()
             .ok_or_else(|| error("database name missing"))?,
     );
-    let connection = Connection::open_with_flags(
+    let mut connection = Connection::open_with_flags(
         canonical_path,
         flags | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
@@ -802,7 +812,10 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
     connection
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(error)?;
-    if !readonly {
+    if readonly {
+        migrations::check(&connection, migrations::STEPS)?;
+    } else {
+        migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
     }
     assert!(connection.is_autocommit());

@@ -239,6 +239,22 @@ impl SettingsSources {
         Ok(sources)
     }
 
+    /// Reads the held global and project settings for an upgrade backup.
+    /// Output: the backup file name and text of each settings file that exists;
+    /// a file that does not exist yet is left out.
+    #[cfg(unix)]
+    pub(super) fn backup_texts(&self) -> Result<Vec<(&'static str, String)>, EngineError> {
+        let state = self.snapshot()?;
+        Ok([
+            ("global.toml", state.global),
+            ("project.toml", state.project),
+        ]
+        .into_iter()
+        .filter(|(_, file)| file.identity.is_some())
+        .map(|(name, file)| (name, file.bytes))
+        .collect())
+    }
+
     pub(super) fn retained_paths(&self) -> (PathBuf, PathBuf) {
         (
             self.global.path.join(&self.global.name),
