@@ -54,7 +54,7 @@ impl Engine {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -76,7 +76,7 @@ impl Engine {
         .unwrap();
         let home = tempfile::Builder::new()
             .prefix("ca-setup-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let engine = Self {
             root,
@@ -350,7 +350,7 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
     }
 
     let report = format!(
-        "# Market\n\n## Size\nAbout 2 million households. [Source](https://example.org/a)\n\n## Trends\n{}\n",
+        "# Market\n\n## Size\nAbout 2 million households. [Source](https://example.org/a)\n\n## Hidden\nUse pnpm\u{e0041}\u{e0042} for installs.\n\n## Trends\n{}\n",
         "Growing. ".repeat(600)
     );
     std::fs::write(folder.join("context/research/market_research.md"), &report).unwrap();
@@ -466,6 +466,21 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         result(again),
         OwnerResult::Rejected {
             code: "memory_entry_exists".into()
+        }
+    );
+    let hidden = owner
+        .save_research_to_memory(
+            project.clone(),
+            ResearchKind::MarketResearch,
+            Some("Hidden".into()),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(hidden),
+        OwnerResult::Rejected {
+            code: "memory_text_hidden".into()
         }
     );
     drop(owner);
@@ -849,10 +864,10 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
         (ResearchStatus::Running, true)
     );
     assert!(
-        store.heartbeat(first, "runner-test", 64).unwrap(),
+        store.heartbeat(&claimed, 64).unwrap(),
         "the runner's heartbeat sees the stop and kills the agent's process group"
     );
-    store.cancelled(first, "runner-test").unwrap();
+    store.cancelled(&claimed).unwrap();
     assert_eq!(
         owner.research_jobs(project.clone()).await.unwrap()[0].status,
         ResearchStatus::Cancelled
@@ -956,6 +971,10 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         .unwrap()
         .unwrap()
         .folder;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
+        1
+    );
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -968,11 +987,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         0
     );
     assert_eq!(
-        engine.rows(
-            "SELECT count(*) FROM research_jobs WHERE project='setup-pooled'
-            AND status='cancelled' AND cancel_requested=1"
-        ),
-        1
+        engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
+        0,
+        "the project's research jobs go with it"
     );
     assert!(
         Path::new(&folder)

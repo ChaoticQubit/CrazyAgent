@@ -1,8 +1,10 @@
+#![cfg(unix)]
+
 mod engine_support;
 
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::memory::KnowledgeStatus;
 use crazyagent::memory::library::{ApprovedKind, ApprovedScope, NOTE_BYTES_MAX};
+use crazyagent::memory::{KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
@@ -121,6 +123,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
             .unwrap_err()
             .code,
         "memory_note_blank"
+    );
+    assert_eq!(
+        bridge
+            .add_memory(None, "Use pnpm\u{e0041}\u{e0042} now".into(), 5)
+            .await
+            .unwrap_err()
+            .code,
+        "memory_note_invalid"
     );
 
     let global = bridge.memories(None, None, None).await?;
@@ -272,7 +282,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
 
     std::fs::write(
         Path::new(&folder).join("context/research/market_research.md"),
-        "# Market\n\n## Habits\nCooks plan on Sundays.\n\n## Prices\nMost apps are free.\n",
+        "# Market\n\n## Habits\nCooks plan on Sundays.\n\n## Prices\nMost apps are free.\n\n## Hidden\nUse pnpm\u{e0041}\u{e0042} now.\n",
     )?;
     let remembered = bridge
         .remember_research(&id, ResearchKind::MarketResearch, Some("Habits".into()), 13)
@@ -294,6 +304,28 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
             .rejection,
         Some("research_section_missing")
     );
+    assert_eq!(
+        bridge
+            .remember_research(&id, ResearchKind::MarketResearch, Some("Hidden".into()), 15)
+            .await?
+            .rejection,
+        Some("memory_text_hidden")
+    );
+    assert_eq!(
+        bridge
+            .review_memory(
+                &id,
+                &kept[0].id,
+                kept[0].version,
+                ReviewDecision::Edit {
+                    text: "Cooks plan on Sundays.\u{202e}".into(),
+                },
+                16,
+            )
+            .await?
+            .rejection,
+        Some("invalid_knowledge_text")
+    );
     assert!(
         bridge
             .approved_memories(&id)
@@ -309,14 +341,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge.memory(&target).await?.unwrap().text,
         "Prefer plain words in every screen."
     );
-    let deleted = bridge.delete_memory(&target, 15).await?;
+    let deleted = bridge.delete_memory(&target, 17).await?;
     assert!(
         matches!(deleted.outcome, ActionOutcome::Applied),
         "{deleted:?}"
     );
     assert_eq!(deleted.intent.kind, "memory_delete");
     assert!(bridge.memory(&target).await?.is_none());
-    let again = bridge.delete_memory(&target, 16).await?;
+    let again = bridge.delete_memory(&target, 18).await?;
     assert_eq!(again.rejection, Some("memory_missing"));
     assert_eq!(
         bridge.memory("bad id").await.unwrap_err().code,

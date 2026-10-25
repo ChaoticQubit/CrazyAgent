@@ -37,3 +37,231 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     })
     .await;
 }
+
+#[cfg(target_os = "macos")]
+mod slow_remote {
+    use super::*;
+    use crate::client_controller::OwnerController;
+    use crate::credentials::{SecretString, Store, platform_store, reference};
+    use crate::engine::owner::{OwnerResponse, OwnerResult};
+    use crate::github::test_server::{Answer, Server};
+    use crate::github::{Endpoints, GitHub, namespace, use_loopback};
+    use crate::protocol::CredentialRef;
+    use std::process::Command;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    const SLOW: Duration = Duration::from_millis(2500);
+
+    struct Forget {
+        root: PathBuf,
+        store: Arc<dyn Store>,
+        item: CredentialRef,
+    }
+
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            let _ = self.store.delete(&self.item);
+            use_loopback(&self.root, None);
+        }
+    }
+
+    fn git(args: &[&str], directory: &Path) {
+        let status = crate::spawn_gate::status(
+            Command::new("/usr/bin/git")
+                .args(args)
+                .current_dir(directory)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", directory)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+        )
+        .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn bare(work: &Path, bare: &Path) {
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            work,
+        );
+        git(&["update-server-info"], bare);
+    }
+
+    fn names(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn a_github_clone_and_repo_list_slower_than_the_owner_wait_still_answer() {
+        run_case(false, |context| async move {
+            let source = tempfile::tempdir().unwrap();
+            let work = source.path().join("work");
+            std::fs::create_dir(&work).unwrap();
+            git(&["init", "--quiet", "--initial-branch=main"], &work);
+            std::fs::write(work.join("README.md"), "hello\n").unwrap();
+            git(&["add", "README.md"], &work);
+            git(&["commit", "--quiet", "-m", "first"], &work);
+            bare(&work, &source.path().join("octo-cat").join("tool.git"));
+            let broken = source.path().join("octo-cat").join("broken.git");
+            bare(&work, &broken);
+            std::fs::remove_dir_all(broken.join("objects")).unwrap();
+
+            let served = source.path().to_path_buf();
+            let (stalled, stall) = mpsc::channel();
+            let stalled = StdMutex::new(Some(stalled));
+            let server = Server::start(move |seen, _| {
+                if seen.path == "/user" {
+                    return Answer::json(200, serde_json::json!({ "login": "octo-cat" }));
+                }
+                if seen.path == "/user/repos" {
+                    std::thread::sleep(SLOW);
+                    return Answer::json(
+                        200,
+                        serde_json::json!([{
+                            "full_name": "octo-cat/tool",
+                            "private": false,
+                            "default_branch": "main",
+                            "size": 1
+                        }]),
+                    );
+                }
+                let relative = seen.path.trim_start_matches('/');
+                assert!(!relative.contains(".."));
+                if relative.starts_with("octo-cat/tool.git/objects/")
+                    && !relative.starts_with("octo-cat/tool.git/objects/info/")
+                    && let Some(sender) = stalled.lock().unwrap().take()
+                {
+                    let _ = sender.send(());
+                    std::thread::sleep(SLOW);
+                }
+                match std::fs::read(served.join(relative)) {
+                    Ok(bytes) => Answer::bytes(200, bytes),
+                    Err(_) => Answer::bytes(404, Vec::new()),
+                }
+            });
+
+            let root = context.state.clone();
+            let space = namespace(&root);
+            let store = platform_store(&space)
+                .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
+            let _forget = Forget {
+                root: root.clone(),
+                store: Arc::clone(&store),
+                item: reference(&format!("{space}.github"), "token").unwrap(),
+            };
+            let token = SecretString::new(b"gho_slowremote0123456789".to_vec()).unwrap();
+            GitHub::new(&root, space, store, Endpoints::loopback(server.port))
+                .use_token(token)
+                .unwrap();
+            use_loopback(&root, Some(server.port));
+
+            let home = tempfile::Builder::new()
+                .prefix("ca-gh-home-")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+                .unwrap();
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let home = std::fs::canonicalize(home.path()).unwrap();
+            let mut controller =
+                OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            let response = controller
+                .set_projects_home(home.to_str().unwrap().into(), 1)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &response,
+                    OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+                ),
+                "{response:?}"
+            );
+            controller.detach();
+
+            let (client, _) =
+                OwnerClient::discover(&root, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            let watched = home.clone();
+            let observe = async move {
+                tokio::task::spawn_blocking(move || {
+                    stall.recv_timeout(Duration::from_secs(20)).unwrap();
+                    names(&watched)
+                })
+                .await
+                .unwrap()
+            };
+            let (cloned, during) = tokio::join!(client.clone_repo("octo-cat/tool".into()), observe);
+            let receipt = cloned.unwrap_or_else(|error| {
+                panic!(
+                    "the clone answered {} while the projects home held {during:?}",
+                    error.0
+                )
+            });
+            let project = home.join("tool");
+            assert_eq!(receipt.full_name, "octo-cat/tool");
+            assert_eq!(receipt.path, project.to_string_lossy());
+            assert_eq!(
+                std::fs::read_to_string(project.join("README.md")).unwrap(),
+                "hello\n"
+            );
+            assert!(
+                !during.is_empty() && during.iter().all(|name| name.starts_with('.')),
+                "mid-clone the projects home held {during:?}"
+            );
+            assert_eq!(names(&home), ["tool"]);
+
+            assert_eq!(
+                client
+                    .clone_repo("octo-cat/broken".into())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_clone_failed"
+            );
+            assert_eq!(
+                names(&home),
+                ["tool"],
+                "a failed clone leaves nothing behind"
+            );
+            assert_eq!(
+                client
+                    .clone_repo("octo-cat/tool".into())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "clone_destination_exists"
+            );
+
+            let started = Instant::now();
+            let page = client
+                .github_repos(1)
+                .await
+                .unwrap_or_else(|error| panic!("the repo list answered {}", error.0));
+            assert!(started.elapsed() >= SLOW);
+            assert_eq!(page.repos.len(), 1);
+            assert_eq!(page.repos[0].full_name, "octo-cat/tool");
+            assert_eq!(page.next, None);
+            assert!(!client.github_sign_out().await.unwrap().signed_in);
+        })
+        .await;
+    }
+}

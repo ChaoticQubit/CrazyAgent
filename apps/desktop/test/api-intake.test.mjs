@@ -55,7 +55,7 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("clone_destination_exists"), "Your projects folder already has a folder with this repository's name.");
   assert.equal(api.intakeCopy("github_sign_in_expired"), "The GitHub code expired before it was entered. Start again.");
   assert.equal(api.intakeCopy("home_move_partial"), "Some projects were moved and couldn't be moved back. Check both folders.");
-  assert.equal(api.intakeCopy("pending_intent"), "Another change is still being saved. Wait for it to finish, then try again.");
+  assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again.");
 });
 
@@ -78,4 +78,10 @@ test("every refusal code the native bridge can return has a plain sentence", () 
   for (const match of bridge.matchAll(/failure\("([a-z_]+)"\)/g)) codes.add(match[1]);
   assert.ok(codes.size > 100);
   for (const code of codes) assert.notEqual(api.intakeCopy(code), "Something went wrong. Try again.", code);
+});
+
+test("an intake code named like an object built-in gets the plain fallback sentence", () => {
+  for (const code of ["constructor", "__proto__", "toString"]) {
+    assert.equal(api.intakeCopy(code), api.intakeCopy("some_unknown_code"), code);
+  }
 });

@@ -186,8 +186,13 @@ mod tests {
         );
         assert_eq!(installer.program("uv"), Some(uv.clone()));
         assert_eq!(installer.program("../uv"), None);
-        assert_eq!(installer.install_tool("graphifyy", "0.9.9"), Ok(()));
-        assert!(root.path().join("setup/uv/tools").is_dir());
+        assert_eq!(
+            installer.install_tool("graphifyy", "0.9.9"),
+            Err(InstallError("setup_install_failed"))
+        );
+        let home = root.path().join("setup/uv/tools/graphifyy");
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        assert!(!root.path().join("setup/bin/graphify").exists());
         assert_eq!(
             installer.install_tool("Graph ify", "0.9.9"),
             Err(InstallError("setup_pin_invalid"))

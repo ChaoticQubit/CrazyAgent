@@ -27,7 +27,7 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
 const FIELD_WIDTH_MAX: usize = 64;
-const KEY_CHARS_MAX: usize = 4096;
+pub(super) const KEY_CHARS_MAX: usize = 4096;
 const KEY_CHARS_MIN: usize = 20;
 const CODE_CHARS_MAX: usize = 2048;
 const URL_CHARS_MAX: usize = crate::accounts::ACCOUNT_URL_MAX;
@@ -162,7 +162,7 @@ fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
         Err(error) if error.0 == "account_local_url_required" => {
             Some("Use an http address on this Mac, such as http://127.0.0.1:11434/v1.")
         }
-        Err(_) => Some("This address is not a valid http or https URL."),
+        Err(_) => Some("Use an https address. Plain http works only on this Mac."),
     }
 }
 
@@ -1501,6 +1501,10 @@ fn plain_sign_in(code: &str) -> &'static str {
             "The code may not have reached Claude. Wait a moment, then try again."
         }
         "native_auth_method_mismatch" => "This account cannot use that sign-in method.",
+        "native_auth_recovery_required" => {
+            "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent."
+        }
+        "native_auth_interrupted" => "The sign-in did not finish. Start it again.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
         other => crate::tui::native_auth::public_problem(other),
     }

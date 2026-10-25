@@ -272,9 +272,7 @@ fn loopback(url: &url::Url) -> bool {
     }
 }
 
-/// Parses an owner-entered endpoint as a plain HTTP(S) address without credentials, query
-/// or fragment. Input: raw text. Output: the parsed URL or `account_url_invalid`.
-pub fn account_url(raw: &str) -> Result<url::Url, EngineError> {
+fn plain_url(raw: &str) -> Result<url::Url, EngineError> {
     let invalid = || failure("account_url_invalid");
     if raw.len() > ACCOUNT_URL_MAX
         || raw
@@ -296,10 +294,21 @@ pub fn account_url(raw: &str) -> Result<url::Url, EngineError> {
     Ok(url)
 }
 
+/// Parses an owner-entered endpoint as an HTTPS address, or plain HTTP only on this
+/// machine, without credentials, query or fragment, so a saved key never crosses a
+/// network in cleartext. Input: raw text. Output: the parsed URL or `account_url_invalid`.
+pub fn account_url(raw: &str) -> Result<url::Url, EngineError> {
+    let url = plain_url(raw)?;
+    if url.scheme() == "http" && !loopback(&url) {
+        return Err(failure("account_url_invalid"));
+    }
+    Ok(url)
+}
+
 /// Checks that a local-model address is plain HTTP on this machine.
 /// Input: raw text. Output: the parsed URL or `account_local_url_required`.
 pub fn local_url(raw: &str) -> Result<url::Url, EngineError> {
-    let url = account_url(raw)?;
+    let url = plain_url(raw)?;
     if url.scheme() != "http" || !loopback(&url) {
         return Err(failure("account_local_url_required"));
     }

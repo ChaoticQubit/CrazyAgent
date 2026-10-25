@@ -1,7 +1,9 @@
 use super::*;
 use crazyagent::agents::AgentView;
 use crazyagent::engine::EngineError;
+use crazyagent::engine::owner::OwnerClient;
 use crazyagent::protocol::ProjectId;
+use std::sync::Arc;
 
 const AGENT_CODES: &[&str] = &[
     "not_connected",
@@ -66,27 +68,31 @@ impl NativeBridge {
             .map_err(agent_error)
     }
 
+    fn agent_client(&self) -> Result<Arc<OwnerClient>, BridgeError> {
+        self.agent_controls()?.shared_client().map_err(agent_error)
+    }
+
     /// Stops one agent and its process group; other agents keep running. Input: agent id.
-    pub async fn stop_agent(&self, id: String) -> Result<AgentView, BridgeError> {
-        self.agent_controls()?
-            .stop_agent(id)
-            .await
-            .map_err(agent_error)
+    pub fn stop_agent(&self, id: String) -> Result<Unlocked<AgentView>, BridgeError> {
+        let client = self.agent_client()?;
+        Ok(Box::pin(async move {
+            client.stop_agent(id).await.map_err(agent_error)
+        }))
     }
 
     /// Interrupts the current turn of one agent, which keeps running. Input: agent id.
-    pub async fn interrupt_agent(&self, id: String) -> Result<(), BridgeError> {
-        self.agent_controls()?
-            .interrupt_agent(id)
-            .await
-            .map_err(agent_error)
+    pub fn interrupt_agent(&self, id: String) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.agent_client()?;
+        Ok(Box::pin(async move {
+            client.interrupt_agent(id).await.map_err(agent_error)
+        }))
     }
 
     /// Restarts one agent with its first task. Input: agent id. Output: the agent.
-    pub async fn restart_agent(&self, id: String) -> Result<AgentView, BridgeError> {
-        self.agent_controls()?
-            .restart_agent(id)
-            .await
-            .map_err(agent_error)
+    pub fn restart_agent(&self, id: String) -> Result<Unlocked<AgentView>, BridgeError> {
+        let client = self.agent_client()?;
+        Ok(Box::pin(async move {
+            client.restart_agent(id).await.map_err(agent_error)
+        }))
     }
 }

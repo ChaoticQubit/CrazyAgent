@@ -1290,7 +1290,11 @@ fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Lo
         return rows;
     }
     if preview.text.is_empty() {
-        rows.push(Row::of("Loading...", look.muted));
+        rows.push(match &preview.problem {
+            Some(problem) => Row::of(problem.clone(), look.error),
+            None if preview.loaded => Row::of("This file is empty.", look.muted),
+            None => Row::of("Loading...", look.muted),
+        });
         return rows;
     }
     let available = room.saturating_sub(if suggestion.is_some() { 6 } else { 2 });

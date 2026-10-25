@@ -5,7 +5,7 @@ use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
 use super::{Flow, Place, ProjectTab, Screen};
 use crate::engine::owner::{OwnerResponse, OwnerResult, random_id};
-use crate::harnesses::{HarnessEntry, HarnessStatus};
+use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
@@ -26,6 +26,34 @@ use std::path::PathBuf;
 
 thread_local! {
     static KEPT: RefCell<Option<Wizard>> = const { RefCell::new(None) };
+    static RUNNING: RefCell<Vec<NewProjectPage>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Carries New project creations whose page the shell closed, such as after Run in
+/// background and then Home, through the engine's reply and the pool assignment.
+/// Takes every shell arrival and the context; each page takes only its own creation reply,
+/// and one waiting assignment takes a pool edit reply.
+/// Returns nothing; a made project is announced and assigned, a refused one keeps its draft.
+pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
+    if !matches!(arrival, Arrival::Owner(_) | Arrival::PoolEdited(_)) {
+        return;
+    }
+    let mut running = RUNNING.take();
+    if running.is_empty() {
+        return;
+    }
+    for page in &mut running {
+        if page.carry(arrival, ctx) {
+            break;
+        }
+    }
+    let (settled, waiting): (Vec<_>, Vec<_>) = running.into_iter().partition(|page| {
+        page.creation
+            .as_ref()
+            .is_none_or(|creation| creation.finished)
+    });
+    RUNNING.with_borrow_mut(|running| running.extend(waiting));
+    drop(settled);
 }
 
 /// Names the New project draft kept after the owner left the wizard.
@@ -146,18 +174,18 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
 }
 
 /// Builds the Team step's harness choices from the engine's harness catalog.
-/// Takes the catalog entries in owner priority order.
-/// Returns one choice per entry with its state and, when control is limited, the engine's sentence.
+/// Takes the catalog entries in owner priority order. Returns one choice per entry with its
+/// state, CantStart when it cannot run team agents, and the limited-control sentence, if any.
 pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<HarnessChoice> {
     entries
         .iter()
         .map(|entry| HarnessChoice {
             id: entry.id.clone(),
             name: entry.name.clone(),
-            state: match entry.status {
-                HarnessStatus::Ready => HarnessState::Ready,
-                HarnessStatus::NotInstalled => HarnessState::NotInstalled,
-                HarnessStatus::Limited { .. } => HarnessState::CantStart,
+            state: match (&entry.status, &entry.team) {
+                (HarnessStatus::NotInstalled, _) => HarnessState::NotInstalled,
+                (_, TeamUse::Unavailable { .. }) => HarnessState::CantStart,
+                (_, TeamUse::Available) => HarnessState::Ready,
             },
             limited: (control_word(entry) == "Limited control").then(|| control_sentence(entry)),
         })
@@ -414,6 +442,49 @@ impl NewProjectPage {
         )))
     }
 
+    fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
+        let Some(creation) = &self.creation else {
+            return false;
+        };
+        match arrival {
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Creation(event) if event.submission == creation.submission => {
+                    self.created(event, ctx);
+                    if self.creation.is_none() {
+                        self.refused(ctx);
+                    }
+                    true
+                }
+                _ => false,
+            },
+            Arrival::PoolEdited(result) if creation.assigning => {
+                self.assigned(result, ctx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn refused(&mut self, ctx: &mut Ctx) {
+        let name = self.wizard.name.value().trim().to_owned();
+        let title = match &self.wizard.phase {
+            Phase::Failed { title, .. } => title.clone(),
+            _ => "Could not create the project.".to_owned(),
+        };
+        if KEPT.with_borrow(Option::is_none) {
+            ctx.say(Message::error(
+                &title,
+                &format!("{name} is kept as a draft. Open New project to fix it."),
+            ));
+        } else {
+            self.wizard = Wizard::new(Vec::new(), None);
+            ctx.say(Message::error(
+                &title,
+                &format!("Your newer draft is kept. Create {name} again in New project."),
+            ));
+        }
+    }
+
     fn set_pools(&mut self, pools: &[PoolSummary]) {
         let first = self.wizard.pools.is_empty() && self.wizard.pool.is_none();
         self.wizard.set_pools(pool_choices_from(pools));
@@ -425,6 +496,28 @@ impl NewProjectPage {
 
 impl Drop for NewProjectPage {
     fn drop(&mut self) {
+        if self
+            .creation
+            .as_ref()
+            .is_some_and(|creation| !creation.finished)
+        {
+            let mut page = Some(Self {
+                wizard: std::mem::replace(&mut self.wizard, Wizard::new(Vec::new(), None)),
+                view: View::default(),
+                creation: self.creation.take(),
+                checking: false,
+                asked: false,
+            });
+            let _ = RUNNING.try_with(|running| {
+                if let Some(page) = page.take() {
+                    running.borrow_mut().push(page);
+                }
+            });
+            if let Some(creation) = page.as_mut().and_then(|page| page.creation.as_mut()) {
+                creation.finished = true;
+            }
+            return;
+        }
         if !matches!(self.wizard.phase, Phase::Creating { .. }) && self.draft() {
             let wizard = std::mem::replace(&mut self.wizard, Wizard::new(Vec::new(), None));
             KEPT.set(Some(wizard));

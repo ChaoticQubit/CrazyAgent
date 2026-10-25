@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 fn network_installs_pinned_uv_and_graphify_into_the_app_data_folder() {
     let root = tempfile::Builder::new()
         .prefix("ca-setup-net-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let installer = MacInstaller::with_paths(root.path(), vec![], vec![]);
@@ -38,7 +38,7 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
 
     let root = tempfile::Builder::new()
         .prefix("ca-setup-run-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");

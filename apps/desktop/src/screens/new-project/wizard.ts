@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
+import type { HarnessSlot, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -57,8 +57,16 @@ export interface ProjectDraft {
   research: ResearchKind[];
   pool: string | null;
   poolChosen: boolean;
-  team: TeamPlan | null;
+  team: TeamDraft | null;
 }
+
+/** One agent row being edited; `tools_wanted` keeps the owner's choice while the harness forces
+ * tools on. */
+export type SlotDraft = HarnessSlot & { tools_wanted?: boolean };
+
+/** A team plan being edited: while a harness can't turn tools off, the owner's own choice is
+ * kept beside the forced value so switching back restores it. `wireTeam` drops it before sending. */
+export type TeamDraft = Omit<TeamPlan, "sub_harnesses"> & { master_tools_wanted?: boolean; sub_harnesses: SlotDraft[] };
 
 /** Starts a New Project draft with the design's default research toggles.
  * Input: none. Output: an empty draft. */
@@ -169,6 +177,31 @@ function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | und
 const choosable = (harness: HarnessEntry | undefined) => harness !== undefined && harness.status.kind !== "not_installed";
 const toolsFixed = (harness: HarnessEntry | undefined) => harness?.tools.kind === "limited";
 
+function toolsFor(wanted: boolean, harness: HarnessEntry | undefined): { tools: boolean; wanted?: boolean } {
+  return !wanted && toolsFixed(harness) ? { tools: true, wanted } : { tools: wanted };
+}
+
+function withMaster(team: TeamDraft, master: string, wanted: boolean, harnesses: HarnessEntry[] | null): TeamDraft {
+  const tools = toolsFor(wanted, entry(harnesses, master));
+  const { master_tools_wanted: _kept, ...rest } = team;
+  return { ...rest, master, master_tools: tools.tools, ...(tools.wanted === undefined ? {} : { master_tools_wanted: tools.wanted }) };
+}
+
+function withSlot(slot: SlotDraft, harness: string, wanted: boolean, harnesses: HarnessEntry[] | null): SlotDraft {
+  const tools = toolsFor(wanted, entry(harnesses, harness));
+  return { harness, agents: slot.agents, tools: tools.tools, ...(tools.wanted === undefined ? {} : { tools_wanted: tools.wanted }) };
+}
+
+/** The team plan the engine takes, without the owner choices kept while tools are forced on.
+ * Input: the edited team. Output: exactly the engine's team fields. */
+export function wireTeam(team: TeamDraft): TeamPlan {
+  return {
+    master: team.master, master_tools: team.master_tools,
+    sub_harnesses: team.sub_harnesses.map((slot) => ({ harness: slot.harness, agents: slot.agents, tools: slot.tools })),
+    min_agents: team.min_agents, max_agents: team.max_agents,
+  };
+}
+
 /** Applies the harness catalog to the engine's smart team defaults: a harness that
  * is not installed is replaced by the first ready one, and fixed tools stay on.
  * Inputs: the engine default and the catalog, or null while it is not ready. Output: the team. */
@@ -191,35 +224,36 @@ export function defaultTeam(engine: TeamPlan, harnesses: HarnessEntry[] | null):
 
 /** Turns tools on or off for the master or one agent row, keeping fixed tools on.
  * Inputs: the team, "master" or a row index, the wanted value and the catalog. Output: the team. */
-export function setTools(team: TeamPlan, row: "master" | number, tools: boolean, harnesses: HarnessEntry[] | null): TeamPlan {
-  if (row === "master") return { ...team, master_tools: tools || toolsFixed(entry(harnesses, team.master)) };
+export function setTools(team: TeamDraft, row: "master" | number, tools: boolean, harnesses: HarnessEntry[] | null): TeamDraft {
+  if (row === "master") return withMaster(team, team.master, tools, harnesses);
+  return { ...team, sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? withSlot(slot, slot.harness, tools, harnesses) : slot) };
+}
+
+const withRoom = (team: TeamDraft): TeamDraft => ({ ...team, max_agents: Math.min(TEAM_AGENTS_MAX, Math.max(team.max_agents, totalAgents(team))) });
+
+/** Picks the master harness; tools follow the owner's choice unless this harness can't turn
+ * them off. Inputs: the team, the harness id and the catalog. Output: the team. */
+export function setMaster(team: TeamDraft, harness: string, harnesses: HarnessEntry[] | null): TeamDraft {
+  return withMaster(team, harness, team.master_tools_wanted ?? team.master_tools, harnesses);
+}
+
+/** Picks the harness of one agent row; tools follow the owner's choice unless this harness can't
+ * turn them off. Inputs: the team, the row, the harness id and the catalog. Output: the team. */
+export function setRowHarness(team: TeamDraft, row: number, harness: string, harnesses: HarnessEntry[] | null): TeamDraft {
   return {
     ...team,
-    sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? { ...slot, tools: tools || toolsFixed(entry(harnesses, slot.harness)) } : slot),
+    sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? withSlot(slot, harness, slot.tools_wanted ?? slot.tools, harnesses) : slot),
   };
 }
 
-const withRoom = (team: TeamPlan): TeamPlan => ({ ...team, max_agents: Math.min(TEAM_AGENTS_MAX, Math.max(team.max_agents, totalAgents(team))) });
-
-export function setMaster(team: TeamPlan, harness: string, harnesses: HarnessEntry[] | null): TeamPlan {
-  return { ...team, master: harness, master_tools: team.master_tools || toolsFixed(entry(harnesses, harness)) };
-}
-
-export function setRowHarness(team: TeamPlan, row: number, harness: string, harnesses: HarnessEntry[] | null): TeamPlan {
-  return {
-    ...team,
-    sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? { ...slot, harness, tools: slot.tools || toolsFixed(entry(harnesses, harness)) } : slot),
-  };
-}
-
-export function setAgents(team: TeamPlan, row: number, agents: number): TeamPlan {
+export function setAgents(team: TeamDraft, row: number, agents: number): TeamDraft {
   const count = Math.min(HARNESS_AGENTS_MAX, Math.max(1, Math.round(Number.isFinite(agents) ? agents : 1)));
   return withRoom({ ...team, sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? { ...slot, agents: count } : slot) });
 }
 
 /** Adds an agent row on the first ready harness the team does not use yet.
  * Inputs: the team and the catalog. Output: the team with one more row of one agent. */
-export function addHarnessRow(team: TeamPlan, harnesses: HarnessEntry[] | null): TeamPlan {
+export function addHarnessRow(team: TeamDraft, harnesses: HarnessEntry[] | null): TeamDraft {
   if (team.sub_harnesses.length >= SUB_HARNESSES_MAX) return team;
   const used = new Set(team.sub_harnesses.map((slot) => slot.harness));
   const ready = (harnesses ?? []).filter((harness) => harness.status.kind === "ready");
@@ -227,7 +261,7 @@ export function addHarnessRow(team: TeamPlan, harnesses: HarnessEntry[] | null):
   return withRoom({ ...team, sub_harnesses: [...team.sub_harnesses, { harness, agents: 1, tools: true }] });
 }
 
-export function removeHarnessRow(team: TeamPlan, row: number): TeamPlan {
+export function removeHarnessRow(team: TeamDraft, row: number): TeamDraft {
   return { ...team, sub_harnesses: team.sub_harnesses.filter((_, index) => index !== row) };
 }
 
@@ -253,16 +287,16 @@ export function teamNotes(team: TeamPlan, harnesses: HarnessEntry[] | null): str
 const GROUPS = { ready: "Ready", limited: "Limited control", not_installed: "Not installed" } as const;
 
 /** Orders every catalog harness for a picker: Ready, Limited control, Not installed.
- * Input: the catalog. Output: options; a harness that is not installed can't be picked. */
+ * Input: the catalog. Output: options; a harness that is not installed or can't run team
+ * agents can't be picked. */
 export function harnessChoices(harnesses: HarnessEntry[]): { id: string; label: string; group: string; disabled: boolean }[] {
   return (["ready", "limited", "not_installed"] as const).flatMap((kind) => harnesses
     .filter((harness) => harness.status.kind === kind)
-    .map((harness) => ({
-      id: harness.id,
-      label: kind === "not_installed" ? `${harness.name} - Not installed` : harness.name,
-      group: GROUPS[kind],
-      disabled: kind === "not_installed",
-    })));
+    .map((harness) => {
+      const blocked = harness.team.kind === "unavailable";
+      const label = kind === "not_installed" ? `${harness.name} - Not installed` : blocked ? `${harness.name} - Can't run team agents` : harness.name;
+      return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || blocked };
+    }));
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -277,6 +311,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
+    if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
     return undefined;
   };
   errors.master = harnessProblem(team.master, "the master");
@@ -325,7 +360,7 @@ export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: P
       platforms: [...draft.platforms],
       research: [...draft.research],
       pool: draft.pool,
-      team: draft.team,
+      team: draft.team && wireTeam(draft.team),
       documents: draft.documents.map((document) => document.path),
     },
   };
@@ -403,13 +438,16 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
   return best?.pool.id ?? null;
 }
 
-/** Tells whether a pool holds an account a harness can use.
+/** Tells whether a pool holds an account a harness can use. A connection names its harness by
+ * the catalog id or by one of the entry's aliases from the engine, such as "claude" for Claude Code.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
+  const names = [harness.id, ...harness.aliases];
   return members.some((member) => {
-    if (member.auth.method === "native_managed") return member.harness === harness.id && harness.account_kinds.includes("subscription");
-    if (member.auth.method === "api_key" || member.auth.method === "oauth") return member.harness === harness.id || harness.account_kinds.includes("api_key");
-    return member.harness === harness.id || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
+    const same = names.includes(member.harness);
+    if (member.auth.method === "native_managed") return same && harness.account_kinds.includes("subscription");
+    if (member.auth.method === "api_key" || member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
+    return same || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
   });
 }
 

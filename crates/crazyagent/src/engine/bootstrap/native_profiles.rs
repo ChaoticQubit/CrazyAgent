@@ -270,6 +270,22 @@ pub(crate) enum NativeProfileUsePurpose {
     Execution,
 }
 
+/// The sign-in lock of one native profile, taken while a stale sign-in is settled so no
+/// custodian can start on that profile meanwhile. Holds no file when the profile does not
+/// exist. Dropping it unlocks the open file description.
+pub(crate) struct NativeProfileRelease(Option<File>);
+
+impl Drop for NativeProfileRelease {
+    /// Releases the profile lock on its open file description when the settlement ends,
+    /// so a process that shares it can never keep the profile busy afterwards.
+    /// Input: the release being dropped. Output: none.
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = flock(file, FlockOperation::Unlock);
+        }
+    }
+}
+
 pub(crate) struct NativeProfileUse {
     custody: NativeProfileCustody,
     root: Directory,
@@ -533,6 +549,57 @@ impl NativeProfileCustody {
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
         remember_profile(&mut self.profiles, key, hash);
         Ok(guard)
+    }
+
+    /// Takes the sign-in lock of one native profile when no process holds it, so a stale
+    /// sign-in can be settled while no custodian can start on that profile.
+    /// Inputs: this engine's host and the profile key. Output: the held lock, an empty
+    /// one when the profile does not exist, or `None` while another process holds it.
+    pub(crate) fn hold_released_profile(
+        &self,
+        host: &HostStamp,
+        key: &str,
+    ) -> Result<Option<NativeProfileRelease>, EngineError> {
+        if key.len() != 64
+            || !key
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(failure("native_profile_identity_invalid"));
+        }
+        self.verify()?;
+        let absent = |error: EngineError| {
+            if error.0 == "native_profile_incomplete" {
+                Ok(Some(NativeProfileRelease(None)))
+            } else {
+                Err(error)
+            }
+        };
+        let root = match self.retained_root(host) {
+            Ok((root, _, _)) => root,
+            Err(error) => return absent(error),
+        };
+        let profile = match Directory::open(&root.file, OsStr::new(key)) {
+            Ok(profile) => profile,
+            Err(error) => return absent(error),
+        };
+        let manifest = match Manifest::open(&profile.file, false) {
+            Ok(manifest) => manifest,
+            Err(error) => return absent(error),
+        };
+        match flock(&manifest.file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(error)
+                if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(failure("native_profile_lock_unavailable")),
+        }
+        let release = NativeProfileRelease(Some(manifest.file));
+        profile.verify(&root.file, OsStr::new(key))?;
+        self.verify()?;
+        Ok(Some(release))
     }
 
     fn root(

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { nextGeneration, plainError, signInRecord } from "../../api";
+import { nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
 import { cancelNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode } from "../../engine-client";
 import {
   nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
@@ -39,6 +39,52 @@ export function signInFailure(code: string, provider: SubscriptionProvider): { t
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
   const known = plainError(code);
   return { text: known === plainError("") ? "Sign-in didn't finish. Try again." : known, hint: "retry" };
+}
+
+const STUCK = new Set(["native_auth_operation_missing", "native_profile_source_conflict", "native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+
+/** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
+ * sentence, or undefined when the sign-in had already stopped. */
+export function cancelError(code: string): string | undefined {
+  if (code === "native_auth_not_active") return undefined;
+  if (STUCK.has(code)) return "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.";
+  return plainError(code);
+}
+
+const SETTLE_TRIES = 20;
+const SETTLE_MS = 500;
+
+/** Cancels the running sign-in of one account, outside any open sign-in panel: reads its
+ * sign-in record, asks the engine to cancel that operation and waits up to 10 s for it to
+ * stop, since the app refuses other changes until it has. Input: the account id. Output: ok
+ * once stopped or already stopped, otherwise the refusal in plain words. */
+export async function cancelSignIn(accountId: string): Promise<Result<void>> {
+  const record = await signInRecord(accountId);
+  if (record.kind !== "ok") return record;
+  try {
+    let view = await cancelNativeAuth(record.value.ticket);
+    for (let tries = 0; ACTIVE_PHASES.includes(view.phase); tries += 1) {
+      if (tries === SETTLE_TRIES) return { kind: "error", code: "native_auth_cancel_pending", message: plainError("native_auth_cancel_pending") };
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      const again = await signInRecord(accountId);
+      if (again.kind !== "ok") return again;
+      view = await readNativeAuth(again.value.ticket);
+    }
+    return { kind: "ok", value: undefined };
+  } catch (failure) {
+    const code = nativeAuthFailureCode(failure);
+    const message = cancelError(code);
+    return message === undefined ? { kind: "ok", value: undefined } : { kind: "error", code, message };
+  }
+}
+
+/** Removes an account Add account created but never signed in, after cancelling its sign-in.
+ * Inputs: the account and the session's result recorder. Output: the line to show. */
+export async function discardAccount(account: AccountView, note: <T>(result: Result<T>) => Result<T>): Promise<string> {
+  await cancelSignIn(account.id);
+  const removed = note(await removeAccount(account.id));
+  return removed.kind === "ok" ? `${account.name} wasn't signed in, so it was removed.`
+    : `Couldn't remove the unfinished account ${account.name}. It stays in your list as Not signed in. Delete it there.`;
 }
 
 function capitalized(text: string): string {
@@ -84,8 +130,9 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
       claudeInput: nativeClaudeInputAllowed(state, false), codeSent: state.claude_input?.status === "accepted" };
     case "authenticated_observed": return operation.action.kind === "logout" ? { kind: "start" }
       : { kind: "signed_in", line: signedInLine(state.presentation?.account) };
-    case "uncertain": return { kind: "failed", ...signInFailure(CHECK[0]!, provider) };
-    default: return { kind: "failed", ...signInFailure(operation.code ?? (operation.phase === "unavailable" ? "native_auth_host_unavailable" : "native_auth_authentication_failed"), provider) };
+    case "uncertain": return { kind: "failed", text: plainError("native_auth_recovery_required"), hint: "check" };
+    default: return { kind: "failed", ...signInFailure(operation.code ?? (operation.phase === "unavailable" ? "native_auth_host_unavailable"
+      : operation.phase === "cancelled" ? "native_auth_cancelled" : "native_auth_authentication_failed"), provider) };
   }
 }
 

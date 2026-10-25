@@ -6,7 +6,8 @@ import {
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
-import { SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { readyAdded } from "./pools";
+import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 export const TILE_LINES: Record<AccountProvider, string> = {
   chatgpt: "Use your ChatGPT plan or an OpenAI key with Codex.",
@@ -106,7 +107,9 @@ function stepTitle(step: Step): string {
     : step.kind === "done" ? "Account added" : step.option.title;
 }
 
-function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (provider: ProviderEntry) => void }) {
+/** Step 1 of Add account: one tile per catalog provider with its name and plain line.
+ * Inputs: the catalog and the pick handler. Output: the tiles, with no secret entry. */
+export function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (provider: ProviderEntry) => void }) {
   return <div className="tiles">
     {catalog.map((provider) => <button type="button" key={provider.provider} className="tile" onClick={() => onPick(provider)}>
       <ProviderMark provider={provider.provider} name={provider.name} large />
@@ -116,7 +119,9 @@ function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: 
   </div>;
 }
 
-function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (option: MethodOption) => void }) {
+/** Step 2 of Add account: the provider's sign-in methods from `methodOptions`.
+ * Inputs: the provider and the pick handler. Output: one button per method. */
+export function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (option: MethodOption) => void }) {
   return <div className="methods">
     {methodOptions(provider).map((option) => <button type="button" key={option.key} className="method" onClick={() => onPick(option)}>
       <Icon name={option.native ? "log-in" : option.entry.method === "url" ? "link" : "key-round"} />
@@ -129,7 +134,7 @@ function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (op
   </div>;
 }
 
-function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, onRunning }: {
+function SubscriptionForm({ provider, option, name, onName, onAdded, onCreated, onUseKey, onRunning }: {
   provider: ProviderEntry;
   option: MethodOption;
   name: string;
@@ -137,6 +142,7 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
   onAdded: (account: AccountView, line: string) => void;
   onUseKey: () => void;
   onRunning: (stop: (() => void) | undefined) => void;
+  onCreated: (account: AccountView) => void;
 }) {
   const session = useAppSession();
   const [account, setAccount] = useState<AccountView>();
@@ -174,6 +180,7 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
     if (added.kind !== "ok") return setError(added.kind === "not_ready" ? "Adding accounts isn't ready yet in this build." : added.message);
     setError(undefined);
     setAccount(added.value);
+    onCreated(added.value);
     setQueued(method);
   };
 
@@ -185,7 +192,10 @@ function SubscriptionForm({ provider, option, name, onName, onAdded, onUseKey, o
   </div>;
 }
 
-function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
+/** The key or URL form: name, base URL, masked key and model as the method entry asks.
+ * The key stays in an uncontrolled field and is sent once. Inputs: the provider, method,
+ * name and handlers. Output: the form; saving calls the engine through the app session. */
+export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
   provider: ProviderEntry;
   option: MethodOption;
   name: string;
@@ -263,7 +273,7 @@ function AddToPool({ account }: { account: AccountView }) {
   const session = useAppSession();
   const [pools] = useLoad(poolSummaries);
   const [chosen, setChosen] = useState("");
-  const [state, setState] = useState<{ kind: "idle" | "saving" | "added" } | { kind: "error"; message: string }>({ kind: "idle" });
+  const [state, setState] = useState<{ kind: "idle" | "saving" } | { kind: "added"; note?: string } | { kind: "error"; message: string }>({ kind: "idle" });
   if (pools.kind === "loading") return <Skeleton shape="line" />;
   if (pools.kind === "not_ready") return <NotReady what="Pools" compact />;
   if (pools.kind === "error") return <Notice tone="danger">Couldn't load pools.</Notice>;
@@ -271,14 +281,20 @@ function AddToPool({ account }: { account: AccountView }) {
   const options = pools.value.map((pool) => ({ value: pool.id, label: pool.name,
     disabledReason: pool.members.length >= POOL_MEMBER_MAX ? "full, 15 of 15" : pool.members.some((member) => member.id === account.id) ? "already in it" : undefined }));
   const target = pools.value.find((pool) => pool.id === chosen);
-  if (state.kind === "added") return <p className="live" role="status"><Icon name="check" />Added to {target?.name}.</p>;
+  if (state.kind === "added") return <div className="stack-small">
+    <p className="live" role="status"><Icon name="check" />Added to {target?.name}.</p>
+    {state.note && <Notice tone="warn" alert>{state.note}</Notice>}
+  </div>;
   return <div className="row">
     <Select id="add-to-pool" label="Pool" value={chosen} onValue={setChosen} options={[{ value: "", label: "Choose a pool" }, ...options]} />
     <Button disabled={!target} pending={state.kind === "saving"} pendingLabel="Adding..." onClick={async () => {
       if (!target) return;
       setState({ kind: "saving" });
-      const saved = session.noteResult(await savePool(target.id, target.name, [...target.members.map((member) => member.id), account.id]));
-      setState(saved.kind === "ok" ? { kind: "added" } : { kind: "error", message: saved.kind === "not_ready" ? "Not ready yet." : saved.message });
+      const listed = { name: target.name, members: target.members.map((member) => member.id) };
+      const members = [...listed.members, account.id];
+      const saved = session.noteResult(await savePool(target.id, target.name, members, listed));
+      if (saved.kind !== "ok") return setState({ kind: "error", message: saved.kind === "not_ready" ? "Not ready yet." : saved.message });
+      setState({ kind: "added", note: await readyAdded(listed.members, members, [account], session.noteResult) });
     }}>Add to pool</Button>
     {state.kind === "error" && <Notice tone="danger" alert>{state.message}</Notice>}
   </div>;
@@ -293,8 +309,10 @@ function Done({ account, line }: { account: AccountView; line: string }) {
 }
 
 /** The Add account dialog: provider tiles, sign-in method, the method's form or managed
- * sign-in, then Account added. Inputs: open flag, the current accounts (for default names),
- * close handler and a handler called after each added account. */
+ * sign-in, then Account added. A subscription account the owner leaves before it is signed in
+ * (close, Back, Stop signing in, a key instead) has its sign-in cancelled and is removed.
+ * Inputs: open flag, the current accounts (for default names), close handler and a handler
+ * called after each added or removed account. */
 export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   open: boolean;
   accounts: AccountView[];
@@ -305,10 +323,19 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   const [step, setStep] = useState<Step>({ kind: "provider" });
   const [name, setName] = useState("");
   const [confirmStop, setConfirmStop] = useState(false);
+  const session = useAppSession();
   const stop = useRef<(() => void) | undefined>(undefined);
+  const unfinished = useRef<AccountView | undefined>(undefined);
   const onRunning = useCallback((value: (() => void) | undefined) => { stop.current = value; }, []);
 
-  const reset = () => { setStep({ kind: "provider" }); setName(""); };
+  const leave = () => {
+    const left = unfinished.current;
+    unfinished.current = undefined;
+    stop.current = undefined;
+    if (!left) return;
+    void discardAccount(left, session.noteResult).then((line) => { session.showToast(line); onAdded(); });
+  };
+  const reset = () => { leave(); setStep({ kind: "provider" }); setName(""); };
   const close = () => {
     if (stop.current) return setConfirmStop(true);
     reset();
@@ -324,11 +351,12 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
     else setStep({ kind: "method", provider });
   };
   const back = step.kind === "method" ? () => setStep({ kind: "provider" })
-    : step.kind === "form" ? () => methodOptions(step.provider).length > 1 ? setStep({ kind: "method", provider: step.provider }) : setStep({ kind: "provider" })
+    : step.kind === "form" ? () => { leave(); if (methodOptions(step.provider).length > 1) setStep({ kind: "method", provider: step.provider }); else setStep({ kind: "provider" }); }
     : undefined;
   const added = (account: AccountView, line: string) => {
     if (step.kind !== "form") return;
     stop.current = undefined;
+    unfinished.current = undefined;
     setStep({ kind: "done", provider: step.provider, option: step.option, account, line });
     onAdded();
   };
@@ -354,7 +382,8 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   } else if (step.kind === "form") {
     body = step.option.native
       ? <SubscriptionForm key={step.option.key} provider={step.provider} option={step.option} name={name} onName={setName}
-        onAdded={added} onRunning={onRunning} onUseKey={() => {
+        onAdded={added} onRunning={onRunning} onCreated={(account) => { unfinished.current = account; }} onUseKey={() => {
+          leave();
           const keyOption = methodOptions(step.provider).find((option) => option.entry.method === "api_key");
           if (keyOption) pickMethod(step.provider, keyOption);
         }} />
@@ -370,8 +399,8 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
       {body}
     </Dialog>
     <ConfirmDialog open={confirmStop} title="Stop signing in?" confirmLabel="Stop signing in" cancelLabel="Keep signing in"
-      onCancel={() => setConfirmStop(false)} onConfirm={() => { setConfirmStop(false); stop.current?.(); stop.current = undefined; reset(); onClose(); }}>
-      The account stays in your list as Not signed in. You can sign in from it later.
+      onCancel={() => setConfirmStop(false)} onConfirm={() => { setConfirmStop(false); reset(); onClose(); }}>
+      The sign-in is cancelled and the account you started is removed, since it isn't signed in.
     </ConfirmDialog>
   </>;
 }

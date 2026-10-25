@@ -8,7 +8,7 @@ const PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
 impl OwnerController {
     fn agents_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
@@ -68,7 +68,7 @@ mod tests {
     async fn agent_controls_reach_the_engine_and_touch_only_one_agent() {
         let root = tempfile::Builder::new()
             .prefix("ca-cagent-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let home = root.path().canonicalize().unwrap();

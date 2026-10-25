@@ -108,10 +108,10 @@ test("links render as safe anchors and the sources list holds each link once", (
 });
 
 test("control and bidi characters are shown as visible escapes", () => {
-  const markup = render("name‮txt.exe and \u0007bell");
+  const markup = render("name\u202etxt.exe and \u0007bell");
   assert.match(markup, /\\u202e/);
   assert.match(markup, /\\u0007/);
-  assert.doesNotMatch(markup, /[‮\u0007]/u);
+  assert.doesNotMatch(markup, /[\u202e\u0007]/u);
 });
 
 test("heading sections list every heading in order for saving one section", () => {
@@ -134,4 +134,62 @@ test("huge or deeply nested input stays bounded", () => {
 test("the renderer never injects raw HTML", () => {
   const source = readFileSync(new URL("../src/screens/project/markdown.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|innerHTML/);
+});
+
+test("heading and list lines that never match parse in linear time", () => {
+  const timed = (source) => {
+    const started = performance.now();
+    const blocks = md.parseMarkdown(source);
+    return { blocks, ms: performance.now() - started };
+  };
+  for (const source of ["#" + " ".repeat(16000) + "\u2028", "-" + " ".repeat(200000) + "\u2028", "1." + "\t".repeat(200000) + "\u2029"]) {
+    const { blocks, ms } = timed(source);
+    assert.ok(ms < 1000, `${JSON.stringify(source.slice(0, 3))} took ${ms} ms`);
+    assert.equal(blocks.length, 1);
+  }
+});
+
+test("a full-size line of openers that never close parses inline in linear time", () => {
+  const size = md.MARKDOWN_CHARS_MAX;
+  const fill = (unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  let ticks = "";
+  for (let run = 1500; ticks.length < size - run - 1 && run > 0; run -= 1) ticks += "`".repeat(run) + " ";
+  const sources = [fill("*a "), fill("**a "), fill("_a "), fill("__a "), fill("***a "), "[".repeat(size - 1) + "]", "<".repeat(size - 1) + ">", ticks,
+    "[".repeat(size - 3000) + "](" + "x".repeat(2990), fill("http://a" + ")".repeat(2040) + " ")];
+  for (const source of sources) {
+    assert.ok(source.length <= size);
+    const started = performance.now();
+    const blocks = md.parseMarkdown(source);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1500, `${JSON.stringify(source.slice(0, 5))} took ${Math.round(ms)} ms`);
+    assert.equal(blocks.length, 1);
+  }
+});
+
+test("emphasis keeps its opener and closer rules", () => {
+  const inline = (source) => md.parseMarkdown(source)[0].children;
+  assert.deepEqual(inline("*a* b"), [{ kind: "em", children: [{ kind: "text", text: "a" }] }, { kind: "text", text: " b" }]);
+  assert.deepEqual(inline("*a *b*"), [{ kind: "em", children: [{ kind: "text", text: "a *b" }] }]);
+  assert.deepEqual(inline("*a **b* c"), [{ kind: "em", children: [{ kind: "text", text: "a **b" }] }, { kind: "text", text: " c" }]);
+  assert.deepEqual(inline("**a ** b**"), [{ kind: "strong", children: [{ kind: "text", text: "a ** b" }] }]);
+  assert.deepEqual(inline("__a__b__ c__"), [{ kind: "strong", children: [{ kind: "text", text: "a__b" }] }, { kind: "text", text: " c__" }]);
+  assert.deepEqual(inline("_a_b_ c"), [{ kind: "em", children: [{ kind: "text", text: "a_b" }] }, { kind: "text", text: " c" }]);
+  assert.deepEqual(inline("*a b"), [{ kind: "text", text: "*a b" }]);
+  assert.deepEqual(inline("[[x](https://a.example)"), [{ kind: "link", href: "https://a.example", children: [{ kind: "text", text: "[x" }] }]);
+  assert.deepEqual(inline("``a` b``"), [{ kind: "code", text: "a` b" }]);
+  assert.deepEqual(inline("see https://a.example/x_(y)). next"), [{ kind: "text", text: "see " }, { kind: "link", href: "https://a.example/x_(y)", children: [{ kind: "text", text: "https://a.example/x_(y)" }] }, { kind: "text", text: "). next" }]);
+});
+
+test("headings keep their closing-hash and empty-text rules", () => {
+  assert.deepEqual(md.parseMarkdown("# Title ##")[0].children, [{ kind: "text", text: "Title" }]);
+  assert.deepEqual(md.parseMarkdown("## a ## ##  ")[0].children, [{ kind: "text", text: "a ##" }]);
+  assert.deepEqual(md.parseMarkdown("# #")[0].children, [{ kind: "text", text: "#" }]);
+  assert.deepEqual(md.parseMarkdown("#")[0].children, []);
+  assert.deepEqual(md.parseMarkdown("###   ")[0].children, []);
+  assert.deepEqual(md.parseMarkdown("   #\tTabbed\t#\t")[0].children, [{ kind: "text", text: "Tabbed" }]);
+  assert.equal(md.parseMarkdown("####### seven")[0].kind, "paragraph");
+  assert.equal(md.parseMarkdown("#nospace")[0].kind, "paragraph");
+  assert.equal(md.parseMarkdown("    # four spaces")[0].kind, "paragraph");
+  assert.deepEqual(md.parseMarkdown("-   spaced item\n+ next")[0].items, [[{ kind: "text", text: "spaced item" }], [{ kind: "text", text: "next" }]]);
+  assert.equal(md.parseMarkdown("-nospace")[0].kind, "paragraph");
 });

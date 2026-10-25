@@ -111,7 +111,7 @@ impl HostCase {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-host-storage-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");
@@ -125,7 +125,7 @@ impl HostCase {
             mut connection,
             lock,
             custody,
-        } = open_actor_database(&path, false).unwrap();
+        } = open_actor_database(&path, false, None).unwrap();
         let started = owner_start(&mut connection).unwrap();
         assert!(connection.is_autocommit());
         assert!(custody.is_ok());
@@ -322,7 +322,7 @@ impl HostCase {
             mut connection,
             lock,
             custody,
-        } = open_actor_database(&path, false).unwrap();
+        } = open_actor_database(&path, false, None).unwrap();
         let started = owner_start(&mut connection).unwrap();
         assert_ne!(started.host.engine_epoch, old_epoch);
         assert!(connection.is_autocommit());
@@ -814,7 +814,7 @@ fn custodian_uncertainty_keeps_fence_after_the_real_lock_is_free() {
 }
 
 #[test]
-fn database_reopen_preserves_fence_and_marks_unfinished_work_uncertain() {
+fn database_reopen_keeps_old_work_fenced_while_held_and_the_next_begin_recovers_it() {
     let mut case = HostCase::new();
     let (fact, work) = fresh_work(
         case.begin(case.start("restart-fence", "connection-a"))
@@ -829,13 +829,31 @@ fn database_reopen_preserves_fence_and_marks_unfinished_work_uncertain() {
     assert_eq!(case.snapshot().1, before.1);
     let probe = lock_probe(&case);
     flock(&probe, FlockOperation::NonBlockingLockExclusive).unwrap();
-    drop(probe);
-    let before = case.snapshot();
+    let held = case.snapshot();
     assert_code(
-        case.begin(case.start("blocked-after-reopen", "connection-a")),
-        "native_auth_recovery_required",
+        case.begin(case.start("held-elsewhere", "connection-z")),
+        "native_auth_host_busy",
     );
-    assert_eq!(case.snapshot(), before);
+    assert_eq!(case.snapshot(), held);
+    drop(probe);
+    let (elsewhere, work) = fresh_work(
+        case.begin(case.start("released-elsewhere", "connection-z"))
+            .unwrap(),
+    );
+    let recovered = case.read(&fact).unwrap().fact;
+    assert_eq!(
+        (recovered.phase, recovered.code.as_deref()),
+        (NativeAuthPhase::Failed, Some("native_auth_interrupted"))
+    );
+    assert_eq!(recovered.generation, fact.generation);
+    let fences = case.snapshot().1;
+    assert_eq!(fences.len(), 1);
+    assert_eq!(fences[0].operation_id, elsewhere.operation_id.as_str());
+    case.finish(work).unwrap();
+    fresh_work(
+        case.begin(case.start("released-here", "connection-a"))
+            .unwrap(),
+    );
 }
 
 #[test]

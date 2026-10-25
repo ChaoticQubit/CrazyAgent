@@ -1,6 +1,6 @@
 import { addMemory, call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
 import { Button, ConfirmDialog, Icon, Segmented, StatusBadge } from "../../ui";
@@ -10,7 +10,7 @@ import { useLinkOpener } from "./links";
 import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
 import { ProjectMemory } from "./memory";
-import { deletable, deleteQuestion, fileIcon } from "./research";
+import { deletable, deleteQuestion, fileIcon, retryPath } from "./research";
 import { NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -35,10 +35,11 @@ export function sectionText(report: string, heading: string | null): string | nu
   return lines.slice(start, end).join("\n").trim();
 }
 
-/** Cleans text the owner selected in the reader before it is saved: line endings become "\n"
- * and outer space goes. Input: the raw selection. Output: the text, or null when nothing is left. */
+/** Cleans text the owner selected in the reader before it is saved: line endings become "\n",
+ * outer space goes and hidden or direction-changing characters become visible escapes, so the
+ * note holds what the owner saw. Input: the raw selection. Output: the text, or null when empty. */
 export function selectionText(raw: string): string | null {
-  const text = raw.replace(/\r\n?/gu, "\n").trim();
+  const text = displayText(raw.replace(/\r\n?/gu, "\n").trim());
   return text === "" ? null : text;
 }
 
@@ -75,6 +76,21 @@ function Group({ title, items, selected, onSelect, running }: {
     : <li><span className="pj-folder pj-muted">(empty)</span></li>}</ul></li>;
 }
 
+/** Reads one context file for the reader, and again every five seconds while an agent is
+ * still writing it. Inputs: the project, the file path, whether it is being written and where
+ * to deliver each read. Output: a stop function; a read that answers after stop is dropped, so
+ * a slow read never replaces the file the reader moved on to. */
+export function followContext(project: string, path: string, writing: boolean, apply: (result: Result<{ text: string | null; truncated: boolean }>) => void): () => void {
+  let current = true;
+  const read = () => void loadContextText(project, path).then((result) => { if (current) apply(result); });
+  read();
+  const timer = writing ? window.setInterval(read, 5000) : undefined;
+  return () => {
+    current = false;
+    if (timer !== undefined) window.clearInterval(timer);
+  };
+}
+
 /** Context tab: the project folder's brief, documents and research reports, with a reader.
  * Input: the project data. Output: the tree and the reader; reports render as safe Markdown. */
 export function ContextTab({ data }: { data: ProjectData }) {
@@ -92,8 +108,6 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const [deleting, setDeleting] = useState<{ path: string; busy: boolean } | null>(null);
   const [adding, setAdding] = useState<{ path: string; busy: boolean; error: string } | null>(null);
   const open = useLinkOpener(data.notify);
-  const live = useRef(selected);
-  live.current = selected;
   const chosen = selected ?? items.find((item) => item.kind === "brief")?.path ?? items[0]?.path ?? null;
   const item = items.find((entry) => entry.path === chosen) ?? null;
   const running = new Set(jobs.filter((job) => job.status === "running").map((job) => job.report_path));
@@ -107,17 +121,12 @@ export function ContextTab({ data }: { data: ProjectData }) {
     setSelection(null);
     setActionNote("");
     if (!chosen || chosen === MEMORY) return;
-    const path = chosen;
-    const read = () => void loadContextText(data.id, path).then((result) => { if ((live.current ?? path) === path) setFile(result); });
-    read();
-    if (!writing) return;
-    const timer = window.setInterval(read, 5000);
-    return () => window.clearInterval(timer);
+    return followContext(data.id, chosen, writing, setFile);
   }, [data.id, chosen, writing]);
 
   const text = file?.kind === "ok" ? file.value.text : null;
   const markdown = chosen !== null && extension(chosen) === "md";
-  const blocks = text !== null && markdown ? parseMarkdown(text) : [];
+  const blocks = useMemo(() => text !== null && markdown ? parseMarkdown(text) : [], [text, markdown]);
   const sources = markdownLinks(blocks);
   const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
 
@@ -182,9 +191,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
   async function addDocuments(paths: string[]) {
     setAdding({ path: "", busy: true, error: "" });
     const result = await addProjectDocuments(data.id, paths, nextGeneration());
-    if (result.kind !== "ok") return setAdding({ path: paths.join(""), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
+    if (result.kind !== "ok") return setAdding({ path: retryPath(paths), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setAdding({ path: paths.join(""), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
+    if (state.kind !== "applied") return setAdding({ path: retryPath(paths), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
     setAdding(null);
     data.notify(paths.length === 1 ? "Document added." : `${paths.length} documents added.`);
     data.reload();

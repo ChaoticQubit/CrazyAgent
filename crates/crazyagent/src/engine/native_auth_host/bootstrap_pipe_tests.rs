@@ -46,7 +46,7 @@ fn custodian_bootstrap_pipe_never_reaches_a_child_started_at_the_same_time() {
     let executable = executable();
     let runtime = tempfile::Builder::new()
         .prefix("ca-bootstrap-pipe-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let group = Group(

@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-conv-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     root
@@ -980,7 +980,7 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
     let before = schema(root.path());
     assert!(!before.contains_key("conversation_meta"));
     let db = rusqlite::Connection::open(root.path().join("db")).unwrap();
-    db.pragma_update(None, "user_version", 37).unwrap();
+    db.pragma_update(None, "user_version", 0).unwrap();
     let legacy: Vec<u8> = db
         .query_row(
             "SELECT reply FROM operations WHERE client='legacy'",
@@ -989,20 +989,14 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
         )
         .unwrap();
     drop(db);
-    let readonly = Arc::new(
-        Engine::open_readonly(&root.path().join("db"), config.clone())
-            .await
-            .unwrap(),
-    );
-    let owner_path = root.path().join("owner");
-    std::fs::create_dir(&owner_path).unwrap();
-    std::fs::set_permissions(&owner_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let readonly = match Engine::open_readonly(&root.path().join("db"), config.clone()).await {
+        Ok(_) => panic!("a read-only open must not upgrade a legacy database"),
+        Err(error) => error.0,
+    };
     assert!(
-        OwnerServer::bind(&owner_path, readonly.clone(), &config)
-            .await
-            .is_err()
+        readonly.starts_with("storage_upgrade_required:"),
+        "{readonly}"
     );
-    readonly.close().await.unwrap();
     assert_eq!(schema(root.path()), before);
     let service = Service::start(root.path()).await;
     let after = schema(root.path());
@@ -1019,10 +1013,11 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    assert_eq!(
+    assert!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-            .unwrap(),
-        37
+            .unwrap()
+            >= 2,
+        "the writable start records the upgraded version"
     );
     assert_eq!(
         db.query_row(

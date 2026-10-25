@@ -53,6 +53,9 @@ pub struct ModelAccess {
 
 pub const ACCOUNTS_MAX: usize = 4096;
 pub const CONFIG_BYTES_MAX: usize = 8 << 20;
+/// The settings file version this engine reads and writes. A file with a higher
+/// `version` came from a newer engine and is refused, never rewritten.
+pub const SETTINGS_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -452,12 +455,30 @@ fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
     }
     let config: ConfigFile =
         toml::from_str(bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
-    if config.version.is_some_and(|v| v != 1) {
+    if let Some(version) = config.version.filter(|v| *v > SETTINGS_VERSION) {
+        return Err(ConfigError(format!(
+            "settings_newer_than_engine: the settings file is version {version} and this \
+             engine reads version {SETTINGS_VERSION}; install the newer CrazyAgent that wrote it"
+        )));
+    }
+    if config.version.is_some_and(|v| v != SETTINGS_VERSION) {
         return Err(ConfigError("unsupported config version".into()));
     }
     assert!(bytes.len() <= CONFIG_BYTES_MAX);
-    assert!(config.version.is_none_or(|v| v == 1));
+    assert!(config.version.is_none_or(|v| v == SETTINGS_VERSION));
     Ok(config)
+}
+
+/// Refuses a connection being saved whose address is plain HTTP to another machine,
+/// with the same rule as an added account. Input: the connection. Output: Ok, or
+/// `account_url_invalid`.
+fn saved_endpoint(connection: &ModelConnection) -> Result<(), ConfigError> {
+    match &connection.endpoint {
+        ModelEndpoint::Http { url } => crate::accounts::account_url(url)
+            .map(|_| ())
+            .map_err(|error| ConfigError(error.0)),
+        ModelEndpoint::Native {} => Ok(()),
+    }
 }
 
 /// Applies one owner edit to the global settings text. `registered` carries saved accounts
@@ -471,6 +492,12 @@ pub(crate) fn edit_model_access(
     registered: &[ModelConnection],
 ) -> Result<(String, EffectiveConfig), ConfigError> {
     edit.validate()?;
+    if let ModelAccessEdit::CreateConnection { connection }
+    | ModelAccessEdit::ReplaceConnection { connection }
+    | ModelAccessEdit::AddConnectedAccount { connection } = edit
+    {
+        saved_endpoint(connection)?;
+    }
     let mut catalog = resolve_config_bytes(global, project)?
         .settings
         .model_access
@@ -479,6 +506,7 @@ pub(crate) fn edit_model_access(
         if catalog.connections.iter().any(|c| c.id == connection.id) {
             continue;
         }
+        saved_endpoint(connection)?;
         if !catalog.accounts.contains(&connection.account_ref) {
             catalog.accounts.push(connection.account_ref.clone());
         }
@@ -995,6 +1023,67 @@ pools = [{ id = "pool", members = ["key-connection", "local-connection"], projec
     }
 
     #[test]
+    fn connections_are_saved_with_plain_http_only_to_this_machine() {
+        let connection = |url: &str| ModelConnection {
+            id: CredentialRef::new("lab-connection").unwrap(),
+            provider: CredentialRef::new("openai-compatible").unwrap(),
+            harness: CredentialRef::new("rcli").unwrap(),
+            protocol: CredentialRef::new("openai-chat").unwrap(),
+            account_ref: CredentialRef::new("local-account").unwrap(),
+            endpoint: ModelEndpoint::Http { url: url.into() },
+            model: ModelReference {
+                id: "m".into(),
+                author: CredentialRef::new("openai-compatible").unwrap(),
+            },
+            auth: ModelAuthentication::ApiKey {
+                credential_ref: CredentialRef::new("lab-key").unwrap(),
+            },
+        };
+        let remote = connection("http://192.0.2.1:8000/v1");
+        let refused = |result: Result<(String, EffectiveConfig), ConfigError>| {
+            assert_eq!(result.unwrap_err().0, "account_url_invalid");
+        };
+        refused(edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &ModelAccessEdit::CreateConnection {
+                connection: remote.clone(),
+            },
+            &[],
+        ));
+        refused(edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &assigned_pool(&["demo"]),
+            std::slice::from_ref(&remote),
+        ));
+        let (bytes, _) = edit_model_access(
+            ASSIGNMENT_GLOBAL,
+            "",
+            &ModelAccessEdit::CreateConnection {
+                connection: connection("http://127.0.0.1:8000/v1"),
+            },
+            &[],
+        )
+        .unwrap();
+        refused(edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplaceConnection { connection: remote },
+            &[],
+        ));
+        edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplaceConnection {
+                connection: connection("https://models.example.test/v1"),
+            },
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn assigning_a_signed_in_pool_allows_its_connection_as_the_master_target() {
         let global = r#"version = 1
 timeout_ms = 2000
@@ -1301,5 +1390,27 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
             assert!(state.reload(&global, &project).is_err(), "{invalid}");
             assert_eq!(state.current, original);
         }
+    }
+
+    #[test]
+    fn newer_settings_file_is_refused_as_newer_than_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("global.toml");
+        let project = root.path().join("project.toml");
+        let newer = format!("version = {}\ntimeout_ms = 2000\n", SETTINGS_VERSION + 1);
+        std::fs::write(&global, &newer).unwrap();
+        let refused = resolve_config(&global, &project).unwrap_err().to_string();
+        assert!(
+            refused.starts_with("settings_newer_than_engine:"),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read_to_string(&global).unwrap(), newer);
+        std::fs::write(&global, "version = 0\n").unwrap();
+        assert_eq!(
+            resolve_config(&global, &project).unwrap_err().to_string(),
+            "unsupported config version"
+        );
+        std::fs::write(&global, format!("version = {SETTINGS_VERSION}\n")).unwrap();
+        assert!(resolve_config(&global, &project).is_ok());
     }
 }

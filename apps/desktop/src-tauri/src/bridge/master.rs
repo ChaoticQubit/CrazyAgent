@@ -95,8 +95,10 @@ impl NativeBridge {
             })
             .await
             .map_err(|_| failure("owner_read_failed"))?;
-        let OwnerData::ProjectMasterTurns { page } = state.data else {
-            return Err(failure("unexpected_reply"));
+        let page = match state.data {
+            OwnerData::ProjectMasterTurns { page } => page,
+            OwnerData::ResyncRequired => return Err(failure("resync_required")),
+            _ => return Err(failure("unexpected_reply")),
         };
         if page.project_id != project_id
             || page.session_id != session_id
@@ -231,7 +233,7 @@ impl NativeBridge {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::bridge::ActionOutcome;
@@ -281,7 +283,7 @@ fallback_allowed = false
     async fn real_master_bridge_open_submit_read_and_cancel_preserve_owner_data() {
         let root = tempfile::Builder::new()
             .prefix("ca-desktop-master-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");
@@ -588,10 +590,171 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn real_master_turns_page_past_one_page_and_refuse_a_stale_cursor() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-desktop-pages-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let path = root.path().to_path_buf();
+        let mut body = tokio::spawn(async move { real_turn_pages_flow(&path).await });
+        let result = tokio::time::timeout(Duration::from_secs(60), &mut body).await;
+        if result.is_err() {
+            body.abort();
+            let _ = body.await;
+        }
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
+        result
+            .expect("real master paging case exceeded 60 seconds")
+            .expect("real master paging assertion failed after engine cleanup")
+            .expect("real master paging setup or readback failed");
+    }
+
+    async fn real_turn_pages_flow(root: &Path) -> Result<(), String> {
+        let mut observer =
+            OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        observer
+            .read(OwnerRead::Capabilities)
+            .await
+            .map_err(|error| error.to_string())?;
+        observer
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("p").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Paged master".into(),
+                        repositories: vec![
+                            root.join("p")
+                                .to_str()
+                                .ok_or("private path encoding")?
+                                .into(),
+                        ],
+                    },
+                },
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        let created = observer
+            .send_pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+        );
+        let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+        bridge.connect().await.map_err(|error| error.code)?;
+        let ticket = bridge
+            .open_project("p")
+            .await
+            .map_err(|error| error.code)?
+            .ticket;
+        let opened = bridge
+            .open_default_master(&ticket, 1)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(opened.outcome, ActionOutcome::Applied);
+        let session = bridge
+            .master_state(&ticket)
+            .await
+            .map_err(|error| error.code)?
+            .session
+            .ok_or("Start master left no configured session")?;
+        let session_id = session.session_id.as_str();
+        let count = u64::from(PAGE_SIZE) + 1;
+        let mut ids = Vec::new();
+        for round in 0..count {
+            let sent = bridge
+                .submit_master(
+                    &ticket,
+                    session_id,
+                    &format!("Owner message {round}."),
+                    2 + 2 * round,
+                )
+                .await
+                .map_err(|error| error.code)?;
+            assert_eq!(sent.outcome, ActionOutcome::Applied);
+            let stopped = bridge
+                .cancel_master_turn(
+                    &ticket,
+                    session_id,
+                    &sent.intent.operation_id,
+                    3 + 2 * round,
+                )
+                .await
+                .map_err(|error| error.code)?;
+            assert_eq!(stopped.outcome, ActionOutcome::Applied);
+            ids.push(sent.intent.operation_id);
+        }
+        let first = bridge
+            .master_turns(&ticket, session_id, None)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(first.page.turns.len(), usize::from(PAGE_SIZE));
+        let next = first
+            .page
+            .next
+            .clone()
+            .ok_or("a full first page must offer the next page")?;
+        let rest = bridge
+            .master_turns(&ticket, session_id, Some(next.clone()))
+            .await
+            .map_err(|error| error.code)?;
+        assert!(rest.page.next.is_none());
+        let all: Vec<_> = first.page.turns.iter().chain(&rest.page.turns).collect();
+        assert_eq!(
+            all.iter().map(|turn| turn.ordinal).collect::<Vec<_>>(),
+            (1..=count).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            all.iter().map(|turn| turn.id.as_str()).collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            all.iter()
+                .all(|turn| turn.phase == MasterTurnPhase::Cancelled)
+        );
+        let later = bridge
+            .submit_master(
+                &ticket,
+                session_id,
+                "One more owner message.",
+                2 + 2 * count,
+            )
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(later.outcome, ActionOutcome::Applied);
+        let stale = bridge
+            .master_turns(&ticket, session_id, Some(next))
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "resync_required");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn real_start_master_uses_only_the_pool_assigned_to_the_project() {
         let root = tempfile::Builder::new()
             .prefix("ca-desktop-default-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");

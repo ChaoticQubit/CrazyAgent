@@ -41,6 +41,8 @@ pub mod storage;
 pub mod team;
 pub mod terminal;
 pub mod tui;
+/// `crazyagent update`: release channel, signed download, verification and executable swap.
+pub mod update;
 pub mod verification;
 pub mod version;
 pub mod worker_dispatch;

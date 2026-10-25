@@ -6,6 +6,10 @@
     "category": "DeveloperTool",
     "shortDescription": "Run and watch a team of coding agents on your own projects.",
     "windows": {
+      "signCommand": {
+        "cmd": "node",
+        "args": ["../../../scripts/release/sign-windows.mjs", "%1"]
+      },
       "nsis": {
         "installMode": "currentUser"
       }

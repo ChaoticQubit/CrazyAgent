@@ -64,3 +64,10 @@ test("provider marks use the CC0 logo where one exists and a monogram otherwise,
   assert.match(monogram, />CG</);
   assert.equal(renderToStaticMarkup(createElement(ProviderMark, { provider: "unknown-thing", name: "pi" })).includes(">PI<"), true);
 });
+
+test("an unknown icon name draws the plain file icon instead of throwing", () => {
+  const plain = renderToStaticMarkup(createElement(Icon, { name: "file" }));
+  for (const name of ["constructor", "__proto__", "toString", "missing"]) {
+    assert.equal(renderToStaticMarkup(createElement(Icon, { name })), plain, name);
+  }
+});

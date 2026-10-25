@@ -5,7 +5,8 @@ use crazyagent::config::resolve_config;
 use crazyagent::engine::Engine;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerServer};
-use crazyagent::harnesses::{HarnessStatus, specs};
+use crazyagent::harnesses::{HarnessStatus, TeamUse, specs};
+use crazyagent::team::launch_harness;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use tokio::sync::oneshot;
 async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
     let root = tempfile::Builder::new()
         .prefix("ca-harness-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
@@ -38,6 +39,15 @@ async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
         let codex = entries.iter().find(|entry| entry.id == "codex").unwrap();
         assert_eq!(codex.status, HarnessStatus::Ready);
         assert_eq!(codex.status_label, "Ready");
+        assert_eq!(codex.team, TeamUse::Available);
+        for entry in &entries {
+            assert_eq!(
+                entry.team == TeamUse::Available,
+                launch_harness(&entry.id).is_some(),
+                "{kind:?} {}",
+                entry.id
+            );
+        }
         assert!(
             entries
                 .iter()
@@ -52,7 +62,7 @@ async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
 async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine() {
     let root = tempfile::Builder::new()
         .prefix("ca-harness-tui-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

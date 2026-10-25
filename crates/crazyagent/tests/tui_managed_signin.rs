@@ -359,7 +359,7 @@ async fn verify_catalog(root: &Path) {
 async fn managed_signin_blank_label_persists_generated_catalog_before_auth_method_choice() {
     let root = tempfile::Builder::new()
         .prefix("ca-ms1023-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     private_file(&root.path().join("global.toml"), SETTINGS.as_bytes());

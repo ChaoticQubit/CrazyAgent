@@ -1891,7 +1891,7 @@ mod creation_recovery_tests {
         async fn new() -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-native373-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -2530,7 +2530,7 @@ mod tests {
     async fn paired_client_configuration_cannot_be_stripped_back_to_unbound() {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-bound-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config =
@@ -2559,7 +2559,7 @@ mod tests {
     async fn actual_owner_completion_trips_corrupt_pending_invariant() {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-pending-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config =
@@ -2611,7 +2611,7 @@ mod tests {
     async fn limited_mode_retains_exact_original_ordinary_endpoint_without_owner_access() {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-limited-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config =

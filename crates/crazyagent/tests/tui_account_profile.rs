@@ -536,7 +536,7 @@ async fn verify(root: &Path, endpoint: &str) {
 async fn local_none_account_before_projects_configures_private_profile_and_unassigned_pool() {
     let root = tempfile::Builder::new()
         .prefix("ca-tap-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     private_file(&root.path().join("global.toml"), SETTINGS.as_bytes());

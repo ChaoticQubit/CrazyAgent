@@ -155,7 +155,7 @@ impl OwnerRuntimeHandle {
         if prepared.session.selection.backend != MasterBackend::Rcli
             || prepared.session.current_turn.as_ref() != Some(turn_id)
             || prepared.attempt.request.project_id != prepared.session.project_id
-            || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+            || !prepared.attempt_on_current_turn()
             || prepared.attempt.connection != prepared.profile.binding().connection
         {
             return Err(failure("master_runtime_binding"));

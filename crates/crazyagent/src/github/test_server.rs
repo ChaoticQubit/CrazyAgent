@@ -6,27 +6,27 @@ use std::time::Instant;
 
 /// One request the loopback server received, with lowercase header names.
 #[derive(Clone, Debug)]
-pub(super) struct Seen {
-    pub(super) method: String,
-    pub(super) path: String,
-    pub(super) query: String,
-    pub(super) headers: BTreeMap<String, String>,
-    pub(super) body: Vec<u8>,
-    pub(super) at: Instant,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) query: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Vec<u8>,
+    pub(crate) at: Instant,
 }
 
 impl Seen {
-    pub(super) fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)
     }
 
-    pub(super) fn form(&self) -> BTreeMap<String, String> {
+    pub(crate) fn form(&self) -> BTreeMap<String, String> {
         url::form_urlencoded::parse(&self.body)
             .into_owned()
             .collect()
     }
 
-    pub(super) fn query_pairs(&self) -> BTreeMap<String, String> {
+    pub(crate) fn query_pairs(&self) -> BTreeMap<String, String> {
         url::form_urlencoded::parse(self.query.as_bytes())
             .into_owned()
             .collect()
@@ -34,14 +34,14 @@ impl Seen {
 }
 
 /// A status, extra headers and a body to send back.
-pub(super) struct Answer {
-    pub(super) status: u16,
-    pub(super) headers: Vec<(String, String)>,
-    pub(super) body: Vec<u8>,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Answer {
-    pub(super) fn json(status: u16, body: serde_json::Value) -> Self {
+    pub(crate) fn json(status: u16, body: serde_json::Value) -> Self {
         Self {
             status,
             headers: vec![("Content-Type".into(), "application/json".into())],
@@ -49,7 +49,7 @@ impl Answer {
         }
     }
 
-    pub(super) fn bytes(status: u16, body: Vec<u8>) -> Self {
+    pub(crate) fn bytes(status: u16, body: Vec<u8>) -> Self {
         Self {
             status,
             headers: vec![("Content-Type".into(), "application/octet-stream".into())],
@@ -62,13 +62,13 @@ type Handler = dyn Fn(&Seen, usize) -> Answer + Send + Sync;
 
 /// A real HTTP/1.1 server on 127.0.0.1 that answers each request with the handler (given
 /// the request and how many came before it) and records every request it saw.
-pub(super) struct Server {
-    pub(super) port: u16,
+pub(crate) struct Server {
+    pub(crate) port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Server {
-    pub(super) fn start(handler: impl Fn(&Seen, usize) -> Answer + Send + Sync + 'static) -> Self {
+    pub(crate) fn start(handler: impl Fn(&Seen, usize) -> Answer + Send + Sync + 'static) -> Self {
         let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -85,7 +85,7 @@ impl Server {
         Self { port, seen }
     }
 
-    pub(super) fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 }

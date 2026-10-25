@@ -576,14 +576,14 @@ fn unknown_capacity_capability_mismatch_and_observation_bounds_are_rejected() {
         event.valid_until_ms = valid_until_ms;
         assert!(observe(&tx, &config, &event).is_err());
     }
-    let count: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM model_gateway_observations",
-            [],
-            |row| row.get(0),
-        )
+    let sequences: Vec<i64> = tx
+        .prepare("SELECT sequence FROM model_gateway_observations")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(sequences, [2]);
 }
 
 #[test]
@@ -967,9 +967,7 @@ fn quota_policy_legacy_sqlite_ready_preserves_unknown_quota_and_original_bytes()
                 .0,
             "gateway_attempt_active"
         );
-        observe(&tx, &config, &observation(&config, 0, 2)).unwrap();
-        tx.commit().unwrap();
-        let raw: String = database
+        let raw: String = tx
             .query_row(
                 "SELECT body FROM model_gateway_observations WHERE id = ?1",
                 [event.id.as_str()],
@@ -977,6 +975,8 @@ fn quota_policy_legacy_sqlite_ready_preserves_unknown_quota_and_original_bytes()
             )
             .unwrap();
         assert_eq!(raw, body);
+        observe(&tx, &config, &observation(&config, 0, 2)).unwrap();
+        tx.commit().unwrap();
         assert_eq!(
             connection_state(&database, &event.connection, 10000)
                 .unwrap()
@@ -1293,7 +1293,7 @@ fn cooldown_history_enforces_exact_256_and_257_row_boundary() {
         let tx = database.transaction().unwrap();
         for sequence in 1..=historical + 1 {
             let mut event = observation(&config, 0, sequence);
-            if sequence == 1 {
+            if sequence <= historical {
                 event.kind = ObservationKind::RateLimited {
                     retry_at_ms: Some(500),
                 };

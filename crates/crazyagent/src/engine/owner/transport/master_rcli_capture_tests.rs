@@ -21,7 +21,7 @@ const _: fn(&Capture) -> u64 = Capture::sequence;
 fn private_capture_root() -> (tempfile::TempDir, Root) {
     let temporary = tempfile::Builder::new()
         .prefix("ca-rcli-master-capture-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let root = Root::open(temporary.path()).unwrap();

@@ -6,7 +6,7 @@ use crate::protocol::CredentialRef;
 impl OwnerController {
     fn accounts_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
@@ -45,6 +45,16 @@ impl OwnerController {
     /// Removes one account that is in no pool, and its saved key. Input: account id.
     pub async fn remove_account(&self, id: CredentialRef) -> Result<(), EngineError> {
         self.accounts_client()?.remove_account(id).await
+    }
+
+    /// Replaces the saved key of one account in place; the key goes to the engine and is
+    /// never kept here. Inputs: account id and the new key. Output: the same account.
+    pub async fn replace_account_key(
+        &self,
+        id: CredentialRef,
+        key: AccountSecret,
+    ) -> Result<AccountView, EngineError> {
+        self.accounts_client()?.replace_account_key(id, key).await
     }
 
     /// Checks one account now and returns its fresh status and listed models.

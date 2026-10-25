@@ -54,11 +54,19 @@ test("a profile read that is not in this build yet skips Welcome instead of bloc
   assert.match(markup, /Profile/);
 });
 
-test("an unconfirmed change shows the plain banner with Check again", () => {
-  const markup = render({ unconfirmed: true });
-  assert.match(markup, /We couldn&#x27;t confirm your last change\. Check it and save again\./);
+test("an unconfirmed change shows a banner naming it, with Check again and Retry", () => {
+  const intent = { kind: "setup_project", generation: "3", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "op-1" };
+  const markup = render({ unconfirmed: { intent, outcome: null, busy: false } });
+  assert.match(markup, /We couldn&#x27;t confirm saving the project setup\. Other changes wait until it&#x27;s checked\./);
   assert.match(markup, />Check again<\/button>/);
-  assert.doesNotMatch(markup, /intent|Reconcile|operation/i);
+  assert.match(markup, />Retry<\/button>/);
+  assert.doesNotMatch(markup, /intent|Reconcile|operation|still being saved/i);
+  const unsent = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: false } });
+  assert.match(unsent, /Saving the project setup hasn&#x27;t reached the engine\. Retry sends the same change again\./);
+  const checking = render({ unconfirmed: { intent, outcome: null, busy: true } });
+  assert.match(checking, /Checking\.\.\./);
+  assert.match(checking, /<button[^>]*disabled=""[^>]*>[\s\S]*?Retry<\/button>/);
+  assert.doesNotMatch(render({}), /class="banner"/);
 });
 
 test("routes reach Settings tabs and the project screens", () => {
@@ -79,7 +87,7 @@ const ok = (value) => ({ kind: "ok", value });
 const account = (patch) => ({ id: "a1", name: "ChatGPT 1", provider: "chatgpt", provider_name: "ChatGPT / Codex", method: "subscription",
   method_label: "Sign in with ChatGPT", url: null, model: null, status: "signed_in", status_label: "Signed in", ...patch });
 const harness = (id, kind) => ({ id, name: id, status: kind === "limited" ? { kind, reason: "x" } : { kind }, status_label: "", executable: null,
-  headless: "", tools: { kind: "switchable" }, model_selection: true, account_kinds: [] });
+  headless: "", tools: { kind: "switchable" }, model_selection: true, account_kinds: [], aliases: [] });
 const tool = (name, state) => ({ name, label: name, state });
 const toolsRead = (tmux, uv, graphify, patch = {}) => ok({
   dependencies: [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)], pack: [], running: false, ...patch,
@@ -265,4 +273,27 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.match(markup, /<strong>Harbor Notes<\/strong> 2 suggested memories to review\./);
   assert.doesNotMatch(markup, /1 suggested memory to review/);
   assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
+});
+
+test("each project gets its own page, so a switch never keeps the last project's ticket or name", async () => {
+  const { Screen } = await import("../src/app.tsx");
+  const { ProjectPage } = await import("../src/screens/project/index.tsx");
+  const projects = { kind: "ok", value: [{ id: "alpha", name: "Alpha" }, { id: "beta", name: "Beta" }] };
+  const page = (id) => Screen({ route: { name: "project", id, tab: "conversation" }, session: session({ projects }) });
+  assert.equal(page("alpha").type, ProjectPage);
+  assert.equal(page("alpha").key, "alpha");
+  assert.equal(page("beta").key, "beta");
+  assert.equal(page("beta").props.name, "Beta");
+});
+
+test("each project's onboarding review and settings get their own page, so a switch never seeds from the last project", async () => {
+  const { Screen } = await import("../src/app.tsx");
+  const { OnboardingReview } = await import("../src/screens/intake/onboarding.tsx");
+  const projects = { kind: "ok", value: [{ id: "alpha", name: "Alpha" }, { id: "beta", name: "Beta" }] };
+  const review = (id) => Screen({ route: { name: "onboarding", id }, session: session({ projects }) });
+  assert.equal(review("alpha").type, OnboardingReview);
+  assert.equal(review("alpha").key, "alpha");
+  assert.equal(review("beta").key, "beta");
+  const settings = (id) => Screen({ route: { name: "project", id, tab: "settings" }, session: session({ projects }) });
+  assert.notEqual(settings("alpha").key, settings("beta").key);
 });

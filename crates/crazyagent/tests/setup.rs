@@ -28,7 +28,7 @@ impl Case {
     async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");

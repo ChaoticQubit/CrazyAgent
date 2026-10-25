@@ -57,7 +57,7 @@ fn typed_until(file: &Path, wanted: &[u8]) -> Vec<u8> {
 fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_with_its_key_file() {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let root_path = root.path().canonicalize().unwrap();
     private(&root_path);
@@ -142,7 +142,7 @@ fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_w
 fn the_first_prompt_waits_until_the_app_reads_keys_itself() {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let root_path = root.path().canonicalize().unwrap();
     private(&root_path);

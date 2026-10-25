@@ -2,7 +2,7 @@ import type { IconName, Tone } from "../../ui";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
+import type { IntentReceipt, MasterState, MasterTurn, ProjectDetail } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -302,6 +302,14 @@ export function nearBottom(box: { scrollHeight: number; scrollTop: number; clien
   return box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK_PX;
 }
 
+/** The master ticket for the project this conversation shows.
+ * Inputs: the bridge's answer to opening a project and the project shown.
+ * Output: the ticket; throws `master_project_mismatch` when the bridge opened another project. */
+export function openedTicket(opened: ProjectDetail, project: string): string {
+  if (opened.project_id !== project) throw { code: "master_project_mismatch" };
+  return opened.ticket;
+}
+
 /** Finds the master turn that is still replying, which Stop cancels.
  * Input: the turns. Output: the newest unsettled turn, or null. */
 export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
@@ -327,12 +335,12 @@ export function signInLine(pool: PoolSummary | undefined): string | null {
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.
- * Inputs: the turns and the messages this window sent, by ordinal. Output: the message, or
+ * Inputs: the turns and the messages this window sent, by turn id. Output: the message, or
  * null when the latest turn replied, is still going or its text is not in this window. */
-export function resendText(turns: MasterTurn[], sent: Record<number, string>): string | null {
+export function resendText(turns: MasterTurn[], sent: Record<string, string>): string | null {
   const latest = turns.reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
   if (latest === null || !RESENDABLE.has(latest.phase)) return null;
-  return sent[latest.ordinal] ?? null;
+  return sent[latest.id] ?? null;
 }
 
 const SEND_FALLBACK = "Couldn't send. Try again.";
@@ -344,16 +352,33 @@ export function sendFailureLine(code: string): string {
   return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
-const FILE_ICONS: Record<string, IconName> = {
-  md: "file-text", txt: "file-text", csv: "file-spreadsheet", png: "file-image", jpg: "file-image", jpeg: "file-image",
-};
+/** The most bytes one message to the master may hold; the bridge refuses more. */
+export const MESSAGE_BYTES_MAX = 8192;
+
+/** Whether the composer may send its draft now, the one rule for the Send button and Cmd+Enter.
+ * Inputs: the draft and whether sending is blocked (an action running, no ticket, a reply in
+ * progress or the master unreachable). Output: true for a non-blank draft within the byte limit. */
+export function canSend(text: string, blocked: boolean): boolean {
+  return !blocked && text.trim() !== "" && new TextEncoder().encode(text).length <= MESSAGE_BYTES_MAX;
+}
+
+/** The path a failed Add documents offers to retry in its one-path box.
+ * Input: the picked paths. Output: the path when exactly one was picked, else empty, so
+ * several paths are never joined into one invalid path. */
+export function retryPath(paths: string[]): string {
+  return paths.length === 1 ? paths[0] : "";
+}
+
+const FILE_ICONS = new Map<string, IconName>([
+  ["md", "file-text"], ["txt", "file-text"], ["csv", "file-spreadsheet"], ["png", "file-image"], ["jpg", "file-image"], ["jpeg", "file-image"],
+]);
 
 /** Picks the icon for a project folder file from its extension.
  * Input: the file path. Output: a text, spreadsheet or image icon, or the plain file icon. */
 export function fileIcon(path: string): IconName {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const dot = name.lastIndexOf(".");
-  return dot > 0 ? FILE_ICONS[name.slice(dot + 1).toLowerCase()] ?? "file" : "file";
+  return dot > 0 ? FILE_ICONS.get(name.slice(dot + 1).toLowerCase()) ?? "file" : "file";
 }
 
 /** Splits a project's memories into the ones waiting for the owner and the saved ones;

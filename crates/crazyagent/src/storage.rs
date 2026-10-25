@@ -18,6 +18,10 @@ pub(crate) mod account_profile;
 pub(crate) mod accounts;
 mod master_bootstrap;
 mod master_session;
+#[cfg(unix)]
+mod migrations;
+#[cfg(all(test, unix))]
+pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     native_sign_in, validate_configured_initial_conversation_receipt,
@@ -77,6 +81,10 @@ pub(crate) enum Job {
         Arc<NativeAuthDispatch>,
         oneshot::Sender<Result<NativeAuthFact, EngineError>>,
     ),
+    NativeAuthCustodyReleased(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
+    ),
     NativeAuth(
         Admission,
         owner_auth::Command,
@@ -132,14 +140,17 @@ pub(crate) enum Job {
         Admission,
         Cursor,
         String,
+        RequestId,
+        u64,
         oneshot::Sender<Result<crate::projects_home::MovePlan, EngineError>>,
     ),
     HomeRecord(
         Admission,
         Box<OwnerRequest>,
-        Result<(), String>,
+        crate::projects_home::HomeEffect,
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
+    HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
@@ -230,7 +241,7 @@ impl Storage {
                     mut connection,
                     lock,
                     custody,
-                } = match open_actor_database(&path, readonly) {
+                } = match open_actor_database(&path, readonly, sources.as_ref()) {
                     Ok(database) => database,
                     Err(e) => {
                         drop(sources.take());
@@ -256,6 +267,9 @@ impl Storage {
                 let mut home_watch = if readonly {
                     None
                 } else {
+                    if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
+                        eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
                     projects_home::watch_saved(&connection)
                 };
                 while let Some(job) = receiver.blocking_recv() {
@@ -335,6 +349,19 @@ impl Storage {
                                     &config,
                                     sources.as_ref(),
                                     &dispatch,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &native_auth::dispatch_host(&dispatch),
+                                    Some(dispatch.fact()),
                                 )
                             };
                             let _ = reply.send(result);
@@ -446,6 +473,14 @@ impl Storage {
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
+                                if let Err(error) = native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &started.host,
+                                    None,
+                                ) {
+                                    eprintln!("native_auth_recovery_deferred cause={}", error.0);
+                                }
                             }
                             let _ = reply.send(result);
                         }
@@ -474,13 +509,25 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::HomeMovePlan(admission, expected, picked, reply) => {
+                        Job::HomeMovePlan(admission, expected, picked, request, exchange, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked)
+                                projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked, &request, exchange)
                             };
                             let _ = reply.send(result);
+                        }
+                        Job::HomeMoveSettle(exchange, ran, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::settle_pending(&mut connection, &path, Some(exchange), ran)
+                            };
+                            if matches!(result, Ok(true)) {
+                                drop(home_watch.take());
+                                home_watch = projects_home::watch_saved(&connection);
+                            }
+                            let _ = reply.send(result.map(|_| ()));
                         }
                         Job::HomeRecord(admission, request, effect, reply) => {
                             let moved_home = matches!(
@@ -734,7 +781,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Rejects unsafe filesystem metadata and competing engine ownership.
 #[cfg(all(test, unix))]
 fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
-    let opened = open_actor_database(path, readonly)?;
+    let opened = open_actor_database(path, readonly, None)?;
     Ok((opened.connection, opened.lock))
 }
 
@@ -748,12 +795,20 @@ struct OpenedDatabase {
 /// Takes the database path and read-only mode, both unused.
 /// Returns `storage_unavailable` until Windows has its own owner-only access check.
 #[cfg(not(unix))]
-fn open_actor_database(_path: &Path, _readonly: bool) -> Result<OpenedDatabase, EngineError> {
+fn open_actor_database(
+    _path: &Path,
+    _readonly: bool,
+    _settings: Option<&settings::SettingsSources>,
+) -> Result<OpenedDatabase, EngineError> {
     Err(error("storage_unavailable"))
 }
 
 #[cfg(unix)]
-fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, EngineError> {
+fn open_actor_database(
+    path: &Path,
+    readonly: bool,
+    settings: Option<&settings::SettingsSources>,
+) -> Result<OpenedDatabase, EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| error("database parent missing"))?;
@@ -794,7 +849,7 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
         path.file_name()
             .ok_or_else(|| error("database name missing"))?,
     );
-    let connection = Connection::open_with_flags(
+    let mut connection = Connection::open_with_flags(
         canonical_path,
         flags | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
@@ -802,7 +857,10 @@ fn open_actor_database(path: &Path, readonly: bool) -> Result<OpenedDatabase, En
     connection
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(error)?;
-    if !readonly {
+    if readonly {
+        migrations::check(&connection, migrations::STEPS)?;
+    } else {
+        migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
     }
     assert!(connection.is_autocommit());
@@ -1454,6 +1512,7 @@ fn persist_event_ids(
     client_id: &ClientId,
     revision: u64,
 ) -> Result<(), EngineError> {
+    settings::ensure_clear(tx)?;
     let event = Event {
         cursor: Cursor::new(revision),
         request_id: request_id.clone(),
@@ -1880,7 +1939,7 @@ fn owner_apply(
 /// home, or a New Project folder built in its staging folder.
 #[derive(Clone, Copy)]
 enum Effect<'a> {
-    Home(&'a Result<(), String>),
+    Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
 }
 
@@ -1952,7 +2011,9 @@ fn owner_apply_with(
         });
     }
     let outcome = match (effect, &command) {
-        (Some(Effect::Home(effect)), _) => projects_home::record(&tx, path, &command, effect)?,
+        (Some(Effect::Home(effect)), _) => {
+            projects_home::record(&tx, path, &request.request_id, &command, effect)?
+        }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
             crate::project_setup::record_new(&tx, config, action, staged)?
         }
@@ -3440,7 +3501,7 @@ fallback_allowed = false
     -> ConfiguredInitialConversationFixture {
         let root = tempfile::Builder::new()
             .prefix("ca-cgf-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global_path = root.path().join("global.toml");
@@ -3600,7 +3661,11 @@ fallback_allowed = false
         };
         let request = AttemptRequest {
             id: RequestId::new("configured-gateway-first-attempt").unwrap(),
-            task_id: session.bootstrap_task_id.clone(),
+            task_id: master_session::turn_task_id(
+                &session.session_id,
+                session.current_turn.as_ref().unwrap(),
+            )
+            .unwrap(),
             project_id: project,
             role: crate::coordination::Role::ProjectLeader,
             pool_ref: session.selection.pool_ref.clone(),

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::config::{
     AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
@@ -22,7 +24,7 @@ impl Harness {
     async fn start(writable: bool) -> TestResult<Self> {
         let root = tempfile::Builder::new()
             .prefix("ca-dma-")
-            .tempdir_in("/private/tmp")?;
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
         let global = root.path().join("global.toml");
         std::fs::write(
@@ -669,7 +671,7 @@ async fn desktop_metadata_pages_remain_bounded_and_refuse_stale_owner_cursors() 
 async fn desktop_metadata_uses_the_actual_owner_and_durable_settings_source() {
     let root = tempfile::Builder::new()
         .prefix("ca-dmodel-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");

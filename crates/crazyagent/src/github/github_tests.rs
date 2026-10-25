@@ -461,10 +461,7 @@ fn repos_page_uses_the_stored_token_and_offers_the_next_page_when_full() {
     assert_eq!(query.get("sort").map(String::as_str), Some("pushed"));
 }
 
-#[test]
-fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
-    let scratch = Scratch::new();
-    let secret_text = token();
+fn served_repository(full_name: &str, secret_text: &str) -> (tempfile::TempDir, Server) {
     let source = tempfile::tempdir().unwrap();
     let work = source.path().join("work");
     std::fs::create_dir(&work).unwrap();
@@ -472,7 +469,7 @@ fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
     std::fs::write(work.join("README.md"), "hello\n").unwrap();
     git(&["add", "README.md"], &work);
     git(&["commit", "--quiet", "-m", "first"], &work);
-    let bare = source.path().join("octo-cat").join("tool.git");
+    let bare = source.path().join(format!("{full_name}.git"));
     std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
     git(
         &[
@@ -490,7 +487,7 @@ fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
         "Basic {}",
         base64(format!("x-access-token:{secret_text}").as_bytes())
     );
-    let expected = secret_text.clone();
+    let expected = secret_text.to_owned();
     let server = Server::start(move |seen, _| {
         if seen.path == "/user" {
             return user(seen, &expected);
@@ -509,6 +506,14 @@ fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
             Err(_) => Answer::bytes(404, Vec::new()),
         }
     });
+    (source, server)
+}
+
+#[test]
+fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_source, server) = served_repository("octo-cat/tool", &secret_text);
     let home = tempfile::tempdir().unwrap();
     let home = home.path().canonicalize().unwrap();
     let account = scratch.account(&server);
@@ -540,6 +545,74 @@ fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
     assert_eq!(
         account.clone_repo(&home, "octo-cat/tool").unwrap_err().0,
         "clone_destination_exists"
+    );
+}
+
+#[test]
+fn clone_of_a_repository_named_after_credentials_is_an_ordinary_project() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let full_name = "credential-labs/git-credential-tool";
+    let (_source, server) = served_repository(full_name, &secret_text);
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let receipt = account.clone_repo(&home, full_name).unwrap();
+    let project = home.join("git-credential-tool");
+    assert_eq!(receipt.path, project.to_string_lossy());
+    assert_eq!(
+        std::fs::read_to_string(project.join("README.md")).unwrap(),
+        "hello\n"
+    );
+    assert!(!tree_holds(&project, &secret_text));
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
+    assert!(config.contains(&format!(
+        "url = http://127.0.0.1:{}/{full_name}.git",
+        server.port
+    )));
+    let entries: Vec<_> = std::fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, [std::ffi::OsString::from("git-credential-tool")]);
+}
+
+#[test]
+fn clone_config_check_refuses_credential_keys_and_a_foreign_origin_by_name() {
+    let folder = tempfile::tempdir().unwrap();
+    let config = folder.path().join("config");
+    let remote =
+        url::Url::parse("http://127.0.0.1:9/credential-labs/git-credential-tool.git").unwrap();
+    let origin = format!(
+        "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {remote}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"credential\"]\n\tremote = origin\n\tmerge = refs/heads/credential\n"
+    );
+    std::fs::write(&config, &origin).unwrap();
+    clone::verify_config(&config, &remote).unwrap();
+    for refused in [
+        format!("{origin}[credential]\n\thelper = store\n"),
+        format!("{origin}[Credential \"https://github.com\"]\n\tHelper = store\n"),
+        format!("{origin}[credential]\n\tuseHttpPath\n"),
+        origin.replace("git-credential-tool", "other"),
+        format!("{origin}[remote \"origin\"]\n\turl = {remote}\n"),
+        "[core]\n\tbare = false\n".to_owned(),
+        "[core\n".to_owned(),
+        format!("{origin}{}", "\n".repeat(65 << 10)),
+    ] {
+        std::fs::write(&config, &refused).unwrap();
+        assert_eq!(
+            clone::verify_config(&config, &remote).unwrap_err().0,
+            "github_clone_failed",
+            "{refused:.120}"
+        );
+    }
+    let real = folder.path().join("real");
+    std::fs::write(&real, &origin).unwrap();
+    std::fs::remove_file(&config).unwrap();
+    std::os::unix::fs::symlink(&real, &config).unwrap();
+    assert_eq!(
+        clone::verify_config(&config, &remote).unwrap_err().0,
+        "github_clone_failed"
     );
 }
 

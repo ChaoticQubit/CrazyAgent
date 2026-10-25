@@ -1,7 +1,14 @@
-.PHONY: help fmt fmt-check lint test test-node build check
+.PHONY: help fmt fmt-check lint test test-rust-selected test-node test-bun build check desktop-dist
+
+NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
+BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
+ENGINE_TESTS := $(filter-out $(ENGINE_TESTS_EXCLUDE),$(basename $(notdir $(wildcard crates/crazyagent/tests/*.rs))))
+DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wildcard apps/desktop/src-tauri/tests/*.rs))))
+BUN ?= $(shell command -v bun)
+RCLI_SDK ?= $(CURDIR)/.local-state/tools/rcli-source
 
 help:
-	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust and Node test suites' 'make test-node  Run first-party Node tests' 'make build      Build the Rust workspace offline' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
+	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust, Node and Bun test suites' 'make test-rust-selected  Run engine and desktop test targets minus ENGINE_TESTS_EXCLUDE and DESKTOP_TESTS_EXCLUDE' 'make test-node  Run every first-party node:test file' 'make test-bun   Run the rcli host bun:test files' 'make build      Build the Rust workspace offline' 'make desktop-dist  Build the desktop frontend the desktop crate embeds' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
 
 fmt:
 	cargo fmt --all
@@ -9,32 +16,33 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
-lint:
-	cargo clippy --workspace --all-targets --offline -- -D warnings
+lint: desktop-dist
+	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
-test:
-	cargo build -p crazyagent --bin crazyagent --offline
-	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --offline
+test: desktop-dist
+	cargo build -p crazyagent --bin crazyagent --locked --offline
+	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --locked --offline
 	$(MAKE) test-node
+	$(MAKE) test-bun
+
+test-rust-selected: desktop-dist
+	cargo build -p crazyagent --bin crazyagent --locked --offline
+	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test -p crazyagent --locked --offline --bins $(foreach test,$(ENGINE_TESTS),--test $(test))
+	cargo test -p crazyagent-desktop --locked --offline --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))
 
 test-node:
-	node --test --test-timeout=15000 \
-		scripts/rcli/host.codec.test.mjs \
-		scripts/rcli/host.messages.test.mjs \
-		scripts/rcli/host.turns.test.mjs \
-		scripts/rcli/host.entry.test.mjs \
-		scripts/rcli/host.observations.test.mjs \
-		scripts/rcli/build-closure.test.mjs \
-		apps/desktop/test/model-access.test.mjs \
-		apps/desktop/test/projects.test.mjs \
-		apps/desktop/test/native/refresh-barrier.test.mjs \
-		apps/desktop/test/native/config-registration.test.mjs \
-		apps/desktop/test/native/baseline-reload.test.mjs \
-		apps/desktop/test/native/run-layout.test.mjs \
-		apps/desktop/test/native/log-producers.test.mjs
+	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TESTS)
 
-build:
-	cargo build --workspace --offline
+test-bun:
+	@test -n "$(BUN)" || { echo 'test-bun: unavailable: bun is not on PATH; set BUN=/path/to/bun' >&2; exit 2; }
+	@test -d "$(CURDIR)/.local-state/tools/rcli-source/node_modules" || { echo 'test-bun: unavailable: .local-state/tools/rcli-source is not the pinned Backboard-R-CLI checkout with installed node_modules' >&2; exit 2; }
+	"$(BUN)" test $(BUN_TESTS)
+
+build: desktop-dist
+	cargo build --workspace --locked --offline
+
+desktop-dist:
+	npm --prefix apps/desktop run build
 
 check:
 	$(MAKE) fmt-check

@@ -67,7 +67,7 @@ async fn closed(output: &mut TerminalOutput) -> String {
 async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
     let root = tempfile::Builder::new()
         .prefix("ca-term-owner-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");
@@ -172,4 +172,231 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
         .await
         .unwrap()
         .unwrap();
+}
+
+struct SubAgent {
+    root: tempfile::TempDir,
+    _server: Server,
+    service: EngineService,
+    _stop: tokio::sync::watch::Sender<bool>,
+    controller: OwnerController,
+    launcher: Tmux,
+    agent: AgentId,
+}
+
+impl SubAgent {
+    async fn start() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("ca-term-sub-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let tmux = installed(root.path()).expect("tmux must be installed on this machine");
+        let folder = root.path().join(FOLDER);
+        let server = Server {
+            tmux: tmux.clone(),
+            socket: folder.join(SOCKET),
+        };
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let member: i64 = {
+            let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+            connection.busy_timeout(Duration::from_secs(5)).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO team_agents(project,role,harness,tools,status,task,created_ms,heartbeat_ms) VALUES ('alpha','sub','codex',1,'stopped',4,1,1)",
+                    [],
+                )
+                .unwrap();
+            connection.last_insert_rowid()
+        };
+        let agent = AgentId::team(member).unwrap();
+        let command = InteractiveCommand {
+            argv: vec!["/bin/sh".into()],
+            cwd: root.path().to_path_buf(),
+            env: vec![("PS1".into(), "ready$ ".into())],
+            transcript: Transcript::Unavailable,
+        };
+        let launcher = {
+            let agent = agent.clone();
+            tokio::task::spawn_blocking(move || {
+                let launcher = Tmux::open(Some(tmux), &folder);
+                launcher.spawn(&agent, &command).unwrap();
+                launcher
+            })
+            .await
+            .unwrap()
+        };
+        let controller = OwnerController::attach(
+            root.path(),
+            OwnerClientKind::Desktop,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        Self {
+            root,
+            _server: server,
+            service,
+            _stop: stop,
+            controller,
+            launcher,
+            agent,
+        }
+    }
+
+    fn database_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for entry in std::fs::read_dir(self.root.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with("engine.db") {
+                bytes.extend(std::fs::read(entry.path()).unwrap());
+            }
+        }
+        assert!(!bytes.is_empty(), "the engine database exists");
+        bytes
+    }
+
+    async fn stop(self) {
+        let Self {
+            mut service,
+            controller,
+            launcher,
+            agent,
+            ..
+        } = self;
+        tokio::task::spawn_blocking(move || launcher.kill(&agent))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(controller);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control
+        .input(b"stty -echo; read secret; stty echo\r".to_vec())
+        .await
+        .unwrap();
+    control.input(b"hunter2-hidden\r".to_vec()).await.unwrap();
+    control
+        .input(b"echo typed-line-shown\r".to_vec())
+        .await
+        .unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\ntyped-line-shown\r\n").await);
+    control.input(b"echo after\r".to_vec()).await.unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\nafter\r\n").await);
+    let stored = sub.database_bytes();
+    assert!(
+        !contains(&stored, b"hunter2-hidden"),
+        "a secret typed at a hidden prompt is not in the engine database"
+    );
+    assert!(
+        !contains(&stored, b"echo typed-line-shown"),
+        "a typed command line is not in the engine database"
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}
+
+fn prompts(database: &std::path::Path) -> Vec<String> {
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    let mut statement = connection
+        .prepare("SELECT text FROM team_owner_prompts ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sent_prompt_is_one_submission_and_the_only_text_kept_for_the_master() {
+    let mut sub = SubAgent::start().await;
+    let database = sub.root.path().join("engine.db");
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control.input(b"echo typed-first\r".to_vec()).await.unwrap();
+    control
+        .prompt("echo sent-prompt\nsecond line".into())
+        .await
+        .unwrap();
+    assert!(
+        read_until(&mut output, &mut seen, b"sent-prompt second line\r\n").await,
+        "a multi-line prompt to an app without bracketed paste is one submission: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let kept = loop {
+        let kept = prompts(&database);
+        if !kept.is_empty() || std::time::Instant::now() > deadline {
+            break kept;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(kept, vec!["echo sent-prompt\nsecond line".to_owned()]);
+
+    control
+        .input(b"printf '\\033[?2004h'; cat -v\r".to_vec())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control.prompt("pasted".into()).await.unwrap();
+    assert!(
+        read_until(&mut output, &mut seen, b"^[[200~pasted^[[201~").await,
+        "a prompt to an app with bracketed paste on arrives as one paste: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    assert_eq!(
+        control
+            .prompt(" \n ".into())
+            .await
+            .err()
+            .map(|error| error.0),
+        Some("terminal_prompt_bounds".into())
+    );
+    control.input(vec![3]).await.unwrap();
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
 }

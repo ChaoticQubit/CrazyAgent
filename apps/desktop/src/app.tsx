@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { SessionContext, useSession, type Session } from "./state";
+import { unconfirmedLine } from "./api";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
@@ -8,7 +9,8 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, useRoute, type Route } from "./ui";
+import { useUpdateWatch } from "./screens/settings/updates";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
@@ -51,14 +53,18 @@ function Launching() {
   </div>;
 }
 
-function Screen({ route, session }: { route: Route; session: Session }) {
+/** The routed screen inside the shell. Each project page and onboarding review is keyed by its
+ * project id, so a switch to another project starts a fresh page and never keeps the last
+ * project's master ticket, name, settings or late reads. Inputs: the route and the session.
+ * Output: the screen element. */
+export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
     case "settings": return <Settings tab={route.tab} action={route.action} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
-    case "onboarding": return <OnboardingReview id={route.id} />;
-    case "project": return <ProjectPage id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
+    case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
+    case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
     default: return <Home />;
   }
 }
@@ -80,8 +86,11 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} />}
       sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
-      {session.unconfirmed && <Banner action={<Button size="small" onClick={() => void session.checkUnconfirmed()}>Check again</Button>}>
-        We couldn't confirm your last change. Check it and save again.
+      {session.unconfirmed && <Banner action={<span className="row">
+        <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
+        <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+      </span>}>
+        {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}
       <Screen route={route} session={session} />
       <GoToLayer projects={projects ?? []} />
@@ -92,7 +101,7 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
 function useShortcuts() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey || event.ctrlKey) return;
+      if (!shortcutKey(event)) return;
       if (event.key === "n") { event.preventDefault(); navigate({ name: "new-project", step: "basics" }); }
       else if (event.key === ",") { event.preventDefault(); navigate({ name: "settings", tab: "accounts" }); }
       else if (event.key === "[") { event.preventDefault(); window.history.back(); }
@@ -108,5 +117,6 @@ export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
+  useUpdateWatch(session.showToast);
   return <AppView session={session} route={route} />;
 }

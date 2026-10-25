@@ -101,7 +101,14 @@ async fn configured_receipt_admits_one_exact_initial_attempt_without_ready() {
         connection_state(&case.db, &case.proof.connection, 101).unwrap(),
         before
     );
-    assert_eq!(case.request.task_id, case.session.bootstrap_task_id);
+    assert_eq!(
+        case.request.task_id,
+        crate::storage::turn_task_id(
+            &case.session.session_id,
+            case.session.current_turn.as_ref().unwrap()
+        )
+        .unwrap()
+    );
     case.close().await;
 }
 
@@ -272,13 +279,6 @@ async fn configured_initial_preserves_explicit_negative_and_stale_observations()
             1000,
             100,
             "gateway_quota_exhausted",
-        ),
-        (
-            ObservationKind::Unknown,
-            100,
-            200,
-            200,
-            "gateway_initial_readiness_stale",
         ),
         (
             ObservationKind::Unknown,

@@ -296,7 +296,7 @@ where
 {
     let root = tempfile::Builder::new()
         .prefix("ca-np-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let context = Arc::new(ProfileCase::start(root.path(), explicit_sources).await);
@@ -598,7 +598,7 @@ async fn no_settings_write_grant_is_needed_for_real_profile_preparation() {
 async fn unavailable_custody_does_not_broaden_ordinary_engine_startup_rejection() {
     let root = tempfile::Builder::new()
         .prefix("ca-np-open-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let state = root.path().join("s");

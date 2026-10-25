@@ -169,19 +169,21 @@ impl NativeBridge {
         assert!(operation.unresolved);
     }
 
-    fn auth_operation(&self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
+    fn auth_operation(&mut self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
         let operation = self
             .native_auth
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| failure("native_auth_operation_missing"))?;
         let original = operation.original.scope();
         if original.expected_database_instance != scope.expected_database_instance {
+            operation.unresolved = false;
             return Err(failure("native_auth_database_mismatch"));
         }
         if original.connection != scope.connection {
             return Err(failure("native_auth_operation_scope_conflict"));
         }
         if original != scope {
+            operation.unresolved = false;
             return Err(failure("native_profile_source_conflict"));
         }
         Ok(operation.original.id().clone())
@@ -214,7 +216,15 @@ impl NativeBridge {
                 if let Some(operation) = self.native_auth.as_mut() {
                     if error.code == "native_auth_outcome_unknown_read_same_operation" {
                         operation.unresolved = true;
-                    } else if operation.generation.is_none() {
+                    } else if operation.generation.is_none()
+                        || matches!(
+                            error.code,
+                            "native_auth_not_active"
+                                | "native_auth_operation_missing"
+                                | "native_auth_database_mismatch"
+                                | "native_profile_source_conflict"
+                        )
+                    {
                         operation.unresolved = false;
                     }
                 }
@@ -229,12 +239,7 @@ impl NativeBridge {
         }
         let operation = self.native_auth.as_mut().expect("validated auth operation");
         operation.generation = Some(reply.fact.generation);
-        operation.unresolved = !matches!(
-            reply.fact.phase,
-            NativeAuthPhase::Unavailable
-                | NativeAuthPhase::AuthenticatedObserved
-                | NativeAuthPhase::UnauthenticatedObserved
-        );
+        operation.unresolved = reply.fact.phase.unfinished();
         let view = presentation::project(ticket, reply)?;
         if view.display_error.is_none()
             && let Some(presentation::Challenge::ClaudeOfficial {

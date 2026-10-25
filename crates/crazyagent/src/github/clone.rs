@@ -13,6 +13,7 @@ const CLONE_TIME: Duration = Duration::from_secs(1800);
 const GIT_USER: &str = "x-access-token";
 const NAME_BYTES_MAX: usize = 100;
 const ERROR_BYTES_MAX: u64 = 16 << 10;
+const CONFIG_BYTES_MAX: u64 = 64 << 10;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
@@ -77,6 +78,8 @@ pub(super) fn clone_command(
         .arg(format!("credential.helper={helper}"))
         .args(["-c", "credential.interactive=never"])
         .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.pager=cat"])
         .args(["-c", "core.askPass=/usr/bin/false"])
         .args(["-c", "protocol.allow=never"])
         .arg("-c")
@@ -94,8 +97,9 @@ pub(super) fn clone_command(
 }
 
 /// Clones one repository into the projects home through the credential store, so the
-/// token never lands in argv, the environment, `.git/config` or the remote URL.
-/// Inputs: the store, the token reference, endpoints, the projects home and `owner/name`.
+/// token never lands in argv, the environment, `.git/config` or the remote URL. git
+/// writes into a hidden staging folder in the home, renamed into place only after a
+/// whole clone and deleted on any failure, so the home never shows a half-written project.
 /// Output: the receipt, or `clone_destination_exists`, `github_clone_failed`.
 pub(super) fn clone_repo(
     store: &dyn Store,
@@ -113,7 +117,27 @@ pub(super) fn clone_repo(
         return Err(failure("clone_destination_exists"));
     }
     let helper = store.git_credential_helper(credential, GIT_USER)?;
-    let (mut command, remote) = clone_command(endpoints, &helper, &destination, name)?;
+    let mut token = [0u8; 8];
+    getrandom::fill(&mut token).map_err(|_| failure("github_clone_failed"))?;
+    let staging = home.join(format!(
+        ".crazyagent-cloning-{}",
+        token.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ));
+    let result = fetch(endpoints, &helper, &staging, &destination, name);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn fetch(
+    endpoints: &Endpoints,
+    helper: &str,
+    staging: &Path,
+    destination: &Path,
+    name: &str,
+) -> Result<CloneReceipt, EngineError> {
+    let (mut command, remote) = clone_command(endpoints, helper, staging, name)?;
     let mut child =
         crate::spawn_gate::spawn(&mut command).map_err(|_| failure("github_clone_failed"))?;
     let stderr = child.stderr.take().expect("git stderr is piped");
@@ -134,7 +158,6 @@ pub(super) fn clone_repo(
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
-            let _ = std::fs::remove_dir_all(&destination);
             return Err(failure("github_clone_timed_out"));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -143,13 +166,64 @@ pub(super) fn clone_repo(
     if !status.success() {
         return Err(failure("github_clone_failed"));
     }
-    let config = std::fs::read(destination.join(".git/config"))
-        .map_err(|_| failure("github_clone_failed"))?;
-    let config = String::from_utf8_lossy(&config);
-    assert!(config.contains(remote.as_str()));
-    assert!(!config.contains("credential"));
+    verify_config(&staging.join(".git/config"), &remote)?;
+    if std::fs::symlink_metadata(destination).is_ok() {
+        return Err(failure("clone_destination_exists"));
+    }
+    std::fs::rename(staging, destination).map_err(|_| failure("github_clone_failed"))?;
     Ok(CloneReceipt {
         full_name: name.to_owned(),
         path: destination.to_string_lossy().into_owned(),
     })
+}
+
+/// Checks the `.git/config` a clone wrote: its origin URL is the remote cloned and it holds
+/// no `credential.` key, so the store helper stayed out of the project. git lists the keys,
+/// so a name in any case or subsection compares alike and URL text is never a key.
+/// Inputs: the config path and the remote. Output: `()`, or `github_clone_failed`.
+pub(super) fn verify_config(config: &Path, remote: &url::Url) -> Result<(), EngineError> {
+    let failed = || failure("github_clone_failed");
+    let metadata = std::fs::symlink_metadata(config).map_err(|_| failed())?;
+    if !metadata.is_file() || metadata.len() > CONFIG_BYTES_MAX {
+        return Err(failed());
+    }
+    let listed = crate::spawn_gate::output(
+        Command::new(GIT)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/var/empty")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["config", "--file"])
+            .arg(config)
+            .args(["--no-includes", "-z", "--list"])
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|_| failed())?;
+    if !listed.status.success() {
+        return Err(failed());
+    }
+    let mut origins = 0_usize;
+    for entry in listed.stdout.split(|byte| *byte == 0) {
+        let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
+            Some(at) => (&entry[..at], &entry[at + 1..]),
+            None => (entry, &entry[entry.len()..]),
+        };
+        if key.starts_with(b"credential.") {
+            return Err(failed());
+        }
+        if key == b"remote.origin.url" {
+            if value != remote.as_str().as_bytes() {
+                return Err(failed());
+            }
+            origins += 1;
+        }
+    }
+    if origins != 1 {
+        return Err(failed());
+    }
+    Ok(())
 }

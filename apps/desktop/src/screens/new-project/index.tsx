@@ -1,8 +1,8 @@
-import { harnessCatalog, nextGeneration, poolSummaries, receiptResult } from "../../api";
+import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receiptResult } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import {
-  assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, reconcileSetup, settledReceipt, setupProject,
+  assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, settledReceipt, setupProject,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog } from "../../api-projects";
 import { SessionContext } from "../../state";
@@ -141,7 +141,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     }
     let receipt = result.value;
     if (needsReconcile(receipt)) {
-      const settled = await reconcileSetup();
+      const settled = await checkUnconfirmed();
       session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
       receipt = settledReceipt(receipt, settled);
     }

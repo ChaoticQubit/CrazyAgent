@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 use std::fs;

@@ -224,9 +224,6 @@ impl Drop for Engine {
     }
 }
 
-/// A fresh private runtime folder `r-sbx-<pid>-<name>` under the checkout's
-/// `.local-state`, holding `catalog` as the global settings, so each test of
-/// this binary gets its own engine folder and a failed run keeps its evidence.
 /// The projects home beside a test runtime folder, outside the engine's data.
 fn home(runtime: &Path) -> PathBuf {
     let mut name = runtime.file_name().unwrap().to_os_string();
@@ -234,16 +231,21 @@ fn home(runtime: &Path) -> PathBuf {
     runtime.with_file_name(name)
 }
 
+/// A fresh private runtime folder `r-sbx-<pid>-<name>` under this checkout's
+/// `.local-state`, holding `catalog` as the global settings, so each test of
+/// this binary gets its own engine folder and a failed run keeps its evidence.
 fn runtime(name: &str, catalog: &str) -> PathBuf {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../.local-state")
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .canonicalize()
         .unwrap();
     assert!(
-        base.ends_with("CrazyAgent/.local-state"),
+        checkout.join("Cargo.lock").is_file(),
         "{}",
-        base.display()
+        checkout.display()
     );
+    let base = checkout.join(".local-state");
+    fs::create_dir_all(&base).unwrap();
     let runtime = base.join(format!("r-sbx-{}-{name}", std::process::id()));
     for folder in [runtime.clone(), home(&runtime)] {
         if folder.exists() {
@@ -305,7 +307,10 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     for id in [codex_job, claude_job, rcli_job] {
         loop {
             let job = jobs.get(id).unwrap().unwrap();
-            if matches!(job.status, ResearchStatus::Done | ResearchStatus::Failed) {
+            if matches!(
+                job.status,
+                ResearchStatus::Done | ResearchStatus::Failed | ResearchStatus::Cancelled
+            ) {
                 break;
             }
             assert!(Instant::now() < deadline, "research did not finish");

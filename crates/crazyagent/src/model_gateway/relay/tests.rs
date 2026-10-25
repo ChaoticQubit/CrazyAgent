@@ -12,6 +12,15 @@ fn key() -> SecretString {
     SecretString::new(KEY.as_bytes().to_vec()).unwrap()
 }
 
+/// Reads one whole HTTP/1.x request the way the relay does, head then body.
+/// Input: the reader positioned at the request line.
+/// Output: the request, or the HTTP status the relay would refuse it with.
+fn read_request(reader: &mut impl BufRead) -> Result<Incoming, u16> {
+    let mut incoming = read_head(reader)?;
+    incoming.body = read_body(reader, &incoming.headers)?;
+    Ok(incoming)
+}
+
 /// A real HTTP/1.1 provider stand-in on 127.0.0.1 that records every request it gets,
 /// parsed with the relay's own request reader, and answers through the given handler.
 struct Provider {
@@ -263,6 +272,50 @@ fn wrong_or_missing_token_is_refused_without_reaching_the_provider() {
         assert_eq!(status, 401, "{auth}");
         assert!(!String::from_utf8_lossy(&body).contains(KEY));
     }
+    assert!(provider.seen().is_empty());
+}
+
+#[test]
+fn a_request_without_the_token_is_refused_before_its_body_is_read() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let answer = Duration::from_secs(10);
+    let announced = [
+        format!("Content-Length: {BODY_BYTES_MAX}"),
+        "Transfer-Encoding: chunked".to_owned(),
+    ];
+    for framing in &announced {
+        let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+        stream.set_read_timeout(Some(answer)).unwrap();
+        let head = format!("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{framing}\r\n\r\n");
+        stream.write_all(head.as_bytes()).unwrap();
+        let started = Instant::now();
+        let mut reply = Vec::new();
+        let read = stream.read_to_end(&mut reply);
+        assert!(
+            read.is_ok(),
+            "{framing}: the relay must answer before any body byte arrives, got {read:?} after {:?}",
+            started.elapsed()
+        );
+        let reply = String::from_utf8_lossy(&reply);
+        assert!(reply.starts_with("HTTP/1.1 401 "), "{framing}: {reply}");
+    }
+
+    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+    stream.set_read_timeout(Some(answer)).unwrap();
+    let head = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nx-api-key: {}\r\nContent-Length: {}\r\n\r\n",
+        relay.token(),
+        BODY_BYTES_MAX + 1
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).unwrap();
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(
+        reply.starts_with("HTTP/1.1 413 "),
+        "an authenticated body keeps its bound: {reply}"
+    );
     assert!(provider.seen().is_empty());
 }
 

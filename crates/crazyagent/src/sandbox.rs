@@ -1,7 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 #[cfg(unix)]
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 #[cfg(unix)]
 use std::io::Write;
@@ -131,7 +132,9 @@ const ENGINE_SECRET_FILES: &[&str] = &[
     "github.toml",
 ];
 
-const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys"];
+const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys", crate::terminal::FOLDER];
+
+const RUNTIME_ENTRIES_MAX: usize = 1024;
 
 /// Why a sandbox root is refused when it equals, holds or sits inside a secret path from
 /// [`ProjectSandbox::secret_paths`]: an allow-list boundary such as Landlock or bubblewrap
@@ -401,7 +404,7 @@ pub struct ProjectSandbox {
     read_roots: Vec<PathBuf>,
     network: SandboxNetwork,
     owner_home: PathBuf,
-    engine_runtime: Option<PathBuf>,
+    engine_secrets: Vec<PathBuf>,
 }
 
 impl ProjectSandbox {
@@ -435,13 +438,14 @@ impl ProjectSandbox {
             read_roots: Vec::new(),
             network,
             owner_home: owner,
-            engine_runtime: None,
+            engine_secrets: Vec::new(),
         })
     }
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
-    /// the engine database, the owner socket, the GitHub sign-in and settings files and the
-    /// saved account keys. The agent's own home and temp dirs may sit inside it, but no
+    /// the engine database, the owner socket, the GitHub sign-in and settings files, the
+    /// saved account keys, the terminal server folder and every engine socket and socket
+    /// folder found in it now. The agent's own home and temp dirs may sit inside it, but no
     /// root granted so far may hold or sit inside one of those secrets.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
@@ -449,20 +453,12 @@ impl ProjectSandbox {
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
-        let secrets = self.engine_secrets_in(&runtime);
+        let secrets = engine_secrets_in(&runtime)?;
         for root in self.writable_roots().chain(self.read_roots.iter()) {
             clear_of_secrets(root, &secrets)?;
         }
-        self.engine_runtime = Some(runtime);
+        self.engine_secrets = secrets;
         Ok(self)
-    }
-
-    fn engine_secrets_in(&self, runtime: &Path) -> Vec<PathBuf> {
-        ENGINE_SECRET_FILES
-            .iter()
-            .chain(ENGINE_SECRET_FOLDERS)
-            .map(|name| runtime.join(name))
-            .collect()
     }
 
     /// Every path this sandbox denies to the agent although an allowed root might cover
@@ -470,9 +466,7 @@ impl ProjectSandbox {
     /// the system Keychains and, once guarded, the engine runtime's secrets.
     pub fn secret_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home).collect();
-        if let Some(runtime) = &self.engine_runtime {
-            paths.extend(self.engine_secrets_in(runtime));
-        }
+        paths.extend(self.engine_secrets.iter().cloned());
         paths
     }
 
@@ -602,14 +596,18 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
+        text.push_str(&self.git_link_denies());
         text.push_str(
-            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",
+            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
+        let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {
-                text.push_str("(allow network*)\n");
+                text.push_str(
+                    "(allow network-outbound (remote ip \"*:*\"))\n(allow network-inbound (local ip \"*:*\"))\n(allow network-bind (local ip \"*:*\"))\n(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
+                );
                 text.push_str(
                     "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n",
                 );
@@ -635,12 +633,44 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
             MACH_SERVICES
                 .iter()
                 .all(|service| !KEYCHAIN_SERVICES.contains(service))
         );
         assert!(text.len() <= PROFILE_BYTES_MAX);
+        text
+    }
+
+    /// The Seatbelt rules that keep the owner's git reading the metadata the engine made.
+    /// No agent may move the project folder, the git worktrees folders or a worktree, which
+    /// would carry protected files out of their denied paths and back. A worktree's `.git`
+    /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
+    /// does, but never rewritten or removed, and no `config.worktree` may be written.
+    /// Input: the policy. Output: the rule text.
+    fn git_link_denies(&self) -> String {
+        let project = self.project_root.display();
+        let pattern = seatbelt_pattern(&self.project_root);
+        let admin = format!("{pattern}/\\.git/worktrees/[^/]+");
+        let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
+        let mut moves = format!(
+            "(deny file-write-unlink\n  (literal \"{project}\")\n  (literal \"{project}/.git/worktrees\")\n  (literal \"{project}/worktrees\")\n  (literal \"{project}/.crazyagent/worktrees\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
+        );
+        let mut links = format!(
+            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/(commondir|gitdir)$\")\n  (regex #\"^{checkouts}/\\.git$\")"
+        );
+        for worktree in &self.worktrees {
+            moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
+            links.push_str(&format!(
+                "\n  (literal \"{}\")",
+                worktree.join(".git").display()
+            ));
+        }
+        let text = format!(
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n"
+        );
+        assert!(text.matches("(regex #\"^/").count() == 5);
         text
     }
 
@@ -857,6 +887,22 @@ impl Sandbox for InstalledSandbox {
     }
 }
 
+/// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.
+/// Input: a path that passes `clean_absolute`, so it holds no quote or backslash.
+/// Output: the pattern text, without anchors.
+fn seatbelt_pattern(path: &Path) -> String {
+    let text = path.display().to_string();
+    assert!(text.starts_with('/') && !text.contains('"') && !text.contains('\\'));
+    let mut pattern = String::with_capacity(text.len() * 2);
+    for character in text.chars() {
+        if ".^$*+?()[]{}|".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern
+}
+
 fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
 }
@@ -893,6 +939,75 @@ fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
                 .fold(owner.to_path_buf(), |at, part| at.join(part))
         })
         .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
+}
+
+/// The engine runtime's secrets: the fixed secret files and folders, plus every Unix socket
+/// directly in the runtime and every runtime folder that directly holds one (owner
+/// generations, runner roots, the terminal server). Input: the canonical runtime folder.
+/// Output: the secret paths, or a refusal for a runtime or folder over the entry bound.
+fn engine_secrets_in(runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
+    let mut secrets: Vec<PathBuf> = ENGINE_SECRET_FILES
+        .iter()
+        .chain(ENGINE_SECRET_FOLDERS)
+        .map(|name| runtime.join(name))
+        .collect();
+    for entry in bounded_entries(runtime)? {
+        if !secrets.contains(&entry) && engine_socket_place(&entry)? {
+            secrets.push(entry);
+        }
+    }
+    Ok(secrets)
+}
+
+#[cfg(unix)]
+fn engine_socket_place(path: &Path) -> Result<bool, SandboxError> {
+    use std::os::unix::fs::FileTypeExt;
+    let Some(kind) = present_kind(path)? else {
+        return Ok(false);
+    };
+    if kind.is_socket() {
+        return Ok(true);
+    }
+    if !kind.is_dir() {
+        return Ok(false);
+    }
+    let entries = match bounded_entries(path) {
+        Err(SandboxError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        other => other?,
+    };
+    for entry in entries {
+        if present_kind(&entry)?.is_some_and(|kind| kind.is_socket()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn present_kind(path: &Path) -> Result<Option<fs::FileType>, SandboxError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn engine_socket_place(_path: &Path) -> Result<bool, SandboxError> {
+    Ok(false)
+}
+
+fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(folder)? {
+        if entries.len() == RUNTIME_ENTRIES_MAX {
+            return Err(invalid("engine runtime folder has too many entries"));
+        }
+        entries.push(entry?.path());
+    }
+    Ok(entries)
 }
 
 fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {

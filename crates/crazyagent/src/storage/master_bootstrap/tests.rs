@@ -123,7 +123,7 @@ impl Case {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-mbp-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let repository = repository(root.path());
@@ -138,7 +138,7 @@ impl Case {
             mut connection,
             lock,
             mut custody,
-        } = storage::open_actor_database(&path, false).unwrap();
+        } = storage::open_actor_database(&path, false, None).unwrap();
         let started = storage::owner_start(&mut connection).unwrap();
         let session = open(
             &mut connection,
@@ -383,7 +383,7 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
 
 #[test]
 fn bootstrap_initializer_rejects_conflicting_schema() {
-    let root = tempfile::tempdir_in("/private/tmp").unwrap();
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let db = Connection::open(root.path().join("conflict.db")).unwrap();
     db.execute_batch("CREATE TABLE bootstrap_workspaces (body TEXT)")
         .unwrap();

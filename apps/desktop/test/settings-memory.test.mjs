@@ -34,7 +34,17 @@ test("suggestions from project research offer Save to memory and Dismiss with th
   assert.match(markup, /Save to memory/);
   assert.match(markup, />Edit</);
   assert.match(markup, /Dismiss/);
-  assert.doesNotMatch(markup, /entry-1|project-harbor/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/gu, " "), /entry-1|project-harbor/);
+});
+
+test("suggested and saved memories show hidden and reordering characters before Save to memory or Delete", () => {
+  const hidden = "Use pnpm\u{e0041}\u{e0042} now\u200b\u202e";
+  const markup = render({ suggested: { kind: "ok", value: [suggestion({ text: hidden, project_name: "Harbor\u202eNotes" })] }, saved: { kind: "ok", value: { items: [saved({ text: hidden })], next: null } } });
+  const text = markup.replace(/<[^>]*>/gu, " ");
+  assert.equal(text.split("Use pnpm\\u{e0041}\\u{e0042} now\\u200b\\u202e").length, 3);
+  assert.match(text, /From Harbor\\u202eNotes/);
+  assert.doesNotMatch(text, /[\u{e0041}\u200b\u202e]/u);
+  assert.equal(markup.split('class="pj-note-text"').length, 3);
 });
 
 test("saved memories list with search, add and delete; empty and not ready states stay plain", () => {
@@ -77,12 +87,14 @@ test("a suggestion opens for editing with its own text before it is saved", () =
   const markup = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: false, onSave: forbidden, onCancel: forbidden }));
   assert.match(markup, /Edit before saving \(from Harbor Notes\)/);
   assert.match(markup, /<textarea[^>]*>Competitors charge per seat\.<\/textarea>/);
-  assert.match(markup, /maxlength="4096"/);
+  assert.match(markup, /maxlength="4096"/i);
   assert.match(markup, />Save edited</);
   assert.match(markup, />Cancel</);
-  assert.doesNotMatch(markup, /entry-1/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/gu, " "), /entry-1/);
   const saving = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion(), pending: true, onSave: forbidden, onCancel: forbidden }));
   assert.match(saving, /Saving\.\.\./);
+  const hidden = renderToStaticMarkup(createElement(SuggestionEditor, { suggestion: suggestion({ text: "Use pnpm\u{e0041}\u200b" }), pending: false, onSave: forbidden, onCancel: forbidden }));
+  assert.match(hidden, /<textarea[^>]*>Use pnpm\\u\{e0041\}\\u200b<\/textarea>/);
 });
 
 test("an edited memory follows the engine's text rules", () => {
@@ -93,7 +105,7 @@ test("an edited memory follows the engine's text rules", () => {
   assert.equal(api.memoryEdit("x".repeat(4096)).kind, "ok");
   assert.deepEqual(api.memoryEdit("x".repeat(4097)), { kind: "invalid", reason: "Too long: 4097 of 4096 bytes." });
   assert.deepEqual(api.memoryEdit("\u00e9".repeat(2049)), { kind: "invalid", reason: "Too long: 4098 of 4096 bytes." });
-  assert.equal(api.plainError("invalid_knowledge_text"), "Write the memory as text, up to 4096 bytes.");
+  assert.equal(api.plainError("invalid_knowledge_text"), "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.");
 });
 
 test("saving an edited suggestion refuses bad text before the engine and needs the desktop shell", async () => {

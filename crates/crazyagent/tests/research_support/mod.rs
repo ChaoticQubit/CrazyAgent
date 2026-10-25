@@ -39,7 +39,7 @@ impl EngineRuntime {
     pub fn with_projects(projects: &[(&str, &str)]) -> Self {
         let temp = tempfile::Builder::new()
             .prefix("ca-research-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -49,7 +49,7 @@ impl EngineRuntime {
         let project_settings = root.join("project.toml");
         let home_temp = tempfile::Builder::new()
             .prefix("ca-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let home = home_temp.path().canonicalize().unwrap();
         tokio::runtime::Builder::new_multi_thread()

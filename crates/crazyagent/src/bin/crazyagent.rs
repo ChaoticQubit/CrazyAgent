@@ -20,6 +20,7 @@ crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-s
 crazyagent tui\n\
 crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
+crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
@@ -46,6 +47,18 @@ fn main() -> ExitCode {
     if args == ["--version"] {
         println!("{}", crazyagent::version::line());
         return ExitCode::SUCCESS;
+    }
+    if args.first().is_some_and(|arg| arg == "update") {
+        return match crazyagent::update::run(&args[1..]) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     if args == ["tui", "--help"] {
         println!("crazyagent tui\ncrazyagent tui SOCKET");

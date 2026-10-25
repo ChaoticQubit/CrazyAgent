@@ -64,25 +64,35 @@ export function homeLine(home: ProjectsHome): string | null {
     : `${where} is checked when CrazyAgent starts. Live updates are off right now.`;
 }
 
-const trimSlash = (path: string) => path.replace(/\/+$/u, "");
+const trimSlash = (path: string) => path.replace(/[\\/]+$/u, "");
+const unified = (path: string) => trimSlash(path).replace(/\\/gu, "/");
 
-/** Checks a folder picked for Add existing folder; the engine checks again.
- * Inputs: the absolute path and the projects folder, or null. Output: the problem, or null. */
+/** Checks a folder picked for Add existing folder: an absolute macOS, Linux or Windows path
+ * (drive or network share) outside the projects folder. The engine checks again.
+ * Inputs: the path and the projects folder, or null. Output: the problem, or null. */
 export function pickedFolderProblem(path: string, home: string | null): string | null {
-  const clean = trimSlash(path);
-  if (!clean.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(clean)) return "Choose the folder again with Choose folder.";
+  const clean = unified(path);
+  if (!/^(\/|[A-Za-z]:\/)/u.test(clean) || /[\u0000-\u001f\u007f-\u009f]/u.test(clean)) return "Choose the folder again with Choose folder.";
   if (home) {
-    const root = trimSlash(home);
+    const root = unified(home);
     if (clean === root || root.startsWith(`${clean}/`)) return "This folder holds your projects folder. Choose one project's folder.";
     if (clean.startsWith(`${root}/`)) return "This folder is already in your projects folder. It shows on Home.";
   }
   return null;
 }
 
-/** The last part of a folder path. Input: the path. Output: the folder's name. */
+/** The last part of a folder path written with forward or back slashes.
+ * Input: the path. Output: the folder's name. */
 export function folderName(path: string): string {
-  const clean = trimSlash(path);
+  const clean = unified(path);
   return clean.slice(clean.lastIndexOf("/") + 1);
+}
+
+/** Joins a folder name onto a folder path with that path's own separator.
+ * Inputs: the folder path and the name. Output: the joined path. */
+export function joinPath(root: string, name: string): string {
+  const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+  return `${trimSlash(root)}${separator}${name}`;
 }
 
 /** Says what Move or Copy does; Copy shows the size first and warns above 1 GB.

@@ -317,7 +317,7 @@ impl OwnerRuntimeHandle {
             || prepared.session.session_id != *session_id
             || prepared.session.current_turn.as_ref() != Some(turn_id)
             || prepared.attempt.request.project_id != *project_id
-            || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+            || !prepared.attempt_on_current_turn()
             || prepared.attempt.connection != prepared.profile.binding().connection
         {
             return Err(failure("master_runtime_binding"));
@@ -784,7 +784,7 @@ mod tests {
         async fn start() -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-md-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let config = resolve_config(

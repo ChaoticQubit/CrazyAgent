@@ -4,7 +4,7 @@ use crazyagent::engine::owner::{TerminalControl, TerminalOutput, TerminalSession
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::TeamGraph;
 use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
+    AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -90,13 +90,16 @@ fn json(frame: &TerminalFrame) -> InvokeResponseBody {
     InvokeResponseBody::Json(text)
 }
 
-/// Checks one input or resize request from the window before it reaches the engine.
+/// Checks one input, prompt or resize request from the window before it reaches the engine.
 /// Takes the request; attach and detach never come through this path.
-/// Returns whether the bytes or the size are inside the engine's limits.
+/// Returns whether the bytes, the prompt or the size are inside the engine's limits.
 pub fn request_valid(request: &TerminalRequest) -> bool {
     let size = SIZE_MIN..=SIZE_MAX;
     match request {
         TerminalRequest::Input { bytes } => !bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX,
+        TerminalRequest::Prompt { text } => {
+            !text.trim().is_empty() && text.len() <= PROMPT_BYTES_MAX
+        }
         TerminalRequest::Resize { cols, rows } => size.contains(cols) && size.contains(rows),
         TerminalRequest::Attach { .. } | TerminalRequest::Detach => false,
     }
@@ -215,7 +218,7 @@ impl Terminals {
         Ok(())
     }
 
-    /// Queues one input or resize request for an attached agent terminal.
+    /// Queues one input, prompt or resize request for an attached agent terminal.
     /// Takes the terminal name and the request.
     /// Returns once queued in order, or a plain code for a bad request or no view.
     pub async fn send(&self, agent: &AgentId, request: TerminalRequest) -> Result<(), BridgeError> {
@@ -255,6 +258,7 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
     while let Some(request) = queue.recv().await {
         let sent = match request {
             TerminalRequest::Input { bytes } => control.input(bytes).await,
+            TerminalRequest::Prompt { text } => control.prompt(text).await,
             TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
             TerminalRequest::Attach { .. } | TerminalRequest::Detach => continue,
         };

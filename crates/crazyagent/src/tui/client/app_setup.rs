@@ -174,7 +174,7 @@ mod tests {
     async fn the_setup_page_reads_setup_home_and_github_and_sets_the_home() {
         let root = tempfile::Builder::new()
             .prefix("ca-tsetup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(home.path, None);
         let beside = tempfile::Builder::new()
             .prefix("ca-tsetup-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let folder = std::fs::canonicalize(beside.path())
             .unwrap()
