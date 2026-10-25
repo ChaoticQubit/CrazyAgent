@@ -107,6 +107,7 @@ export interface HarnessEntry {
   tools: ToolControl;
   model_selection: boolean;
   account_kinds: AccountKind[];
+  aliases: string[];
 }
 
 /** Lists every harness the engine knows, in owner order, with its status on this machine.

@@ -288,7 +288,7 @@ test("Stop targets the master turn that is still replying", () => {
 });
 
 test("the master's harness that is not installed gets the design's line", () => {
-  const entry = (id, name, kind) => ({ id, name, status: { kind }, status_label: "", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [] });
+  const entry = (id, name, kind) => ({ id, name, status: { kind }, status_label: "", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], aliases: [] });
   const catalog = [entry("codex", "Codex", "not_installed"), entry("claude", "Claude Code", "ready")];
   assert.equal(research.masterMissingLine(catalog, "codex"), "Codex isn't installed on this Mac.");
   assert.equal(research.masterMissingLine(catalog, "claude"), null);
