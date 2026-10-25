@@ -30,6 +30,7 @@ fn main() {
         "desktop_team_graph",
         "desktop_terminal_attach",
         "desktop_terminal_input",
+        "desktop_terminal_prompt",
         "desktop_terminal_resize",
         "desktop_terminal_detach",
         "desktop_update_project_setup",

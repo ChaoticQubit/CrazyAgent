@@ -27,9 +27,10 @@ pub const DELEGATE_MARKER: &str = "DELEGATE";
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
-/// Text the owner typed straight into one team agent's terminal. It is recorded on the
-/// agent's task, and the master hears a short note of it on its next turn.
-/// `agent` is the team agent id; `text` is at most `DIRECT_INPUT_BYTES_MAX` bytes.
+/// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
+/// on the agent's task until the master hears a short note of it on its next turn.
+/// Keys typed into the terminal are never kept. `agent` is the team agent id; `text` is at
+/// most `DIRECT_INPUT_BYTES_MAX` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectInput {
     pub project: ProjectId,
@@ -665,19 +666,19 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS team_direct_inputs (
+            CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
                 agent INTEGER NOT NULL,
                 task INTEGER,
                 harness TEXT NOT NULL,
                 text TEXT NOT NULL,
-                created_ms INTEGER NOT NULL,
-                delivered INTEGER NOT NULL DEFAULT 0
+                created_ms INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS team_direct_inputs_project ON team_direct_inputs(project, delivered);",
+            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    direct::erase_typed_input(connection)
 }
 
 fn slot<'a>(plan: &'a TeamPlan, harness: &str) -> Option<&'a HarnessSlot> {

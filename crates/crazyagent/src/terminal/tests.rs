@@ -58,6 +58,13 @@ fn terminal_frames_use_the_documented_wire_shape() {
         r#"{"kind":"input","bytes":[104,105,13]}"#
     );
     assert_eq!(
+        serde_json::from_str::<TerminalRequest>(r#"{"kind":"prompt","text":"run the tests"}"#)
+            .unwrap(),
+        TerminalRequest::Prompt {
+            text: "run the tests".into()
+        }
+    );
+    assert_eq!(
         serde_json::to_string(&TerminalFrame::Attached {
             agent_id: AgentId::team(3).unwrap(),
             cols: 80,
@@ -101,4 +108,39 @@ fn every_terminal_code_has_plain_words() {
         plain_reason("terminal_agent_unknown"),
         "This agent has stopped, so its terminal is closed."
     );
+}
+
+#[test]
+fn a_prompt_is_typed_as_one_submission_whatever_the_pane_mode() {
+    let keys = |text: &str, bracketed: bool| {
+        prompt_keys(text, bracketed).map(|bytes| String::from_utf8(bytes).unwrap())
+    };
+    assert_eq!(
+        keys("run the tests  \n\n", true).as_deref(),
+        Some("\x1b[200~run the tests\x1b[201~")
+    );
+    assert_eq!(
+        keys("first\r\nsecond\rthird", true).as_deref(),
+        Some("\x1b[200~first\rsecond\rthird\x1b[201~")
+    );
+    assert_eq!(
+        keys("first\nsecond\n/run it", false).as_deref(),
+        Some("first second /run it"),
+        "without bracketed paste every line would be its own Enter, so lines join"
+    );
+    assert_eq!(
+        keys("a\x1b[201~b\x07\tc", true).as_deref(),
+        Some("\x1b[200~a[201~b\tc\x1b[201~"),
+        "a prompt cannot end the paste or press keys"
+    );
+    assert_eq!(
+        keys("\u{e9}t\u{e9}", false).as_deref(),
+        Some("\u{e9}t\u{e9}")
+    );
+    assert_eq!(keys("   \n \x03", true), None);
+    assert_eq!(
+        keys(&"x".repeat(PROMPT_BYTES_MAX), false).map(|text| text.len()),
+        Some(PROMPT_BYTES_MAX)
+    );
+    assert_eq!(keys(&"x".repeat(PROMPT_BYTES_MAX + 1), false), None);
 }

@@ -627,6 +627,13 @@ export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result
   return call<void>("desktop_terminal_input", { agent, bytes });
 }
 
+/** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one
+ * submission and tells a sub-agent's master. Inputs: the terminal name and the prompt, up to
+ * 4096 bytes. Output: ok once queued in order with typed keys. */
+export function promptTerminal(agent: string, text: string): Promise<Result<void>> {
+  return call<void>("desktop_terminal_prompt", { agent, text });
+}
+
 /** Sets an attached agent terminal's size. Inputs: the terminal name, columns and rows.
  * Output: ok once queued. */
 export function resizeTerminal(agent: string, cols: number, rows: number): Promise<Result<void>> {
