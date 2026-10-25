@@ -65,7 +65,7 @@ test("cancelling a sign-in reaches the engine and says plainly when the engine c
 });
 
 test("a change refused while a sign-in runs, or a cancel still stopping, says so plainly", () => {
-  assert.equal(api.plainError("native_auth_recovery_required"), "A sign-in is still running. Finish or cancel it, then try again.");
+  assert.equal(api.plainError("native_auth_recovery_required"), "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.");
   assert.equal(api.plainError("native_auth_cancel_pending"), "The sign-in is still stopping. Try again in a moment.");
 });
 
