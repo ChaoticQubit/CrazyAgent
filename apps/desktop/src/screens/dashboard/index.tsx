@@ -85,19 +85,34 @@ export function useProjectActivity(ids: string[]): Map<string, CardActivity> {
   return activity;
 }
 
-/** Works out the Get set up panel: Add an account is done when one account is signed in or
- * has a saved key, Create a pool when one pool exists, Install tools when tmux, uv and graphify
- * are installed; harnesses never block. The panel shows until those three are done.
- * Inputs: the four engine reads. Output: items and whether the panel shows. */
+/** Says what Add an account needs: which accounts are ready for agents, that none of the owned
+ * ones is ready yet with a link to Accounts, or how to add the first one. Inputs: how many
+ * accounts the owner has and the ready ones. Output: the step's body, action and link. */
+function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "body" | "action" | "href"> {
+  const accountsPage = formatRoute({ name: "settings", tab: "accounts" });
+  const open = (body: string) => ({ body, action: "Open accounts", href: accountsPage });
+  if (usable.length === 1) return open(`${usable[0].name} is ready for agents.`);
+  if (usable.length > 1) return open(`${usable.length} accounts are ready for agents.`);
+  if (owned > 0) return open("No account is ready for agents yet. Sign one in or check its key or URL.");
+  return { body: "Sign in with ChatGPT or Claude, or add an API key or local model.", action: "Add account",
+    href: formatRoute({ name: "settings", tab: "accounts", action: "add" }) };
+}
+
+/** Works out the Get set up panel: Add an account is done when one account is ready for agents
+ * (signed in, a saved key, or a reachable URL or local model) and names it, Create a pool when one
+ * pool exists, Install tools when tmux, uv and graphify are installed; harnesses never block.
+ * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
+ * three are done. Inputs: the four engine reads. Output: items and whether the panel shows. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
   tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
-  const accountsDone = accounts.kind === "ok" && accounts.value.some((account) => READY_ACCOUNT.has(account.status));
+  const owned = accounts.kind === "ok" ? accounts.value : [];
+  const usable = owned.filter((account) => READY_ACCOUNT.has(account.status));
+  const accountsDone = usable.length > 0;
   const poolsDone = pools.kind === "ok" && pools.value.length > 0;
   const ready = harnesses.kind === "ok" ? harnesses.value.filter((entry) => entry.status.kind === "ready").length : undefined;
   const installTools = toolsStep(tools);
   const items: SetupItem[] = [
-    { id: "accounts", icon: "key-round", title: "Add an account", body: "Sign in with ChatGPT or Claude, or add an API key or local model.",
-      action: "Add account", href: formatRoute({ name: "settings", tab: "accounts", action: "add" }), done: accountsDone },
+    { id: "accounts", icon: "key-round", title: "Add an account", ...accountStep(owned.length, usable), done: accountsDone },
     { id: "pools", icon: "layers", title: "Create a pool", body: "Group up to 15 accounts for your projects to use.",
       action: "Create pool", href: formatRoute({ name: "settings", tab: "pools", action: "new" }), done: poolsDone },
     { id: "harnesses", icon: "terminal", title: "Check your harnesses",

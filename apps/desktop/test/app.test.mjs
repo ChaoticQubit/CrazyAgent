@@ -112,6 +112,35 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
 });
 
+test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
+  const harnesses = ok([]);
+  const claude = (id, status) => account({ id, name: "ChaoticQubit", provider: "claude", provider_name: "Claude", status });
+  const qwen = account({ id: "q1", name: "Qwen 2.5 - 7B", provider: "local", provider_name: "Local model", method: "url", status: "signed_in" });
+  const step = (accounts) => setupSteps(ok(accounts), ok([]), harnesses, toolsReady).items[0];
+
+  const none = step([claude("c1", "not_signed_in"), claude("c2", "not_signed_in"), claude("c3", "unreachable")]);
+  assert.equal(none.done, false);
+  assert.equal(none.body, "No account is ready for agents yet. Sign one in or check its key or URL.");
+  assert.equal(none.action, "Open accounts");
+  assert.equal(none.href, "#/settings/accounts");
+
+  assert.equal(step([claude("c1", "not_signed_in")]).href, "#/settings/accounts");
+
+  const one = step([claude("c1", "not_signed_in"), claude("c2", "signing_in"), qwen]);
+  assert.equal(one.done, true);
+  assert.equal(one.body, "Qwen 2.5 - 7B is ready for agents.");
+
+  const two = step([qwen, account({ id: "k1", name: "Key", provider: "openai_api", status: "key_saved" }), claude("c1", "not_signed_in")]);
+  assert.equal(two.done, true);
+  assert.equal(two.body, "2 accounts are ready for agents.");
+
+  const empty = step([]);
+  assert.equal(empty.done, false);
+  assert.equal(empty.body, "Sign in with ChatGPT or Claude, or add an API key or local model.");
+  assert.equal(empty.action, "Add account");
+  assert.equal(empty.href, "#/settings/accounts?action=add");
+});
+
 test("Get set up keeps Install tools until tmux, uv and graphify are found; the pack never blocks", () => {
   const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
   const steps = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools);
