@@ -2097,14 +2097,18 @@ impl TeamRuntime {
     }
 
     fn finish_task(&mut self, task: i64, text: &str, end: TurnEnd) -> Result<(), EngineError> {
-        let attempts: i64 = self
+        let Some(attempts): Option<i64> = self
             .connection
             .query_row(
                 "SELECT attempts FROM team_tasks WHERE id=?1",
                 [task],
                 |row| row.get(0),
             )
-            .map_err(error)?;
+            .optional()
+            .map_err(error)?
+        else {
+            return Ok(());
+        };
         let retry = attempts < self.limits.attempts_max;
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
@@ -2179,7 +2183,7 @@ impl TeamRuntime {
                     params![message, state],
                 )
                 .map_err(error)?;
-            if state == "failed" {
+            if state == "failed" && self.stored(project)?.is_some() {
                 let why = if end == TurnEnd::Interrupted {
                     "You interrupted the master before it replied."
                 } else {

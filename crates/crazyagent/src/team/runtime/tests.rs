@@ -567,3 +567,51 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
     );
     assert!(count(&fixture.connection, all_messages) <= MESSAGES_PER_PROJECT_MAX);
 }
+
+#[test]
+fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner','Plan it','sent',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    for statement in [
+        "DELETE FROM team_tasks WHERE project=?1",
+        "DELETE FROM team_messages WHERE project=?1",
+        "DELETE FROM project_setups WHERE project=?1",
+        "DELETE FROM projects WHERE id=?1",
+    ] {
+        fixture.connection.execute(statement, [PROJECT]).unwrap();
+    }
+    let mut team = fixture.runtime();
+    team.finish_task(task, "page written", TurnEnd::Success)
+        .unwrap();
+    team.finish_task(task, "", TurnEnd::Closed).unwrap();
+    team.finish_message(&project, message, "", TurnEnd::Interrupted, vec![])
+        .unwrap();
+    team.finish_message(&project, message, "Done", TurnEnd::Success, vec![])
+        .unwrap();
+    for table in ["team_tasks", "team_messages"] {
+        assert_eq!(
+            count(
+                &fixture.connection,
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1")
+            ),
+            0,
+            "{table}"
+        );
+    }
+}
