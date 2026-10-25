@@ -32,6 +32,20 @@ pub const GRAPHIFY_PACKAGE: &str = "graphifyy";
 /// The Graphify release setup installs on every system.
 pub const GRAPHIFY_VERSION: &str = "0.9.9";
 const GRAPHIFY_PYTHON: &str = "3.12";
+const TOOL_LOCKS: [ToolLock<'static>; 2] = [
+    ToolLock {
+        package: GRAPHIFY_PACKAGE,
+        version: GRAPHIFY_VERSION,
+        programs: &["graphify"],
+        requirements: include_str!("setup/locks/graphifyy-0.9.9.txt"),
+    },
+    ToolLock {
+        package: "headroom-ai",
+        version: "0.41.0",
+        programs: &["headroom"],
+        requirements: include_str!("setup/locks/headroom-ai-0.41.0.txt"),
+    },
+];
 const UV_RELEASES: [(&str, &str); 4] = [
     (
         "aarch64-apple-darwin",
@@ -178,8 +192,8 @@ impl From<Version> for String {
 }
 
 /// Exactly what setup installs for one dependency. `Release` downloads one archive,
-/// checks its SHA-256 and takes one program out of it; `UvTool` runs `uv tool install`
-/// for one pinned package version; `Homebrew` installs one formula, whose bottles
+/// checks its SHA-256 and takes one program out of it; `UvTool` installs one pinned
+/// package version from its bundled hash lock; `Homebrew` installs one formula, whose bottles
 /// Homebrew verifies itself; `Winget` installs one package version, whose installer
 /// winget checks against its manifest's SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +276,80 @@ pub struct SetupStatus {
     pub running: bool,
 }
 
+/// One Python tool setup installs only from its bundled lock: the package, its version,
+/// the programs it links for the engine, and every requirement uv may install for it,
+/// each pinned to one version with the SHA-256 of every file uv may download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolLock<'a> {
+    pub package: &'a str,
+    pub version: &'a str,
+    pub programs: &'a [&'a str],
+    pub requirements: &'a str,
+}
+
+const LOCK_FILE: &str = "requirements.txt";
+
+/// Removes every entry of a tool's folder except the environment just installed, so old
+/// environments and older install layouts go away. Inputs: the folder and the entry kept.
+fn keep_only(home: &std::path::Path, kept: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == kept {
+            continue;
+        }
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+    }
+}
+
+/// Finds the bundled lock for one Python tool version. Inputs: the package and version.
+/// Output: the lock, or none when setup ships no lock for exactly that version.
+pub fn tool_lock(package: &str, version: &str) -> Option<ToolLock<'static>> {
+    TOOL_LOCKS
+        .iter()
+        .find(|lock| lock.package == package && lock.version == version)
+        .copied()
+}
+
+/// The two uv commands that install a locked tool into a fresh virtual environment: the
+/// first creates it with the pinned Python, the second installs exactly the lock's
+/// wheels and refuses any file whose SHA-256 the lock lacks and any source build. Both
+/// ignore uv configuration files. Inputs: the Python version, the environment folder,
+/// its Python and the lock file. Output: each command's arguments.
+pub fn locked_tool_args(
+    python: &str,
+    venv: &std::path::Path,
+    venv_python: &std::path::Path,
+    requirements: &std::path::Path,
+) -> [Vec<std::ffi::OsString>; 2] {
+    [
+        vec![
+            "venv".into(),
+            "--no-project".into(),
+            "--no-config".into(),
+            "--python".into(),
+            python.into(),
+            venv.into(),
+        ],
+        vec![
+            "pip".into(),
+            "install".into(),
+            "--no-config".into(),
+            "--python".into(),
+            venv_python.into(),
+            "--require-hashes".into(),
+            "--no-build".into(),
+            "--requirements".into(),
+            requirements.into(),
+        ],
+    ]
+}
+
 /// Finds and installs the app's system dependencies on one platform. `find` returns the
 /// installed version or none; `install` installs exactly the pin and returns the version
 /// now present; `install_tool` installs one pinned Python tool an MCP server needs into
@@ -285,7 +373,7 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 25] = [
+const REASONS: [(&str, &str); 26] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -320,6 +408,10 @@ const REASONS: [(&str, &str); 25] = [
         "The app's data folder can't be written.",
     ),
     ("setup_pin_invalid", "The pinned source is not valid."),
+    (
+        "setup_pin_unlocked",
+        "Setup has no locked list of this tool's files, so it was not installed.",
+    ),
     ("setup_busy", "Setup is already running."),
     (
         "setup_outcome_unknown",
@@ -528,6 +620,92 @@ mod tests {
     use process::is_sha256;
 
     const LINUX: [&str; 2] = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"];
+
+    fn requirements(lock: &ToolLock<'_>) -> Vec<(String, Vec<String>)> {
+        let mut parsed: Vec<(String, Vec<String>)> = Vec::new();
+        for line in lock.requirements.lines() {
+            let words = line.trim().trim_end_matches('\\').trim();
+            if let Some(hash) = words.strip_prefix("--hash=sha256:") {
+                parsed.last_mut().unwrap().1.push(hash.to_owned());
+            } else if !line.starts_with(' ') && !words.is_empty() {
+                let pin = words.split(" ; ").next().unwrap().to_owned();
+                parsed.push((pin, Vec::new()));
+            } else {
+                assert!(words.is_empty(), "{line}");
+            }
+        }
+        parsed
+    }
+
+    #[test]
+    fn every_bundled_tool_lock_pins_each_requirement_with_sha256_hashes() {
+        for lock in TOOL_LOCKS {
+            let parsed = requirements(&lock);
+            assert!(parsed.len() > 1, "{}", lock.package);
+            for (pin, hashes) in &parsed {
+                let (name, version) = pin.split_once("==").expect(pin);
+                assert!(!name.is_empty() && !version.is_empty(), "{pin}");
+                assert!(!hashes.is_empty(), "{pin}");
+                assert!(hashes.iter().all(|hash| is_sha256(hash)), "{pin}");
+            }
+            let own = format!("{}=={}", lock.package, lock.version);
+            assert_eq!(parsed.iter().filter(|(pin, _)| *pin == own).count(), 1);
+            assert!(!lock.programs.is_empty());
+            assert_eq!(tool_lock(lock.package, lock.version), Some(lock));
+        }
+        let Some(Pin::UvTool {
+            package, version, ..
+        }) = pin_for("unknown", Dependency::Graphify)
+        else {
+            panic!("graphify installs as a uv tool");
+        };
+        assert!(tool_lock(&package, version.as_str()).is_some());
+        let pack = pack::default_pack().unwrap();
+        let tools: Vec<(&str, &str)> = pack
+            .entries
+            .iter()
+            .filter_map(|entry| entry.install.strip_prefix("uv tool install "))
+            .map(|rest| rest.split([',', ' ']).next().unwrap())
+            .map(|step| step.split_once("==").unwrap())
+            .collect();
+        assert_eq!(tools.len(), 2);
+        for (package, version) in tools {
+            assert!(
+                tool_lock(package, version).is_some(),
+                "{package}=={version}"
+            );
+        }
+        assert_eq!(tool_lock("headroom-ai", "0.41.1"), None);
+    }
+
+    #[test]
+    fn a_locked_tool_installs_with_required_hashes_and_no_source_builds() {
+        let [venv, install] = locked_tool_args(
+            "3.12",
+            std::path::Path::new("/e/venv"),
+            std::path::Path::new("/e/venv/bin/python"),
+            std::path::Path::new("/e/requirements.txt"),
+        );
+        assert!(venv.iter().eq([
+            "venv",
+            "--no-project",
+            "--no-config",
+            "--python",
+            "3.12",
+            "/e/venv"
+        ]));
+        assert!(install.iter().eq([
+            "pip",
+            "install",
+            "--no-config",
+            "--python",
+            "/e/venv/bin/python",
+            "--require-hashes",
+            "--no-build",
+            "--requirements",
+            "/e/requirements.txt"
+        ]));
+    }
 
     #[test]
     fn every_uv_release_pin_names_its_target_and_a_distinct_checksum() {
