@@ -491,9 +491,24 @@ pub(crate) fn execute(
     }
 }
 
-/// Bounds persistent authority records before inserting new material.
-/// Takes a transaction and an internal table name.
-/// Returns an error at the fixed core storage ceiling.
+/// Candidates (alias `c`) that can never be accepted again: their task is gone, their
+/// pinned baseline is revoked or gone, or a newer candidate replaced them for the task.
+const STALE_CANDIDATE: &str = "(NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=json_extract(c.body,'$.task_id'))
+    OR NOT EXISTS (SELECT 1 FROM verification_baselines b WHERE b.id=json_extract(c.body,'$.pinned_baseline_id') AND b.revoked=0)
+    OR EXISTS (SELECT 1 FROM verification_candidates n WHERE n.rowid>c.rowid AND json_extract(n.body,'$.task_id')=json_extract(c.body,'$.task_id')))";
+
+/// Baselines (alias `b`) nothing depends on: not revoked (a revoked row blocks the same
+/// draft from being admitted again), not current, and pinned by no task or candidate.
+/// Superseded approved ones go before drafts still waiting for approval.
+const STALE_BASELINES: &str = "SELECT b.rowid FROM verification_baselines b WHERE b.revoked=0
+    AND NOT EXISTS (SELECT 1 FROM verification_current v WHERE v.baseline=b.id)
+    AND NOT EXISTS (SELECT 1 FROM tasks t WHERE json_extract(t.body,'$.baseline_id')=b.id)
+    AND NOT EXISTS (SELECT 1 FROM verification_candidates c WHERE json_extract(c.body,'$.pinned_baseline_id')=b.id)
+    ORDER BY b.approved DESC, b.rowid";
+
+/// Bounds persistent authority records before inserting new material. At the ceiling it
+/// first prunes the oldest records that can never be used again, in this transaction.
+/// Takes a transaction and an internal table name. Returns an error while still full.
 fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
     assert!(
         [
@@ -503,9 +518,35 @@ fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
         ]
         .contains(&table)
     );
-    let count: i64 = tx
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+    let counted = |tx: &Transaction<'_>| -> Result<i64, EngineError> {
+        tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(db_error)
+    };
+    let mut count = counted(tx)?;
+    if count >= 128 {
+        let stale = match table {
+            "verification_baselines" => STALE_BASELINES.to_string(),
+            "verification_candidates" => format!(
+                "SELECT c.rowid FROM verification_candidates c WHERE {STALE_CANDIDATE} ORDER BY c.rowid"
+            ),
+            _ => format!(
+                "SELECT a.rowid FROM verification_attempts a LEFT JOIN verification_candidates c ON c.id=a.candidate WHERE c.id IS NULL OR {STALE_CANDIDATE} ORDER BY a.rowid"
+            ),
+        };
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE rowid IN ({stale} LIMIT ?1)"),
+            [count - 127],
+        )
         .map_err(db_error)?;
+        if table == "verification_candidates" {
+            tx.execute(
+                "DELETE FROM verification_attempts WHERE candidate NOT IN (SELECT id FROM verification_candidates)",
+                [],
+            )
+            .map_err(db_error)?;
+        }
+        count = counted(tx)?;
+    }
     if count >= 128 {
         return Err(db_error("verification_capacity"));
     }
