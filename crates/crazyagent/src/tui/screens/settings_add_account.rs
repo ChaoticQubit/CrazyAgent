@@ -27,7 +27,7 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
 const FIELD_WIDTH_MAX: usize = 64;
-const KEY_CHARS_MAX: usize = 4096;
+pub(super) const KEY_CHARS_MAX: usize = 4096;
 const KEY_CHARS_MIN: usize = 20;
 const CODE_CHARS_MAX: usize = 2048;
 const URL_CHARS_MAX: usize = crate::accounts::ACCOUNT_URL_MAX;

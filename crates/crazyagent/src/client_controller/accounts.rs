@@ -47,6 +47,16 @@ impl OwnerController {
         self.accounts_client()?.remove_account(id).await
     }
 
+    /// Replaces the saved key of one account in place; the key goes to the engine and is
+    /// never kept here. Inputs: account id and the new key. Output: the same account.
+    pub async fn replace_account_key(
+        &self,
+        id: CredentialRef,
+        key: AccountSecret,
+    ) -> Result<AccountView, EngineError> {
+        self.accounts_client()?.replace_account_key(id, key).await
+    }
+
     /// Checks one account now and returns its fresh status and listed models.
     pub async fn check_account(&self, id: CredentialRef) -> Result<AccountCheck, EngineError> {
         self.accounts_client()?.check_account(id).await

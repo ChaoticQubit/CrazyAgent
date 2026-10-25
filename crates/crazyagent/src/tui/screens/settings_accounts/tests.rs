@@ -670,7 +670,7 @@ mod lost_engine {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
-    async fn until(
+    pub(super) async fn until(
         shell: &mut Shell,
         connection: &mut Connection,
         done: impl Fn(&OwnerEvent) -> bool,
@@ -692,15 +692,15 @@ mod lost_engine {
         }
     }
 
-    fn ready(event: &OwnerEvent) -> bool {
+    pub(super) fn ready(event: &OwnerEvent) -> bool {
         matches!(event, OwnerEvent::Access { ready: true, .. })
     }
 
-    fn settled(event: &OwnerEvent) -> bool {
+    pub(super) fn settled(event: &OwnerEvent) -> bool {
         matches!(event, OwnerEvent::Settings(_))
     }
 
-    async fn send(
+    pub(super) async fn send(
         shell: &mut Shell,
         connection: &mut Connection,
         wanted: fn(&SettingsJob) -> bool,
@@ -810,6 +810,168 @@ mod lost_engine {
         .await;
         let checked = shell.ctx.message().unwrap();
         assert!(checked.lead.starts_with("Connected. "), "{}", checked.lead);
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[cfg(unix)]
+mod replace_key {
+    use super::lost_engine::{ready, send, settled, until};
+    use super::*;
+    use crate::engine::Client;
+    use crate::engine::bootstrap::EngineService;
+    use crate::engine::owner::AccountSecret;
+    use crate::tui::client::Connection;
+    use crate::tui::client::accounts::AccountsRequest;
+    use crate::tui::client::settings::SettingsJob;
+    use crate::tui::screens::open;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn holders(root: &Path, secret: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    folders.push(path);
+                } else if metadata.is_file()
+                    && std::fs::read(&path).is_ok_and(|bytes| {
+                        bytes
+                            .windows(secret.len())
+                            .any(|window| window == secret.as_bytes())
+                    })
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    async fn accounts(connection: &mut Connection) -> Vec<AccountView> {
+        connection
+            .settings(SettingsJob::Accounts(AccountsRequest::List {
+                after: None,
+                limit: 50,
+            }))
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(OwnerEvent::Settings(event)) = connection.poll_owner().unwrap()
+                && let SettingsEvent::Accounts(Ok(AccountsReply::Page(page))) = *event
+            {
+                return page.accounts;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "account page timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replace_key_rotates_the_same_account_and_deletes_the_old_key() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tacc-key-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = crate::tui::test_home::engine_config();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let mut connection = Connection::connect_paired(
+            Client::new(
+                root.path().join("e.sock"),
+                crate::tui::test_home::ENGINE_WAIT,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut start = ctx(80, 24);
+        let home = open(&Place::Home, &mut start);
+        let mut shell = Shell::with(start, home);
+        until(&mut shell, &mut connection, ready).await;
+        let old = format!("sk-old-{}-leaked-key", std::process::id());
+        let new = format!("sk-new-{}-rotated-key", std::process::id());
+        connection
+            .settings(SettingsJob::Accounts(AccountsRequest::Add {
+                draft: crate::accounts::AccountDraft {
+                    provider: Provider::OpenaiApi,
+                    method: SignInMethod::ApiKey,
+                    name: "Work key".into(),
+                    url: None,
+                    model: Some("gpt-5".into()),
+                },
+                key: Some(AccountSecret::new(old.as_bytes().to_vec()).unwrap()),
+            }))
+            .unwrap();
+        until(&mut shell, &mut connection, settled).await;
+        while shell.ctx.next_request().is_some() {}
+        let before = accounts(&mut connection).await;
+        assert_eq!(before.len(), 1);
+        assert_eq!(holders(root.path(), &old).len(), 1);
+
+        shell.key(Key::Ctrl('k'));
+        for character in "set accounts".chars() {
+            shell.key(Key::Char(character));
+        }
+        shell.key(Key::Enter);
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::AllAccounts)
+        })
+        .await;
+        shell.key(Key::Enter);
+        assert_eq!(shell.depth(), 2);
+        let page = render(&mut shell, 80, 24).join("\n");
+        assert!(page.contains("[> Replace key ]"), "{page}");
+
+        shell.key(Key::Enter);
+        let page = render(&mut shell, 80, 24).join("\n");
+        assert!(page.contains("New API key"), "a masked field opens: {page}");
+        assert_eq!(shell.depth(), 2, "the details page stays open");
+        for character in new.chars() {
+            shell.key(Key::Char(character));
+        }
+        let page = render(&mut shell, 80, 24).join("\n");
+        assert!(!page.contains(&new), "the typed key stays hidden: {page}");
+        shell.key(Key::Enter);
+        send(&mut shell, &mut connection, |job| {
+            matches!(
+                job,
+                SettingsJob::Accounts(AccountsRequest::ReplaceKey { .. })
+            )
+        })
+        .await;
+        assert_eq!(shell.ctx.message().unwrap().lead, "Key replaced.");
+        let page = render(&mut shell, 80, 24).join("\n");
+        assert!(page.contains("Key saved"), "{page}");
+
+        let after = accounts(&mut connection).await;
+        assert_eq!(after.len(), 1, "no second account: {after:?}");
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[0].name, "Work key");
+        assert!(
+            holders(root.path(), &old).is_empty(),
+            "the old key is deleted"
+        );
+        let held = holders(root.path(), &new);
+        assert_eq!(
+            held.len(),
+            1,
+            "only the key file holds the new key: {held:?}"
+        );
+        assert!(held[0].parent().unwrap().ends_with("account-keys"));
         drop(connection);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

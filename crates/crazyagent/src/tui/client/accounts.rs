@@ -21,6 +21,10 @@ pub(in crate::tui) enum AccountsRequest {
     Remove {
         id: CredentialRef,
     },
+    ReplaceKey {
+        id: CredentialRef,
+        key: AccountSecret,
+    },
     Check {
         id: CredentialRef,
     },
@@ -70,6 +74,9 @@ impl NativeOwner {
                 AccountsRequest::Remove { id } => {
                     controller.remove_account(id.clone()).await?;
                     AccountsReply::Removed(id)
+                }
+                AccountsRequest::ReplaceKey { id, key } => {
+                    AccountsReply::Account(controller.replace_account_key(id, key).await?)
                 }
                 AccountsRequest::Check { id } => {
                     AccountsReply::Checked(controller.check_account(id).await?)
