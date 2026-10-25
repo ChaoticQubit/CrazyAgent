@@ -542,3 +542,18 @@ test("an engine code named like an object built-in gets the plain fallback sente
     assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
   }
 });
+
+test("a context read that answers after the reader moved on is dropped", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  const late = [];
+  const stop = context.followContext("alpha", "context/brief.md", false, (result) => late.push(result));
+  stop();
+  await settle();
+  assert.deepEqual(late, []);
+  const kept = [];
+  context.followContext("alpha", "context/brief.md", false, (result) => kept.push(result));
+  await settle();
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].kind, "error");
+});

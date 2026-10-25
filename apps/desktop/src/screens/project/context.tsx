@@ -75,6 +75,21 @@ function Group({ title, items, selected, onSelect, running }: {
     : <li><span className="pj-folder pj-muted">(empty)</span></li>}</ul></li>;
 }
 
+/** Reads one context file for the reader, and again every five seconds while an agent is
+ * still writing it. Inputs: the project, the file path, whether it is being written and where
+ * to deliver each read. Output: a stop function; a read that answers after stop is dropped, so
+ * a slow read never replaces the file the reader moved on to. */
+export function followContext(project: string, path: string, writing: boolean, apply: (result: Result<{ text: string | null; truncated: boolean }>) => void): () => void {
+  let current = true;
+  const read = () => void loadContextText(project, path).then((result) => { if (current) apply(result); });
+  read();
+  const timer = writing ? window.setInterval(read, 5000) : undefined;
+  return () => {
+    current = false;
+    if (timer !== undefined) window.clearInterval(timer);
+  };
+}
+
 /** Context tab: the project folder's brief, documents and research reports, with a reader.
  * Input: the project data. Output: the tree and the reader; reports render as safe Markdown. */
 export function ContextTab({ data }: { data: ProjectData }) {
@@ -92,8 +107,6 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const [deleting, setDeleting] = useState<{ path: string; busy: boolean } | null>(null);
   const [adding, setAdding] = useState<{ path: string; busy: boolean; error: string } | null>(null);
   const open = useLinkOpener(data.notify);
-  const live = useRef(selected);
-  live.current = selected;
   const chosen = selected ?? items.find((item) => item.kind === "brief")?.path ?? items[0]?.path ?? null;
   const item = items.find((entry) => entry.path === chosen) ?? null;
   const running = new Set(jobs.filter((job) => job.status === "running").map((job) => job.report_path));
@@ -107,12 +120,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     setSelection(null);
     setActionNote("");
     if (!chosen || chosen === MEMORY) return;
-    const path = chosen;
-    const read = () => void loadContextText(data.id, path).then((result) => { if ((live.current ?? path) === path) setFile(result); });
-    read();
-    if (!writing) return;
-    const timer = window.setInterval(read, 5000);
-    return () => window.clearInterval(timer);
+    return followContext(data.id, chosen, writing, setFile);
   }, [data.id, chosen, writing]);
 
   const text = file?.kind === "ok" ? file.value.text : null;
