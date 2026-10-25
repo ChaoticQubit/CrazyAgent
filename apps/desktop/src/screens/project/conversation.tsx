@@ -13,8 +13,8 @@ import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
 
-const sentByProject = new Map<string, Record<number, string>>();
-const sentAtByProject = new Map<string, Record<number, number>>();
+const sentByProject = new Map<string, Record<string, string>>();
+const sentAtByProject = new Map<string, Record<string, number>>();
 const MESSAGE_BYTES_MAX = 8192;
 
 const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", Replied: "ok", "Not signed in": "warn", Stopped: "neutral", "Needs a pool": "warn" };
@@ -37,7 +37,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [ticket, setTicket] = useState("");
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
-  const [sent, setSentState] = useState<Record<number, string>>(() => sentByProject.get(data.id) ?? {});
+  const [sent, setSentState] = useState<Record<string, string>>(() => sentByProject.get(data.id) ?? {});
   const [text, setText] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
@@ -53,10 +53,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const session = master?.ticket === ticket ? master.session : null;
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !turnSettled(turn));
-  const unseen = Object.keys(sent).some((ordinal) => !turns.some((turn) => turn.ordinal === Number(ordinal)));
+  const unseen = Object.keys(sent).some((id) => !turns.some((turn) => turn.id === id));
   const status = needsPool ? "Needs a pool" : masterStatus(session, turns);
 
-  const setSent = (next: Record<number, string>) => {
+  const setSent = (next: Record<string, string>) => {
     sentByProject.set(data.id, next);
     setSentState(next);
   };
@@ -68,8 +68,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (current.current !== live) return;
     setMaster(state);
     if (state.session) {
-      const page = unwrap(await readMasterTurns(useTicket, state.session.session_id));
-      if (current.current === live) setTurns([...page.page.turns].sort((a, b) => a.ordinal - b.ordinal));
+      const read = unwrap(await readMasterTurns(useTicket, state.session.session_id));
+      if (current.current === live) setTurns(read);
     } else setTurns([]);
   }
 
@@ -131,10 +131,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       if (live?.phase !== "configured") throw { code: "master_outcome_pending" };
       setTurns([]);
     }
-    const ordinal = (active ? turns : []).reduce((most, turn) => Math.max(most, turn.ordinal), 0) + 1;
-    confirm(unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration())));
-    sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [ordinal]: at });
-    setSent({ ...(active ? sent : {}), [ordinal]: message });
+    const receipt = unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration()));
+    confirm(receipt);
+    sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [receipt.operation_id]: at });
+    setSent({ ...(active ? sent : {}), [receipt.operation_id]: message });
     if (again === undefined) setText("");
     await refresh();
   }, sendFailureLine);
@@ -178,16 +178,16 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
         Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
       {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
-        {sent[turn.ordinal] !== undefined
-          ? <div className="pj-msg-owner"><p>{displayText(sent[turn.ordinal])}</p></div>
+        {sent[turn.id] !== undefined
+          ? <div className="pj-msg-owner"><p>{displayText(sent[turn.id])}</p></div>
           : <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>}
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
-          : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.ordinal], now) : turnLine(turn)}</p>}
+          : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}
-      {Object.entries(sent).filter(([ordinal]) => !turns.some((turn) => turn.ordinal === Number(ordinal))).map(([ordinal, message]) =>
-        <div key={`pending-${ordinal}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[Number(ordinal)], now)}</p></div>)}
+      {Object.entries(sent).filter(([id]) => !turns.some((turn) => turn.id === id)).map(([id, message]) =>
+        <div key={`pending-${id}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[id], now)}</p></div>)}
     </div>
     {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}

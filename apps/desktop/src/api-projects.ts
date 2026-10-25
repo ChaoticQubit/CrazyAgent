@@ -1,10 +1,10 @@
 import { call, classifyFailure, connect, plainError, status, type Result } from "./api";
 import {
-  closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
+  allMasterTurns, closeMaster, editModelAccess, inspectModelAccess, masterState, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, IntentReceipt, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -201,6 +201,7 @@ const copy: Record<string, string> = {
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
+  resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
@@ -486,8 +487,8 @@ export function readMaster(ticket: string): Promise<Result<MasterState>> {
   return wrap(() => masterState(ticket));
 }
 
-export function readMasterTurns(ticket: string, session: string): Promise<Result<MasterTurns>> {
-  return wrap(() => masterTurns(ticket, session));
+export function readMasterTurns(ticket: string, session: string): Promise<Result<MasterTurn[]>> {
+  return wrap(() => allMasterTurns(ticket, session));
 }
 
 export function startMaster(ticket: string, generation: number): Promise<Result<IntentReceipt>> {

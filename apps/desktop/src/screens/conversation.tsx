@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { closeMaster, errorMessage, masterState, masterTurns, openMaster, submitMaster } from "../engine-client";
+import { allMasterTurns, closeMaster, errorMessage, masterState, openMaster, submitMaster } from "../engine-client";
 import type { IntentReceipt, MasterState, MasterTurn } from "../engine-client";
 import type { useOwnerBrowser } from "../state";
 
@@ -88,7 +88,7 @@ export function turnStatus(turn: MasterTurn): string {
 export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwnerBrowser>; ticket: string }) {
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
-  const [sent, setSent] = useState<Record<number, string>>({});
+  const [sent, setSent] = useState<Record<string, string>>({});
   const [text, setText] = useState("");
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState("");
@@ -97,7 +97,7 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   const session = master?.ticket === ticket ? master.session : null;
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !settled.includes(turn.phase));
-  const unseen = Object.keys(sent).some((ordinal) => !turns.some((turn) => turn.ordinal === Number(ordinal)));
+  const unseen = Object.keys(sent).some((id) => !turns.some((turn) => turn.id === id));
 
   async function refresh() {
     if (!ticket || !state.connected) return;
@@ -106,8 +106,8 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
     setMaster(next);
     if (next.session) {
       const session = next.session.session_id;
-      const page = await masterTurns(ticket, session);
-      if (current.current === ticket) setTurns([...page.page.turns].sort((a, b) => a.ordinal - b.ordinal));
+      const read = await allMasterTurns(ticket, session);
+      if (current.current === ticket) setTurns(read);
     } else setTurns([]);
   }
 
@@ -153,11 +153,10 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
   const send = () => act(async () => {
     if (!session) return;
     const message = text.trim();
-    const ordinal = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0) + 1;
     const generation = state.nextGeneration();
     const receipt = await submitMaster(ticket, session.session_id, message, generation);
     confirm(receipt);
-    setSent((prior) => ({ ...prior, [ordinal]: message }));
+    setSent((prior) => ({ ...prior, [receipt.operation_id]: message }));
     setText("");
     await refresh();
   });
@@ -172,7 +171,7 @@ export function MasterPanel({ state, ticket }: { state: ReturnType<typeof useOwn
     {controls.start && <button type="button" disabled={blocked} onClick={() => void start()} data-testid="select-project-master">Start master</button>}
     {controls.close && <button type="button" disabled={blocked} onClick={() => void close()} data-testid="close-project-master">Close master</button>}
     {turns.map((turn) => <article key={turn.id} className="check" data-testid="master-turn">
-      {sent[turn.ordinal] && <p><strong>You:</strong> {displayText(sent[turn.ordinal])}</p>}
+      {sent[turn.id] && <p><strong>You:</strong> {displayText(sent[turn.id])}</p>}
       <p className="muted">Message {turn.ordinal} · {turnStatus(turn)}</p>
       {turn.reply && <pre data-testid="master-reply">{displayText(turn.reply.text)}</pre>}
     </article>)}
