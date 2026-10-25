@@ -165,3 +165,16 @@ assert.deepEqual(frame, { kind: "input", turn_id: "one", prompt_id: "input-1", q
 const id = "a".repeat(128);
 assert(encodeEvent(id, id, 18446744073709551615n, { ...frame, turn_id: id, prompt_id: id }).byteLength <= 65540);
 });
+test("a turn whose message overflowed completes failed unless it was cancelled", () => {
+for (const [status, expected] of [["completed", "failed"], ["cancelled", "cancelled"], ["failed", "failed"]]) {
+const state = new SdkTurnProjection();
+state.admit(prompt("one")); start(state, "one");
+assert.deepEqual(state.event({ type: "assistant:message", turnId: "sdk-one", messageId: "large", text: "x".repeat(1048576) }), []);
+end(state, "sdk-one", status);
+assert.deepEqual(state.complete("one", status), [{ kind: "completed", turn_id: "one", status: expected }]);
+state.admit(prompt("two")); start(state, "two");
+state.event({ type: "assistant:message", turnId: "sdk-two", messageId: "small", text: "ok" });
+end(state, "sdk-two");
+assert.deepEqual(state.complete("two", "completed"), [{ kind: "completed", turn_id: "two", status: "succeeded" }]);
+}
+});

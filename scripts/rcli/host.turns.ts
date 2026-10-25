@@ -178,11 +178,12 @@ complete(turnId: string, status: TurnStatus): EventBody[] {
 this.check();
 const turn = this.turns.get(turnId);
 if (this.disposed || !turn || status !== "completed" && status !== "cancelled" && status !== "failed" || status === "completed" && (turn.sdkId === null || !turn.ended)) reject();
+const overflowed = turn.messages?.overflowed === true;
 turn.messages?.close();
 turn.input = null;
 this.turns.delete(turnId);
 if (this.awaitingStart === turnId) this.awaitingStart = null;
-return [{ kind: "completed", turn_id: turnId, status: status === "completed" ? "succeeded" : status }];
+return [{ kind: "completed", turn_id: turnId, status: status !== "completed" ? status : overflowed ? "failed" : "succeeded" }];
 }
 stop(): void {
 this.check();

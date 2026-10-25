@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import type { AgentEvent } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
 import { FRAME_TEXT_MAX } from "./host.codec.ts";
 
+export const MESSAGE_JSON_MAX = 458_752;
+
 export type MessageFrame =
   | { kind: "message_started" | "message_reset" | "message_discarded" | "message_finished"; turn_id: string; message_id: string }
   | { kind: "message_delta"; turn_id: string; message_id: string; text: string };
 
 type MessageState =
   | { hostId: string; phase: "streaming" | "finished" }
-  | { hostId: string | null; phase: "discarded" };
+  | { hostId: string | null; phase: "discarded" }
+  | { hostId: string | null; phase: "overflowed" };
 
 function reject(): never {
   throw new Error("host_sdk_event_rejected");
@@ -27,13 +30,14 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function textChunks(value: unknown, maximumBytes: number): string[] {
+function textChunks(value: unknown, maximumBytes: number, maximumJson: number): string[] | null {
   if (typeof value !== "string") reject();
   const chunks: string[] = [];
   let start = 0;
   let chunkBytes = 0;
   let chunkJson = 2;
   let totalBytes = 0;
+  let totalJson = 2;
   for (let index = 0; index < value.length;) {
     const unit = value.charCodeAt(index);
     let units = 1;
@@ -48,6 +52,7 @@ function textChunks(value: unknown, maximumBytes: number): string[] {
     } else if (unit >= 0xdc00 && unit <= 0xdfff) {
       reject();
     }
+    if (totalJson + json > maximumJson) return null;
     if (totalBytes + bytes > maximumBytes) reject();
     if (chunkBytes + bytes > 16384 || chunkJson + json > FRAME_TEXT_MAX) {
       chunks.push(value.slice(start, index));
@@ -58,6 +63,7 @@ function textChunks(value: unknown, maximumBytes: number): string[] {
     chunkBytes += bytes;
     chunkJson += json;
     totalBytes += bytes;
+    totalJson += json;
     index += units;
   }
   if (start < value.length) chunks.push(value.slice(start));
@@ -66,14 +72,14 @@ function textChunks(value: unknown, maximumBytes: number): string[] {
 
 function opaqueId(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 256) reject();
-  textChunks(value, 256);
+  textChunks(value, 256, Number.POSITIVE_INFINITY);
   return value;
 }
 
 function stateInvariant(value: MessageState | undefined): asserts value is MessageState {
   assert(value !== null && value !== undefined &&
-    ["streaming", "finished", "discarded"].includes(value.phase) &&
-    (value.hostId === null ? value.phase === "discarded" :
+    ["streaming", "finished", "discarded", "overflowed"].includes(value.phase) &&
+    (value.hostId === null ? value.phase === "discarded" || value.phase === "overflowed" :
       typeof value.hostId === "string" && /^msg-[1-9][0-9]{0,2}$/.test(value.hostId) &&
       Number(value.hostId.slice(4)) <= 128), "host_message_identity_invariant");
 }
@@ -84,6 +90,7 @@ export class SdkMessageProjection {
   private readonly messages = new Map<string, MessageState>();
   private nextMessage = 1;
   private closed = false;
+  private overflow = false;
 
   constructor(turnId: string, sdkTurnId: string) {
     if (typeof turnId !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(turnId) || turnId.includes("..")) reject();
@@ -103,6 +110,7 @@ export class SdkMessageProjection {
     const nativeId = opaqueId(input.messageId);
     const previous = this.messages.get(nativeId);
     if (this.messages.has(nativeId)) stateInvariant(previous);
+    if (previous?.phase === "overflowed") return [];
     if (discard) {
       if (previous?.phase === "discarded") reject();
       if (!previous) {
@@ -114,8 +122,14 @@ export class SdkMessageProjection {
       this.messages.set(nativeId, { hostId, phase: "discarded" });
       return [{ kind: "message_discarded", turn_id: this.turnId, message_id: hostId }];
     }
-    const chunks = textChunks(input.text, 1048576);
+    const chunks = textChunks(input.text, MESSAGE_JSON_MAX, MESSAGE_JSON_MAX);
     if (previous && previous.phase !== "streaming") reject();
+    if (chunks === null) {
+      if (!previous) this.admit();
+      this.overflow = true;
+      this.messages.set(nativeId, { hostId: previous?.hostId ?? null, phase: "overflowed" });
+      return previous ? [{ kind: "message_discarded", turn_id: this.turnId, message_id: previous.hostId }] : [];
+    }
     if (input.type === "assistant:delta" && chunks.length === 0) return [];
     const output: MessageFrame[] = [];
     let current = previous;
@@ -141,6 +155,10 @@ export class SdkMessageProjection {
       output.push({ kind: "message_finished", turn_id: this.turnId, message_id: hostId });
     }
     return output;
+  }
+
+  get overflowed(): boolean {
+    return this.overflow;
   }
 
   close(): void {

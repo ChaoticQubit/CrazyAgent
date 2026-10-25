@@ -393,13 +393,13 @@
     },
     {
       "path": "scripts/rcli/host.turns.ts",
-      "sha256": "d2e61a2ef22708bd2b5e18a27029934bb3c8dc5179b4c6ad8870997552e26589",
-      "bytes": 9185
+      "sha256": "b2bf9dd9178ac30ae45b83ee1b9ca427a59dea0f1ab1b98c1d684addddf750d0",
+      "bytes": 9264
     },
     {
       "path": "scripts/rcli/host.messages.ts",
-      "sha256": "a5d1365450ffa402f5ba2e92be234c87d4278b6f6774ad80becdc4bd5187050b",
-      "bytes": 6090
+      "sha256": "e253176a555593df126d0b886ac9b1c9bd2c93e3135cc609500d51cd0e981aa3",
+      "bytes": 6852
     },
     {
       "path": "scripts/rcli/host.observations.ts",
