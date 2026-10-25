@@ -1,3 +1,5 @@
+use super::new_project_view::printable;
+use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
@@ -424,8 +426,10 @@ impl Memory {
     fn suggestion_modal(item: &Suggestion, save_focused: bool, ctx: &Ctx) -> (Modal, Vec<Hint>) {
         let theme = &ctx.theme;
         let room = usize::from(MODAL_WIDTH) - 4;
-        let mut body: Vec<Line<'static>> =
-            wrap(&item.text, room).into_iter().map(Line::raw).collect();
+        let mut body: Vec<Line<'static>> = wrap(&sanitize(&item.text), room)
+            .into_iter()
+            .map(Line::raw)
+            .collect();
         body.push(Line::default());
         let project = project_name(&item.project, ctx);
         let (reach, choices) = if item.kept {
@@ -605,11 +609,11 @@ impl Memory {
                 } else {
                     status("Suggested", theme, glyphs)
                 };
-                (Line::raw(item.text.clone()), from)
+                (Line::raw(printable(item.text.clone())), from)
             })
             .chain(visible.iter().map(|memory| {
                 (
-                    Line::raw(memory.text.clone()),
+                    Line::raw(printable(memory.text.clone())),
                     Line::raw(source(memory, ctx)),
                 )
             }))
@@ -644,12 +648,20 @@ impl Memory {
         match (ctx.wide(), self.picked(ctx)) {
             (true, Some(Picked::Saved(memory))) => {
                 lines.push(Line::default());
-                lines.push(Line::raw(cut(&memory.text, limit, glyphs.ellipsis)));
+                lines.push(Line::raw(cut(
+                    &printable(memory.text.clone()),
+                    limit,
+                    glyphs.ellipsis,
+                )));
                 lines.push(status(&saved_line(memory, ctx), theme, glyphs));
             }
             (true, Some(Picked::Suggested(item))) => {
                 lines.push(Line::default());
-                lines.push(Line::raw(cut(&item.text, limit, glyphs.ellipsis)));
+                lines.push(Line::raw(cut(
+                    &printable(item.text.clone()),
+                    limit,
+                    glyphs.ellipsis,
+                )));
                 let project = project_name(&item.project, ctx);
                 let from = if item.kept {
                     format!("Kept for {project} only. Enter to use it in all projects.")
@@ -922,7 +934,7 @@ impl Screen for Memory {
         match self.mode {
             Mode::List | Mode::Add { .. } | Mode::Suggestion { .. } => None,
             Mode::View => {
-                let mut body: Vec<Line<'static>> = wrap(&memory.text, room)
+                let mut body: Vec<Line<'static>> = wrap(&sanitize(&memory.text), room)
                     .into_iter()
                     .map(Line::raw)
                     .collect();
@@ -950,7 +962,7 @@ impl Screen for Memory {
                 };
                 let mut body = vec![Line::raw("Delete this memory for good?"), Line::default()];
                 body.push(styled(
-                    cut(&memory.text, room, ctx.glyphs.ellipsis),
+                    cut(&printable(memory.text.clone()), room, ctx.glyphs.ellipsis),
                     Role::Muted,
                     theme,
                 ));
