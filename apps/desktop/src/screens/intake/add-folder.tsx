@@ -7,7 +7,7 @@ import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
-import { folderName, pickedFolderProblem, sizeLine } from "./intake";
+import { folderName, joinPath, pickedFolderProblem, sizeLine } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -43,7 +43,7 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
     {header}
     <div className="pj-stack-s">
       <span className="pj-row"><Button icon="folder-open" disabled={busy} onClick={onChoose}>{source ? "Choose another folder" : "Choose folder"}</Button></span>
-      {source && <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> goes to <span className="pj-mono">{displayText(folderLabel(`${root.replace(/\/+$/u, "")}/${name}`))}</span>.</p>}
+      {source && <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> goes to <span className="pj-mono">{displayText(folderLabel(joinPath(root, name)))}</span>.</p>}
     </div>
     {source && <>
       {github && <Notice tone="info">

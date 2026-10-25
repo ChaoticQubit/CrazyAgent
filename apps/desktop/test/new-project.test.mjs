@@ -107,6 +107,24 @@ test("a harness whose tools can't be turned off keeps tools on", () => {
   ]);
 });
 
+test("switching to a harness whose tools can't be turned off and back restores the owner's choice", () => {
+  const off = wizard.setTools(wizard.setTools(engineTeam("codex", 1), "master", false, catalog), 0, false, catalog);
+  assert.deepEqual([off.master_tools, off.sub_harnesses[0].tools], [false, false]);
+  const forced = wizard.setRowHarness(wizard.setMaster(off, "cursor", catalog), 0, "cursor", catalog);
+  assert.deepEqual([forced.master_tools, forced.sub_harnesses[0].tools], [true, true]);
+  const back = wizard.setRowHarness(wizard.setMaster(forced, "claude", catalog), 0, "claude", catalog);
+  assert.deepEqual([back.master, back.master_tools, back.sub_harnesses[0].harness, back.sub_harnesses[0].tools], ["claude", false, "claude", false]);
+  const on = wizard.setRowHarness(wizard.setMaster(wizard.setMaster(engineTeam("codex", 1), "cursor", catalog), "codex", catalog), 0, "claude", catalog);
+  assert.deepEqual([on.master_tools, on.sub_harnesses[0].tools], [true, true]);
+  const request = wizard.buildRequest({ ...wizard.emptyDraft(), name: "Harbor", team: forced }).setup.team;
+  assert.deepEqual(request, {
+    master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }], min_agents: 1, max_agents: 2,
+  });
+  assert.deepEqual(wizard.wireTeam(back), {
+    master: "claude", master_tools: false, sub_harnesses: [{ harness: "claude", agents: 1, tools: false }], min_agents: 1, max_agents: 2,
+  });
+});
+
 test("harness choices list every harness and say why one can't be picked", () => {
   assert.deepEqual(wizard.harnessChoices(catalog).map((choice) => [choice.id, choice.group, choice.disabled]), [
     ["codex", "Ready", false],
