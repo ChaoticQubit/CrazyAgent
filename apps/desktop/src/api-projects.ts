@@ -179,7 +179,7 @@ const copy: Record<string, string> = {
   team_task_invalid: "The task is empty or too long.",
   team_queue_full: "Too much work is waiting already. Try again when some finishes.",
   team_task_limit: "This project has reached its task limit.",
-  team_conversation_full: "This team's conversation has reached its 2000-message limit.",
+  team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
   team_message_invalid: "The message is empty or too long.",
   team_plan_step_missing: "That step is no longer in the master's plan.",
   team_plan_step_handed: "That step was handed off already.",
