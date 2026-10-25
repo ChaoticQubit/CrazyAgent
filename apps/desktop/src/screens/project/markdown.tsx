@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { ReactNode } from "react";
 import { displayText } from "../conversation";
 
@@ -60,30 +61,68 @@ function closingParen(text: string, open: number): number {
   return -1;
 }
 
+const URL_RUN = new RegExp(`[^\\s<>"\`]{0,${URL_CHARS_MAX}}`, "uy");
+
 function bareUrl(text: string, start: number): string {
-  let end = start;
-  while (end < text.length && end - start < URL_CHARS_MAX && !/[\s<>"`]/u.test(text[end])) end += 1;
-  let url = text.slice(start, end);
+  URL_RUN.lastIndex = start;
+  let url = URL_RUN.exec(text)![0];
+  let surplus: number | null = null;
   for (;;) {
     const last = url[url.length - 1];
     if (last && ".,;:!?'*_".includes(last)) url = url.slice(0, -1);
-    else if (last === ")" && (url.match(/\)/gu)?.length ?? 0) > (url.match(/\(/gu)?.length ?? 0)) url = url.slice(0, -1);
-    else return url;
+    else if (last === ")" && (surplus ??= (url.match(/\)/gu)?.length ?? 0) - (url.match(/\(/gu)?.length ?? 0)) > 0) {
+      url = url.slice(0, -1);
+      surplus -= 1;
+    } else return url;
   }
 }
 
-/** Parses inline Markdown: code, strong, emphasis, links and bare http(s) links.
+function tickRuns(text: string): Int32Array {
+  const longest = new Int32Array(text.length + 1);
+  let run = 0;
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    run = text[index] === "`" ? run + 1 : 0;
+    longest[index] = Math.max(run, longest[index + 1]);
+  }
+  return longest;
+}
+
+/** Parses inline Markdown: code, strong, emphasis, links and bare http(s) links. Every close
+ * search is remembered, so a line of openers that never close stays linear in its length.
  * Inputs: the text and the nesting depth. Output: inline nodes; anything else stays text. */
 export function parseInline(text: string, depth = 0): Inline[] {
   const out: Inline[] = [];
-  const missing = new Map<string, number>();
+  const searched = new Map<string, { from: number; found: number }>();
   const find = (needle: string, from: number) => {
-    const known = missing.get(needle);
-    if (known !== undefined && from >= known) return -1;
+    const known = searched.get(needle);
+    if (known && from >= known.from && (known.found < 0 || from <= known.found)) return known.found;
     const found = text.indexOf(needle, from);
-    if (found < 0) missing.set(needle, from);
+    searched.set(needle, { from, found });
     return found;
   };
+  const chains = new Map<string, Map<number, number>>();
+  const closer = (needle: string, from: number, valid: (at: number) => boolean, step: (at: number) => number) => {
+    const memo = chains.get(needle) ?? new Map<number, number>();
+    chains.set(needle, memo);
+    const seen: number[] = [];
+    let found = -1;
+    for (let at = find(needle, from); at >= 0; at = find(needle, step(at))) {
+      const known = memo.get(at);
+      if (known !== undefined) {
+        found = known;
+        break;
+      }
+      seen.push(at);
+      if (valid(at)) {
+        found = at;
+        break;
+      }
+    }
+    for (const at of seen) memo.set(at, found);
+    return found;
+  };
+  const parens = new Map<number, number>();
+  let ticks: Int32Array | null = null;
   let index = 0;
   while (index < text.length) {
     const char = text[index];
@@ -97,7 +136,8 @@ export function parseInline(text: string, depth = 0): Inline[] {
       let run = 1;
       while (text[index + run] === "`") run += 1;
       const fence = "`".repeat(run);
-      const close = find(fence, index + run);
+      ticks ??= tickRuns(text);
+      const close = ticks[index + run] >= run ? find(fence, index + run) : -1;
       if (close >= 0) {
         out.push({ kind: "code", text: text.slice(index + run, close).replace(/^ (.*) $/su, "$1") });
         index = close + run;
@@ -108,9 +148,7 @@ export function parseInline(text: string, depth = 0): Inline[] {
       continue;
     }
     if (depth < INLINE_DEPTH_MAX && (char === "*" || char === "_") && next === char && !isSpace(text[index + 2])) {
-      const delimiter = char + char;
-      let close = find(delimiter, index + 2);
-      while (close >= 0 && (isSpace(text[close - 1]) || (char === "_" && isWord(text[close + 2])))) close = find(delimiter, close + 1);
+      const close = closer(char + char, index + 2, (at) => !isSpace(text[at - 1]) && !(char === "_" && isWord(text[at + 2])), (at) => at + 1);
       if (close > index + 2 && !(char === "_" && isWord(text[index - 1]))) {
         out.push({ kind: "strong", children: parseInline(text.slice(index + 2, close), depth + 1) });
         index = close + 2;
@@ -118,10 +156,8 @@ export function parseInline(text: string, depth = 0): Inline[] {
       }
     }
     if (depth < INLINE_DEPTH_MAX && (char === "*" || char === "_") && next !== char && !isSpace(next) && !(char === "_" && isWord(text[index - 1]))) {
-      let close = find(char, index + 1);
-      while (close >= 0 && (isSpace(text[close - 1]) || text[close + 1] === char || (char === "_" && isWord(text[close + 1])))) {
-        close = text[close + 1] === char ? find(char, close + 2) : find(char, close + 1);
-      }
+      const close = closer(char, index + 1, (at) => !isSpace(text[at - 1]) && text[at + 1] !== char && !(char === "_" && isWord(text[at + 1])),
+        (at) => text[at + 1] === char ? at + 2 : at + 1);
       if (close > index + 1) {
         out.push({ kind: "em", children: parseInline(text.slice(index + 1, close), depth + 1) });
         index = close + 1;
@@ -131,7 +167,8 @@ export function parseInline(text: string, depth = 0): Inline[] {
     if (char === "[" && depth < INLINE_DEPTH_MAX) {
       const close = find("]", index + 1);
       if (close > index && text[close + 1] === "(") {
-        const end = closingParen(text, close + 1);
+        const end = parens.get(close) ?? closingParen(text, close + 1);
+        parens.set(close, end);
         if (end > close) {
           const target = text.slice(close + 2, end).trim().split(/\s+/u)[0].replace(/^<(.*)>$/u, "$1");
           const href = safeHref(target);
@@ -145,7 +182,7 @@ export function parseInline(text: string, depth = 0): Inline[] {
     }
     if (char === "<") {
       const close = find(">", index + 1);
-      const href = close > index ? safeHref(text.slice(index + 1, close)) : null;
+      const href = close > index && close - index <= URL_CHARS_MAX + 1 ? safeHref(text.slice(index + 1, close)) : null;
       if (href) {
         out.push({ kind: "link", href, children: [{ kind: "text", text: href }] });
         index = close + 1;
@@ -373,7 +410,7 @@ export function MarkdownView({ source, onOpenLink, headingAction }: {
   onOpenLink: (href: string) => void;
   headingAction?: (heading: string) => ReactNode;
 }) {
-  const blocks = parseMarkdown(source);
+  const blocks = useMemo(() => parseMarkdown(source), [source]);
   return <div className="markdown">{blocks.map((block, key) => {
     switch (block.kind) {
       case "heading": {

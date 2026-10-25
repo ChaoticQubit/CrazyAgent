@@ -1,6 +1,6 @@
 import { addMemory, call, nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
 import { Button, ConfirmDialog, Icon, Segmented, StatusBadge } from "../../ui";
@@ -126,7 +126,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
 
   const text = file?.kind === "ok" ? file.value.text : null;
   const markdown = chosen !== null && extension(chosen) === "md";
-  const blocks = text !== null && markdown ? parseMarkdown(text) : [];
+  const blocks = useMemo(() => text !== null && markdown ? parseMarkdown(text) : [], [text, markdown]);
   const sources = markdownLinks(blocks);
   const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
 

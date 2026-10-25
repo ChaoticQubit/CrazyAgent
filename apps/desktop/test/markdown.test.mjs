@@ -149,6 +149,37 @@ test("heading and list lines that never match parse in linear time", () => {
   }
 });
 
+test("a full-size line of openers that never close parses inline in linear time", () => {
+  const size = md.MARKDOWN_CHARS_MAX;
+  const fill = (unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  let ticks = "";
+  for (let run = 1500; ticks.length < size - run - 1 && run > 0; run -= 1) ticks += "`".repeat(run) + " ";
+  const sources = [fill("*a "), fill("**a "), fill("_a "), fill("__a "), fill("***a "), "[".repeat(size - 1) + "]", "<".repeat(size - 1) + ">", ticks,
+    "[".repeat(size - 3000) + "](" + "x".repeat(2990), fill("http://a" + ")".repeat(2040) + " ")];
+  for (const source of sources) {
+    assert.ok(source.length <= size);
+    const started = performance.now();
+    const blocks = md.parseMarkdown(source);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1500, `${JSON.stringify(source.slice(0, 5))} took ${Math.round(ms)} ms`);
+    assert.equal(blocks.length, 1);
+  }
+});
+
+test("emphasis keeps its opener and closer rules", () => {
+  const inline = (source) => md.parseMarkdown(source)[0].children;
+  assert.deepEqual(inline("*a* b"), [{ kind: "em", children: [{ kind: "text", text: "a" }] }, { kind: "text", text: " b" }]);
+  assert.deepEqual(inline("*a *b*"), [{ kind: "em", children: [{ kind: "text", text: "a *b" }] }]);
+  assert.deepEqual(inline("*a **b* c"), [{ kind: "em", children: [{ kind: "text", text: "a **b" }] }, { kind: "text", text: " c" }]);
+  assert.deepEqual(inline("**a ** b**"), [{ kind: "strong", children: [{ kind: "text", text: "a ** b" }] }]);
+  assert.deepEqual(inline("__a__b__ c__"), [{ kind: "strong", children: [{ kind: "text", text: "a__b" }] }, { kind: "text", text: " c__" }]);
+  assert.deepEqual(inline("_a_b_ c"), [{ kind: "em", children: [{ kind: "text", text: "a_b" }] }, { kind: "text", text: " c" }]);
+  assert.deepEqual(inline("*a b"), [{ kind: "text", text: "*a b" }]);
+  assert.deepEqual(inline("[[x](https://a.example)"), [{ kind: "link", href: "https://a.example", children: [{ kind: "text", text: "[x" }] }]);
+  assert.deepEqual(inline("``a` b``"), [{ kind: "code", text: "a` b" }]);
+  assert.deepEqual(inline("see https://a.example/x_(y)). next"), [{ kind: "text", text: "see " }, { kind: "link", href: "https://a.example/x_(y)", children: [{ kind: "text", text: "https://a.example/x_(y)" }] }, { kind: "text", text: "). next" }]);
+});
+
 test("headings keep their closing-hash and empty-text rules", () => {
   assert.deepEqual(md.parseMarkdown("# Title ##")[0].children, [{ kind: "text", text: "Title" }]);
   assert.deepEqual(md.parseMarkdown("## a ## ##  ")[0].children, [{ kind: "text", text: "a ##" }]);
