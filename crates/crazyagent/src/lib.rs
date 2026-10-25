@@ -40,5 +40,6 @@ pub mod team;
 pub mod terminal;
 pub mod tui;
 pub mod verification;
+pub mod version;
 pub mod worker_dispatch;
 pub mod worktrees;

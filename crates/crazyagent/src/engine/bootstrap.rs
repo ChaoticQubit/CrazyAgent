@@ -43,6 +43,7 @@ const LOCATOR_MAX: usize = 2048;
 pub struct OwnerConnectionIdentity {
     database_instance: String,
     engine_epoch: String,
+    engine_version: String,
 }
 
 impl OwnerConnectionIdentity {
@@ -52,6 +53,12 @@ impl OwnerConnectionIdentity {
 
     pub fn engine_epoch(&self) -> &str {
         &self.engine_epoch
+    }
+
+    /// The version the connected engine published at start; empty for an engine that
+    /// predates the version handshake.
+    pub fn engine_version(&self) -> &str {
+        &self.engine_version
     }
 }
 
@@ -95,6 +102,16 @@ struct Locator {
     owner_socket: Identity,
     ordinary_name: String,
     ordinary_socket: Identity,
+    #[serde(default)]
+    engine_version: String,
+}
+
+#[cfg(unix)]
+const ENGINE_VERSION_BYTES_MAX: usize = 64;
+
+#[cfg(unix)]
+fn engine_version_valid(version: &str) -> bool {
+    version.len() <= ENGINE_VERSION_BYTES_MAX && !version.chars().any(char::is_control)
 }
 
 fn fail(code: &str) -> EngineError {
@@ -132,6 +149,7 @@ fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
         || !locator.generation.starts_with('o')
         || !hex(&locator.generation[1..], 8)
         || socket_name(&locator.ordinary_name).is_err()
+        || !engine_version_valid(&locator.engine_version)
         || [
             locator.database,
             locator.generation_identity,
@@ -440,6 +458,7 @@ async fn discover_owner(
     let identity = OwnerConnectionIdentity {
         database_instance: binding.pinned.value.db_instance.clone(),
         engine_epoch: binding.pinned.value.engine_epoch.clone(),
+        engine_version: binding.pinned.value.engine_version.clone(),
     };
     Ok((client, identity, binding))
 }
@@ -455,8 +474,35 @@ pub(super) fn runner_binding(
     let identity = OwnerConnectionIdentity {
         database_instance: binding.pinned.value.db_instance.clone(),
         engine_epoch: binding.pinned.value.engine_epoch.clone(),
+        engine_version: binding.pinned.value.engine_version.clone(),
     };
     Ok((generation, identity, binding))
+}
+
+/// Reads the version a running engine published in its locator, for the version message
+/// only; nothing else is trusted from it, so it reads any future locator shape. Input:
+/// the engine's data root. Output: the version, or none without a readable one.
+#[cfg(unix)]
+pub fn reported_engine_version(root: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    File::open(root.join(LOCATOR))
+        .ok()?
+        .take(LOCATOR_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > LOCATOR_MAX {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let version = value.get("engine_version")?.as_str()?;
+    (!version.is_empty() && engine_version_valid(version)).then(|| version.to_owned())
+}
+
+/// Reports no engine version where no engine locator can exist yet. Input: the root,
+/// unused. Output: none.
+#[cfg(not(unix))]
+pub fn reported_engine_version(_root: &Path) -> Option<String> {
+    None
 }
 
 pub(super) async fn discover_pair(
@@ -817,6 +863,7 @@ impl EngineService {
             owner_socket,
             ordinary_name: ordinary.into(),
             ordinary_socket,
+            engine_version: crate::version::VERSION.into(),
         };
         self.publish(value, previous)?;
         cancelled(shutdown)?;
@@ -1109,7 +1156,55 @@ mod tests {
             owner_socket: id,
             ordinary_name: "engine.sock".into(),
             ordinary_socket: id,
+            engine_version: crate::version::VERSION.into(),
         }
+    }
+
+    #[test]
+    fn locator_carries_a_bounded_engine_version_and_tolerates_older_engines() {
+        let parsed = parse_locator(&serde_json::to_vec(&sample()).unwrap()).unwrap();
+        assert_eq!(parsed.engine_version, crate::version::VERSION);
+        let mut older = serde_json::to_value(sample()).unwrap();
+        older.as_object_mut().unwrap().remove("engine_version");
+        let parsed = parse_locator(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(parsed.engine_version, "");
+        for bad in ["0.2.0\n".to_owned(), "9".repeat(65)] {
+            let mut value = sample();
+            value.engine_version = bad;
+            assert_eq!(
+                parse_locator(&serde_json::to_vec(&value).unwrap())
+                    .unwrap_err()
+                    .0,
+                "owner_locator_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_engine_version_reads_any_locator_shape_for_the_message_only() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
+        let mut future = serde_json::to_value(sample()).unwrap();
+        future["engine_version"] = "9.0.0".into();
+        future["added_later"] = true.into();
+        std::fs::write(
+            root.path().join(LOCATOR),
+            serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reported_engine_version(root.path()).as_deref(),
+            Some("9.0.0")
+        );
+        future["engine_version"] = "9.0.0\u{1b}[2J".into();
+        std::fs::write(
+            root.path().join(LOCATOR),
+            serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
+        std::fs::write(root.path().join(LOCATOR), vec![b' '; LOCATOR_MAX + 1]).unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
     }
 
     #[test]
