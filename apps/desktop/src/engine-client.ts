@@ -1064,6 +1064,13 @@ export function terminalInput(agent: string, bytes: number[]): Promise<void> {
   return invoke<void>("desktop_terminal_input", { agent, bytes });
 }
 
+/** Sends the owner's explicit prompt to an attached agent terminal as one submission; a
+ * sub-agent's master hears a note of it. Inputs: the terminal name and up to 4096 bytes of
+ * text. Output: resolves once the bridge queued it in order. */
+export function terminalPrompt(agent: string, text: string): Promise<void> {
+  return invoke<void>("desktop_terminal_prompt", { agent, text });
+}
+
 /** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
  * name, columns and rows, each from 2 to 1000. Output: resolves once queued. */
 export function terminalResize(agent: string, cols: number, rows: number): Promise<void> {

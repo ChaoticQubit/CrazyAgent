@@ -53,3 +53,16 @@ test("a pool's saved-key, URL and local members can be set up for agents again f
   const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onPrepare: forbidden }));
   assert.match(markup, /Research/);
 });
+
+test("an account added to a pool from Add account is set up for agents the way the pool editor sets it up", async () => {
+  const { readyAdded } = await import("../src/screens/settings/pools.tsx");
+  const accounts = [account("k", "api_key", { name: "Work key" }), account("s", "subscription")];
+  const run = async (previous, members) => {
+    const noted = [];
+    const note = (result) => { noted.push(result.kind === "error" ? result.code : result.kind); return result; };
+    return { line: await readyAdded(previous, members, accounts, note), noted };
+  };
+  assert.deepEqual(await run(["s"], ["s"]), { line: undefined, noted: [] });
+  assert.deepEqual(await run([], ["s"]), { line: undefined, noted: [] });
+  assert.deepEqual(await run(["s"], ["s", "k"]), { line: "Work key isn't ready for agents yet. CrazyAgent's engine isn't running.", noted: ["engine_unreachable"] });
+});

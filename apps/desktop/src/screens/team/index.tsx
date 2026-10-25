@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { loadTeamGraph } from "../../api";
 import type { Result } from "../../api";
 import type { GraphNode, TeamGraph } from "../../engine-client";
-import { Button, EmptyState, Icon, LoadError, NotReady, Skeleton, StatusBadge, type IconName } from "../../ui";
+import { Button, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton, StatusBadge, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import {
   DRAG_SLOP, NODE_HEIGHT, NODE_WIDTH, arrowMove, edgeStatus, graphLive, graphSummary, keepOffsets,
@@ -105,19 +105,35 @@ function TaskDetail({ placed, nodes, id, onClose }: { placed: PlacedEdge; nodes:
   </section>;
 }
 
+/** What the graph view shows: the read it draws, and why the latest read failed while an
+ * older graph stays on screen. */
+export type GraphState = { shown: Result<TeamGraph> | undefined; stale: string | null };
+
+export const GRAPH_UNREAD: GraphState = { shown: undefined, stale: null };
+
+/** Takes one graph read into the view. A failed read after a good one keeps the good graph,
+ * so an open terminal and its unsent prompt stay, and says why the refresh failed; before
+ * any good read the failure is what the view shows. Inputs: the current state and the read.
+ * Output: the next state. */
+export function graphRead(state: GraphState, result: Result<TeamGraph>): GraphState {
+  if (result.kind === "ok" || state.shown?.kind !== "ok") return { shown: result, stale: null };
+  return { shown: state.shown, stale: result.kind === "error" ? result.message : "The team graph isn't ready in this build." };
+}
+
 /** Reads one project's team graph, again every 2 s while work is live and every 10 s
- * otherwise. Input: the project id. Output: the latest read and a reload action. */
-export function useTeamGraph(projectId: string): [Result<TeamGraph> | undefined, () => void] {
-  const [graph, setGraph] = useState<Result<TeamGraph>>();
+ * otherwise. Input: the project id. Output: the graph state and a reload action that keeps
+ * the graph on screen while it reads. */
+export function useTeamGraph(projectId: string): [GraphState, () => void] {
+  const [state, setState] = useState<GraphState>(GRAPH_UNREAD);
   const [round, setRound] = useState(0);
+  useEffect(() => setState(GRAPH_UNREAD), [projectId]);
   useEffect(() => {
     let current = true;
     let timer = 0;
-    setGraph(undefined);
     const read = async () => {
       const result = await loadTeamGraph(projectId);
       if (!current) return;
-      setGraph(result);
+      setState((previous) => graphRead(previous, result));
       if (result.kind === "not_ready") return;
       timer = window.setTimeout(read, result.kind === "ok" && graphLive(result.value) ? LIVE_READ_MS : IDLE_READ_MS);
     };
@@ -127,7 +143,7 @@ export function useTeamGraph(projectId: string): [Result<TeamGraph> | undefined,
       window.clearTimeout(timer);
     };
   }, [projectId, round]);
-  return [graph, () => setRound((value) => value + 1)];
+  return [state, () => setRound((value) => value + 1)];
 }
 
 /** The live team graph of one project: the master, one box per harness group with its agent
@@ -136,7 +152,8 @@ export function useTeamGraph(projectId: string): [Result<TeamGraph> | undefined,
  * or an agent opens its terminal beside the graph. Inputs: the project id and an optional
  * harness name lookup. Output: the graph section. */
 export function TeamGraphView({ projectId, harness }: { projectId: string; harness?: (id: string) => string }) {
-  const [graph, reload] = useTeamGraph(projectId);
+  const [read, reload] = useTeamGraph(projectId);
+  const graph = read.shown;
   const [offsets, setOffsets] = useState<Offsets>(() => new Map());
   const [open, setOpen] = useState<string | null>(null);
   const [task, setTask] = useState<number | null>(null);
@@ -171,6 +188,10 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
       <h3 id={`${ids}-title`}>Team graph</h3>
       <span className="tg-summary" role="status">{graphSummary(graph.value)}</span>
     </div>
+    {read.stale && <Notice tone="warn" alert>
+      <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
+      <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
+    </Notice>}
     <p className="tg-hint">Drag a box to arrange the graph, or focus it and use the arrow keys. Click the master or an agent to open its terminal.</p>
     <div className={`tg-split${openNode ? " with-terminal" : ""}`}>
       <div className="tg-canvas-scroll">
