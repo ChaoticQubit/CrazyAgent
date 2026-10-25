@@ -90,15 +90,29 @@ export interface MenuItem {
   onSelect: () => void;
 }
 
-/** A button that opens a small menu; arrow keys move, Esc closes and returns focus.
- * Inputs: accessible label for the button and the items. */
+/** Whether focus leaving a menu went somewhere outside it. A webview that moves focus to an
+ * ancestor on mousedown, as WKWebView does with buttons, or to nothing has not left it.
+ * Inputs: the menu element and the element taking focus. Output: true when the menu should close. */
+function focusLeftMenu(menu: Node, next: Node | null): boolean {
+  return next !== null && !menu.contains(next) && !next.contains(menu);
+}
+
+/** A button that opens a small menu; arrow keys move, Esc closes and returns focus, and a
+ * pointerdown or focus outside closes it. Inputs: accessible label for the button and the items. */
 export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
   useEffect(() => { if (open) list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus(); }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => { if (!(event.target instanceof Node && root.current?.contains(event.target))) setOpen(false); };
+    document.addEventListener("pointerdown", outside, true);
+    return () => document.removeEventListener("pointerdown", outside, true);
+  }, [open]);
   const close = () => { setOpen(false); button.current?.focus(); };
-  return <span className="menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
+  return <span ref={root} className="menu" onBlur={(event) => { if (focusLeftMenu(event.currentTarget, event.relatedTarget as Node | null)) setOpen(false); }}>
     <button ref={button} type="button" className="btn icon-only" aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open}
       onClick={() => setOpen(!open)}><Icon name="ellipsis" /></button>
     {open && <div ref={list} className="menu-list" role="menu" aria-label={label} onKeyDown={(event) => {
