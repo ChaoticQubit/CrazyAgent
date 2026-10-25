@@ -29,6 +29,10 @@ const MONITOR_POLL: Duration = Duration::from_millis(250);
 const REPLY_WAIT: Duration = Duration::from_secs(40);
 #[cfg(unix)]
 const KILL_WAIT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const LSOF: &str = "/usr/sbin/lsof";
+#[cfg(unix)]
+const STOP_INCOMPLETE: &str = "agent_stop_incomplete";
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
@@ -443,6 +447,7 @@ enum Live {
     #[cfg(unix)]
     Reattached {
         group: u32,
+        output: Arc<PathBuf>,
         probe: Arc<File>,
         quit: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -646,6 +651,7 @@ impl Agents {
 
     #[cfg(unix)]
     fn watch(&self, id: String, group: u32, probe: File, attempt: u32) -> Result<(), LaunchError> {
+        let output = Arc::new(self.folder(&id).join(launch::DURABLE_OUTPUT));
         let probe = Arc::new(probe);
         let quit = Arc::new(AtomicBool::new(false));
         let recorder = Recorder {
@@ -656,7 +662,7 @@ impl Agents {
         };
         let limit = LaunchLimits::default().output_bytes as u64;
         let thread = {
-            let (probe, quit) = (probe.clone(), quit.clone());
+            let (output, probe, quit) = (output.clone(), probe.clone(), quit.clone());
             std::thread::Builder::new()
                 .name("agent-reattached".into())
                 .spawn(move || {
@@ -669,8 +675,12 @@ impl Agents {
                             .metadata()
                             .is_ok_and(|metadata| metadata.len() > limit)
                         {
-                            kill_group(group, &probe);
-                            recorder.finish(AgentState::Failed, None, Some("launch_output_limit"));
+                            let reason = if kill_holders(group, &output, &probe) {
+                                "launch_output_limit"
+                            } else {
+                                STOP_INCOMPLETE
+                            };
+                            recorder.finish(AgentState::Failed, None, Some(reason));
                             return;
                         }
                         std::thread::sleep(MONITOR_POLL);
@@ -682,6 +692,7 @@ impl Agents {
             id,
             Live::Reattached {
                 group,
+                output,
                 probe,
                 quit,
                 thread: Some(thread),
@@ -925,7 +936,9 @@ impl Agents {
     }
 
     /// Stops one agent: its whole process group gets TERM, then KILL after the grace
-    /// time. Other agents are untouched. Input: id. Output: the stopped agent.
+    /// time; a reattached agent is reached through what holds its output log, and is
+    /// recorded Failed when that cannot be ended. Other agents are untouched.
+    /// Input: id. Output: the stopped agent.
     pub fn stop(&self, id: &str) -> Result<AgentView, LaunchError> {
         if let Some(control) = self.hosted(id)? {
             control.stop.store(true, Ordering::Release);
@@ -1239,6 +1252,7 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
         #[cfg(unix)]
         Live::Reattached {
             group,
+            output,
             probe,
             quit,
             mut thread,
@@ -1247,8 +1261,11 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
             if let Some(thread) = thread.take() {
                 let _ = thread.join();
             }
-            kill_group(group, &probe);
-            recorder.finish(state, None, None);
+            if kill_holders(group, &output, &probe) {
+                recorder.finish(state, None, None);
+            } else {
+                recorder.finish(AgentState::Failed, None, Some(STOP_INCOMPLETE));
+            }
         }
         Live::Hosted { control } => {
             control.stop.store(true, Ordering::Release);
@@ -1257,28 +1274,157 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
     }
 }
 
+/// Ends what still holds a reattached agent's output log: TERM, then KILL after the
+/// grace time, each sent only to a process found holding the log for writing, or to its
+/// group when the holder leads it or sits in the agent's recorded group.
+/// Inputs: the recorded group, the log path and a read-only open of the log.
+/// Output: true once no holder is left; false when holders survive or cannot be found.
 #[cfg(unix)]
-fn kill_group(group: u32, probe: &File) {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .filter(|group| *group > 1)
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
+fn kill_holders(group: u32, output: &Path, probe: &File) -> bool {
+    let own = rustix::process::getpgrp();
     for (signal, wait) in [
         (rustix::process::Signal::TERM, STOP_GRACE),
         (rustix::process::Signal::KILL, KILL_WAIT),
     ] {
         if !launch::holder_alive(probe) {
-            return;
+            return true;
         }
-        let _ = rustix::process::kill_process_group(pid, signal);
+        let Some(writers) = writers(output, probe) else {
+            return false;
+        };
+        for writer in writers {
+            match rustix::process::getpgid(Some(writer)) {
+                Err(rustix::io::Errno::SRCH) => {}
+                Ok(leader)
+                    if leader != own
+                        && (leader == writer
+                            || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
+                {
+                    let _ = rustix::process::kill_process_group(leader, signal);
+                }
+                _ => {
+                    let _ = rustix::process::kill_process(writer, signal);
+                }
+            }
+        }
         let until = Instant::now() + wait;
         while launch::holder_alive(probe) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    !launch::holder_alive(probe)
+}
+
+/// Lists the other processes that hold the agent output log open for writing, through
+/// `lsof`, while the path still names the probed file. Inputs: the log path and a
+/// read-only open of it. Output: the writers, or None when the path changed, `lsof`
+/// failed or did not list this engine's own open of the log.
+#[cfg(target_os = "macos")]
+fn writers(output: &Path, probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    let probed = probe.metadata().ok()?;
+    let names_probe = || {
+        std::fs::symlink_metadata(output)
+            .is_ok_and(|named| (named.dev(), named.ino()) == (probed.dev(), probed.ino()))
+    };
+    if !names_probe() {
+        return None;
+    }
+    let listed = crate::spawn_gate::output(
+        std::process::Command::new(LSOF)
+            .args(["-w", "-n", "-P", "-F", "pa", "--"])
+            .arg(output)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .ok()?;
+    if !listed.status.success() || !names_probe() {
+        return None;
+    }
+    listed_writers(std::str::from_utf8(&listed.stdout).ok()?)
+}
+
+/// Reads `lsof -F pa` output into the processes with a write open, leaving out this
+/// engine. Input: the output text. Output: the writers, or None when the text is not
+/// that format or does not list this engine, whose read-only probe it must show.
+#[cfg(target_os = "macos")]
+fn listed_writers(text: &str) -> Option<Vec<rustix::process::Pid>> {
+    let own = rustix::process::getpid();
+    let (mut current, mut seen_own, mut found) = (None, false, Vec::new());
+    for line in text.lines() {
+        let (tag, value) = line.split_at_checked(1)?;
+        match tag {
+            "p" => {
+                let pid = rustix::process::Pid::from_raw(value.parse().ok()?)?;
+                seen_own |= pid == own;
+                current = Some(pid);
+            }
+            "a" if matches!(value, "w" | "u") => {
+                let pid = current?;
+                if pid != own && !found.contains(&pid) {
+                    found.push(pid);
+                }
+            }
+            "f" | "a" => {}
+            _ => return None,
+        }
+    }
+    seen_own.then_some(found)
+}
+
+/// Lists the other processes that hold the agent output log open for writing, by
+/// matching every readable `/proc/<pid>/fd` entry against the probed file. Inputs: the
+/// log path, unused, and a read-only open of it. Output: the writers, or None when
+/// `/proc` is unreadable or does not show this engine's own open of the log.
+#[cfg(target_os = "linux")]
+fn writers(_output: &Path, probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    let probed = probe.metadata().ok()?;
+    let own = rustix::process::getpid();
+    let (mut seen_own, mut found) = (false, Vec::new());
+    for process in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        let Ok(descriptors) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        for descriptor in descriptors.flatten() {
+            let held = std::fs::metadata(descriptor.path())
+                .is_ok_and(|held| (held.dev(), held.ino()) == (probed.dev(), probed.ino()));
+            if !held {
+                continue;
+            }
+            if pid == own {
+                seen_own = true;
+                continue;
+            }
+            let flags =
+                std::fs::read_to_string(process.path().join("fdinfo").join(descriptor.file_name()))
+                    .ok()
+                    .and_then(|info| {
+                        info.lines()
+                            .find_map(|line| line.strip_prefix("flags:"))
+                            .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
+                    });
+            if flags.is_some_and(|flags| flags & 3 != 0) && !found.contains(&pid) {
+                found.push(pid);
+            }
+        }
+    }
+    seen_own.then_some(found)
+}
+
+/// Reports that no other platform can list what holds the agent output log, so nothing
+/// is signalled. Inputs: the log path and probe, unused. Output: None.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn writers(_output: &Path, _probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    None
 }
 
 fn drive(
