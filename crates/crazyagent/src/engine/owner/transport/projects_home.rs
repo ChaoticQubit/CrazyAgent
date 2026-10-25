@@ -1,10 +1,12 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{AddMode, AddPlan, HomeEffect, MovePlan, folder_size};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
+static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 
 enum Step {
     Reply(Box<OwnerResponse>),
@@ -71,7 +73,12 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check and the plan; the disk work runs under its own bounds and
 /// a fresh owner deadline then bounds the record and the reply, so a finished
-/// effect is recorded as Applied or as Rejected with the refusal code.
+/// effect is recorded as Applied or as Rejected with the refusal code. A home
+/// move then sends a settle job for this exchange's pending move: one whose
+/// record did not finish it (a stale grant, a slow barrier, a failed record)
+/// is finished from disk, and one whose disk work never ran is forgotten. The
+/// exchange number is unique within the engine process; engine start finishes
+/// any move left by an earlier process before serving.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -84,19 +91,27 @@ pub(super) async fn serve(
     assert!(handles(&request));
     let id = request.request_id.clone();
     let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
-    let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline))
+    let exchange = EXCHANGES.fetch_add(1, Ordering::Relaxed);
+    assert!(exchange > 0);
+    let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
         .await
         .unwrap_or_else(|_| Err(failure(UNKNOWN)));
-    let (step, deadline) = match planned {
+    let moving = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectsHome { .. }
+        }
+    );
+    let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let interrupted = work.interrupted();
             let step = tokio::task::spawn_blocking(move || work.run())
                 .await
                 .map_err(|_| failure(interrupted));
-            (step, Instant::now() + engine.timeout)
+            (step, Instant::now() + engine.timeout, true)
         }
-        Ok(Planned::Step(step)) => (Ok(step), deadline),
-        Err(e) => (Err(e), deadline),
+        Ok(Planned::Step(step)) => (Ok(step), deadline, false),
+        Err(e) => (Err(e), deadline, false),
     };
     let staging = match &step {
         Ok(Step::Staged(Ok(staged))) => Some(staged.staging().to_path_buf()),
@@ -117,9 +132,15 @@ pub(super) async fn serve(
         }
         write_owner_reply(stream, result, id, mutation).await
     };
-    tokio::time::timeout_at(deadline, answer)
-        .await
-        .map_err(|_| failure(UNKNOWN))?
+    let answered = tokio::time::timeout_at(deadline, answer).await;
+    if moving
+        && let Err(e) = engine
+            .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
+            .await
+    {
+        eprintln!("projects_home_move_not_settled cause={}", e.0);
+    }
+    answered.map_err(|_| failure(UNKNOWN))?
 }
 
 async fn plan(
@@ -127,6 +148,7 @@ async fn plan(
     a: &Admission,
     request: &OwnerRequest,
     deadline: Instant,
+    exchange: u64,
 ) -> Result<Planned, EngineError> {
     let mutation = match &request.operation {
         OwnerOperation::Read {
@@ -149,8 +171,11 @@ async fn plan(
         }
         OwnerMutation::MoveProjectsHome { path, .. } => {
             let picked = path.clone();
+            let id = request.request_id.clone();
             engine
-                .owner_job(|reply| Job::HomeMovePlan(a.clone(), expected, picked, reply))
+                .owner_job(|reply| {
+                    Job::HomeMovePlan(a.clone(), expected, picked, id, exchange, reply)
+                })
                 .await
                 .map(Work::Move)
         }

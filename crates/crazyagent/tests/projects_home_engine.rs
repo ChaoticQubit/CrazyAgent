@@ -474,3 +474,149 @@ async fn a_folder_added_through_a_link_is_recorded_at_its_real_name() {
     );
     engine.stop().await;
 }
+
+fn move_home(path: &Path) -> OwnerMutation {
+    OwnerMutation::MoveProjectsHome {
+        path: path.to_str().unwrap().into(),
+        move_projects: true,
+    }
+}
+
+fn sql(database: &Path, statement: &str) {
+    let db = rusqlite::Connection::open(database).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(statement).unwrap();
+}
+
+async fn unknown(owner: &mut Owner, to: &Path) {
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner.generation += 1;
+    owner
+        .controller
+        .begin_mutation(move_home(to), owner.generation)
+        .unwrap();
+    let response = owner.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(response, OwnerResponse::OutcomeUnknown { .. }),
+        "{response:?}"
+    );
+    assert!(to.join("reading-list").is_dir() && to.join("plain").is_dir());
+}
+
+async fn home_until(owner: &mut Owner, home: &Path) {
+    let start = Instant::now();
+    while owner.home().await.path.as_deref() != home.to_str() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{}",
+            home.display()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn ready_at(owner: &mut Owner, project: &ProjectId, folder: &Path) {
+    let found = owner
+        .found_until(|found| {
+            found.iter().any(|entry| {
+                entry.project_id.as_ref() == Some(project) && entry.path == folder.to_str().unwrap()
+            })
+        })
+        .await;
+    let entry = found
+        .iter()
+        .find(|entry| entry.project_id.as_ref() == Some(project))
+        .unwrap();
+    assert_eq!(entry.state, FoundState::Ready, "{found:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_home_move_whose_record_fails_still_lands_on_the_moved_folders() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let first = place.join("first");
+    let second = place.join("second");
+    let third = place.join("third");
+    for folder in [&first, &second, &third] {
+        fs::create_dir(folder).unwrap();
+    }
+    let mut engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: first.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    let project = ProjectId::new("reading").unwrap();
+    owner.generation += 1;
+    let setup = ProjectSetup {
+        about: "Tracks reading lists.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "Reading list".into(),
+        repositories: vec![],
+    };
+    match owner
+        .controller
+        .setup_project(project.clone(), spec, setup, owner.generation)
+        .await
+        .unwrap()
+    {
+        OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
+        other => panic!("{other:?}"),
+    }
+    fs::create_dir(first.join("plain")).unwrap();
+    ready_at(&mut owner, &project, &first.join("reading-list")).await;
+
+    let database = engine.root.path().join("engine.db");
+    let abort = |event: &str| {
+        sql(
+            &database,
+            &format!(
+                "CREATE TRIGGER home_move_abort {event} BEGIN SELECT RAISE(ABORT, 'home_move_injected_abort'); END;"
+            ),
+        )
+    };
+
+    abort("BEFORE INSERT ON owner_operations");
+    unknown(&mut owner, &second).await;
+    sql(&database, "DROP TRIGGER home_move_abort;");
+    home_until(&mut owner, &second).await;
+    ready_at(&mut owner, &project, &second.join("reading-list")).await;
+    owner.controller.detach();
+    owner.controller = engine.owner().await;
+
+    abort("BEFORE UPDATE ON projects_home");
+    unknown(&mut owner, &third).await;
+    owner.controller.detach();
+    engine.restart().await;
+    owner.controller = engine.owner().await;
+    assert_eq!(owner.home().await.path.as_deref(), second.to_str());
+    sql(&database, "DROP TRIGGER home_move_abort;");
+    owner.controller.detach();
+    engine.restart().await;
+    owner.controller = engine.owner().await;
+    home_until(&mut owner, &third).await;
+    ready_at(&mut owner, &project, &third.join("reading-list")).await;
+
+    assert_eq!(owner.apply(move_home(&first)).await, OwnerResult::Applied);
+    assert!(first.join("reading-list").is_dir() && first.join("plain").is_dir());
+    ready_at(&mut owner, &project, &first.join("reading-list")).await;
+    engine.stop().await;
+}

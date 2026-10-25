@@ -3,6 +3,7 @@ use crate::projects_home::{
     self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch, MovePlan,
     ProjectsHome, Registered,
 };
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 const FOUND_REPLY_BYTES: usize = 48 * 1024;
@@ -144,23 +145,172 @@ pub(super) fn add_plan(
     home::plan_add(&saved, &engine_root(path)?, source, mode)
 }
 
-/// Plans a MoveProjectsHome that moves the project folders, before any disk work.
+/// Plans a MoveProjectsHome that moves the project folders and records the
+/// move as pending before any disk work, so a move whose result is never
+/// recorded is still finished from what landed on disk.
 /// Input: the connection, database path, owner admission, the revision the
-/// owner saw and the new home. Output: the checked plan or the refusal code.
+/// owner saw, the new home, the request and the transport exchange that will
+/// run the move. Output: the checked plan, or the refusal code
+/// (`home_move_in_progress` while another move is pending).
 pub(super) fn move_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
     expected: &Cursor,
     picked: &str,
+    request: &RequestId,
+    exchange: u64,
 ) -> Result<MovePlan, EngineError> {
+    let exchange = i64::try_from(exchange).map_err(error)?;
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     if owner_revision(&tx)? != expected.value() {
         return Err(error("stale_revision"));
     }
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_move(&saved, Path::new(picked), &engine_root(path)?)
+    let plan = home::plan_move(&saved, Path::new(picked), &engine_root(path)?)?;
+    tx.execute(
+        "INSERT INTO projects_home_move VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        params![
+            request.as_str(),
+            exchange,
+            text(&saved)?,
+            text(plan.destination())?,
+            serde_json::to_string(plan.folders()).map_err(error)?
+        ],
+    )
+    .map_err(error)?;
+    tx.commit().map_err(error)?;
+    Ok(plan)
+}
+
+/// A projects home move recorded before its folders moved: its request, the
+/// transport exchange running it, the old home, the new home and the
+/// top-level folders the plan moves.
+struct PendingMove {
+    request: String,
+    exchange: i64,
+    origin: PathBuf,
+    target: PathBuf,
+    folders: Vec<String>,
+}
+
+fn text(path: &Path) -> Result<&str, EngineError> {
+    path.to_str()
+        .ok_or_else(|| error("projects_home_path_invalid"))
+}
+
+fn pending_move(tx: &Transaction<'_>) -> Result<Option<PendingMove>, EngineError> {
+    let row: Option<(String, i64, String, String, String)> = tx
+        .query_row(
+            "SELECT request, exchange, origin, target, folders FROM projects_home_move
+             WHERE singleton=1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(error)?;
+    row.map(|(request, exchange, origin, target, folders)| {
+        Ok(PendingMove {
+            request,
+            exchange,
+            origin: PathBuf::from(origin),
+            target: PathBuf::from(target),
+            folders: serde_json::from_str(&folders).map_err(error)?,
+        })
+    })
+    .transpose()
+}
+
+/// Finishes the pending projects home move from what is on disk now and
+/// clears it. A folder counts as moved once it is a real folder in the new
+/// home and gone from the old one. Input: the transaction, database path and
+/// which pending move to finish. Output: None when no such move is pending;
+/// Applied when every planned folder moved and the new home is saved,
+/// otherwise Rejected. Either way exactly the set-up projects whose folders
+/// moved are pointed at the new home.
+fn settle(
+    tx: &Transaction<'_>,
+    path: &Path,
+    belongs: impl Fn(&PendingMove) -> bool,
+) -> Result<Option<Outcome>, EngineError> {
+    let Some(pending) = pending_move(tx)? else {
+        return Ok(None);
+    };
+    if !belongs(&pending) {
+        return Ok(None);
+    }
+    tx.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
+        .map_err(error)?;
+    let arrived: Vec<&OsStr> = pending
+        .folders
+        .iter()
+        .map(OsStr::new)
+        .filter(|name| {
+            std::fs::symlink_metadata(pending.target.join(name))
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                && std::fs::symlink_metadata(pending.origin.join(name)).is_err()
+        })
+        .collect();
+    let outcome = if arrived.len() == pending.folders.len() {
+        switch_home(tx, path, text(&pending.target)?)?
+    } else {
+        Outcome::Rejected {
+            code: "home_move_partial".into(),
+        }
+    };
+    rewrite_folders(tx, &pending.origin, &pending.target, |name| {
+        arrived.contains(&name)
+    })?;
+    assert!(pending_move(tx)?.is_none());
+    Ok(Some(outcome))
+}
+
+/// Finishes or forgets a pending projects home move in its own transaction.
+/// Input: the connection, database path, the transport exchange the move must
+/// belong to (None at engine start, before any exchange, which finishes any
+/// pending move) and whether that exchange ran its disk work. A move whose
+/// work never ran is forgotten; any other is finished as `settle` does; a move
+/// another exchange planned is left alone. Output: true when the saved home or
+/// set-up projects may have changed, so the caller restarts the home watch.
+pub(super) fn settle_pending(
+    db: &mut Connection,
+    path: &Path,
+    exchange: Option<u64>,
+    ran: bool,
+) -> Result<bool, EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let changed = match exchange {
+        None => settle(&tx, path, |_| true)?.is_some(),
+        Some(exchange) => {
+            let exchange = i64::try_from(exchange).map_err(error)?;
+            if ran {
+                settle(&tx, path, |pending| pending.exchange == exchange)?.is_some()
+            } else {
+                tx.execute(
+                    "DELETE FROM projects_home_move WHERE singleton=1 AND exchange=?1",
+                    [exchange],
+                )
+                .map_err(error)?;
+                false
+            }
+        }
+    };
+    tx.commit().map_err(error)?;
+    Ok(changed)
 }
 
 fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcome, EngineError> {
@@ -173,10 +323,15 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
     }
 }
 
-/// Points every set-up project whose folder sat in the old home at the same
-/// folder name in the new home, after the transport moved them, keeping an
+/// Points every set-up project whose folder sat in the old home, under a name
+/// `arrived` accepts, at the same folder name in the new home, keeping an
 /// onboarded project's recorded `.crazyagent/` folder and onboarding folder.
-fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), EngineError> {
+fn rewrite_folders(
+    tx: &Transaction<'_>,
+    from: &Path,
+    to: &Path,
+    arrived: impl Fn(&OsStr) -> bool,
+) -> Result<(), EngineError> {
     let rows: Vec<(String, String)> = {
         let mut statement = tx
             .prepare("SELECT project, body FROM project_setups")
@@ -193,7 +348,7 @@ fn rewrite_folders(tx: &Transaction<'_>, from: &Path, to: &Path) -> Result<(), E
         let Some(name) = folder.file_name() else {
             continue;
         };
-        if folder.parent() != Some(from) {
+        if folder.parent() != Some(from) || !arrived(name) {
             continue;
         }
         let moved = to.join(name);
@@ -262,14 +417,16 @@ pub(super) fn execute(
 
 /// Records the result of disk work the owner transport carried out for
 /// AddExistingFolder or MoveProjectsHome with `move_projects`.
-/// Input: the transaction, database path, the mutation's command and the
-/// transport's effect. Output: Rejected with the transport's refusal code;
+/// Input: the transaction, database path, the request, the mutation's command
+/// and the transport's effect. Output: Rejected with the transport's refusal code;
 /// for an add, Applied once the real folder the plan named is confirmed in the
-/// home (and, for Move, gone from its old place); for a home move, Applied once
-/// the new home is saved and set-up projects point at their moved folders.
+/// home (and, for Move, gone from its old place); for a home move, the move
+/// pending under this request finished as `settle` does. A move the transport
+/// refused or failed stays pending for the transport's settle job.
 pub(super) fn record(
     tx: &Transaction<'_>,
     path: &Path,
+    request: &RequestId,
     command: &Command,
     effect: &HomeEffect,
 ) -> Result<Outcome, EngineError> {
@@ -297,16 +454,10 @@ pub(super) fn record(
             })
         }
         HomeAction::MoveHome {
-            path: picked,
             move_projects: true,
-        } if real.is_none() => {
-            let outcome = switch_home(tx, path, picked)?;
-            if outcome == Outcome::Applied {
-                let next = home::load(tx)?.ok_or_else(|| error("projects_home_unset"))?;
-                rewrite_folders(tx, &saved, &next)?;
-            }
-            Ok(outcome)
-        }
+            ..
+        } if real.is_none() => settle(tx, path, |pending| pending.request == request.as_str())?
+            .ok_or_else(|| error("home_record_invalid")),
         _ => Err(error("home_record_invalid")),
     }
 }

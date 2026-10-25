@@ -24,6 +24,14 @@ const RESERVED_NAMES: [&str; 22] = [
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
+);
+CREATE TABLE IF NOT EXISTS projects_home_move (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    exchange INTEGER NOT NULL CHECK(exchange > 0),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
+    folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -456,7 +464,8 @@ pub fn found(
     entries
 }
 
-/// Creates the projects home table when the engine database opens.
+/// Creates the projects home table, and the table that holds a home move
+/// recorded before its folders move, when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
@@ -547,6 +556,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
         "home_move_partial" => {
             "Some projects were moved and could not be moved back. Check both folders."
+        }
+        "home_move_in_progress" => {
+            "Your projects folder is still being moved. Try again when it finishes."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
