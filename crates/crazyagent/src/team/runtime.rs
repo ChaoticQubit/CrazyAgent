@@ -1807,6 +1807,10 @@ impl TeamRuntime {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
+        sandbox = sandbox
+            .confine_to_worktree(&working_dir)
+            .map_err(|e| plain(&e))?;
+        sandbox.install(&profile).map_err(|e| plain(&e))?;
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),

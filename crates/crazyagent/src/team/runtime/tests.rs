@@ -392,3 +392,111 @@ fn a_removed_project_stops_its_agents_and_their_panes() {
     assert!(!fixture.recorded(sub));
     assert!(team.shutdown().unwrap().is_empty());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
+    let fixture = Fixture::new(2);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = fixture.base.join("project");
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let plan = |id: i64| {
+        runtime
+            .prepare(&fixture.setup, id, AgentRole::Sub, "codex", true, &account)
+            .unwrap()
+            .1
+    };
+    let first = plan(1);
+    let second = plan(2);
+    let object = project.join(".git").join("objects");
+    let head = String::from_utf8(
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&project)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .stdout,
+    )
+    .unwrap();
+    let head = head.trim();
+    let object = object.join(&head[..2]).join(&head[2..]);
+    let fanout = object.parent().unwrap();
+    let before = std::fs::read(&object).unwrap();
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "g='/usr/bin/git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
+         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
+         (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
+         (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
+         (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
+         (ln {owner} linked.txt) 2>/dev/null && echo link=made || echo link=refused\n\
+         (rm -f {object}; echo junk > {object}) 2>/dev/null; echo object=tried\n\
+         (mv {fanout} {moved}) 2>/dev/null; echo fanout=tried\n",
+        sibling = quoted(&second.working_dir.join("escaped.txt")),
+        owner = quoted(&project.join("owner.txt")),
+        fresh = quoted(&project.join("fresh.txt")),
+        object = quoted(&object),
+        fanout = quoted(fanout),
+        moved = quoted(&fanout.with_extension("moved")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&first.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&first.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text,
+        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\nobject=tried\nfanout=tried\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!second.working_dir.join("escaped.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("owner.txt")).unwrap(),
+        "owner\n"
+    );
+    assert!(!project.join("fresh.txt").exists());
+    assert_eq!(
+        std::fs::read(&object).unwrap(),
+        before,
+        "the worker replaced a git object"
+    );
+    assert!(!fanout.with_extension("moved").exists());
+}
