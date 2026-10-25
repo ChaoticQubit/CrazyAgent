@@ -1511,8 +1511,27 @@ async fn desktop_logout_native_auth(
     lock(&state)?.logout_native_auth(&ticket).await
 }
 
+/// The engine socket the desktop connects to: `CRAZYAGENT_DESKTOP_SOCKET` when set, else
+/// the default engine's socket in its data root, so an app opened from the Dock or Finder,
+/// which starts with no such variable, still finds the engine. Inputs: the variable's value
+/// and the environment values that choose the data root. Output: the socket, or none.
+pub fn desktop_socket(
+    explicit: Option<std::ffi::OsString>,
+    env: &crazyagent::paths::RootEnvironment,
+) -> Option<std::path::PathBuf> {
+    use crazyagent::paths::{Layout, Platform, data_root};
+    if let Some(socket) = explicit.filter(|socket| !socket.is_empty()) {
+        return Some(socket.into());
+    }
+    let root = data_root(Platform::CURRENT, env).ok()?;
+    Some(Layout::new(root).ok()?.socket())
+}
+
 pub fn run() {
-    let socket = std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").map(Into::into);
+    let socket = desktop_socket(
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET"),
+        &crazyagent::paths::RootEnvironment::current(),
+    );
     let builder = tauri::Builder::default()
         .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
         .manage(TerminalState(Arc::new(Terminals::default())))
