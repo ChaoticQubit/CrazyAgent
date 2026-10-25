@@ -65,7 +65,17 @@ test("the system dark theme and the chosen dark theme use identical tokens", () 
   const tokens = Object.fromEntries([...body.matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)].map((match) => [match[1], match[2].trim()]));
   assert.deepEqual(tokens, block(':root[data-theme="dark"]'));
   assert.deepEqual(Object.keys(block(':root[data-theme="dark"]')).sort(),
-    Object.keys(block(":root")).filter((name) => !/^(font|mono|space|radius|dur|ease|z)-?/.test(name) || name === "focus").sort());
+    Object.keys(block(":root")).filter((name) => !/^(font|mono|space|radius|dur|ease|z|terminal)-?/.test(name) || name === "focus").sort());
+});
+
+test("the agent terminal keeps one dark palette in every theme and its text meets WCAG AA", () => {
+  const light = block(":root");
+  const names = Object.keys(light).filter((name) => name.startsWith("terminal-")).sort();
+  assert.deepEqual(names, ["terminal-bg", "terminal-cursor", "terminal-fg", "terminal-selection"]);
+  assert.deepEqual(Object.keys(block(':root[data-theme="dark"]')).filter((name) => name.startsWith("terminal-")), []);
+  assert.equal(light["terminal-bg"], block(':root[data-theme="dark"]').bg);
+  assert.ok(ratio(light["terminal-fg"], light["terminal-bg"]) >= 4.5);
+  assert.ok(ratio(light["terminal-cursor"], light["terminal-bg"]) >= 3);
 });
 
 test("brand colors and fonts live in tokens: the brand vermilion, bone and charcoal are present", () => {
