@@ -20,6 +20,8 @@ mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
 mod migrations;
+#[cfg(all(test, unix))]
+pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     native_sign_in, validate_configured_initial_conversation_receipt,
@@ -3659,7 +3661,11 @@ fallback_allowed = false
         };
         let request = AttemptRequest {
             id: RequestId::new("configured-gateway-first-attempt").unwrap(),
-            task_id: session.bootstrap_task_id.clone(),
+            task_id: master_session::turn_task_id(
+                &session.session_id,
+                session.current_turn.as_ref().unwrap(),
+            )
+            .unwrap(),
             project_id: project,
             role: crate::coordination::Role::ProjectLeader,
             pool_ref: session.selection.pool_ref.clone(),

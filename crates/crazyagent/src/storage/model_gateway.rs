@@ -207,10 +207,37 @@ pub(super) fn insert_observation(
         )
         .map_err(error)?;
     assert_eq!(inserted, 1);
+    prune_observations(tx, &revision, sequence, observation.observed_at_ms)?;
     assert_eq!(
         latest_observation(tx, &revision)?.as_ref(),
         Some(observation)
     );
+    Ok(())
+}
+
+/// Deletes a connection's older observations that can no longer change its state: every
+/// row before the newest one whose retry time is absent or already reached. The history
+/// stays bounded while the latest state and every still active cooldown are kept.
+/// Inputs: the transaction, connection revision, newest sequence and its observed time.
+/// Output: Ok after the delete.
+fn prune_observations(
+    tx: &Transaction<'_>,
+    revision: &str,
+    newest: i64,
+    observed_at_ms: u64,
+) -> Result<(), EngineError> {
+    let observed_at =
+        i64::try_from(observed_at_ms).map_err(|_| error("gateway_observation_bounds"))?;
+    assert!(newest > 0);
+    tx.execute(
+        "DELETE FROM model_gateway_observations
+         WHERE connection_revision = ?1 AND sequence < ?2
+         AND COALESCE(json_extract(body, '$.kind.QuotaExhausted.retry_at_ms'),
+                      json_extract(body, '$.kind.RateLimited.retry_at_ms'),
+                      json_extract(body, '$.kind.TransientFailure.retry_at_ms'), 0) <= ?3",
+        params![revision, newest, observed_at],
+    )
+    .map_err(error)?;
     Ok(())
 }
 

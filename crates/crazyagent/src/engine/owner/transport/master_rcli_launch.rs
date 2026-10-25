@@ -92,7 +92,7 @@ fn validate_prepared(
         || session.owner.engine_epoch != identity.engine_epoch
         || prepared.attempt.completion.is_some()
         || request.project_id != session.project_id
-        || request.task_id != session.bootstrap_task_id
+        || !prepared.attempt_on_current_turn()
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
         || request.target_profile_ref != session.selection.target_profile_ref

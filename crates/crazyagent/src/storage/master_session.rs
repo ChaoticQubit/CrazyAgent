@@ -118,6 +118,18 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) lease: WorktreeLease,
 }
 
+impl PreparedMasterTurn {
+    /// Tells whether the prepared attempt is on the gateway task of the session's current turn.
+    /// Input: the prepared turn. Output: true only when the session has a current turn and the
+    /// attempt's task is the one derived from that session and turn.
+    pub(crate) fn attempt_on_current_turn(&self) -> bool {
+        self.session.current_turn.as_ref().is_some_and(|turn| {
+            turn_task_id(&self.session.session_id, turn)
+                .is_ok_and(|task| task == self.attempt.request.task_id)
+        })
+    }
+}
+
 pub(crate) enum MasterRuntimeResult {
     #[cfg(all(test, unix))]
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
@@ -702,7 +714,7 @@ fn validate_runtime_record(
         if model_gateway::read_attempt(tx, &attempt.request.id)?.as_ref() != Some(attempt)
             || attempt.config_id != session.config_id
             || attempt.request.project_id != session.project_id
-            || attempt.request.task_id != session.bootstrap_task_id
+            || attempt.request.task_id != turn_task_id(&session.session_id, &turn.id)?
             || attempt.request.role != Role::ProjectLeader
             || attempt.request.pool_ref != session.selection.pool_ref
             || attempt.request.target_profile_ref != session.selection.target_profile_ref
@@ -1214,13 +1226,18 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         engine_epoch: proof.engine_epoch.clone(),
     };
     let actual = configured_auth(tx, current, &host, &session)?;
+    let turn_task = session
+        .current_turn
+        .as_ref()
+        .map(|turn| turn_task_id(&session.session_id, turn))
+        .transpose()?;
     if actual != *proof
         || pinned.id != current.id
         || pinned.id != proof.config_id
         || binding != &MasterBootstrapAuth::RcliConfigured(actual).binding()
         || generation != proof.generation
         || request.project_id != session.project_id
-        || request.task_id != session.bootstrap_task_id
+        || turn_task.as_ref() != Some(&request.task_id)
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
         || request.target_profile_ref != session.selection.target_profile_ref
@@ -1540,7 +1557,7 @@ fn bundle(
     };
     assert_eq!(
         prepared.attempt.request.task_id,
-        prepared.session.bootstrap_task_id
+        turn_task_id(&prepared.session.session_id, &turn.id)?
     );
     Ok(MasterRuntimeResult::Prepared(Box::new(prepared)))
 }
@@ -1648,7 +1665,7 @@ fn prepare_turn(
     let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
-        task_id: session.bootstrap_task_id.clone(),
+        task_id: turn_task_id(&session.session_id, &turn.id)?,
         project_id: session.project_id.clone(),
         role: Role::ProjectLeader,
         pool_ref: session.selection.pool_ref.clone(),
@@ -1656,10 +1673,9 @@ fn prepare_turn(
         route: session.selection.route.clone(),
         previous_attempt: None,
     };
-    let first_admission = !gateway_attempted(tx, session)?;
     tx.execute_batch("SAVEPOINT master_admission")
         .map_err(error)?;
-    let admitted = if first_admission && request.route.required_capabilities.is_empty() {
+    let admitted = if request.route.required_capabilities.is_empty() {
         match &auth {
             MasterBootstrapAuth::NativeSignIn(fact) => {
                 model_gateway::begin_initial_conversation_attempt(
@@ -1735,19 +1751,15 @@ fn prepare_turn(
     bundle(tx, session.clone(), turn)
 }
 
-/// Tells whether any gateway attempt exists for the session's bootstrap task.
-/// Input: the session. Output: false until a turn first reaches gateway admission,
-/// so the initial conversation admission applies to that turn whatever its ordinal.
-fn gateway_attempted(
-    tx: &Transaction<'_>,
-    session: &MasterSessionView,
-) -> Result<bool, EngineError> {
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM model_gateway_attempts WHERE task_id=?1)",
-        [session.bootstrap_task_id.as_str()],
-        |row| row.get(0),
-    )
-    .map_err(error)
+/// Names the gateway task of one owner turn, so every turn starts its own attempt chain
+/// and a failed or stopped turn never blocks the next one.
+/// Inputs: the master session id and the turn's request id.
+/// Output: a stable task id derived from both, distinct for every turn of every session.
+pub(crate) fn turn_task_id(session: &SessionId, turn: &RequestId) -> Result<TaskId, EngineError> {
+    let digest = crate::memory::hash(format!("{}\n{}", session.as_str(), turn.as_str()).as_bytes());
+    let task = TaskId::new(format!("master-turn-{digest}")).map_err(error)?;
+    assert!(task.as_str().starts_with("master-turn-"));
+    Ok(task)
 }
 
 fn observe_turn(
@@ -2071,7 +2083,7 @@ fn publish_rcli_profile(
     }
     let count: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM configured_master_profiles",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM configured_master_profiles p JOIN master_sessions s ON s.id=p.session WHERE s.phase='configured' LIMIT 65)",
             [],
             |row| row.get(0),
         )
@@ -2792,7 +2804,7 @@ fn execute(
         }
         let count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM master_sessions LIMIT 65)",
+                "SELECT COUNT(*) FROM (SELECT 1 FROM master_sessions WHERE phase='configured' LIMIT 65)",
                 [],
                 |row| row.get(0),
             )
@@ -3225,6 +3237,9 @@ pub(super) fn read(
 mod brief_tests;
 
 #[cfg(all(test, unix))]
+mod capacity_tests;
+
+#[cfg(all(test, unix))]
 mod rcli_configured_tests {
     use super::*;
 
@@ -3234,6 +3249,10 @@ mod rcli_configured_tests {
 
     mod brief_boundary_tests {
         include!("master_session/brief_boundary_tests.rs");
+    }
+
+    mod readiness_tests {
+        include!("master_session/readiness_tests.rs");
     }
     use crate::engine::owner::{ModelAccessCollection, Started};
     use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
@@ -3695,7 +3714,7 @@ fallback_allowed = false
         assert_eq!(prepared.attempt.request.project_id, case.session.project_id);
         assert_eq!(
             prepared.attempt.request.task_id,
-            case.session.bootstrap_task_id
+            turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
         );
         assert_eq!(prepared.attempt.request.role, Role::ProjectLeader);
         assert!(
@@ -3872,6 +3891,95 @@ fallback_allowed = false
         drop(db);
         assert_eq!(case.snapshot(), before);
         assert_eq!(before.counts, [0; 6]);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_profiles_of_closed_sessions_leave_room_for_a_new_registration() {
+        let case = Fixture::new(true).await;
+        let project = case.session.project_id.clone();
+        let mut session = case.session.session_id.clone();
+        for cycle in 0..=crate::master_session::SESSIONS_MAX {
+            let registered = case
+                .runtime(MasterRuntimeCommand::RegisterRcliProfile {
+                    host: case.started.host.clone(),
+                    project_id: project.clone(),
+                    session_id: session.clone(),
+                    configured_home: case.home.clone(),
+                })
+                .await;
+            match registered {
+                Ok(MasterRuntimeResult::ConfiguredProfile(_)) => {}
+                Ok(_) => panic!("register {cycle}: another runtime result"),
+                Err(failure) => panic!("register {cycle}: {}", failure.0),
+            }
+            owner_apply(
+                &case.storage,
+                &case.started,
+                &format!("close-configured-{cycle}"),
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Close {
+                        project_id: project.clone(),
+                        session_id: session.clone(),
+                    },
+                },
+            )
+            .await;
+            let basis = owner_read(
+                &case.storage,
+                &case.started,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 1,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(
+                &case.storage,
+                &case.started,
+                &format!("open-configured-{cycle}"),
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Open {
+                        project_id: project.clone(),
+                        expected_config_id: basis.config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(case.session.selection.clone()),
+                    },
+                },
+            )
+            .await;
+            let state = owner_read(
+                &case.storage,
+                &case.started,
+                OwnerRead::ProjectMaster {
+                    project_id: project.clone(),
+                },
+            )
+            .await;
+            let OwnerData::ProjectMaster {
+                session: Some(opened),
+            } = state.data
+            else {
+                panic!("actual reopened master session missing");
+            };
+            assert_ne!(opened.session_id, session);
+            session = opened.session_id;
+        }
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let registrations: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM configured_master_profiles",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(registrations > crate::master_session::SESSIONS_MAX as i64);
+        drop(tx);
         case.close().await;
     }
 

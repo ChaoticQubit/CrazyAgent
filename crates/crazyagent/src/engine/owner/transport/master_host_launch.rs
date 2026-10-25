@@ -173,7 +173,7 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     if prepared.session.current_turn.is_none()
         || prepared.attempt.completion.is_some()
         || prepared.attempt.request.project_id != prepared.session.project_id
-        || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+        || !prepared.attempt_on_current_turn()
         || prepared.attempt.config_id != prepared.session.config_id
         || binding.connection != prepared.attempt.connection
         || lease.state != LeaseState::Ready
