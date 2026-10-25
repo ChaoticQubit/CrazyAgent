@@ -599,7 +599,7 @@ impl ProjectSandbox {
             "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\"))\n"
         ));
         text.push_str(
-            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (subpath \"/dev/fd\"))\n",
+            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
         let network = text.len();
         match &self.network {
