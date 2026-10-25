@@ -85,6 +85,10 @@
     --text-3: #a39d91;
     --accent: #ff6a45;
     --brand: #ff6a45;
+    --terminal-bg: #161513;
+    --terminal-fg: #eeeae2;
+    --terminal-cursor: #ff6a45;
+    --terminal-selection: rgba(255, 106, 69, 0.32);
     --accent-solid: #ff6a45;
     --accent-hover: #ff8a6b;
     --accent-text: #ff8a6b;
@@ -117,6 +121,10 @@
   --text-3: #a39d91;
   --accent: #ff6a45;
   --brand: #ff6a45;
+  --terminal-bg: #161513;
+  --terminal-fg: #eeeae2;
+  --terminal-cursor: #ff6a45;
+  --terminal-selection: rgba(255, 106, 69, 0.32);
   --accent-solid: #ff6a45;
   --accent-hover: #ff8a6b;
   --accent-text: #ff8a6b;
