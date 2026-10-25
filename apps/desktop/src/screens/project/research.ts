@@ -2,7 +2,7 @@ import type { IconName, Tone } from "../../ui";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
+import type { IntentReceipt, MasterState, MasterTurn, ProjectDetail } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -300,6 +300,14 @@ const FOLLOW_SLACK_PX = 120;
  * Input: the element's scroll sizes. Output: true within FOLLOW_SLACK_PX of the bottom. */
 export function nearBottom(box: { scrollHeight: number; scrollTop: number; clientHeight: number }): boolean {
   return box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK_PX;
+}
+
+/** The master ticket for the project this conversation shows.
+ * Inputs: the bridge's answer to opening a project and the project shown.
+ * Output: the ticket; throws `master_project_mismatch` when the bridge opened another project. */
+export function openedTicket(opened: ProjectDetail, project: string): string {
+  if (opened.project_id !== project) throw { code: "master_project_mismatch" };
+  return opened.ticket;
 }
 
 /** Finds the master turn that is still replying, which Stop cancels.

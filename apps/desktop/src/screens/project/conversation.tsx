@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { masterMissingLine, masterStatus, nearBottom, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, type Tone } from "../../ui";
@@ -96,10 +96,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     setNeedsPool(false);
     const live = data.id;
     void act(async () => {
-      const opened = unwrap(await openMasterProject(live));
+      const opened = openedTicket(unwrap(await openMasterProject(live)), live);
       if (current.current !== live) return;
-      setTicket(opened.ticket);
-      await refresh(opened.ticket);
+      setTicket(opened);
+      await refresh(opened);
     });
   }, [data.id]);
 

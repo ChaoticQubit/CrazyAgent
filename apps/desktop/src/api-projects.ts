@@ -198,6 +198,7 @@ const copy: Record<string, string> = {
   context_item_unreadable: "This file can't be read.",
   context_path_invalid: "This file can't be opened here.",
   master_open_unavailable: "This project needs a pool before the master can reply.",
+  master_project_mismatch: "The conversation opened for another project. Open this project again.",
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
   stale_master: "The conversation changed. It was reloaded; send again.",

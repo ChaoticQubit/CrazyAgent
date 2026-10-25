@@ -519,3 +519,13 @@ test("Pause all agents says what stops, or that nothing is running", () => {
   assert.deepEqual(research.pauseSummary([teamTask(1, "done"), teamTask(2, "cancelled")]), { count: 0, line: "No team agents are working or waiting." });
   assert.deepEqual(research.pauseSummary([]), { count: 0, line: "No team agents are working or waiting." });
 });
+
+test("the master ticket is used only for the project that was opened", () => {
+  const opened = { project_id: "alpha", ticket: "7", brief: null, fresh: true, revision: "1" };
+  assert.equal(research.openedTicket(opened, "alpha"), "7");
+  assert.throws(() => research.openedTicket(opened, "beta"), (failure) => failure.code === "master_project_mismatch");
+});
+
+test("a master opened for another project has its own plain sentence", () => {
+  assert.equal(api.failureCopy("master_project_mismatch"), "The conversation opened for another project. Open this project again.");
+});

@@ -266,3 +266,14 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.doesNotMatch(markup, /1 suggested memory to review/);
   assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
 });
+
+test("each project gets its own page, so a switch never keeps the last project's ticket or name", async () => {
+  const { Screen } = await import("../src/app.tsx");
+  const { ProjectPage } = await import("../src/screens/project/index.tsx");
+  const projects = { kind: "ok", value: [{ id: "alpha", name: "Alpha" }, { id: "beta", name: "Beta" }] };
+  const page = (id) => Screen({ route: { name: "project", id, tab: "conversation" }, session: session({ projects }) });
+  assert.equal(page("alpha").type, ProjectPage);
+  assert.equal(page("alpha").key, "alpha");
+  assert.equal(page("beta").key, "beta");
+  assert.equal(page("beta").props.name, "Beta");
+});

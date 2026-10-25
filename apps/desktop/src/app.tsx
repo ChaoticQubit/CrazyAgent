@@ -51,14 +51,17 @@ function Launching() {
   </div>;
 }
 
-function Screen({ route, session }: { route: Route; session: Session }) {
+/** The routed screen inside the shell. Each project page is keyed by its project id, so a
+ * switch to another project starts a fresh page and never keeps the last project's master
+ * ticket, name or late reads. Inputs: the route and the session. Output: the screen element. */
+export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
     case "settings": return <Settings tab={route.tab} action={route.action} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview id={route.id} />;
-    case "project": return <ProjectPage id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
+    case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
     default: return <Home />;
   }
 }
