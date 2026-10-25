@@ -53,6 +53,9 @@ pub struct ModelAccess {
 
 pub const ACCOUNTS_MAX: usize = 4096;
 pub const CONFIG_BYTES_MAX: usize = 8 << 20;
+/// The settings file version this engine reads and writes. A file with a higher
+/// `version` came from a newer engine and is refused, never rewritten.
+pub const SETTINGS_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -452,11 +455,17 @@ fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
     }
     let config: ConfigFile =
         toml::from_str(bytes).map_err(|_| ConfigError("invalid_configuration_format".into()))?;
-    if config.version.is_some_and(|v| v != 1) {
+    if let Some(version) = config.version.filter(|v| *v > SETTINGS_VERSION) {
+        return Err(ConfigError(format!(
+            "settings_newer_than_engine: the settings file is version {version} and this \
+             engine reads version {SETTINGS_VERSION}; install the newer CrazyAgent that wrote it"
+        )));
+    }
+    if config.version.is_some_and(|v| v != SETTINGS_VERSION) {
         return Err(ConfigError("unsupported config version".into()));
     }
     assert!(bytes.len() <= CONFIG_BYTES_MAX);
-    assert!(config.version.is_none_or(|v| v == 1));
+    assert!(config.version.is_none_or(|v| v == SETTINGS_VERSION));
     Ok(config)
 }
 
@@ -1301,5 +1310,27 @@ pools = [{ id = "codex-pool", members = ["codex-connection"], projects = [], rol
             assert!(state.reload(&global, &project).is_err(), "{invalid}");
             assert_eq!(state.current, original);
         }
+    }
+
+    #[test]
+    fn newer_settings_file_is_refused_as_newer_than_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("global.toml");
+        let project = root.path().join("project.toml");
+        let newer = format!("version = {}\ntimeout_ms = 2000\n", SETTINGS_VERSION + 1);
+        std::fs::write(&global, &newer).unwrap();
+        let refused = resolve_config(&global, &project).unwrap_err().to_string();
+        assert!(
+            refused.starts_with("settings_newer_than_engine:"),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read_to_string(&global).unwrap(), newer);
+        std::fs::write(&global, "version = 0\n").unwrap();
+        assert_eq!(
+            resolve_config(&global, &project).unwrap_err().to_string(),
+            "unsupported config version"
+        );
+        std::fs::write(&global, format!("version = {SETTINGS_VERSION}\n")).unwrap();
+        assert!(resolve_config(&global, &project).is_ok());
     }
 }

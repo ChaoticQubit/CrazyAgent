@@ -138,7 +138,7 @@ impl Case {
             mut connection,
             lock,
             mut custody,
-        } = storage::open_actor_database(&path, false).unwrap();
+        } = storage::open_actor_database(&path, false, None).unwrap();
         let started = storage::owner_start(&mut connection).unwrap();
         let session = open(
             &mut connection,
