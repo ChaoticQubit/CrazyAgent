@@ -10,7 +10,7 @@ import { useLinkOpener } from "./links";
 import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
 import { ProjectMemory } from "./memory";
-import { deletable, deleteQuestion, fileIcon } from "./research";
+import { deletable, deleteQuestion, fileIcon, retryPath } from "./research";
 import { NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -190,9 +190,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
   async function addDocuments(paths: string[]) {
     setAdding({ path: "", busy: true, error: "" });
     const result = await addProjectDocuments(data.id, paths, nextGeneration());
-    if (result.kind !== "ok") return setAdding({ path: paths.join(""), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
+    if (result.kind !== "ok") return setAdding({ path: retryPath(paths), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setAdding({ path: paths.join(""), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
+    if (state.kind !== "applied") return setAdding({ path: retryPath(paths), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
     setAdding(null);
     data.notify(paths.length === 1 ? "Document added." : `${paths.length} documents added.`);
     data.reload();

@@ -352,6 +352,13 @@ export function sendFailureLine(code: string): string {
   return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
+/** The path a failed Add documents offers to retry in its one-path box.
+ * Input: the picked paths. Output: the path when exactly one was picked, else empty, so
+ * several paths are never joined into one invalid path. */
+export function retryPath(paths: string[]): string {
+  return paths.length === 1 ? paths[0] : "";
+}
+
 const FILE_ICONS = new Map<string, IconName>([
   ["md", "file-text"], ["txt", "file-text"], ["csv", "file-spreadsheet"], ["png", "file-image"], ["jpg", "file-image"], ["jpeg", "file-image"],
 ]);

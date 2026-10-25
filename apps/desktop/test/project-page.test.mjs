@@ -557,3 +557,9 @@ test("a context read that answers after the reader moved on is dropped", async (
   assert.equal(kept.length, 1);
   assert.equal(kept[0].kind, "error");
 });
+
+test("a failed add offers a single picked path to retry and never several joined into one", () => {
+  assert.equal(research.retryPath(["/Users/mira/a.pdf"]), "/Users/mira/a.pdf");
+  assert.equal(research.retryPath(["/Users/mira/a.pdf", "/Users/mira/b.pdf"]), "");
+  assert.equal(research.retryPath([]), "");
+});
