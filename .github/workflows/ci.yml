@@ -22,7 +22,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
-    research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
+    e2e_tui research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
   DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
