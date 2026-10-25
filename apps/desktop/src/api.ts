@@ -78,7 +78,7 @@ const COPY: Record<string, string> = {
   account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
   memory_note_blank: "Write something to remember.",
   memory_note_too_long: "Keep the memory under 2000 characters.",
-  memory_note_invalid: "Remove special control characters from the memory.",
+  memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
   memory_duplicate: "This memory is already saved.",
   memory_full: "Memory is full. Delete an old memory first.",
   memory_missing: "That memory no longer exists.",
@@ -90,7 +90,7 @@ const COPY: Record<string, string> = {
   memory_page_invalid: "Show between 1 and 20 memories at a time.",
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
-  invalid_knowledge_text: "Write the memory as text, up to 4096 bytes.",
+  invalid_knowledge_text: "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);

@@ -189,6 +189,7 @@ const copy: Record<string, string> = {
   research_report_missing: "This report hasn't been written yet.",
   research_section_missing: "That section isn't in the report anymore.",
   research_section_invalid: "That section can't be saved. Pick another heading.",
+  memory_text_hidden: "This part has hidden or direction-changing characters, so it can't be saved to memory.",
   documents_empty: "Pick at least one file.",
   invalid_memory: "This memory no longer exists. The list was reloaded.",
   knowledge_entry_missing: "This memory no longer exists. The list was reloaded.",

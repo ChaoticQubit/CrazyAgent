@@ -45,6 +45,11 @@ test("a saved project memory shows its exact text next to Use in all projects", 
   assert.doesNotMatch(text, /entry-7/);
 });
 
+test("Edit first starts from the text with hidden characters shown, so saving it keeps them visible", () => {
+  const markup = render({ editing: true, item: item({ text: "Use pnpm\u{e0041}\u200b" }) });
+  assert.match(markup, /<textarea[^>]*>Use pnpm\\u\{e0041\}\\u200b<\/textarea>/);
+});
+
 test("Edit first opens the memory's own text in an editor with Save edited and Cancel", () => {
   const markup = render({ editing: true });
   assert.match(markup, /<label[^>]*>Edit before saving<\/label>/);
