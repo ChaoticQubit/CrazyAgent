@@ -324,6 +324,7 @@ impl SettingsSources {
             pending.temporary.as_str(),
             AtFlags::SYMLINK_NOFOLLOW,
         ) {
+            #[allow(clippy::unnecessary_cast)]
             Ok(named) => Ok((named.st_dev as u64, named.st_ino) == staged),
             Err(rustix::io::Errno::NOENT) => Ok(false),
             Err(e) => Err(error(e)),
