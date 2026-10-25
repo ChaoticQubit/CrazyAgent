@@ -150,14 +150,29 @@ export function repoMeta(repo: GitHubRepo): string {
 }
 
 /** Badge word, tone and failure line for one onboarding step.
- * Input: the step. Output: the fixed status word, its tone and the reason when it failed. */
-export function stepView(step: OnboardingStep): { word: string; tone: Tone; line: string | null } {
+ * Inputs: the step and whether the setup is already saved, when a step that never started was
+ * skipped. Output: the fixed status word, its tone and the reason when it failed. */
+export function stepView(step: OnboardingStep, finished = false): { word: string; tone: Tone; line: string | null } {
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
-    default: return { word: "Waiting", tone: "neutral", line: null };
+    default: return { word: finished ? "Skipped" : "Waiting", tone: "neutral", line: null };
   }
+}
+
+/** Whether the review offers Retry mapping: the mapping agent failed and the setup isn't saved yet.
+ * Input: the onboarding view. Output: true when Retry and Skip show. */
+export function mappingRetry(view: OnboardingView): boolean {
+  return view.mapping.kind === "failed" && !view.finished;
+}
+
+/** The project's own folder from its saved setup: the recorded folder, or the folder holding it when
+ * it is the project's `.crazyagent` folder. Input: the saved setup. Output: the folder path. */
+export function projectFolder(stored: StoredSetup): string {
+  const clean = trimSlash(stored.folder);
+  const name = folderName(clean);
+  return name === ".crazyagent" ? clean.slice(0, clean.length - name.length - 1) : clean;
 }
 
 const MISSING_LABELS: Record<string, string> = {
@@ -184,16 +199,17 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
   };
 }
 
-/** Tells whether the graph and mapping steps have stopped changing.
+/** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
   const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  return view.finished || done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
 }
 
 /** Says whether the owner can confirm yet and what to do.
  * Input: the onboarding view. Output: ready and one sentence. */
 export function confirmReady(view: OnboardingView): { ready: boolean; line: string } {
+  if (view.finished) return { ready: true, line: "This project is set up. Change anything below, then save." };
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
   if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };

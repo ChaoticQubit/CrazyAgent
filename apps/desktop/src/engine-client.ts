@@ -771,6 +771,7 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  finished: boolean;
 }
 
 export interface GitHubDeviceCode {

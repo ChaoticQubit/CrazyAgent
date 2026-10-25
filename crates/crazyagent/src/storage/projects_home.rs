@@ -31,9 +31,9 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
 
 /// Lists the set-up projects for the projects home: each project's own
 /// folder and whether its onboarding is still under way, read from the
-/// onboarding table. An onboarded project is Ready once both its graph and
-/// mapping steps are done; a project made with New Project has no
-/// onboarding row and is Ready at once.
+/// onboarding table. An onboarded project is Ready once the owner saved its
+/// setup or both its graph and mapping steps are done; a project made with
+/// New Project has no onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
     let mut statement = tx
@@ -57,9 +57,10 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
         let (body, graph, mapping) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
-        let onboarding = graph
-            .zip(mapping)
-            .is_some_and(|(graph, mapping)| graph != done || mapping != done);
+        let onboarding = !stored.saved()
+            && graph
+                .zip(mapping)
+                .is_some_and(|(graph, mapping)| graph != done || mapping != done);
         projects.push(Registered {
             folder: stored.project_folder(),
             project_id: stored.project_id,

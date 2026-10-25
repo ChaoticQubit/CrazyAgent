@@ -363,7 +363,32 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
+/// The revision a project setup is recorded at; only the owner's
+/// `UpdateProjectSetup` raises it.
+pub(crate) const FIRST_REVISION: u64 = 1;
+
 impl StoredSetup {
+    /// Whether the owner saved this setup after it was recorded: only
+    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
+    /// an onboarding whose setup was saved is finished.
+    pub fn saved(&self) -> bool {
+        self.revision > FIRST_REVISION
+    }
+
+    /// The setup as the owner edits it: every stored field except the
+    /// documents, which keep their own add and delete actions.
+    pub fn editable(&self) -> ProjectSetup {
+        ProjectSetup {
+            about: self.about.clone(),
+            tech_stack: self.tech_stack.clone(),
+            platforms: self.platforms.clone(),
+            research: self.research.clone(),
+            pool: self.pool.clone(),
+            team: Some(self.team.clone()),
+            documents: Vec::new(),
+        }
+    }
+
     /// The folder holding this project's context and agent worktrees:
     /// `.crazyagent/` inside the project for projects in the projects home,
     /// or the project folder itself for projects made before it.
@@ -2051,6 +2076,11 @@ fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, Engin
         [project_id.as_str()],
     )
     .map_err(error)?;
+    tx.execute(
+        "DELETE FROM onboarding WHERE project=?1",
+        [project_id.as_str()],
+    )
+    .map_err(error)?;
     let removed = tx
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
@@ -2282,7 +2312,7 @@ pub(crate) fn record(
             .ok_or_else(|| failure("project_folder_unwritable"))?
             .to_owned(),
         created_ms: now,
-        revision: 1,
+        revision: FIRST_REVISION,
     };
     tx.execute(
         "INSERT INTO project_setups VALUES (?1,?2)",
