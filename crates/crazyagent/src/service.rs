@@ -26,6 +26,7 @@ const SERVICE_PATH_EXTRAS: [&str; 6] = [
 ];
 const POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(35);
 const LOG_SCAN_BYTES: u64 = 4 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +457,27 @@ WantedBy=default.target\n",
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }
 
+    /// Removes the job from launchd and waits until launchd lets it go. `bootout` returns
+    /// while the engine is still shutting down, and a job in that state can be neither
+    /// bootstrapped nor kickstarted. Output: an error when launchd still has it after the
+    /// bound, which outlasts the definition's `ExitTimeOut`.
+    fn launchd_unload(&self) -> Result<(), ServiceError> {
+        assert_eq!(self.platform, Platform::MacOs);
+        run_checked(&self.unregister_commands(current_uid())[0])?;
+        let deadline = Instant::now() + UNLOAD_TIMEOUT;
+        while self.loaded()? {
+            if Instant::now() >= deadline {
+                return Err(failure(format!(
+                    "launchd still runs {} {} s after it was asked to stop it",
+                    self.name,
+                    UNLOAD_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(POLL);
+        }
+        Ok(())
+    }
+
     /// Writes the definition and registers it, replacing an earlier install of the same
     /// name, so the engine starts now and at every login. Output: an error naming the
     /// failing step.
@@ -469,7 +491,7 @@ WantedBy=default.target\n",
         self.layout()?.prepare()?;
         let text = self.definition_text()?;
         if self.platform == Platform::MacOs && self.loaded()? {
-            run_checked(&self.unregister_commands(current_uid())[0])?;
+            self.launchd_unload()?;
         }
         write_definition(&self.definition, &text, self.platform)?;
         for command in self.register_commands(current_uid()) {
@@ -486,10 +508,13 @@ WantedBy=default.target\n",
         if !loaded && !installed {
             return Ok(());
         }
-        for command in self.unregister_commands(current_uid()) {
-            let result = run_checked(&command);
-            if self.platform == Platform::MacOs && loaded {
-                result?;
+        if self.platform == Platform::MacOs {
+            if loaded {
+                self.launchd_unload()?;
+            }
+        } else {
+            for command in self.unregister_commands(current_uid()) {
+                let _ = run_checked(&command);
             }
         }
         match std::fs::remove_file(&self.definition) {
@@ -521,8 +546,12 @@ WantedBy=default.target\n",
 
     /// Stops the engine and keeps the service installed. A stopped engine is left as it is.
     pub fn stop(&self) -> Result<(), ServiceError> {
-        if self.platform == Platform::MacOs && !self.loaded()? {
-            return Ok(());
+        if self.platform == Platform::MacOs {
+            return if self.loaded()? {
+                self.launchd_unload()
+            } else {
+                Ok(())
+            };
         }
         run_checked(&self.stop_command(current_uid()))
     }

@@ -325,7 +325,7 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
     };
     let installed = Installed(service.clone());
     let runtime = runtime();
-    let wait = |since: u64| {
+    let wait = |phase: &str, since: u64| {
         runtime
             .block_on(crazyagent::service::wait_ready(
                 &layout,
@@ -333,7 +333,13 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
                 None,
                 since,
             ))
-            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{phase}: {error}\nservice: {:?}\nlog:\n{}",
+                    service.status(),
+                    std::fs::read_to_string(layout.engine_log()).unwrap_or_default()
+                )
+            })
     };
     let since = crazyagent::service::log_length(&layout);
     service.install().unwrap();
@@ -341,7 +347,7 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
         std::fs::read_to_string(&service.definition).unwrap(),
         service.definition_text().unwrap()
     );
-    wait(since);
+    wait("install", since);
     let status = service.status().unwrap();
     assert!(status.installed && status.running, "{status:?}");
     assert!(status.pid.is_some_and(|pid| pid > 1), "{status:?}");
@@ -353,7 +359,7 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
     let since = crazyagent::service::log_length(&layout);
     assert!(since > 0);
     service.start().unwrap();
-    wait(since);
+    wait("restart", since);
     assert!(service.status().unwrap().running);
     assert_eq!(check(layout.root()), ready_version());
     service.uninstall().unwrap();
