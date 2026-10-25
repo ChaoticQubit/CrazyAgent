@@ -98,6 +98,7 @@ impl OwnerRuntimeHandle {
             return Err(failure("master_runtime_binding"));
         }
         let (runtime_ref, capture_ref, capture) = allocate_master_capture(&self.authority.root)?;
+        let folder = MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
         let command = if prepared.session.selection.backend == MasterBackend::Claude {
             let instructions = write_master_instructions(
                 &self.authority.root,
@@ -132,7 +133,39 @@ impl OwnerRuntimeHandle {
             runtime_ref,
             capture_ref,
             capture,
+            folder,
         })
+    }
+}
+
+/// Owns one master turn's private folder in the owner generation, with its capture,
+/// instructions, sandbox profile and temp folder, and removes it with whatever the turn
+/// left there when the launch lets go of it, on every path out. Nothing reads the folder
+/// afterwards: the reply is stored. Input: the owner root and the runtime reference.
+pub(super) struct MasterRuntimeFolder {
+    path: PathBuf,
+}
+
+impl MasterRuntimeFolder {
+    pub(super) fn new(root: &Root, runtime_ref: &RequestId) -> Self {
+        Self {
+            path: root
+                .path
+                .join(format!("master-runtime-{}", runtime_ref.as_str())),
+        }
+    }
+}
+
+impl Drop for MasterRuntimeFolder {
+    /// Removes the turn folder without following links inside it; a folder already gone
+    /// is fine and a failure is logged by code, since engine shutdown and the next start
+    /// remove what is left. Input: the folder being dropped. Output: none.
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => eprintln!("master_runtime_cleanup_failed"),
+        }
     }
 }
 
@@ -634,6 +667,69 @@ mod tests {
                 .join("instructions.md")
                 .exists()
         );
+    }
+
+    #[test]
+    fn a_master_turn_folder_goes_with_everything_its_turn_wrote_when_the_launch_lets_go() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let kept = repository.join("keep.txt");
+        std::fs::write(&kept, "kept\n").unwrap();
+        let (runtime_ref, _, capture) = allocate_master_capture(&root).unwrap();
+        let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+        write_master_instructions(&root, &runtime_ref, "instructions").unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+        )
+        .unwrap();
+        let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
+        let tmp = turn.join(MASTER_TMP);
+        let mut harness = Command::new("/bin/sh");
+        harness
+            .arg("-c")
+            .arg("mkdir \"$0/work\" && echo agent > \"$0/work/scratch.txt\" && ln -s \"$1\" \"$0/link\"")
+            .arg(&tmp)
+            .arg(&kept)
+            .current_dir(&worktree);
+        let mut child = sandbox.wrap(&harness).unwrap();
+        child
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        assert!(crate::spawn_gate::status(&mut child).unwrap().success());
+        assert!(tmp.join("work/scratch.txt").is_file());
+        assert!(
+            std::fs::symlink_metadata(tmp.join("link"))
+                .unwrap()
+                .is_symlink()
+        );
+        let (other, _, _) = allocate_master_capture(&root).unwrap();
+        drop((capture, sandbox, folder));
+        assert!(!turn.exists());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept\n");
+        assert!(
+            base.join(format!("master-runtime-{}", other.as_str()))
+                .is_dir()
+        );
+        drop(MasterRuntimeFolder::new(&root, &runtime_ref));
     }
 
     fn private_directory(path: &Path) {

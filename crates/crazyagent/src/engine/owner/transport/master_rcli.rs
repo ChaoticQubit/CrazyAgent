@@ -199,6 +199,8 @@ impl OwnerRuntimeHandle {
         }
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
+        let _folder =
+            super::master_host_launch::MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
         let sandbox = super::master_host_launch::master_sandbox(
             &self.authority.root,
             &runtime_ref,

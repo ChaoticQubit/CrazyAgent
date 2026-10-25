@@ -827,29 +827,34 @@ impl Authority {
         result.and(cleanup)
     }
 
+    /// Unlinks the owner socket, both owner keys and every runner key this server made,
+    /// each only while it is still the engine's own file, and tries all of them even after
+    /// one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
-        self.root.unlink_owned(SOCKET, self.socket, true)?;
-        let slots = self
-            .slots
-            .lock()
-            .map_err(|_| failure("owner_authority_unavailable"))?;
-        for (i, slot) in slots.iter().enumerate() {
-            self.root.unlink_owned(KEYS[i], slot.identity, false)?;
-        }
-        let runners = self
-            .runners
-            .lock()
-            .map_err(|_| failure("runner_authority_unavailable"))?;
-        for slot in runners.iter().flatten() {
-            if let Some(key) = &slot.key {
-                self.root.unlink_owned(
-                    &format!("r{:02x}.cap", slot.prepared.slot),
-                    key.identity,
-                    false,
-                )?;
+        let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        match self.slots.lock() {
+            Ok(slots) => {
+                for (i, slot) in slots.iter().enumerate() {
+                    result = result.and(self.root.unlink_owned(KEYS[i], slot.identity, false));
+                }
             }
+            Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
         }
-        Ok(())
+        match self.runners.lock() {
+            Ok(runners) => {
+                for slot in runners.iter().flatten() {
+                    if let Some(key) = &slot.key {
+                        result = result.and(self.root.unlink_owned(
+                            &format!("r{:02x}.cap", slot.prepared.slot),
+                            key.identity,
+                            false,
+                        ));
+                    }
+                }
+            }
+            Err(_) => result = result.and(Err(failure("runner_authority_unavailable"))),
+        }
+        result
     }
 }
 
@@ -1360,16 +1365,20 @@ impl OwnerServer {
             .authority
             .drain_native_auth_dispatch(&self.engine)
             .await;
-        invalidated?;
-        drained?;
-        let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
-            .await
-            .map_err(|_| failure("owner_stop_outcome_unknown"))?;
-        self.engine
-            .owner_job(|reply| Job::OwnerStop(self.authority.host.clone(), reply))
-            .await?;
-        self.authority.cleanup()?;
-        result
+        let stopped = async {
+            invalidated?;
+            drained?;
+            let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
+                .await
+                .map_err(|_| failure("owner_stop_outcome_unknown"))?;
+            self.engine
+                .owner_job(|reply| Job::OwnerStop(self.authority.host.clone(), reply))
+                .await
+                .map(|_| ())
+        }
+        .await;
+        let cleaned = self.authority.cleanup();
+        stopped.and(cleaned).and(result)
     }
 }
 
@@ -2055,8 +2064,13 @@ async fn serve_admitted(
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
+            return write_owner_reply(&mut stream, Err(error), id, mutation)
+                .await
+                .map(|()| None);
+        }
         let result = engine.dispatch_owner(a, request, None).await;
-        let result = setup::after_owner(engine, authority, &submitted, result, deadline).await;
+        let mut result = setup::after_owner(engine, authority, &submitted, result, deadline).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),
@@ -2069,6 +2083,7 @@ async fn serve_admitted(
                 .committed(runtime, &submitted, reply)
             {
                 eprintln!("master_dispatch_not_started cause={}", error.0);
+                result = Err(failure("master_turn_not_started"));
             }
         }
         write_owner_reply(stream, result, id, mutation)
@@ -2182,6 +2197,8 @@ fn owner_reply_frame(
                 | "owner_queue_not_submitted"
                 | "operation_identity_conflict"
                 | "master_transaction_rolled_back"
+                | "master_dispatch_stopped"
+                | "master_dispatch_capacity"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {

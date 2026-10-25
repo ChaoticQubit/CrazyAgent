@@ -36,6 +36,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
     pub(super) capture: File,
+    pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
 }
 
 pub(super) struct Capture {
@@ -368,6 +369,7 @@ impl OwnerRuntimeHandle {
         };
         let profile = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile)?;
+        let _folder = launch.folder;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
