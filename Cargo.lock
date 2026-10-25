@@ -782,6 +782,7 @@ dependencies = [
  "getrandom 0.4.3",
  "keyring-core",
  "landlock",
+ "libc",
  "minisign",
  "minisign-verify",
  "nix",
@@ -790,6 +791,7 @@ dependencies = [
  "ratatui",
  "rusqlite",
  "rustix 1.1.5",
+ "seccompiler",
  "semver",
  "serde",
  "serde_json",
@@ -4059,6 +4061,15 @@ dependencies = [
  "pbkdf2",
  "salsa20",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
