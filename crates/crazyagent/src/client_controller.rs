@@ -7,6 +7,7 @@ use crate::engine::owner::{
 use crate::engine::{Client, EngineError};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod account_profile;
@@ -43,7 +44,7 @@ pub struct ControllerView {
 }
 
 pub struct OwnerController {
-    client: Option<OwnerClient>,
+    client: Option<Arc<OwnerClient>>,
     identity: OwnerConnectionIdentity,
     view: Option<ControllerView>,
     pending: Option<PendingMutation>,
@@ -100,7 +101,7 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .start_native_auth(request)
             .await
@@ -111,7 +112,7 @@ impl OwnerController {
         request: NativeAuthQuery,
     ) -> Result<NativeAuthReply, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .read_native_auth(request)
             .await
@@ -122,7 +123,7 @@ impl OwnerController {
         request: NativeAuthCancel,
     ) -> Result<NativeAuthReply, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .cancel_native_auth(request)
             .await
@@ -140,7 +141,7 @@ impl OwnerController {
             return Err(EngineError("native_auth_database_mismatch".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .submit_claude_auth_code(request, secret)
             .await
@@ -154,7 +155,7 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .logout_native_auth(request)
             .await
@@ -172,7 +173,7 @@ impl OwnerController {
         Ok((
             ordinary,
             Self {
-                client: Some(client),
+                client: Some(Arc::new(client)),
                 identity,
                 view: None,
                 pending: None,
@@ -193,7 +194,7 @@ impl OwnerController {
     ) -> Result<Self, EngineError> {
         let (client, identity) = OwnerClient::discover(anchor, kind, timeout).await?;
         Ok(Self {
-            client: Some(client),
+            client: Some(Arc::new(client)),
             identity,
             view: None,
             pending: None,
@@ -228,7 +229,16 @@ impl OwnerController {
     /// mutations, such as GitHub and setup. Output: the client, or `controller_disconnected`.
     pub fn owner_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
+    /// Shares the owner socket client so a long stateless call, such as a GitHub clone, an
+    /// MCP check or an agent stop, runs without exclusive access to this controller.
+    /// Output: the shared client, or `controller_disconnected`.
+    pub fn shared_client(&self) -> Result<Arc<OwnerClient>, EngineError> {
+        self.client
+            .clone()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
@@ -287,7 +297,7 @@ impl OwnerController {
         if self.identity.database_instance() != identity.database_instance() {
             self.view = None;
         }
-        self.client = Some(client);
+        self.client = Some(Arc::new(client));
         self.identity = identity;
         Ok(())
     }

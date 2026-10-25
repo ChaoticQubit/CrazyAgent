@@ -52,6 +52,11 @@ impl std::fmt::Display for BridgeError {
 
 impl std::error::Error for BridgeError {}
 
+/// An engine call prepared under the bridge lock. Awaiting it holds no bridge state, so
+/// other commands run while it waits on the engine. Output: the call's result.
+pub type Unlocked<T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, BridgeError>> + Send>>;
+
 fn failure(code: &'static str) -> BridgeError {
     BridgeError { code }
 }

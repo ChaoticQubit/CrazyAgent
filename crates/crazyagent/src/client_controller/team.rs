@@ -33,7 +33,7 @@ impl OwnerController {
         agent: AgentId,
     ) -> Result<TerminalSession, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .terminal_attach(agent)
             .await
