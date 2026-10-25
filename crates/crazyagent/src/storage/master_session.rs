@@ -3284,6 +3284,7 @@ fallback_allowed = false
         home: PathBuf,
         repository: PathBuf,
         root: tempfile::TempDir,
+        _repos: Option<tempfile::TempDir>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3375,6 +3376,16 @@ fallback_allowed = false
         }
 
         async fn new_with_message(with_repository: bool, message: &str) -> Self {
+            Self::build(with_repository, false, message).await
+        }
+
+        /// A master on a project the owner added as an existing folder: the
+        /// committed repository outside the runtime is onboarded, not declared.
+        async fn onboarded() -> Self {
+            Self::build(true, true, PROMPT).await
+        }
+
+        async fn build(with_repository: bool, onboarded: bool, message: &str) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrc-")
                 .tempdir_in("/private/tmp")
@@ -3398,7 +3409,16 @@ fallback_allowed = false
                 }))
                 .unwrap(),
             );
-            let repository = root.path().join("repository");
+            let repos = onboarded.then(|| {
+                tempfile::Builder::new()
+                    .prefix("ca-mrc-repos-")
+                    .tempdir_in("/private/tmp")
+                    .unwrap()
+            });
+            let repository = match &repos {
+                Some(repos) => repos.path().canonicalize().unwrap().join("rcli-project"),
+                None => root.path().join("repository"),
+            };
             if with_repository {
                 std::fs::create_dir(&repository).unwrap();
                 git(
@@ -3432,10 +3452,12 @@ fallback_allowed = false
                 .unwrap_or_else(|_| panic!("actual owner start queue unavailable"));
             let started = receive.await.unwrap().unwrap();
             let project = ProjectId::new("rcli-project").unwrap();
-            owner_apply(
-                &storage,
-                &started,
-                "create-rcli-project",
+            let create = if onboarded {
+                OwnerMutation::StartOnboarding {
+                    path: repository.to_str().unwrap().into(),
+                    pool: reference("local-pool"),
+                }
+            } else {
                 OwnerMutation::CreateProject {
                     project_id: project.clone(),
                     spec: ProjectSpec {
@@ -3446,9 +3468,9 @@ fallback_allowed = false
                             vec![]
                         },
                     },
-                },
-            )
-            .await;
+                }
+            };
+            owner_apply(&storage, &started, "create-rcli-project", create).await;
             let basis = owner_read(
                 &storage,
                 &started,
@@ -3562,6 +3584,7 @@ fallback_allowed = false
                 home,
                 repository,
                 root,
+                _repos: repos,
             }
         }
 
@@ -3771,6 +3794,22 @@ fallback_allowed = false
             original_config
         );
         assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_added_folder_project_prepares_its_master_turn_on_its_own_repository() {
+        let case = Fixture::onboarded().await;
+        case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("an added folder must prepare its master turn"),
+            Err(failure) => panic!("an added folder must reach its master turn: {failure:?}"),
+        };
+        assert_eq!(prepared.text, PROMPT);
+        assert_eq!(prepared.repository, case.repository);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert!(prepared.cwd.join(".git").is_file());
         case.close().await;
     }
 

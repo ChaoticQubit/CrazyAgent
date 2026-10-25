@@ -491,6 +491,25 @@ impl Bench {
         }
     }
 
+    /// The repositories the engine stored in the project's specification,
+    /// read from its database.
+    fn repositories(&self, project: &ProjectId) -> Vec<String> {
+        let db = rusqlite::Connection::open_with_flags(
+            self.root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let body: String = db
+            .query_row(
+                "SELECT body FROM projects WHERE id=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
+    }
+
     /// Saves the owner's setup for `project` from the review form: the
     /// onboarding draft with the owner's name, about text and platforms.
     async fn save_setup(&mut self, project: &ProjectId, draft: &ProjectSetup) {
@@ -1123,6 +1142,30 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
         "a saved setup needs no mapping agent: {view:?}"
     );
     assert!(view.finished, "{view:?}");
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_added_folder_is_its_project_repository_and_older_projects_are_repaired_on_start() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.to_str().unwrap().to_owned();
+    assert_eq!(bench.repositories(&project), std::slice::from_ref(&repo));
+
+    let bench = bench
+        .restart_with(|root| {
+            let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+            let changed = db
+                .execute(
+                    "UPDATE projects SET body=json_set(body,'$.spec.repositories',json('[]'))
+                     WHERE id=?1",
+                    [project.as_str()],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        })
+        .await;
+    assert_eq!(bench.repositories(&project), [repo]);
     bench.stop().await;
 }
 
