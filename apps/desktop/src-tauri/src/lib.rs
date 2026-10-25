@@ -61,13 +61,164 @@ fn lock(state: &NativeState) -> Result<MutexGuard<'_, NativeBridge>, BridgeError
     state.0.try_lock().map_err(|_| BridgeError { code: "busy" })
 }
 
+const SOCKET_OVERRIDE: &str = "CRAZYAGENT_DESKTOP_SOCKET";
+
+fn engine_failure(code: &'static str) -> BridgeError {
+    BridgeError { code }
+}
+
+/// The `crazyagent` executable bundled beside this app's own executable as a sidecar.
+/// Output: its path with links resolved when it exists, else the path where it belongs.
+fn sidecar_executable() -> Result<std::path::PathBuf, BridgeError> {
+    let name = if cfg!(windows) {
+        "crazyagent.exe"
+    } else {
+        "crazyagent"
+    };
+    let app = std::env::current_exe().map_err(|_| engine_failure("engine_sidecar_missing"))?;
+    let sidecar = std::fs::canonicalize(&app)
+        .unwrap_or(app)
+        .parent()
+        .ok_or_else(|| engine_failure("engine_sidecar_missing"))?
+        .join(name);
+    Ok(std::fs::canonicalize(&sidecar).unwrap_or(sidecar))
+}
+
+/// The default engine layout and the login service that runs this app's sidecar.
+fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::Service), BridgeError>
+{
+    let layout =
+        crazyagent::paths::Layout::current().map_err(|_| engine_failure("not_configured"))?;
+    let service = crazyagent::service::Service::current_user(
+        crazyagent::paths::Platform::CURRENT,
+        sidecar_executable()?,
+        &layout,
+    )
+    .map_err(|_| engine_failure("engine_service_failed"))?;
+    Ok((layout, service))
+}
+
+/// Installs the service when it is missing or `reinstall` asks, else starts it, then
+/// waits for the engine with the shared bound. Inputs: the layout, the service and
+/// whether to replace the definition with this app's sidecar. Output: Ok once it answers.
+async fn start_engine(
+    layout: &crazyagent::paths::Layout,
+    service: &crazyagent::service::Service,
+    reinstall: bool,
+) -> Result<(), BridgeError> {
+    let since = crazyagent::service::log_length(layout);
+    let installed = service
+        .status()
+        .map_err(|_| engine_failure("engine_service_failed"))?
+        .installed;
+    if reinstall || !installed {
+        if !service.executable.is_file() {
+            return Err(engine_failure("engine_sidecar_missing"));
+        }
+        if installed {
+            service
+                .stop()
+                .map_err(|_| engine_failure("engine_service_failed"))?;
+        }
+        service
+            .install()
+            .map_err(|_| engine_failure("engine_service_failed"))?;
+    } else {
+        service
+            .start()
+            .map_err(|_| engine_failure("engine_service_failed"))?;
+    }
+    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+        .await
+        .map_err(|_| engine_failure("engine_start_failed"))
+}
+
+/// Makes sure the default engine runs before the bridge connects: when none answers it
+/// starts the login service, installing it for this app's sidecar on first launch. An
+/// engine of another version is refused with `engine_version_mismatch`. Skipped when
+/// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
+async fn ensure_default_engine() -> Result<(), BridgeError> {
+    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
+        return Ok(());
+    }
+    let (layout, service) = default_engine()?;
+    if !crazyagent::service::answering(&layout.socket()) {
+        start_engine(&layout, &service, false).await?;
+    }
+    match crazyagent::service::check_engine(
+        layout.root(),
+        crazyagent::engine::owner::OwnerClientKind::Desktop,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    {
+        crazyagent::service::EngineCheck::Mismatch { .. } => {
+            Err(engine_failure("engine_version_mismatch"))
+        }
+        crazyagent::service::EngineCheck::Ready { .. }
+        | crazyagent::service::EngineCheck::Unavailable { .. } => Ok(()),
+    }
+}
+
 #[tauri::command]
 async fn desktop_connect(
     window: WebviewWindow,
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.connect().await
+    let mut bridge = lock(&state)?;
+    ensure_default_engine().await?;
+    bridge.connect().await
+}
+
+/// The engine and app versions for the mismatch message.
+#[derive(Debug, serde::Serialize)]
+pub struct EngineVersions {
+    pub engine: Option<String>,
+    pub app: String,
+    pub message: Option<String>,
+}
+
+#[tauri::command]
+async fn desktop_engine_versions(window: WebviewWindow) -> Result<EngineVersions, BridgeError> {
+    main_window(&window)?;
+    let (layout, _) = default_engine()?;
+    let check = crazyagent::service::check_engine(
+        layout.root(),
+        crazyagent::engine::owner::OwnerClientKind::Desktop,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    let (engine, message) = match check {
+        crazyagent::service::EngineCheck::Ready { version } => (Some(version), None),
+        crazyagent::service::EngineCheck::Mismatch { version, message } => {
+            (Some(version), Some(message))
+        }
+        crazyagent::service::EngineCheck::Unavailable { .. } => (None, None),
+    };
+    Ok(EngineVersions {
+        engine,
+        app: crazyagent::version::VERSION.into(),
+        message,
+    })
+}
+
+/// Restarts the default engine through its login service, pointing the service at this
+/// app's sidecar so the engine and the app share one version, then reconnects.
+#[tauri::command]
+async fn desktop_restart_engine(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ConnectionStatus, BridgeError> {
+    main_window(&window)?;
+    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
+        return Err(engine_failure("engine_restart_unavailable"));
+    }
+    let mut bridge = lock(&state)?;
+    let (layout, service) = default_engine()?;
+    start_engine(&layout, &service, true).await?;
+    ensure_default_engine().await?;
+    bridge.connect().await
 }
 
 #[tauri::command]
@@ -1750,6 +1901,8 @@ pub fn run() {
             desktop_open_link,
             desktop_reveal_project_folder,
             desktop_open_context_item,
+            desktop_engine_versions,
+            desktop_restart_engine,
             desktop_update_settings,
             desktop_set_update_channel,
             desktop_check_update,
