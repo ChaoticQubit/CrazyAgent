@@ -85,6 +85,6 @@ export async function withPage(check) {
     socket?.close();
     if (chrome.exitCode === null) chrome.kill("SIGTERM");
     await exited;
-    rmSync(profile, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }

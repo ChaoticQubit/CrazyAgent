@@ -20,9 +20,9 @@ function useModal(open: boolean) {
 }
 
 /** A modal dialog on the native dialog element: traps focus, starts on the first field, Esc
- * asks onClose, and focus returns to the opener. Inputs: open, title, close handler, optional
- * Back handler, body, footer, wide layout. */
-export function Dialog({ open, title, onClose, onBack, children, footer, wide = false }: {
+ * asks onClose, and focus returns to the opener. While busy, Back, Close and Esc do nothing.
+ * Inputs: open, title, close handler, optional Back handler, body, footer, wide layout, busy. */
+export function Dialog({ open, title, onClose, onBack, children, footer, wide = false, busy = false }: {
   open: boolean;
   title: string;
   onClose: () => void;
@@ -30,16 +30,17 @@ export function Dialog({ open, title, onClose, onBack, children, footer, wide = 
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  busy?: boolean;
 }) {
   const ref = useModal(open);
   const titleId = useId();
   if (!open) return null;
-  return <dialog ref={ref} className={`dialog${wide ? " wide" : ""}`} aria-labelledby={titleId}
-    onCancel={(event) => { event.preventDefault(); onClose(); }}>
+  return <dialog ref={ref} className={`dialog${wide ? " wide" : ""}`} aria-labelledby={titleId} aria-busy={busy || undefined}
+    onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
     <div className="dialog-head">
-      {onBack && <Button iconOnly="Back" icon="arrow-left" onClick={onBack} />}
+      {onBack && <Button iconOnly="Back" icon="arrow-left" disabled={busy} onClick={onBack} />}
       <h2 id={titleId}>{title}</h2>
-      <Button iconOnly="Close" icon="x" onClick={onClose} />
+      <Button iconOnly="Close" icon="x" disabled={busy} onClick={onClose} />
     </div>
     <div className="dialog-body">{children}</div>
     {footer && <div className="dialog-foot">{footer}</div>}
@@ -65,8 +66,9 @@ export function Drawer({ open, title, onClose, children, footer }: {
   </dialog>;
 }
 
-/** A confirmation dialog for a destructive or irreversible step. Inputs: open, title, body,
- * confirm label, cancel label, pending flag, handlers. */
+/** A confirmation dialog for a destructive or irreversible step. While the step runs, Cancel,
+ * Close and Esc are off, so the dialog can't claim the step was stopped.
+ * Inputs: open, title, body, confirm label, cancel label, pending flag, handlers. */
 export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel = "Cancel", pending = false, onConfirm, onCancel }: {
   open: boolean;
   title: string;
@@ -77,8 +79,8 @@ export function ConfirmDialog({ open, title, children, confirmLabel, cancelLabel
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  return <Dialog open={open} title={title} onClose={onCancel}
-    footer={<><Button onClick={onCancel} data-autofocus>{cancelLabel}</Button><Button variant="danger" pending={pending} onClick={onConfirm}>{confirmLabel}</Button></>}>
+  return <Dialog open={open} title={title} onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel} data-autofocus>{cancelLabel}</Button><Button variant="danger" pending={pending} onClick={onConfirm}>{confirmLabel}</Button></>}>
     <p>{children}</p>
   </Dialog>;
 }

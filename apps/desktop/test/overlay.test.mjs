@@ -52,3 +52,41 @@ test("a menu closes on a pointerdown outside it, on focus moving to something ou
   });
   assert.deepEqual(seen, { opened: true, afterOutside: false, afterTab: false, afterEscape: false, focusBack: true, events: [] });
 });
+
+async function confirmWhile(pending) {
+  return withPage(async ({ evaluate, send }) => {
+    await evaluate(fixture);
+    const box = await evaluate(`(async () => { ${tick}
+      Fixture.mountConfirm(${pending});
+      await tick();
+      const text = document.querySelector("dialog p").getBoundingClientRect();
+      return { x: text.left + 4, y: text.top + text.height / 2 };
+    })()`);
+    for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: box.x, y: box.y, button: "left", clickCount: 1 });
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    return evaluate(`(async () => { ${tick}
+      await tick();
+      const afterEscape = [...Fixture.events];
+      const dialog = document.querySelector("dialog");
+      const named = (text) => [...document.querySelectorAll("dialog button")].find((button) => button.textContent === text || button.getAttribute("aria-label") === text);
+      const disabled = { keep: named("Keep project")?.disabled ?? null, close: named("Close")?.disabled ?? null };
+      named("Keep project")?.click();
+      named("Close")?.click();
+      await tick();
+      return { afterEscape, open: dialog?.open ?? false, disabled, events: [...Fixture.events] };
+    })()`);
+  });
+}
+
+test("a confirm dialog can't be dismissed while its destructive action runs", async () => {
+  assert.deepEqual(await confirmWhile(true), {
+    afterEscape: [], open: true, disabled: { keep: true, close: true }, events: [],
+  });
+});
+
+test("a confirm dialog that isn't running answers Esc, its cancel button and Close", async () => {
+  const seen = await confirmWhile(false);
+  assert.deepEqual(seen.afterEscape, ["cancel"]);
+  assert.deepEqual(seen.disabled, { keep: false, close: false });
+  assert.deepEqual(seen.events, ["cancel", "cancel", "cancel"]);
+});
