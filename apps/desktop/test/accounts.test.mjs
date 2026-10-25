@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const auth = await import("../src/native-auth.ts");
 const { SignInPanel, signInStage, signInFailure, signedInLine, signInRunning } = await import("../src/screens/settings/sign-in.tsx");
-const { methodOptions, defaultAccountName, urlError, nameError, addedLine, TILE_LINES, ProviderTiles, MethodMenu, KeyOrUrlForm } =
+const { methodOptions, providerTiles, defaultAccountName, urlError, nameError, addedLine, TILE_LINES, ProviderTiles, MethodMenu, KeyOrUrlForm } =
   await import("../src/screens/settings/add-account.tsx");
 const { SessionContext, useSession } = await import("../src/state.ts");
 const { removeBody, supportDetails } = await import("../src/screens/settings/account-drawer.tsx");
@@ -56,7 +56,54 @@ test("step 2 lists catalog methods in order with Recommended first, and ChatGPT 
   const single = methodOptions(catalog[2]);
   assert.equal(single.length, 1);
   assert.equal(single[0].recommended, false);
-  for (const provider of ["chatgpt", "claude", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) assert.ok(TILE_LINES[provider]);
+  for (const tile of ["openai", "anthropic", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile]);
+});
+
+const keyed = (url) => ({ method: "api_key", label: "Use an API key", url_preset: url, ...field("hidden", "required", "required") });
+const engineCatalog = [
+  { provider: "chatgpt", name: "ChatGPT / Codex", methods: [
+    { method: "subscription", label: "Sign in with ChatGPT", url_preset: null, ...field("hidden", "hidden", "hidden") }, keyed("https://api.openai.com/v1")] },
+  { provider: "claude", name: "Claude", methods: [
+    { method: "subscription", label: "Sign in with your Claude subscription", url_preset: null, ...field("hidden", "hidden", "hidden") }, keyed("https://api.anthropic.com/v1")] },
+  { provider: "openrouter", name: "OpenRouter", methods: [keyed("https://openrouter.ai/api/v1")] },
+  { provider: "openai_api", name: "OpenAI API", methods: [keyed("https://api.openai.com/v1")] },
+  { provider: "anthropic_api", name: "Anthropic API", methods: [keyed("https://api.anthropic.com/v1")] },
+  { provider: "openai_compatible", name: "Any OpenAI-compatible URL", methods: [
+    { method: "url", label: "Connect a URL", url_preset: null, ...field("required", "optional", "required") }] },
+  { provider: "local", name: "Local models (Ollama)", methods: [
+    { method: "url", label: "Connect a URL", url_preset: "http://127.0.0.1:11434/v1", ...field("required", "hidden", "required") }] },
+];
+
+test("Add account offers one OpenAI and one Anthropic entry, and each key method adds the company's API account", () => {
+  const markup = renderToStaticMarkup(createElement(ProviderTiles, { catalog: engineCatalog, onPick: forbidden }));
+  for (const gone of ["ChatGPT / Codex", "Claude", "OpenAI API", "Anthropic API"]) assert.ok(!markup.includes(`<span class="title">${gone}</span>`), gone);
+  assert.equal(markup.match(/<span class="title">/g).length, 5);
+  const tiles = providerTiles(engineCatalog);
+  assert.deepEqual(tiles.map((tile) => tile.name), ["OpenAI", "Anthropic", "OpenRouter", "Any OpenAI-compatible URL", "Local models (Ollama)"]);
+  for (const tile of tiles) assert.ok(markup.includes(`<span class="title">${tile.name}</span><span class="detail">${tile.line}</span>`), tile.name);
+  const ways = (name) => tiles.find((tile) => tile.name === name).options
+    .map((option) => [option.title, option.recommended, option.provider.provider, option.entry.method, option.native ?? null]);
+  assert.deepEqual(ways("OpenAI"), [
+    ["Sign in with ChatGPT", true, "chatgpt", "subscription", "codex_device_code"],
+    ["Use the Codex sign-in on this Mac", false, "chatgpt", "subscription", "codex_existing"],
+    ["Use an API key", false, "openai_api", "api_key", null]]);
+  assert.deepEqual(ways("Anthropic"), [
+    ["Sign in with your Claude subscription", true, "claude", "subscription", "claude_official"],
+    ["Use an API key", false, "anthropic_api", "api_key", null]]);
+  assert.deepEqual(ways("OpenRouter"), [["Use an API key", false, "openrouter", "api_key", null]]);
+  assert.equal(tiles[0].line, "Sign in with ChatGPT or use an OpenAI API key.");
+  assert.equal(tiles[1].line, "Sign in with your Claude plan or use an Anthropic API key.");
+  const anthropic = renderToStaticMarkup(createElement(MethodMenu, { tile: tiles[1], onPick: forbidden }));
+  assert.match(anthropic, /Sign in with your Claude subscription<span class="badge tone-info">Recommended<\/span>/);
+  assert.match(anthropic, /Pay per use with an Anthropic key\./);
+  assert.equal(defaultAccountName(tiles[1].options[1].provider, []), "Anthropic API 1");
+  assert.equal(defaultAccountName(tiles[0].options[0].provider, []), "ChatGPT 1");
+  const older = providerTiles(catalog).find((tile) => tile.name === "Anthropic").options.map((option) => option.key);
+  assert.deepEqual(older, ["claude:subscription", "claude:api_key"], "without a separate API provider the subscription provider's key stays");
+});
+
+test("a catalog provider with no way to add an account trips the tile check", () => {
+  assert.throws(() => providerTiles([{ provider: "openrouter", name: "OpenRouter", methods: [] }]), /every Add account tile offers a way to add an account/);
 });
 
 test("default names take the lowest free number; form checks match the engine's rules", () => {
@@ -257,11 +304,11 @@ const keyForm = (provider) => renderToStaticMarkup(createElement(WithSession, nu
 
 test("Add account starts provider-first: managed sign-in, key and URL providers, no routing fields, no secret entry", () => {
   const tiles = renderToStaticMarkup(createElement(ProviderTiles, { catalog: [...catalog, compatible], onPick: forbidden }));
-  for (const provider of [...catalog, compatible]) {
-    assert.ok(tiles.includes(`<span class="title">${provider.name}</span>`), provider.name);
-    assert.ok(tiles.includes(`<span class="detail">${TILE_LINES[provider.provider]}</span>`), provider.provider);
+  for (const tile of providerTiles([...catalog, compatible])) {
+    assert.ok(tiles.includes(`<span class="title">${tile.name}</span>`), tile.name);
+    assert.ok(tiles.includes(`<span class="detail">${TILE_LINES[tile.key]}</span>`), tile.key);
   }
-  const methods = renderToStaticMarkup(createElement(MethodMenu, { provider: catalog[0], onPick: forbidden }));
+  const methods = renderToStaticMarkup(createElement(MethodMenu, { tile: providerTiles(catalog)[0], onPick: forbidden }));
   assert.match(methods, /Sign in with ChatGPT<span class="badge tone-info">Recommended<\/span>/);
   assert.match(methods, /Use the Codex sign-in on this Mac/);
   assert.match(methods, /Use an API key/);

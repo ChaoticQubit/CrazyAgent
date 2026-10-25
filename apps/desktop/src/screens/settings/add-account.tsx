@@ -8,15 +8,18 @@ import { useAppSession, useLoad } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
 import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
-export const TILE_LINES: Record<AccountProvider, string> = {
-  chatgpt: "Use your ChatGPT plan or an OpenAI key with Codex.",
-  claude: "Use your Claude subscription or an Anthropic key with Claude Code.",
+export const TILE_LINES: Record<string, string> = {
+  openai: "Sign in with ChatGPT or use an OpenAI API key.",
+  anthropic: "Sign in with your Claude plan or use an Anthropic API key.",
   openrouter: "One key for many models.",
-  openai_api: "Pay per use with an OpenAI API key.",
-  anthropic_api: "Pay per use with an Anthropic API key.",
   openai_compatible: "Any server that speaks the OpenAI API.",
   local: "Ollama or another model running on this Mac.",
 };
+
+const COMPANIES: { key: string; name: string; subscription: AccountProvider; keyed: AccountProvider }[] = [
+  { key: "openai", name: "OpenAI", subscription: "chatgpt", keyed: "openai_api" },
+  { key: "anthropic", name: "Anthropic", subscription: "claude", keyed: "anthropic_api" },
+];
 
 const METHOD_DETAILS: Record<string, string> = {
   "chatgpt:subscription": "Uses your ChatGPT plan.",
@@ -24,11 +27,15 @@ const METHOD_DETAILS: Record<string, string> = {
   "chatgpt:existing": "Reuses the account Codex is already signed in to.",
   "claude:subscription": "Uses your Pro or Max plan.",
   "claude:api_key": "Pay per use with an Anthropic key.",
+  "openai_api:api_key": "Pay per use with an OpenAI key.",
+  "anthropic_api:api_key": "Pay per use with an Anthropic key.",
 };
 
-/** One way to sign in, as step 2 lists it. `native` is the managed sign-in it starts. */
+/** One way to sign in, as step 2 lists it. `provider` is the engine provider the account is
+ * added under and `native` the managed sign-in it starts. */
 export interface MethodOption {
   key: string;
+  provider: ProviderEntry;
   title: string;
   detail: string;
   recommended: boolean;
@@ -44,14 +51,46 @@ export function methodOptions(provider: ProviderEntry): MethodOption[] {
   for (const entry of provider.methods) {
     const native: NativeAuthMethod | undefined = entry.method !== "subscription" ? undefined
       : provider.provider === "chatgpt" ? "codex_device_code" : provider.provider === "claude" ? "claude_official" : undefined;
-    options.push({ key: `${provider.provider}:${entry.method}`, title: entry.label, detail: METHOD_DETAILS[`${provider.provider}:${entry.method}`] ?? "",
+    options.push({ key: `${provider.provider}:${entry.method}`, provider, title: entry.label, detail: METHOD_DETAILS[`${provider.provider}:${entry.method}`] ?? "",
       recommended: options.length === 0 && provider.methods.length > 1, entry, native });
     if (provider.provider === "chatgpt" && entry.method === "subscription") {
-      options.push({ key: "chatgpt:existing", title: "Use the Codex sign-in on this Mac", detail: METHOD_DETAILS["chatgpt:existing"]!,
+      options.push({ key: "chatgpt:existing", provider, title: "Use the Codex sign-in on this Mac", detail: METHOD_DETAILS["chatgpt:existing"]!,
         recommended: false, entry, native: "codex_existing" });
     }
   }
   return options;
+}
+
+/** One tile on step 1 of Add account: a company with every way to add its accounts, or one
+ * other provider. `mark` is the provider whose logo the tile shows. */
+export interface ProviderTile {
+  key: string;
+  name: string;
+  mark: AccountProvider;
+  line: string;
+  options: MethodOption[];
+}
+
+/** Groups the catalog into step 1's tiles in catalog order: one per company, whose API key
+ * adds an account under the company's API provider when the catalog lists one, and one per
+ * other provider. Input: the catalog. Output: the tiles, the first of several ways Recommended. */
+export function providerTiles(catalog: ProviderEntry[]): ProviderTile[] {
+  const tiles: ProviderTile[] = [];
+  for (const provider of catalog) {
+    const company = COMPANIES.find((entry) => entry.subscription === provider.provider || entry.keyed === provider.provider);
+    const keyedElsewhere = company !== undefined && company.keyed !== provider.provider && catalog.some((entry) => entry.provider === company.keyed);
+    const options = methodOptions(provider).filter((option) => !(keyedElsewhere && option.entry.method === "api_key"));
+    const tile = company && tiles.find((entry) => entry.key === company.key);
+    if (tile) tile.options.push(...options);
+    else tiles.push({ key: company?.key ?? provider.provider, name: company?.name ?? provider.name, mark: company?.keyed ?? provider.provider,
+      line: TILE_LINES[company?.key ?? provider.provider] ?? "", options });
+  }
+  assert(tiles.every((tile) => tile.options.length > 0), "every Add account tile offers a way to add an account");
+  return tiles.map((tile) => ({ ...tile, options: tile.options.map((option, index) => ({ ...option, recommended: index === 0 && tile.options.length > 1 })) }));
+}
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
 /** Proposes an unused account name such as "ChatGPT 3". Inputs: the provider and the
@@ -97,32 +136,32 @@ export function addedLine(entry: SignInMethodEntry, account: AccountView, check?
 
 type Step =
   | { kind: "provider" }
-  | { kind: "method"; provider: ProviderEntry }
-  | { kind: "form"; provider: ProviderEntry; option: MethodOption }
-  | { kind: "done"; provider: ProviderEntry; option: MethodOption; account: AccountView; line: string };
+  | { kind: "method"; tile: ProviderTile }
+  | { kind: "form"; tile: ProviderTile; option: MethodOption }
+  | { kind: "done"; tile: ProviderTile; option: MethodOption; account: AccountView; line: string };
 
 function stepTitle(step: Step): string {
   return step.kind === "provider" ? "Add an account" : step.kind === "method" ? "How do you want to sign in?"
     : step.kind === "done" ? "Account added" : step.option.title;
 }
 
-/** Step 1 of Add account: one tile per catalog provider with its name and plain line.
+/** Step 1 of Add account: one tile per company or other provider, from `providerTiles`.
  * Inputs: the catalog and the pick handler. Output: the tiles, with no secret entry. */
-export function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (provider: ProviderEntry) => void }) {
+export function ProviderTiles({ catalog, onPick }: { catalog: ProviderEntry[]; onPick: (tile: ProviderTile) => void }) {
   return <div className="tiles">
-    {catalog.map((provider) => <button type="button" key={provider.provider} className="tile" onClick={() => onPick(provider)}>
-      <ProviderMark provider={provider.provider} name={provider.name} large />
-      <span className="title">{provider.name}</span>
-      <span className="detail">{TILE_LINES[provider.provider]}</span>
+    {providerTiles(catalog).map((tile) => <button type="button" key={tile.key} className="tile" onClick={() => onPick(tile)}>
+      <ProviderMark provider={tile.mark} name={tile.name} large />
+      <span className="title">{tile.name}</span>
+      <span className="detail">{tile.line}</span>
     </button>)}
   </div>;
 }
 
-/** Step 2 of Add account: the provider's sign-in methods from `methodOptions`.
- * Inputs: the provider and the pick handler. Output: one button per method. */
-export function MethodMenu({ provider, onPick }: { provider: ProviderEntry; onPick: (option: MethodOption) => void }) {
+/** Step 2 of Add account: the tile's ways to add an account.
+ * Inputs: the tile and the pick handler. Output: one button per method. */
+export function MethodMenu({ tile, onPick }: { tile: ProviderTile; onPick: (option: MethodOption) => void }) {
   return <div className="methods">
-    {methodOptions(provider).map((option) => <button type="button" key={option.key} className="method" onClick={() => onPick(option)}>
+    {tile.options.map((option) => <button type="button" key={option.key} className="method" onClick={() => onPick(option)}>
       <Icon name={option.native ? "log-in" : option.entry.method === "url" ? "link" : "key-round"} />
       <span className="stack-small">
         <span className="title">{option.title}{option.recommended && <span className="badge tone-info">Recommended</span>}</span>
@@ -334,23 +373,22 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
     reset();
     onClose();
   };
-  const pickMethod = (provider: ProviderEntry, option: MethodOption) => {
-    setName(defaultAccountName(provider, accounts));
-    setStep({ kind: "form", provider, option });
+  const pickMethod = (tile: ProviderTile, option: MethodOption) => {
+    setName(defaultAccountName(option.provider, accounts));
+    setStep({ kind: "form", tile, option });
   };
-  const pickProvider = (provider: ProviderEntry) => {
-    const options = methodOptions(provider);
-    if (options.length === 1) pickMethod(provider, options[0]!);
-    else setStep({ kind: "method", provider });
+  const pickTile = (tile: ProviderTile) => {
+    if (tile.options.length === 1) pickMethod(tile, tile.options[0]!);
+    else setStep({ kind: "method", tile });
   };
   const back = step.kind === "method" ? () => setStep({ kind: "provider" })
-    : step.kind === "form" ? () => { leave(); if (methodOptions(step.provider).length > 1) setStep({ kind: "method", provider: step.provider }); else setStep({ kind: "provider" }); }
+    : step.kind === "form" ? () => { leave(); if (step.tile.options.length > 1) setStep({ kind: "method", tile: step.tile }); else setStep({ kind: "provider" }); }
     : undefined;
   const added = (account: AccountView, line: string) => {
     if (step.kind !== "form") return;
     stop.current = undefined;
     unfinished.current = undefined;
-    setStep({ kind: "done", provider: step.provider, option: step.option, account, line });
+    setStep({ kind: "done", tile: step.tile, option: step.option, account, line });
     onAdded();
   };
 
@@ -369,18 +407,18 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   if (step.kind === "provider") {
     body = catalog.kind === "loading" ? <Skeleton shape="card" count={4} /> : catalog.kind === "not_ready" ? <NotReady what="Adding accounts" compact />
       : catalog.kind === "error" ? <LoadError message="Couldn't load the account types." onRetry={reloadCatalog} />
-      : <ProviderTiles catalog={catalog.value} onPick={pickProvider} />;
+      : <ProviderTiles catalog={catalog.value} onPick={pickTile} />;
   } else if (step.kind === "method") {
-    body = <MethodMenu provider={step.provider} onPick={(option) => pickMethod(step.provider, option)} />;
+    body = <MethodMenu tile={step.tile} onPick={(option) => pickMethod(step.tile, option)} />;
   } else if (step.kind === "form") {
     body = step.option.native
-      ? <SubscriptionForm key={step.option.key} provider={step.provider} option={step.option} name={name} onName={setName}
+      ? <SubscriptionForm key={step.option.key} provider={step.option.provider} option={step.option} name={name} onName={setName}
         onAdded={added} onRunning={onRunning} onCreated={(account) => { unfinished.current = account; }} onUseKey={() => {
           leave();
-          const keyOption = methodOptions(step.provider).find((option) => option.entry.method === "api_key");
-          if (keyOption) pickMethod(step.provider, keyOption);
+          const keyOption = step.tile.options.find((option) => option.entry.method === "api_key");
+          if (keyOption) pickMethod(step.tile, keyOption);
         }} />
-      : <KeyOrUrlForm key={step.option.key} provider={step.provider} option={step.option} name={name} onName={setName}
+      : <KeyOrUrlForm key={step.option.key} provider={step.option.provider} option={step.option} name={name} onName={setName}
         onAdded={(account) => added(account, addedLine(step.option.entry, account))} />;
   } else {
     body = <Done account={step.account} line={step.line} />;
