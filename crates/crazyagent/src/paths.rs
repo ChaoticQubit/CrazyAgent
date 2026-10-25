@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn prepare_creates_private_root_logs_and_default_settings_once() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let layout = Layout::new(temp.path().join("CrazyAgent").join("engine")).unwrap();
         layout.prepare().unwrap();
         for folder in [
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn prepare_refuses_an_open_root_or_settings_file_with_the_fix() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let layout = Layout::new(temp.path().join("engine")).unwrap();
         std::fs::create_dir(layout.root()).unwrap();
         std::fs::set_permissions(layout.root(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -609,5 +609,13 @@ mod tests {
         program(&app.join(RCLI_EXECUTABLE), 0o755);
         let found = resolve_harnesses(Harnesses::default(), Some(&path), Some(&app));
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
+    }
+
+    #[test]
+    fn the_default_socket_sits_in_the_data_root() {
+        let layout = Layout::new(PathBuf::from("/srv/crazy/engine")).unwrap();
+        assert_eq!(layout.socket(), Path::new("/srv/crazy/engine/engine.sock"));
+        let error = Layout::new(PathBuf::from("relative")).unwrap_err();
+        assert!(error.0.contains("absolute"), "{error}");
     }
 }
