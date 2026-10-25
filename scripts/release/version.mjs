@@ -12,6 +12,13 @@ function fail(message) {
   throw new Error(message);
 }
 
+async function readText(root, file) {
+  const raw = await readFile(join(root, file), "utf8");
+  const crlf = raw.includes("\r\n");
+  if (crlf && /(?:^|[^\r])\n/.test(raw)) fail(`release_line_endings_mixed:${file}`);
+  return { text: crlf ? raw.replaceAll("\r\n", "\n") : raw, crlf };
+}
+
 function escape(text) {
   return text.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
 }
@@ -42,7 +49,7 @@ export function channelVersion({ channel, base, tag, now }) {
  * Output: the version string.
  */
 export async function workspaceVersion(root = REPO) {
-  const text = await readFile(join(root, "Cargo.toml"), "utf8");
+  const { text } = await readText(root, "Cargo.toml");
   const matches = [...text.matchAll(workspacePattern())];
   if (matches.length !== 1) fail("release_workspace_version_missing");
   return matches[0][2];
@@ -53,13 +60,13 @@ function workspacePattern() {
 }
 
 async function members(root) {
-  const text = await readFile(join(root, "Cargo.toml"), "utf8");
+  const { text } = await readText(root, "Cargo.toml");
   const list = /^members = \[([^\]]*)\]$/m.exec(text);
   if (!list) fail("release_workspace_members_missing");
   const paths = [...list[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   if (paths.length === 0) fail("release_workspace_members_missing");
   return Promise.all(paths.map(async (path) => {
-    const manifest = await readFile(join(root, path, "Cargo.toml"), "utf8");
+    const { text: manifest } = await readText(root, `${path}/Cargo.toml`);
     const name = /^\[package\]\nname = "([^"]+)"$/m.exec(manifest);
     if (!name || !/^version\.workspace = true$/m.test(manifest)) fail(`release_member_version_not_inherited:${path}`);
     return name[1];
@@ -76,7 +83,8 @@ function replaceOnce(text, pattern, version, label) {
 /**
  * Writes `version` into the workspace Cargo.toml, the workspace members' Cargo.lock entries,
  * apps/desktop/package.json, its package-lock.json and tauri.conf.json under `root`.
- * Every file is rewritten only after every edit was located once. Output: changed paths.
+ * Every file is rewritten only after every edit was located once, keeping its LF or CRLF line
+ * endings; a file that mixes both is refused. Output: changed paths.
  */
 export async function applyVersion(root, version) {
   if (typeof version !== "string" || !SEMVER.test(version)) fail("release_version_rejected");
@@ -93,9 +101,9 @@ export async function applyVersion(root, version) {
   };
   const written = [];
   for (const [file, patterns] of Object.entries(edits)) {
-    let text = await readFile(join(root, file), "utf8");
+    let { text, crlf } = await readText(root, file);
     for (const [pattern, label] of patterns) text = replaceOnce(text, pattern, version, `${file}:${label}`);
-    written.push([file, text]);
+    written.push([file, crlf ? text.replaceAll("\n", "\r\n") : text]);
   }
   assert.equal(written.length, Object.keys(edits).length, "release_version_files_invariant");
   for (const [file, text] of written) await writeFile(join(root, file), text);
