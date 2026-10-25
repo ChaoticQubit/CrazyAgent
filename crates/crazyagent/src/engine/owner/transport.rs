@@ -51,8 +51,13 @@ mod native_auth_channel_tests;
 mod native_auth_dispatch_diagnostic_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_lifetime_tests;
+#[cfg(all(test, unix))]
+mod owner_server_tests;
 
 const SOCKET: &str = "owner.sock";
+const CLIENTS_MAX: usize = 2;
+const HANDSHAKES_MAX: usize = 3;
+const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1196,62 +1201,93 @@ impl OwnerServer {
         stream: UnixStream,
         auth: [u8; 37],
         deadline: Instant,
-        clients: &mut tokio::task::JoinSet<()>,
-        custody: &mut tokio::task::JoinSet<()>,
-        terminals: &mut tokio::task::JoinSet<()>,
-    ) -> Result<(), EngineError> {
+        tasks: &mut Tasks,
+    ) {
         if &auth[..4] == terminal::MAGIC {
-            while terminals.try_join_next().is_some() {}
-            if terminals.len() >= crate::terminal::VIEWERS_MAX {
-                return Ok(());
+            while let Some(result) = tasks.terminals.try_join_next() {
+                log_panic(&result, "owner_terminal_panicked");
+            }
+            if tasks.terminals.len() >= crate::terminal::VIEWERS_MAX {
+                return;
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
-            terminals.spawn(async move {
+            tasks.terminals.spawn(async move {
                 terminal::serve(stream, auth, engine, authority, deadline).await;
             });
-            return Ok(());
+            return;
         }
         if &auth[..4] == b"CAN1" {
-            while let Some(result) = custody.try_join_next() {
-                if let Err(error) = result
-                    && !error.is_cancelled()
-                {
-                    return Err(io_error(error));
-                }
+            while let Some(result) = tasks.custody.try_join_next() {
+                log_panic(&result, "owner_custody_panicked");
             }
-            if !custody.is_empty() || self.authority.can_start_native_auth(&auth).is_err() {
-                return Ok(());
+            if !tasks.custody.is_empty() || self.authority.can_start_native_auth(&auth).is_err() {
+                return;
             }
             let engine = self.engine.clone();
             let authority = Arc::downgrade(&self.authority);
             let timeout = self.timeout;
-            let task = custody.spawn(async move {
+            let task = tasks.custody.spawn(async move {
                 native_auth_channel::serve(stream, auth, engine, authority, timeout, deadline)
                     .await;
             });
             self.authority.track_native_auth(&auth, task);
         } else {
-            while let Some(result) = clients.try_join_next() {
-                result.map_err(io_error)?;
+            while let Some(result) = tasks.clients.try_join_next() {
+                log_panic(&result, "owner_client_panicked");
             }
-            if clients.len() >= 2 {
-                return Ok(());
+            if tasks.clients.len() >= CLIENTS_MAX {
+                self.refuse_busy(stream, Some((auth, deadline)), &mut tasks.refusals);
+                return;
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
-            clients.spawn(async move {
+            tasks.clients.spawn(async move {
                 serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
             });
         }
-        Ok(())
+    }
+
+    /// Answers a connection the server has no room for with `owner_busy` in its own
+    /// protocol's reply shape, at most `REFUSALS_MAX` at once; past that the connection
+    /// is closed and the closing is logged. Inputs: the stream, its handshake packet and
+    /// deadline when already read, and the refusal tasks. Output: none.
+    fn refuse_busy(
+        &self,
+        stream: UnixStream,
+        handshake: Option<([u8; 37], Instant)>,
+        refusals: &mut tokio::task::JoinSet<()>,
+    ) {
+        while let Some(result) = refusals.try_join_next() {
+            log_panic(&result, "owner_refusal_panicked");
+        }
+        if refusals.len() >= REFUSALS_MAX {
+            eprintln!("owner_connection_closed_busy");
+            return;
+        }
+        let authority = self.authority.clone();
+        let timeout = self.timeout;
+        refusals.spawn(async move {
+            let read = match handshake {
+                Some((auth, deadline)) => Some((stream, auth, deadline)),
+                None => read_owner_handshake(stream, timeout).await,
+            };
+            let Some((mut stream, auth, deadline)) = read else {
+                return;
+            };
+            let refused = async {
+                let (_, frame) = admit(&mut stream, &auth, &authority).await?;
+                refuse(&mut stream, &auth, &frame, "owner_busy").await
+            };
+            let _ = tokio::time::timeout_at(deadline, refused).await;
+            let _ = stream.shutdown().await;
+        });
+        assert!(refusals.len() <= REFUSALS_MAX);
     }
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
-        let mut clients = tokio::task::JoinSet::new();
+        let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
-        let mut custody = tokio::task::JoinSet::new();
-        let mut terminals = tokio::task::JoinSet::new();
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();
@@ -1269,37 +1305,39 @@ impl OwnerServer {
                 _ = async { match expiry { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => {
                     self.authority.expire_native_auth(&self.engine).await;
                 }
-                result=clients.join_next(), if !clients.is_empty() => {
-                    if let Some(Err(e))=result {break Err(io_error(e));}
+                result=tasks.clients.join_next(), if !tasks.clients.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_client_panicked");}
                 }
-                result=custody.join_next(), if !custody.is_empty() => {
-                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                result=tasks.custody.join_next(), if !tasks.custody.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_custody_panicked");}
                 }
-                result=terminals.join_next(), if !terminals.is_empty() => {
-                    if let Some(Err(e))=result && !e.is_cancelled() {break Err(io_error(e));}
+                result=tasks.terminals.join_next(), if !tasks.terminals.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_terminal_panicked");}
+                }
+                result=tasks.refusals.join_next(), if !tasks.refusals.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_refusal_panicked");}
                 }
                 result=handshakes.join_next(), if !handshakes.is_empty() => {
                     match result {
                         Some(Ok(Some((stream, auth, deadline)))) => {
-                            if let Err(error) = self.accept_owner_handshake(stream, auth, deadline, &mut clients, &mut custody, &mut terminals) {
-                                break Err(error);
-                            }
+                            self.accept_owner_handshake(stream, auth, deadline, &mut tasks);
                         }
-                        Some(Err(error)) => break Err(io_error(error)),
-                        _ => {}
+                        Some(result) => log_panic(&result, "owner_handshake_panicked"),
+                        None => {}
                     }
                 }
                 accepted=crate::spawn_gate::accept_unix(&self.listener) => {
                     let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
-                    if handshakes.len()>=3 {continue;}
+                    if handshakes.len()>=HANDSHAKES_MAX {self.refuse_busy(stream, None, &mut tasks.refusals);continue;}
                     let timeout=self.timeout;
                     handshakes.spawn(read_owner_handshake(stream,timeout));
                 }
             }
-            assert!(clients.len() <= 2);
-            assert!(handshakes.len() <= 3);
-            assert!(custody.len() <= 1);
-            assert!(terminals.len() <= crate::terminal::VIEWERS_MAX);
+            assert!(tasks.clients.len() <= CLIENTS_MAX);
+            assert!(handshakes.len() <= HANDSHAKES_MAX);
+            assert!(tasks.refusals.len() <= REFUSALS_MAX);
+            assert!(tasks.custody.len() <= 1);
+            assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("master_dispatch_shutdown cause={}", error.0);
@@ -1309,13 +1347,15 @@ impl OwnerServer {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let invalidated = self.authority.stop_native_auth();
         handshakes.abort_all();
-        custody.abort_all();
-        clients.abort_all();
-        terminals.abort_all();
-        while terminals.join_next().await.is_some() {}
+        tasks.custody.abort_all();
+        tasks.clients.abort_all();
+        tasks.terminals.abort_all();
+        tasks.refusals.abort_all();
+        while tasks.terminals.join_next().await.is_some() {}
         while handshakes.join_next().await.is_some() {}
-        while custody.join_next().await.is_some() {}
-        while clients.join_next().await.is_some() {}
+        while tasks.custody.join_next().await.is_some() {}
+        while tasks.clients.join_next().await.is_some() {}
+        while tasks.refusals.join_next().await.is_some() {}
         let drained = self
             .authority
             .drain_native_auth_dispatch(&self.engine)
@@ -1753,6 +1793,11 @@ async fn serve_owner(
     }
 }
 
+/// Serves one admitted owner or runner connection. Its handshake deadline bounds the
+/// admission, the frame read and the request, except deferred work, which runs under
+/// its own bounds. A panic in the request is answered `owner_request_failed` and logged
+/// by code only. Inputs: the stream, handshake packet, engine, authority and deadline.
+/// Output: none; the reply is written to the stream and the stream is closed.
 async fn serve_authenticated_owner(
     mut stream: UnixStream,
     auth: [u8; 37],
@@ -1760,86 +1805,179 @@ async fn serve_authenticated_owner(
     authority: Arc<Authority>,
     deadline: Instant,
 ) {
+    let admitted = tokio::time::timeout_at(deadline, admit(&mut stream, &auth, &authority)).await;
+    if let Ok(Ok((admission, frame))) = admitted {
+        let served = contained(serve_admitted(
+            &mut stream,
+            &auth,
+            &engine,
+            &authority,
+            admission,
+            &frame,
+            deadline,
+        ))
+        .await;
+        if served.is_none() {
+            eprintln!("owner_request_panicked");
+            let refused = refuse(&mut stream, &auth, &frame, "owner_request_failed");
+            let _ = tokio::time::timeout(engine.timeout, refused).await;
+        }
+    }
+    let _ = stream.shutdown().await;
+}
+
+/// Runs one future and turns a panic inside it into `None`, so a panicking owner request
+/// ends only itself; the future is dropped and never polled again after the panic.
+/// Input: the future. Output: its value, or `None` when it panicked.
+async fn contained<F: std::future::Future>(work: F) -> Option<F::Output> {
+    let mut work = std::pin::pin!(work);
+    std::future::poll_fn(|context| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work.as_mut().poll(context)))
+        {
+            Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Some(value)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(None),
+        }
+    })
+    .await
+}
+
+/// Logs a server task that ended in a panic by a fixed code, so the server keeps serving
+/// its other connections. Inputs: the task's join result and the code. Output: none.
+fn log_panic<T>(result: &Result<T, tokio::task::JoinError>, code: &str) {
+    if let Err(error) = result
+        && error.is_panic()
+    {
+        eprintln!("{code}");
+    }
+}
+
+/// Admits one owner or runner connection and reads its request frame.
+/// Inputs: the stream, the handshake packet and the authority. Output: the owner
+/// admission (none for a runner) and the whole frame, or the error that ends it.
+async fn admit(
+    stream: &mut UnixStream,
+    auth: &[u8; 37],
+    authority: &Authority,
+) -> Result<(Option<Admission>, Vec<u8>), EngineError> {
+    verify_peer(stream)?;
+    let admission = if &auth[..4] == b"CAR1" {
+        authority.authenticate_runner(auth)?;
+        None
+    } else {
+        Some(authority.authenticate(auth)?)
+    };
+    let frame = read_frame(stream).await?;
+    Ok((admission, frame))
+}
+
+/// The protocol an owner request speaks, named by the selector key of its body. It
+/// picks the handler that serves the request and the shape of a refusal.
+#[derive(Clone, Copy)]
+enum Protocol {
+    ClaudeInput,
+    Accounts,
+    GitHub,
+    AccountProfile,
+    HarnessCatalog,
+    Plugins,
+    Agents,
+    NativeAuth,
+    Owner,
+    #[cfg(test)]
+    TestPanic,
+}
+
+/// Names the protocol of an owner request body from its selector key.
+/// Input: the request body. Output: the protocol, or `owner_request_invalid`.
+fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
+    let selector: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
+    #[cfg(test)]
+    if selector.get("test_panic").is_some() {
+        return Ok(Protocol::TestPanic);
+    }
+    let named = [
+        ("claude_auth_input", Protocol::ClaudeInput),
+        ("accounts", Protocol::Accounts),
+        ("github", Protocol::GitHub),
+        ("account_profile", Protocol::AccountProfile),
+        ("harness_catalog", Protocol::HarnessCatalog),
+        ("plugins", Protocol::Plugins),
+        ("agents", Protocol::Agents),
+        ("native_auth", Protocol::NativeAuth),
+    ];
+    Ok(named
+        .into_iter()
+        .find(|(key, _)| selector.get(key).is_some())
+        .map_or(Protocol::Owner, |(_, protocol)| protocol))
+}
+
+async fn serve_admitted(
+    stream: &mut UnixStream,
+    auth: &[u8; 37],
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    admission: Option<Admission>,
+    frame: &[u8],
+    deadline: Instant,
+) {
+    let body = &frame[4..];
     let exchange = async {
-        verify_peer(&stream)?;
-        if &auth[..4] == b"CAR1" {
-            authority.authenticate_runner(&auth)?;
-            let frame = read_frame(&mut stream).await?;
-            let request: RunnerRequest = serde_json::from_slice(&frame[4..])
-                .map_err(|_| failure("runner_request_invalid"))?;
-            let reply = engine.dispatch_runner(&authority, &auth, request).await?;
+        let Some(a) = admission else {
+            let request: RunnerRequest =
+                serde_json::from_slice(body).map_err(|_| failure("runner_request_invalid"))?;
+            let reply = engine.dispatch_runner(authority, auth, request).await?;
             let _barrier = engine.owner_egress.write().await;
-            authority.admitted_runner(&auth)?;
+            authority.admitted_runner(auth)?;
             let frame = encode_frame(&reply).map_err(|_| failure("runner_response_bounds"))?;
             return stream
                 .write_all(&frame)
                 .await
                 .map_err(io_error)
                 .map(|()| None);
-        }
-        let a = authority.authenticate(&auth)?;
-        let frame = read_frame(&mut stream).await?;
-        let selector: serde_json::Value =
-            serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
-        if selector.get("claude_auth_input").is_some() {
-            return native_auth_channel::claude::serve_input(
-                &mut stream,
-                &engine,
-                &authority,
-                &auth,
-                &a,
-                &frame[4..],
-            )
-            .await
-            .map(|()| None);
-        }
-        if selector.get("accounts").is_some() {
-            return Ok(Some(Deferred::Accounts(a, frame)));
-        }
-        if selector.get("github").is_some() {
-            return Ok(Some(Deferred::GitHub(a, frame)));
-        }
-        if selector.get("account_profile").is_some() {
-            return account_profile::serve(
-                &mut stream,
-                &engine,
-                &authority,
-                &auth,
-                &a,
-                &frame[4..],
-            )
-            .await
-            .map(|()| None);
-        }
-        if selector.get("harness_catalog").is_some() {
-            return harness_catalog::serve(
-                &mut stream,
-                &engine,
-                &authority,
-                &auth,
-                &a,
-                &frame[4..],
-            )
-            .await
-            .map(|()| None);
-        }
-        if selector.get("plugins").is_some() {
-            return plugins::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
+        };
+        match protocol(body)? {
+            Protocol::ClaudeInput => {
+                return native_auth_channel::claude::serve_input(
+                    stream, engine, authority, auth, &a, body,
+                )
                 .await
                 .map(|()| None);
-        }
-        if selector.get("agents").is_some() {
-            return agents::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
-                .await
-                .map(|()| None);
-        }
-        if selector.get("native_auth").is_some() {
-            return native_auth::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..])
-                .await
-                .map(|()| None);
+            }
+            Protocol::Accounts => return Ok(Some(Deferred::Accounts(a))),
+            Protocol::GitHub => return Ok(Some(Deferred::GitHub(a))),
+            Protocol::AccountProfile => {
+                return account_profile::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::HarnessCatalog => {
+                return harness_catalog::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Plugins => {
+                return plugins::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Agents => {
+                return agents::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::NativeAuth => {
+                return native_auth::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Owner => {}
+            #[cfg(test)]
+            Protocol::TestPanic => panic!("owner_test_panic"),
         }
         let request: OwnerRequest =
-            serde_json::from_slice(&frame[4..]).map_err(|_| failure("owner_request_invalid"))?;
+            serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
         request.validate()?;
         if projects_home::handles(&request) {
             return Ok(Some(Deferred::ProjectsHome(a, Box::new(request))));
@@ -1871,7 +2009,7 @@ async fn serve_authenticated_owner(
             );
             let mut result = {
                 let _barrier = engine.owner_egress.write().await;
-                let current = authority.authenticate(&auth)?;
+                let current = authority.authenticate(auth)?;
                 if current != a {
                     return Err(failure("owner_grant_stale_or_revoked"));
                 }
@@ -1894,11 +2032,11 @@ async fn serve_authenticated_owner(
                 && let OwnerResult::DispatchPrepared { dispatch_id } = &operation.result
             {
                 let _ = engine
-                    .drive_dispatch(dispatch_id, &authority, reconcile, deadline)
+                    .drive_dispatch(dispatch_id, authority, reconcile, deadline)
                     .await;
             }
             let _barrier = engine.owner_egress.write().await;
-            if authority.authenticate(&auth)? != a {
+            if authority.authenticate(auth)? != a {
                 return Err(failure("owner_grant_stale_or_revoked"));
             }
             let current = engine
@@ -1911,14 +2049,14 @@ async fn serve_authenticated_owner(
             {
                 operation.current_revision = current.revision;
             }
-            return write_owner_reply(&mut stream, result, id, mutation)
+            return write_owner_reply(stream, result, id, mutation)
                 .await
                 .map(|()| None);
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
         let result = engine.dispatch_owner(a, request, None).await;
-        let result = setup::after_owner(&engine, &authority, &submitted, result, deadline).await;
+        let result = setup::after_owner(engine, authority, &submitted, result, deadline).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),
@@ -1933,42 +2071,88 @@ async fn serve_authenticated_owner(
                 eprintln!("master_dispatch_not_started cause={}", error.0);
             }
         }
-        write_owner_reply(&mut stream, result, id, mutation)
+        write_owner_reply(stream, result, id, mutation)
             .await
             .map(|()| None)
     };
     match tokio::time::timeout_at(deadline, exchange).await {
         Ok(Ok(Some(Deferred::ProjectsHome(a, request)))) => {
-            let _ = projects_home::serve(
-                &mut stream,
-                &engine,
-                &authority,
-                &auth,
-                &a,
-                *request,
-                deadline,
-            )
-            .await;
+            let _ =
+                projects_home::serve(stream, engine, authority, auth, &a, *request, deadline).await;
         }
-        Ok(Ok(Some(Deferred::GitHub(a, frame)))) => {
-            let _ = github::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        Ok(Ok(Some(Deferred::GitHub(a)))) => {
+            let _ = github::serve(stream, engine, authority, auth, &a, body).await;
         }
-        Ok(Ok(Some(Deferred::Accounts(a, frame)))) => {
-            let _ = accounts::serve(&mut stream, &engine, &authority, &auth, &a, &frame[4..]).await;
+        Ok(Ok(Some(Deferred::Accounts(a)))) => {
+            let _ = accounts::serve(stream, engine, authority, auth, &a, body).await;
         }
         _ => {}
     }
-    let _ = stream.shutdown().await;
+}
+
+/// The owner server's running tasks: owner and runner requests, the native auth
+/// custody channel, terminal viewers and busy refusals, each bounded by its own maximum.
+#[derive(Default)]
+struct Tasks {
+    clients: tokio::task::JoinSet<()>,
+    custody: tokio::task::JoinSet<()>,
+    terminals: tokio::task::JoinSet<()>,
+    refusals: tokio::task::JoinSet<()>,
 }
 
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
-/// clones, and account checks that reach the network. Each carries the admission and
-/// the validated request or its raw frame.
+/// clones, and account checks that reach the network. Each carries the admission, and
+/// the projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
-    GitHub(Admission, Vec<u8>),
-    Accounts(Admission, Vec<u8>),
+    GitHub(Admission),
+    Accounts(Admission),
+}
+
+/// Answers an admitted request the engine will not run, in its own protocol's reply
+/// shape, so the client shows the refusal code instead of a closed connection.
+/// Inputs: the stream, the handshake packet, the whole request frame and the code.
+/// Output: Ok once written; Ok without a reply for the Claude code input, which has none.
+async fn refuse(
+    stream: &mut UnixStream,
+    auth: &[u8; 37],
+    frame: &[u8],
+    code: &str,
+) -> Result<(), EngineError> {
+    let Some(reply) = refusal(&auth[..4] == b"CAR1", &frame[4..], code)? else {
+        return Ok(());
+    };
+    stream.write_all(&reply).await.map_err(io_error)
+}
+
+/// Encodes the refusal of one request in the reply shape of its protocol.
+/// Inputs: whether a runner sent it, the request body and the code. Output: the reply
+/// frame, none for the Claude code input, or the error when the body is not readable.
+fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, EngineError> {
+    if runner {
+        return encode_frame(&RunnerReply::Rejected { code: code.into() })
+            .map(Some)
+            .map_err(|_| failure("runner_response_bounds"));
+    }
+    Ok(Some(match protocol(body)? {
+        Protocol::ClaudeInput => return Ok(None),
+        Protocol::Accounts => accounts::refusal(code)?,
+        Protocol::GitHub => github::refusal(code)?,
+        Protocol::AccountProfile => account_profile::refusal(body, code)?,
+        Protocol::HarnessCatalog => harness_catalog::refusal(code)?,
+        Protocol::Plugins => plugins::refusal(code)?,
+        Protocol::Agents => agents::refusal(code)?,
+        Protocol::NativeAuth => native_auth::refusal(body, code)?,
+        #[cfg(test)]
+        Protocol::TestPanic => accounts::refusal(code)?,
+        Protocol::Owner => {
+            let request: OwnerRequest =
+                serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
+            let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
+            owner_reply_frame(Err(failure(code)), request.request_id, mutation)?
+        }
+    }))
 }
 
 async fn write_owner_reply(
@@ -1977,10 +2161,23 @@ async fn write_owner_reply(
     id: RequestId,
     mutation: bool,
 ) -> Result<(), EngineError> {
+    let frame = owner_reply_frame(result, id, mutation)?;
+    stream.write_all(&frame).await.map_err(io_error)
+}
+
+/// Encodes one owner reply. An error becomes Rejected with its code when the engine
+/// knows the request changed nothing, and OutcomeUnknown for any other failed mutation.
+/// Inputs: the result, the request id and whether it was a mutation. Output: the frame.
+fn owner_reply_frame(
+    result: Result<OwnerReply, EngineError>,
+    id: RequestId,
+    mutation: bool,
+) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
         let known = matches!(
             e.0.as_str(),
-            "owner_grant_stale_or_revoked"
+            "owner_busy"
+                | "owner_grant_stale_or_revoked"
                 | "owner_runtime_stale"
                 | "owner_queue_not_submitted"
                 | "operation_identity_conflict"
@@ -1998,8 +2195,7 @@ async fn write_owner_reply(
             response,
         }
     });
-    let frame = encode_frame(&reply).map_err(|_| failure("owner_response_bounds"))?;
-    stream.write_all(&frame).await.map_err(io_error)
+    encode_frame(&reply).map_err(|_| failure("owner_response_bounds"))
 }
 
 /// Renders a single-line engine diagnostic for a failed native auth dispatch.
