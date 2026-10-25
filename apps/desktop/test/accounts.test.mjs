@@ -96,7 +96,7 @@ test("Add account offers one OpenAI and one Anthropic entry, and each key method
     ["Use an API key", false, "anthropic_api", "api_key", null]]);
   assert.deepEqual(ways("OpenRouter"), [["Use an API key", false, "openrouter", "api_key", null]]);
   assert.equal(tiles[0].line, "Sign in with ChatGPT or use an OpenAI API key.");
-  assert.equal(tiles[1].line, "Sign in with your Claude plan or use an Anthropic API key.");
+  assert.equal(tiles[1].line, "Sign in with Claude or use an Anthropic API key.");
   const anthropic = renderToStaticMarkup(createElement(MethodMenu, { tile: tiles[1], onPick: forbidden }));
   assert.match(anthropic, /Sign in with your Claude subscription<span class="badge tone-info">Recommended<\/span>/);
   assert.match(anthropic, /Pay per use with an Anthropic key\./);

@@ -5,15 +5,15 @@
   Add account                                                                   
   Where does the model come from?                                               
                                                                                 
-  > ⬡ ChatGPT / Codex         Sign in with ChatGPT, or use an OpenAI API key    
-    ✻ Claude                  Sign in with your Claude plan, or use an API key  
+  > ⬡ OpenAI                  Sign in with ChatGPT or use an OpenAI API key     
+    ✻ Anthropic               Sign in with Claude or use an Anthropic API key   
     ⇄ OpenRouter              One API key for models from many companies        
-    ⬡ OpenAI API              Pay-as-you-go OpenAI API key                      
-    ✻ Anthropic API           Pay-as-you-go Anthropic API key                   
     ⌁ OpenAI-compatible URL   Any server that speaks the OpenAI API             
     ⌂ Local model             Ollama, LM Studio or another server on this Mac   
                                                                                 
   Add as many accounts as you like. One pool can mix providers.                 
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 

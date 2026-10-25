@@ -11,7 +11,7 @@ import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, typ
 
 export const TILE_LINES: Record<string, string> = {
   openai: "Sign in with ChatGPT or use an OpenAI API key.",
-  anthropic: "Sign in with your Claude plan or use an Anthropic API key.",
+  anthropic: "Sign in with Claude or use an Anthropic API key.",
   openrouter: "One key for many models.",
   openai_compatible: "Any server that speaks the OpenAI API.",
   local: "Ollama or another model running on this Mac.",

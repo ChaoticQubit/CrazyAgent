@@ -1157,6 +1157,220 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accounts() {
+        use crate::accounts::AccountStatus;
+        use crate::tui::client::OwnerEvent;
+        use crate::tui::ctx::Ctx;
+        use crate::tui::keys::Key;
+        use crate::tui::screens::Screen;
+        use crate::tui::screens::settings_add_account::AddAccount;
+        use crate::tui::seam::{Arrival, Request};
+
+        async fn pump(screen: &mut AddAccount, ctx: &mut Ctx, native: &mut NativeOwner) -> usize {
+            let mut held = 0;
+            for _ in 0..16 {
+                let Some(request) = ctx.next_request() else {
+                    break;
+                };
+                match request {
+                    Request::Settings(job) if matches!(*job, SettingsJob::Accounts(_)) => {
+                        let event = native.settings(*job).await;
+                        screen.arrive(
+                            &Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event)))),
+                            ctx,
+                        );
+                    }
+                    Request::Settings(_) => held += 1,
+                    _ => {}
+                }
+            }
+            held
+        }
+        fn text(screen: &AddAccount, ctx: &Ctx) -> Vec<String> {
+            screen
+                .body(76, ctx)
+                .0
+                .iter()
+                .map(|line| line.to_string())
+                .collect()
+        }
+        fn type_text(screen: &mut AddAccount, ctx: &mut Ctx, value: &str) {
+            for letter in value.chars() {
+                screen.key(&Key::Char(letter), ctx);
+            }
+        }
+
+        let root = tempfile::Builder::new()
+            .prefix("ca-tadd-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut service, _stop) = engine(root.path()).await;
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let _ = native.attach().await;
+        assert!(native.ready);
+        let mut ctx = crate::tui::screens::settings_accounts::tests::ctx(80, 24);
+
+        let mut screen = AddAccount::new();
+        screen.shown(&mut ctx);
+        assert_eq!(pump(&mut screen, &mut ctx, &mut native).await, 0);
+        let rows = text(&screen, &ctx);
+        assert_eq!(rows.len(), 3 + 5 + 2, "five entries: {rows:#?}");
+        for (row, (name, line)) in rows[3..8].iter().zip([
+            ("OpenAI", "Sign in with ChatGPT or use an OpenAI API key"),
+            (
+                "Anthropic",
+                "Sign in with Claude or use an Anthropic API key",
+            ),
+            ("OpenRouter", "One API key for models from many companies"),
+            (
+                "OpenAI-compatible URL",
+                "Any server that speaks the OpenAI API",
+            ),
+            (
+                "Local model",
+                "Ollama, LM Studio or another server on this Mac",
+            ),
+        ]) {
+            assert!(
+                row.contains(&format!(" {name} ")) && row.contains(line),
+                "{row}"
+            );
+        }
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("ChatGPT / Codex") && !row.contains("Pay-as-you-go")),
+            "{rows:#?}"
+        );
+
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        let methods = text(&screen, &ctx).join("\n");
+        let first = methods
+            .find("Sign in with your Claude subscription")
+            .expect(&methods);
+        let key = methods.find("Use an API key").expect(&methods);
+        assert!(first < key && !methods.contains("Codex"), "{methods}");
+        assert!(methods.starts_with("Anthropic\n"), "{methods}");
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        screen.key(&Key::Tab, &mut ctx);
+        screen.key(
+            &Key::Paste("unit-placeholder-anthropic-key-0001".into()),
+            &mut ctx,
+        );
+        screen.key(&Key::Tab, &mut ctx);
+        type_text(&mut screen, &mut ctx, "claude-sonnet-4-5");
+        screen.key(&Key::Enter, &mut ctx);
+        assert_eq!(pump(&mut screen, &mut ctx, &mut native).await, 0);
+        assert_eq!(ctx.message().unwrap().lead, "Account added.");
+
+        let mut screen = AddAccount::new();
+        screen.shown(&mut ctx);
+        pump(&mut screen, &mut ctx, &mut native).await;
+        screen.key(&Key::Enter, &mut ctx);
+        let methods = text(&screen, &ctx).join("\n");
+        let order: Vec<usize> = [
+            "Sign in with ChatGPT",
+            "Use the Codex sign-in on this Mac",
+            "Use an API key",
+        ]
+        .iter()
+        .map(|title| methods.find(title).expect(&methods))
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{methods}");
+        assert!(methods.starts_with("OpenAI\n"), "{methods}");
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        screen.key(&Key::Tab, &mut ctx);
+        screen.key(
+            &Key::Paste("unit-placeholder-openai-key-00000001".into()),
+            &mut ctx,
+        );
+        screen.key(&Key::Tab, &mut ctx);
+        type_text(&mut screen, &mut ctx, "gpt-5");
+        screen.key(&Key::Enter, &mut ctx);
+        assert_eq!(pump(&mut screen, &mut ctx, &mut native).await, 0);
+
+        for down in [1, 0] {
+            let mut screen = AddAccount::new();
+            screen.shown(&mut ctx);
+            pump(&mut screen, &mut ctx, &mut native).await;
+            for _ in 0..down {
+                screen.key(&Key::Down, &mut ctx);
+            }
+            screen.key(&Key::Enter, &mut ctx);
+            screen.key(&Key::Enter, &mut ctx);
+            assert_eq!(
+                pump(&mut screen, &mut ctx, &mut native).await,
+                1,
+                "the sign-in itself is held back"
+            );
+        }
+
+        let mut lost = false;
+        let mut added: Vec<(Provider, SignInMethod, String, String, AccountStatus)> = native
+            .all_accounts(2, &mut lost)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|account| {
+                (
+                    account.provider,
+                    account.method,
+                    account.provider_name,
+                    account.name,
+                    account.status,
+                )
+            })
+            .collect();
+        added.sort_by_key(|account| account.0);
+        assert_eq!(
+            added,
+            [
+                (
+                    Provider::Chatgpt,
+                    SignInMethod::Subscription,
+                    "ChatGPT / Codex".to_owned(),
+                    "ChatGPT / Codex".to_owned(),
+                    AccountStatus::NotSignedIn
+                ),
+                (
+                    Provider::Claude,
+                    SignInMethod::Subscription,
+                    "Claude".to_owned(),
+                    "Claude".to_owned(),
+                    AccountStatus::NotSignedIn
+                ),
+                (
+                    Provider::OpenaiApi,
+                    SignInMethod::ApiKey,
+                    "OpenAI API".to_owned(),
+                    "OpenAI API".to_owned(),
+                    AccountStatus::KeySaved
+                ),
+                (
+                    Provider::AnthropicApi,
+                    SignInMethod::ApiKey,
+                    "Anthropic API".to_owned(),
+                    "Anthropic API".to_owned(),
+                    AccountStatus::KeySaved
+                ),
+            ]
+        );
+
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     fn changed(event: SettingsEvent) {
         match event {
             SettingsEvent::PluginChanged(Ok(None)) => {}
