@@ -22,7 +22,6 @@ env:
     e2e_team e2e_tui research_engine smoke team_engine terminal_owner terminal_session terminal_tmux
     onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
-    credential_platforms linux_sandbox windows_terminal
   DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
@@ -33,9 +32,13 @@ defaults:
 
 jobs:
   linux:
-    name: Format, typecheck and Linux lint
+    name: Linux format, typecheck, lint and tests
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 150
+    env:
+      PLATFORM_TESTS_EXCLUDE: >-
+        credential_platforms windows_terminal agent_secret_walls setup team_project_root
+        harness_launch launch_context project_sandbox sandbox_everywhere
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
@@ -71,15 +74,22 @@ jobs:
       - name: Typecheck desktop
         working-directory: apps/desktop
         run: npm run typecheck
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
-      - name: Lint engine for Linux
-        run: cargo clippy -p crazyagent --all-targets --locked --offline -- -D warnings
+      - name: Lint workspace
+        run: make lint
+      - name: Test engine and desktop crates
+        run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
 
   macos:
     name: macOS lint and tests
     runs-on: macos-15
     timeout-minutes: 150
+    env:
+      PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -126,29 +136,7 @@ jobs:
       - name: Lint workspace
         run: make lint
       - name: Test engine and desktop crates
-        run: |
-          set -euo pipefail
-          engine=()
-          for file in crates/crazyagent/tests/*.rs; do
-            name="$(basename "$file" .rs)"
-            case " $ENGINE_TESTS_EXCLUDE " in
-              *" $name "*) ;;
-              *) engine+=(--test "$name") ;;
-            esac
-          done
-          desktop=()
-          for file in apps/desktop/src-tauri/tests/*.rs; do
-            name="$(basename "$file" .rs)"
-            case " $DESKTOP_TESTS_EXCLUDE " in
-              *" $name "*) ;;
-              *) desktop+=(--test "$name") ;;
-            esac
-          done
-          echo "Engine test targets: ${#engine[@]} flags, desktop: ${#desktop[@]} flags"
-          cargo build -p crazyagent --bin crazyagent --locked --offline
-          export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$PWD/target/debug/crazyagent"
-          cargo test -p crazyagent --locked --offline --bins "${engine[@]}"
-          cargo test -p crazyagent-desktop --locked --offline --lib --bins "${desktop[@]}"
+        run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites
         env:
           BUN: ${{ steps.bun.outputs.bun-path }}
@@ -159,13 +147,18 @@ jobs:
         run: make test-bun BUN="$BUN" BUN_TESTS_EXCLUDE="$BUN_TESTS_EXCLUDE"
 
   windows:
-    name: Windows lint and sandbox tests
+    name: Windows lint and tests
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -179,9 +172,19 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ci-windows-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
-      - name: Lint engine and Windows sandbox
-        run: cargo clippy -p crazyagent -p crazyagent-win-sandbox --all-targets --locked --offline -- -D warnings
-      - name: Test Windows sandbox
-        run: cargo test -p crazyagent-win-sandbox --locked --offline
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Test Windows sandbox, terminal and picker
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --locked --offline
+          cargo test -p crazyagent --locked --offline --test windows_terminal
+          cargo test -p crazyagent-desktop --locked --offline --test picker_windows
