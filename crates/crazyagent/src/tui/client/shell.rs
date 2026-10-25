@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{AccountPool, ModelAccessEdit};
-use crate::engine::EngineError;
 use crate::engine::owner::{ModelAccessCollection, ModelAccessRecord, OwnerResult};
 use crate::memory::KnowledgeStatus;
 use crate::protocol::CredentialRef;
@@ -35,9 +34,9 @@ impl Connection {
 }
 
 impl NativeOwner {
-    /// Runs one shell request through the owner controller; an engine
-    /// transport failure detaches the trusted connection so the shell
-    /// reconnects.
+    /// Runs one shell request through the owner controller; a lost engine
+    /// connection detaches the trusted connection so the shell reconnects,
+    /// while a refusal is only reported.
     /// Input: the request. Output: the event with data or a bounded plain
     /// problem code.
     pub(super) async fn shell(&mut self, request: ShellRequest) -> ShellEvent {
@@ -55,7 +54,7 @@ impl NativeOwner {
                 Ok(controller) => controller
                     .owner_profile()
                     .await
-                    .map_err(|error| transport(&error, lost)),
+                    .map_err(|error| settings::problem(&error, lost)),
                 Err(error) => Err(error),
             }),
             ShellRequest::SaveProfile {
@@ -64,7 +63,7 @@ impl NativeOwner {
             } => ShellEvent::ProfileSaved(match self.ready_controller() {
                 Ok(controller) => match controller.save_owner_profile(profile, generation).await {
                     Ok(response) => settled(response, "profile_outcome_unknown"),
-                    Err(error) => Err(transport(&error, lost)),
+                    Err(error) => Err(settings::problem(&error, lost)),
                 },
                 Err(error) => Err(error),
             }),
@@ -72,7 +71,7 @@ impl NativeOwner {
                 Ok(controller) => controller
                     .pool_summaries()
                     .await
-                    .map_err(|error| transport(&error, lost)),
+                    .map_err(|error| settings::problem(&error, lost)),
                 Err(error) => Err(error),
             }),
             ShellRequest::PoolProjects => ShellEvent::PoolProjects(match self.ready_controller() {
@@ -128,7 +127,7 @@ impl NativeOwner {
                 .map_err(|error| bounded_problem(&error.0))?;
             match controller.send_pending().await {
                 Ok(response) => settled(response, "pool_outcome_unknown")?,
-                Err(error) => return Err(transport(&error, lost)),
+                Err(error) => return Err(settings::problem(&error, lost)),
             }
         }
         Ok(())
@@ -200,18 +199,18 @@ impl NativeOwner {
         let pools = controller
             .pool_summaries()
             .await
-            .map_err(|error| transport(&error, lost))?;
+            .map_err(|error| settings::problem(&error, lost))?;
         let mut cards = Vec::with_capacity(projects.len());
         for project in &projects {
             let setup = controller
                 .project_setup(project.project_id.clone())
                 .await
-                .map_err(|error| transport(&error, lost))?;
+                .map_err(|error| settings::problem(&error, lost))?;
             let jobs = if setup.is_some() {
                 controller
                     .research_jobs(project.project_id.clone())
                     .await
-                    .map_err(|error| transport(&error, lost))?
+                    .map_err(|error| settings::problem(&error, lost))?
             } else {
                 Vec::new()
             };
@@ -263,7 +262,7 @@ async fn pool_basis(
                 limit: POOL_PAGE,
             })
             .await
-            .map_err(|error| transport(&error, lost))?;
+            .map_err(|error| settings::problem(&error, lost))?;
         let OwnerData::ModelAccessPage {
             source_hash,
             writable,
@@ -317,7 +316,7 @@ async fn unchanged(
             id: pool.id.clone(),
         })
         .await
-        .map_err(|error| transport(&error, lost))?;
+        .map_err(|error| settings::problem(&error, lost))?;
     let OwnerData::ModelAccessRecord {
         source_hash,
         writable,
@@ -444,11 +443,6 @@ fn settled(response: OwnerResponse, unknown: &str) -> Result<(), String> {
         OwnerResponse::Rejected { code } => Err(bounded_problem(&code)),
         _ => Err(unknown.into()),
     }
-}
-
-fn transport(error: &EngineError, lost: &mut bool) -> String {
-    *lost = true;
-    bounded_problem(&error.0)
 }
 
 #[cfg(all(test, unix))]
@@ -773,6 +767,55 @@ pools = [
         shell.arrive(Arrival::Disconnected("trusted_connection_lost".into()));
         assert_eq!(shell.ctx.identity, None);
         live.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_keeps_the_trusted_connection_and_a_stopped_engine_loses_it() {
+        let (mut live, _) = Live::start().await;
+        let profile = |name: &str| crate::owner_profile::OwnerProfile {
+            name: name.into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        };
+        let save = |name: &str| ShellRequest::SaveProfile {
+            profile: profile(name),
+            generation: 1,
+        };
+        let refused = live.native.shell(save(" ")).await;
+        assert!(
+            matches!(&refused, ShellEvent::ProfileSaved(Err(code)) if code == "owner_profile_name")
+        );
+        assert!(live.native.ready, "a refused profile is not a lost engine");
+
+        let controller = live.native.controller.as_mut().unwrap();
+        controller.read(OwnerRead::Capabilities).await.unwrap();
+        controller
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("held").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Held".into(),
+                        repositories: vec![],
+                    },
+                },
+                1,
+            )
+            .unwrap();
+        let refused = live.native.shell(save("Ada")).await;
+        assert!(
+            matches!(&refused, ShellEvent::ProfileSaved(Err(code)) if code == "controller_pending_intent")
+        );
+        assert!(
+            live.native.ready,
+            "a change still finishing is not a lost engine"
+        );
+
+        live.service.shutdown().await.unwrap();
+        let read = live.native.shell(ShellRequest::Profile).await;
+        assert!(matches!(read, ShellEvent::Profile(Err(_))));
+        assert!(!live.native.ready, "a stopped engine is a lost connection");
     }
 
     #[tokio::test]
