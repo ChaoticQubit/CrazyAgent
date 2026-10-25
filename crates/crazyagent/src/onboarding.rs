@@ -43,8 +43,9 @@ pub struct MappingFacts {
 /// The onboarding of one found or cloned project as clients read it: the
 /// graph and mapping steps, the proposed name, the pre-filled setup the owner
 /// confirms with `UpdateProjectSetup`, the extra facts, `missing`, the draft
-/// fields the owner must still fill such as `about` or `platforms`, and the
-/// mapping agent's `.crazyagent/overview.md` once it exists.
+/// fields the owner must still fill such as `about` or `platforms`, the
+/// mapping agent's `.crazyagent/overview.md` once it exists, and `finished`
+/// once the owner saved the setup, when name and draft are the saved ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
@@ -56,6 +57,7 @@ pub struct OnboardingView {
     pub facts: MappingFacts,
     pub missing: Vec<String>,
     pub overview: Option<String>,
+    pub finished: bool,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -391,8 +393,9 @@ fn restart(
 
 /// The onboarding of `project_id`: both steps, the draft, its proposed name,
 /// the extra facts, the fields still missing and the overview, read bounded
-/// and never through a link. Returns `None` for a project that was not
-/// onboarded.
+/// and never through a link. Once the owner saved the setup it is finished,
+/// and the name, draft and missing fields come from the saved setup. Returns
+/// `None` for a project that was not onboarded.
 pub(crate) fn status(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -418,7 +421,13 @@ pub(crate) fn status(
     let Some((graph, graph_reason, mapping, mapping_reason, drafted, repo)) = row else {
         return Ok(None);
     };
-    let drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    let mut drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
+    let finished = saved.is_some();
+    if let Some(stored) = saved {
+        drafted.draft = stored.editable();
+        drafted.name = stored.name;
+    }
     let missing = drafted.missing();
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
@@ -429,5 +438,6 @@ pub(crate) fn status(
         facts: drafted.facts,
         missing,
         overview: draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY)),
+        finished,
     }))
 }

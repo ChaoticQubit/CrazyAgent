@@ -363,7 +363,32 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
+/// The revision a project setup is recorded at; only the owner's
+/// `UpdateProjectSetup` raises it.
+pub(crate) const FIRST_REVISION: u64 = 1;
+
 impl StoredSetup {
+    /// Whether the owner saved this setup after it was recorded: only
+    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
+    /// an onboarding whose setup was saved is finished.
+    pub fn saved(&self) -> bool {
+        self.revision > FIRST_REVISION
+    }
+
+    /// The setup as the owner edits it: every stored field except the
+    /// documents, which keep their own add and delete actions.
+    pub fn editable(&self) -> ProjectSetup {
+        ProjectSetup {
+            about: self.about.clone(),
+            tech_stack: self.tech_stack.clone(),
+            platforms: self.platforms.clone(),
+            research: self.research.clone(),
+            pool: self.pool.clone(),
+            team: Some(self.team.clone()),
+            documents: Vec::new(),
+        }
+    }
+
     /// The folder holding this project's context and agent worktrees:
     /// `.crazyagent/` inside the project for projects in the projects home,
     /// or the project folder itself for projects made before it.
@@ -2078,6 +2103,11 @@ fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, Engin
         [project_id.as_str()],
     )
     .map_err(error)?;
+    tx.execute(
+        "DELETE FROM onboarding WHERE project=?1",
+        [project_id.as_str()],
+    )
+    .map_err(error)?;
     let removed = tx
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
@@ -2285,10 +2315,6 @@ pub(crate) fn record(
     documents: Vec<StoredDocument>,
     folder: &Path,
 ) -> Result<Outcome, EngineError> {
-    let outcome = crate::storage::create_project(tx, project_id, spec)?;
-    if outcome != Outcome::Applied {
-        return Ok(outcome);
-    }
     let now = now_ms();
     let stored = StoredSetup {
         project_id: project_id.clone(),
@@ -2309,8 +2335,13 @@ pub(crate) fn record(
             .ok_or_else(|| failure("project_folder_unwritable"))?
             .to_owned(),
         created_ms: now,
-        revision: 1,
+        revision: FIRST_REVISION,
     };
+    let spec = declared(spec, &stored)?;
+    let outcome = crate::storage::create_project(tx, project_id, &spec)?;
+    if outcome != Outcome::Applied {
+        return Ok(outcome);
+    }
     tx.execute(
         "INSERT INTO project_setups VALUES (?1,?2)",
         params![
@@ -2329,6 +2360,66 @@ pub(crate) fn record(
     )?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
+}
+
+/// The specification a set-up project is recorded with: the client's, with
+/// the project's own folder as its repository when the client declared none,
+/// so the master works in it. Takes the specification and the setup.
+/// Returns the checked specification or its bound failure.
+fn declared(spec: &ProjectSpec, stored: &StoredSetup) -> Result<ProjectSpec, EngineError> {
+    let mut spec = spec.clone();
+    if spec.repositories.is_empty() {
+        let folder = stored.project_folder();
+        let folder = folder
+            .to_str()
+            .ok_or_else(|| failure("project_folder_unwritable"))?;
+        spec.repositories.push(folder.to_owned());
+    }
+    spec.validate().map_err(|problem| failure(&problem.0))?;
+    assert!(!spec.repositories.is_empty());
+    Ok(spec)
+}
+
+/// Gives each project with no declared repository its setup's project
+/// folder, repairing projects recorded before the folder was declared. Runs
+/// when the engine opens its database, at most 256 projects. Takes the
+/// connection. Returns any storage failure.
+#[cfg(unix)]
+pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineError> {
+    const REPAIRED_MAX: i64 = 256;
+    let tx = connection.unchecked_transaction().map_err(error)?;
+    let rows: Vec<(String, String)> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT p.body, s.body FROM projects p JOIN project_setups s ON s.project=p.id
+                 WHERE json_array_length(p.body,'$.spec.repositories')=0
+                 ORDER BY p.id LIMIT ?1",
+            )
+            .map_err(error)?;
+        statement
+            .query_map([REPAIRED_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for (project, setup) in rows {
+        let mut project: crate::protocol::StoredProject =
+            serde_json::from_str(&project).map_err(error)?;
+        let setup: StoredSetup = serde_json::from_str(&setup).map_err(error)?;
+        assert_eq!(project.project_id, setup.project_id);
+        project.spec = declared(&project.spec, &setup)?;
+        let changed = tx
+            .execute(
+                "UPDATE projects SET body=?2 WHERE id=?1",
+                params![
+                    project.project_id.as_str(),
+                    serde_json::to_string(&project).map_err(error)?
+                ],
+            )
+            .map_err(error)?;
+        assert_eq!(changed, 1);
+    }
+    tx.commit().map_err(error)
 }
 
 /// Loads the stored setup of one project.

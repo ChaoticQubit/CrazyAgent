@@ -33,7 +33,7 @@ const view = (extra = {}) => ({
   project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
-  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", ...extra,
+  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", finished: false, ...extra,
 });
 
 test("each folder state has its badge, line and one action", () => {
@@ -135,6 +135,23 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
+});
+
+test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
+  const finished = view({ finished: true, graph: { kind: "running" }, mapping: { kind: "waiting" } });
+  assert.equal(intake.settled(finished), true);
+  assert.deepEqual(intake.confirmReady(finished), { ready: true, line: "This project is set up. Change anything below, then save." });
+  assert.deepEqual(intake.stepView({ kind: "waiting" }, true), { word: "Skipped", tone: "neutral", line: null });
+  assert.deepEqual(intake.stepView({ kind: "failed", reason: "x" }, true), { word: "Failed", tone: "danger", line: "x" });
+});
+
+test("only a failed mapping of an unfinished setup offers Retry, from the project's own folder", () => {
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "failed", reason: "x" } })), true);
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "failed", reason: "x" }, finished: true })), false);
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "running" } })), false);
+  assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop/.crazyagent" })), "/Users/mira/Projects/shop");
+  assert.equal(intake.projectFolder(stored({ folder: "C:\\Projects\\shop\\.crazyagent" })), "C:\\Projects\\shop");
+  assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop" })), "/Users/mira/Projects/shop");
 });
 
 test("missing items name the form fields, once each", () => {
@@ -385,6 +402,18 @@ test("the setup review shows the steps, the overview, missing items and a confir
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
   assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /graphify isn&#x27;t installed\./);
   assert.match(html(OnboardingReviewView, { ...base, view: notReady, draft: null }), /Not ready yet/);
+  const stopped = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "failed", reason: "Agent stopped: workspace routing discovery failed" } })), draft });
+  assert.match(stopped, /Agent stopped: workspace routing discovery failed/);
+  assert.match(stopped, /<button[^>]*>Retry mapping<\/button>/);
+  assert.match(stopped, /<button[^>]*>Skip mapping<\/button>/);
+  assert.doesNotMatch(stopped, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
+  const skipped = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "failed", reason: "x" } })), draft, skipped: true });
+  assert.doesNotMatch(skipped, /Retry mapping|Skip mapping/);
+  const saved = html(OnboardingReviewView, { ...base, view: ok(view({ finished: true, graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), draft });
+  assert.match(saved, /This project is set up\. Change anything below, then save\./);
+  assert.match(saved, /Map the project[\s\S]*Skipped/);
+  assert.match(saved, /<button[^>]*>Save changes<\/button>/);
+  assert.doesNotMatch(saved, /Retry mapping|Confirm and finish setup/);
 });
 
 test("the tools step lists dependencies and the pack by group, and names the MCP servers it approves", () => {

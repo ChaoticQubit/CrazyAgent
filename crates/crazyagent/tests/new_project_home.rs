@@ -241,6 +241,25 @@ fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
 
+/// The repositories the engine stored in a project's specification, read
+/// from the database in the runtime folder `root`.
+fn repositories(root: &Path, project: &ProjectId) -> Vec<String> {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM projects WHERE id=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
+}
+
 fn setup() -> ProjectSetup {
     ProjectSetup {
         about: "Tracks the books I want to read.".into(),
@@ -331,6 +350,10 @@ async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
     assert_eq!(entry.state, FoundState::Ready);
     assert_eq!(entry.project_id.as_ref(), Some(&reading));
     assert!(entry.git && entry.known);
+    assert_eq!(
+        repositories(engine.root.path(), &reading),
+        [folder.to_str().unwrap()]
+    );
     let context = owner.project_context(reading.clone()).await.unwrap();
     assert_eq!(context.folder, state.to_str().unwrap());
     assert!(

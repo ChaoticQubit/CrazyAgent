@@ -923,7 +923,7 @@ pub(crate) enum ReadOnlyEnding {
     #[cfg(unix)]
     Answered(String),
     #[cfg(unix)]
-    Failed(&'static str),
+    Failed(String),
     #[cfg(unix)]
     TimedOut,
     #[cfg(unix)]
@@ -1059,10 +1059,11 @@ impl ResearchRunner {
             let _ = stdin.write_all(run.prompt.as_bytes());
         }
         let started = Instant::now();
+        let mut exited_failing = false;
         let ending = loop {
             if let Some(status) = running.child.try_wait()? {
-                break (!status.success())
-                    .then_some(ReadOnlyEnding::Failed("Agent stopped with an error"));
+                exited_failing = !status.success();
+                break None;
             }
             if started.elapsed() >= run.wall_time {
                 break Some(ReadOnlyEnding::TimedOut);
@@ -1071,7 +1072,7 @@ impl ResearchRunner {
                 break Some(ReadOnlyEnding::Stopped);
             }
             if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output"));
+                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };
@@ -1081,6 +1082,13 @@ impl ResearchRunner {
             let _ = handle.join();
         }
         drop(lease);
+        if exited_failing {
+            return Ok(ReadOnlyEnding::Failed(agent_failure(
+                &agent.join(stdout_log),
+                harness,
+                self.limits.output_bytes_max,
+            )));
+        }
         if let Some(ending) = ending {
             return Ok(ending);
         }
@@ -1088,7 +1096,7 @@ impl ResearchRunner {
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         Ok(if answer.is_empty() {
-            ReadOnlyEnding::Failed("Agent returned no answer")
+            ReadOnlyEnding::Failed("Agent returned no answer".into())
         } else {
             ReadOnlyEnding::Answered(answer)
         })
@@ -1793,6 +1801,43 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// The plain reason a read-only agent stopped with an error: Codex's own
+/// message from its last `turn.failed` event, else its last `error` event,
+/// else the generic reason; a message that is a provider's JSON error body
+/// gives its inner message. Takes the agent's stdout log, its harness and
+/// the log bound; the log is read bounded and never through a link.
+#[cfg(unix)]
+fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
+    const GENERIC: &str = "Agent stopped with an error";
+    if harness != ResearchHarness::Codex {
+        return GENERIC.to_owned();
+    }
+    let Ok(text) = read_bounded(log, max) else {
+        return GENERIC.to_owned();
+    };
+    let (mut turn, mut error) = (None, None);
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (slot, message) = match event["type"].as_str() {
+            Some("turn.failed") => (&mut turn, &event["error"]["message"]),
+            Some("error") => (&mut error, &event["message"]),
+            _ => continue,
+        };
+        if let Some(message) = message.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            let inner = serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
+            *slot = Some(inner.unwrap_or_else(|| message.to_owned()));
+        }
+    }
+    turn.or(error).map_or_else(
+        || GENERIC.to_owned(),
+        |message| format!("Agent stopped: {message}"),
+    )
 }
 
 fn read_bounded(path: &Path, max: u64) -> io::Result<String> {

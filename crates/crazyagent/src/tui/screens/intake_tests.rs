@@ -542,6 +542,12 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
 }
 
 fn waiting_review() -> (Shell, ProjectId) {
+    review_with(|_| {})
+}
+
+/// The onboarding page of `notes` after its onboarding read arrives: the graph
+/// done and the mapping failed, changed by `change` first.
+fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
     let project = ProjectId::new("project-notes").unwrap();
     let mut ctx = ctx(80, 40);
     let screen = open(
@@ -578,7 +584,10 @@ fn waiting_review() -> (Shell, ProjectId) {
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
+        finished: false,
     };
+    let mut draft = draft;
+    change(&mut draft);
     shell.arrive(intake(
         IntakeQuery::Onboarding {
             project: project.clone(),
@@ -614,6 +623,51 @@ fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "[x] CLI"), "{rows:#?}");
     assert!(shows(&rows, "Check the setup and confirm it."), "{rows:#?}");
+}
+
+#[test]
+fn a_failed_mapping_shows_its_reason_and_r_on_confirm_maps_again() {
+    let (mut shell, _) = review_with(|view| {
+        view.draft.pool = Some(crate::protocol::CredentialRef::new("main").unwrap());
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Retry mapping"), "{rows:#?}");
+    shell.key(Key::Char('r'));
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("r on Confirm maps the project again");
+    };
+    let IntakeJob::Query(IntakeQuery::StartOnboarding { path, pool, .. }) = *job else {
+        panic!("a retry starts the onboarding again");
+    };
+    assert_eq!(path, "/Users/owner/Projects/notes");
+    assert_eq!(pool.as_str(), "main");
+}
+
+#[test]
+fn a_saved_setup_opens_with_its_saved_values_and_saves_changes() {
+    let (mut shell, _) = review_with(|view| {
+        view.finished = true;
+        view.graph = Step::Running;
+        view.mapping = Step::Waiting;
+        view.draft.about = "Keeps notes in the terminal.".into();
+        view.missing = vec!["platforms".into()];
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "This project is set up."), "{rows:#?}");
+    assert!(shows(&rows, "Keeps notes in the terminal."), "{rows:#?}");
+    assert!(!shows(&rows, "Mapping failed"), "{rows:#?}");
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Save changes"), "{rows:#?}");
+    assert!(!shows(&rows, "Retry mapping"), "{rows:#?}");
 }
 
 #[test]

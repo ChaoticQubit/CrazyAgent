@@ -234,18 +234,21 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 }
 
 /// Claims the oldest waiting step: a graph build, or a mapping once its
-/// graph step has finished either way. Marks it running under `claimer`
-/// and counts the attempt. Returns `None` when nothing waits.
+/// graph step has finished either way and while the owner has not saved
+/// the setup. Marks it running under `claimer` and counts the attempt.
+/// Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding
+            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed')))
+                OR (mapping_state='waiting' AND graph_state IN ('done','failed')
+                    AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
+                        AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",
-            [],
+            [crate::project_setup::FIRST_REVISION as i64],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -454,7 +457,7 @@ fn mapping_step(
         #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(reason), base),
+        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
         #[cfg(unix)]

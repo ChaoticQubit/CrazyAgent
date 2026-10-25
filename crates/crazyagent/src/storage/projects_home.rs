@@ -30,10 +30,10 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Lists every set-up project, none left out, so the trash guard and the
-/// Found list see them all: each project's folder and whether onboarding
-/// is still under way (Ready once its graph and mapping steps are done, or
-/// at once with no onboarding row). The engine's snapshot bound caps how
-/// many projects exist.
+/// Found list see them all: each project's folder and whether onboarding is
+/// still under way. An onboarded project is Ready once the owner saved its
+/// setup or both its graph and mapping steps are done; a project made with
+/// New Project has no onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
     let mut statement = tx
@@ -57,9 +57,10 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
         let (body, graph, mapping) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
-        let onboarding = graph
-            .zip(mapping)
-            .is_some_and(|(graph, mapping)| graph != done || mapping != done);
+        let onboarding = !stored.saved()
+            && graph
+                .zip(mapping)
+                .is_some_and(|(graph, mapping)| graph != done || mapping != done);
         projects.push(Registered {
             folder: stored.project_folder(),
             project_id: stored.project_id,
