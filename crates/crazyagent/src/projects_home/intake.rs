@@ -89,14 +89,22 @@ impl MovePlan {
     }
 
     /// Moves each folder in turn, as AddPlan's Move does. When one fails,
-    /// the folders already moved are moved back. Output: Ok when all moved,
-    /// the first failure's code when everything went back, or
+    /// the folders already moved are moved back; a folder whose checked copy
+    /// landed but whose source could not be fully deleted is first made whole
+    /// from that copy. Output: Ok when all moved, the first failure's code when
+    /// everything went back (`home_move_failed` for a folder made whole), or
     /// `home_move_partial` when a folder could not be moved back.
     pub fn run(self) -> Result<(), EngineError> {
         let mut moved: Vec<&String> = Vec::with_capacity(self.folders.len());
         for name in &self.folders {
             let step = AddPlan::new(self.from.join(name), self.to.join(name), AddMode::Move);
-            if let Err(failure) = step.run() {
+            if let Err(mut failure) = step.run() {
+                if failure.0 == "home_move_source_left" {
+                    failure = match restore(&self.to.join(name), &self.from.join(name)) {
+                        Ok(()) => refused("home_move_failed"),
+                        Err(_) => refused("home_move_partial"),
+                    };
+                }
                 for back in moved.into_iter().rev() {
                     let undo =
                         AddPlan::new(self.to.join(back), self.from.join(back), AddMode::Move);
@@ -123,6 +131,77 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
     make_writable(source)
         .and_then(|()| fs::remove_dir_all(source))
         .map_err(|_| refused("home_move_source_left"))
+}
+
+/// Makes a source whole again after `move_by_copy` landed its checked copy
+/// but could not delete all of the source, then removes the copy.
+/// Input: the complete copy and what is left of the source. Output: Ok once
+/// the source matches the copy again and the copy is gone; otherwise the code
+/// of the step that failed, with nothing taken from the source.
+fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
+    fill_tree(copy, source)?;
+    verify_tree(copy, source)?;
+    make_writable(copy)
+        .and_then(|()| fs::remove_dir_all(copy))
+        .map_err(|_| refused("home_move_partial"))
+}
+
+/// Copies back every entry of `copy` missing from `target` without following
+/// links, then gives each folder of `target` its counterpart's permissions.
+/// Input: a complete copy and a partly deleted folder it was copied from.
+/// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
+/// are kept for `verify_tree` to compare.
+fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
+    let failed = |_| refused("home_copy_failed");
+    if fs::symlink_metadata(target).is_err() {
+        return copy_tree(copy, target);
+    }
+    let root = fs::symlink_metadata(copy).map_err(failed)?;
+    let mut folders = vec![(target.to_path_buf(), root)];
+    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize)];
+    let mut entries = 0u64;
+    while let Some((from, to, depth)) = stack.pop() {
+        for entry in fs::read_dir(&from).map_err(failed)? {
+            entries += 1;
+            if entries > ENTRIES_MAX {
+                return Err(refused("home_copy_too_large"));
+            }
+            let entry = entry.map_err(failed)?;
+            let path = entry.path();
+            let kept = to.join(entry.file_name());
+            let metadata = fs::symlink_metadata(&path).map_err(failed)?;
+            let kind = metadata.file_type();
+            match fs::symlink_metadata(&kept) {
+                Err(_) if kind.is_symlink() => {
+                    let link = fs::read_link(&path).map_err(failed)?;
+                    copy_link(&path, link, &kept).map_err(failed)?;
+                }
+                Err(_) if kind.is_dir() => copy_tree(&path, &kept)?,
+                Err(_) => {
+                    fs::copy(&path, &kept).map_err(failed)?;
+                    fs::set_permissions(&kept, metadata.permissions()).map_err(failed)?;
+                }
+                Ok(existing)
+                    if kind.is_dir() && existing.is_dir() && !existing.file_type().is_symlink() =>
+                {
+                    if depth + 1 > DEPTH_MAX {
+                        return Err(refused("home_copy_too_large"));
+                    }
+                    folders.push((kept.clone(), metadata));
+                    stack.push((path, kept, depth + 1));
+                }
+                Ok(_) => {}
+            }
+        }
+    }
+    for (folder, wanted) in folders.into_iter().rev() {
+        let now = fs::symlink_metadata(&folder).map_err(failed)?;
+        if permission_bits(&now) != permission_bits(&wanted) {
+            fs::set_permissions(&folder, wanted.permissions()).map_err(failed)?;
+        }
+    }
+    assert!(entries <= ENTRIES_MAX);
+    Ok(())
 }
 
 fn copy_into(source: &Path, destination: &Path, verify: bool) -> Result<(), EngineError> {
