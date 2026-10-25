@@ -1,7 +1,7 @@
 use super::*;
 use crate::projects_home::{
-    self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeWatch, MovePlan, ProjectsHome,
-    Registered,
+    self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch, MovePlan,
+    ProjectsHome, Registered,
 };
 use std::path::PathBuf;
 
@@ -263,36 +263,43 @@ pub(super) fn execute(
 /// Records the result of disk work the owner transport carried out for
 /// AddExistingFolder or MoveProjectsHome with `move_projects`.
 /// Input: the transaction, database path, the mutation's command and the
-/// transport's result. Output: Rejected with the transport's refusal code;
-/// for an add, Applied once the folder is confirmed in the home (and, for
-/// Move, gone from its old place); for a home move, Applied once the new home
-/// is saved and set-up projects point at their moved folders.
+/// transport's effect. Output: Rejected with the transport's refusal code;
+/// for an add, Applied once the real folder the plan named is confirmed in the
+/// home (and, for Move, gone from its old place); for a home move, Applied once
+/// the new home is saved and set-up projects point at their moved folders.
 pub(super) fn record(
     tx: &Transaction<'_>,
     path: &Path,
     command: &Command,
-    effect: &Result<(), String>,
+    effect: &HomeEffect,
 ) -> Result<Outcome, EngineError> {
     let Command::ProjectsHome { action } = command else {
         return Err(error("home_record_invalid"));
     };
-    if let Err(code) = effect {
-        return Ok(Outcome::Rejected { code: code.clone() });
-    }
+    let real = match effect {
+        Err(code) => return Ok(Outcome::Rejected { code: code.clone() }),
+        Ok(real) => real,
+    };
     let Some(saved) = home::load(tx)? else {
         return Ok(Outcome::Rejected {
             code: "projects_home_unset".into(),
         });
     };
     match action {
-        HomeAction::Added { source, mode } => Ok(match home::verify_added(&saved, source, *mode) {
-            Ok(()) => Outcome::Applied,
-            Err(e) => Outcome::Rejected { code: e.0 },
-        }),
+        HomeAction::Added { mode, .. } => {
+            let real = real
+                .as_deref()
+                .and_then(Path::to_str)
+                .ok_or_else(|| error("home_record_invalid"))?;
+            Ok(match home::verify_added(&saved, real, *mode) {
+                Ok(()) => Outcome::Applied,
+                Err(e) => Outcome::Rejected { code: e.0 },
+            })
+        }
         HomeAction::MoveHome {
             path: picked,
             move_projects: true,
-        } => {
+        } if real.is_none() => {
             let outcome = switch_home(tx, path, picked)?;
             if outcome == Outcome::Applied {
                 let next = home::load(tx)?.ok_or_else(|| error("projects_home_unset"))?;

@@ -98,6 +98,11 @@ impl HomeAction {
     }
 }
 
+/// What the owner transport's disk work for a projects home mutation gave:
+/// Ok(Some(real source)) once an add ran, Ok(None) once a home move ran, or
+/// Err with the refusal code of the plan or of the disk work.
+pub type HomeEffect = Result<Option<PathBuf>, String>;
+
 /// A project the engine has set up, as the projects home sees it.
 /// Input to `found`: the project, its name, its folder on disk and whether
 /// its onboarding is still running.
@@ -379,7 +384,8 @@ pub fn plan_move(
 }
 
 /// Confirms that an add the owner asked for actually landed in the home.
-/// Input: the canonical home, the source text and the mode. Output: Ok when
+/// Input: the canonical home, the real source `plan_add` resolved (never the
+/// owner's text, which may reach it through a link) and the mode. Output: Ok when
 /// the folder is in the home and, for Move, gone from its old place, or for
 /// Copy, still there; otherwise `home_add_unverified`.
 pub fn verify_added(home: &Path, source: &str, mode: AddMode) -> Result<(), EngineError> {

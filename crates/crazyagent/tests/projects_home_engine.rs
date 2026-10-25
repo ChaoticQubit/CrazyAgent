@@ -423,3 +423,54 @@ async fn the_engine_keeps_the_home_watches_it_and_records_each_add() {
 
     engine.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_added_through_a_link_is_recorded_at_its_real_name() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let code = place.join("code");
+    let links = place.join("links");
+    for folder in [&home, &code, &links] {
+        fs::create_dir(folder).unwrap();
+    }
+    for name in ["moved", "copied"] {
+        fs::create_dir(code.join(name)).unwrap();
+        fs::write(code.join(name).join("main.rs"), name).unwrap();
+        std::os::unix::fs::symlink(code.join(name), links.join(format!("{name}-link"))).unwrap();
+    }
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    for (name, mode) in [("moved", AddMode::Move), ("copied", AddMode::Copy)] {
+        let source = format!("{}/", links.join(format!("{name}-link")).to_str().unwrap());
+        assert_eq!(
+            owner
+                .apply(OwnerMutation::AddExistingFolder { source, mode })
+                .await,
+            OwnerResult::Applied,
+            "{name}"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(name).join("main.rs")).unwrap(),
+            name
+        );
+        assert!(fs::symlink_metadata(home.join(format!("{name}-link"))).is_err());
+    }
+    assert!(fs::symlink_metadata(code.join("moved")).is_err());
+    assert_eq!(
+        fs::read_to_string(code.join("copied").join("main.rs")).unwrap(),
+        "copied"
+    );
+    engine.stop().await;
+}

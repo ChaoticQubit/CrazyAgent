@@ -1,6 +1,6 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
-use crate::projects_home::{AddMode, AddPlan, MovePlan, folder_size};
+use crate::projects_home::{AddMode, AddPlan, HomeEffect, MovePlan, folder_size};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
@@ -8,7 +8,7 @@ const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
 
 enum Step {
     Reply(Box<OwnerResponse>),
-    Record(Result<(), String>),
+    Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
 }
@@ -30,8 +30,11 @@ impl Work {
 
     fn run(self) -> Step {
         match self {
-            Self::Add(plan) => Step::Record(plan.run().map_err(|e| e.0)),
-            Self::Move(plan) => Step::Record(plan.run().map_err(|e| e.0)),
+            Self::Add(plan) => {
+                let source = plan.source().to_path_buf();
+                Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
+            }
+            Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
         }
     }

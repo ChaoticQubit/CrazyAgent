@@ -137,7 +137,7 @@ pub(crate) enum Job {
     HomeRecord(
         Admission,
         Box<OwnerRequest>,
-        Result<(), String>,
+        crate::projects_home::HomeEffect,
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     SetupPlan(
@@ -1880,7 +1880,7 @@ fn owner_apply(
 /// home, or a New Project folder built in its staging folder.
 #[derive(Clone, Copy)]
 enum Effect<'a> {
-    Home(&'a Result<(), String>),
+    Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
 }
 
