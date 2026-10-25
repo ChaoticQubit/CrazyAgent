@@ -2071,7 +2071,7 @@ fn publish_rcli_profile(
     }
     let count: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM configured_master_profiles",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM configured_master_profiles p JOIN master_sessions s ON s.id=p.session WHERE s.phase='configured' LIMIT 65)",
             [],
             |row| row.get(0),
         )
@@ -2792,7 +2792,7 @@ fn execute(
         }
         let count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM master_sessions LIMIT 65)",
+                "SELECT COUNT(*) FROM (SELECT 1 FROM master_sessions WHERE phase='configured' LIMIT 65)",
                 [],
                 |row| row.get(0),
             )
@@ -3223,6 +3223,9 @@ pub(super) fn read(
 
 #[cfg(all(test, unix))]
 mod brief_tests;
+
+#[cfg(all(test, unix))]
+mod capacity_tests;
 
 #[cfg(all(test, unix))]
 mod rcli_configured_tests {
@@ -3871,6 +3874,95 @@ fallback_allowed = false
         drop(db);
         assert_eq!(case.snapshot(), before);
         assert_eq!(before.counts, [0; 6]);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_profiles_of_closed_sessions_leave_room_for_a_new_registration() {
+        let case = Fixture::new(true).await;
+        let project = case.session.project_id.clone();
+        let mut session = case.session.session_id.clone();
+        for cycle in 0..=crate::master_session::SESSIONS_MAX {
+            let registered = case
+                .runtime(MasterRuntimeCommand::RegisterRcliProfile {
+                    host: case.started.host.clone(),
+                    project_id: project.clone(),
+                    session_id: session.clone(),
+                    configured_home: case.home.clone(),
+                })
+                .await;
+            match registered {
+                Ok(MasterRuntimeResult::ConfiguredProfile(_)) => {}
+                Ok(_) => panic!("register {cycle}: another runtime result"),
+                Err(failure) => panic!("register {cycle}: {}", failure.0),
+            }
+            owner_apply(
+                &case.storage,
+                &case.started,
+                &format!("close-configured-{cycle}"),
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Close {
+                        project_id: project.clone(),
+                        session_id: session.clone(),
+                    },
+                },
+            )
+            .await;
+            let basis = owner_read(
+                &case.storage,
+                &case.started,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 1,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(
+                &case.storage,
+                &case.started,
+                &format!("open-configured-{cycle}"),
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Open {
+                        project_id: project.clone(),
+                        expected_config_id: basis.config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(case.session.selection.clone()),
+                    },
+                },
+            )
+            .await;
+            let state = owner_read(
+                &case.storage,
+                &case.started,
+                OwnerRead::ProjectMaster {
+                    project_id: project.clone(),
+                },
+            )
+            .await;
+            let OwnerData::ProjectMaster {
+                session: Some(opened),
+            } = state.data
+            else {
+                panic!("actual reopened master session missing");
+            };
+            assert_ne!(opened.session_id, session);
+            session = opened.session_id;
+        }
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let registrations: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM configured_master_profiles",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(registrations > crate::master_session::SESSIONS_MAX as i64);
+        drop(tx);
         case.close().await;
     }
 
