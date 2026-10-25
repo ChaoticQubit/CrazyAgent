@@ -1,11 +1,12 @@
 import type { HarnessEntry } from "../../api";
 import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
-import type { PoolChoice, ResearchKind, TeamPlan } from "../../api-projects";
+import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
   HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits, poolName,
   removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes, totalAgents,
 } from "./wizard";
+import type { TeamDraft } from "./wizard";
 
 export const RESEARCH_LABELS: Record<ResearchKind, string> = {
   market_research: "Market research",
@@ -53,11 +54,11 @@ function Switch({ id, checked, fixed, label, onChange }: { id: string; checked: 
  * Inputs: the team, the harness catalog (null while not ready), the chosen pool, research
  * kinds and a change handler. Output: the editor; it never saves on its own. */
 export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }: {
-  team: TeamPlan;
+  team: TeamDraft;
   harnesses: HarnessEntry[] | null;
   pool: PoolChoice | null;
   research: ResearchKind[];
-  onChange: (team: TeamPlan) => void;
+  onChange: (team: TeamDraft) => void;
   prefix: string;
 }) {
   const errors = teamErrors(team, harnesses);
