@@ -135,16 +135,29 @@ export interface NeedRow {
 }
 
 /** Lists what needs the owner across projects, for the Needs you strip: accounts that are not
- * signed in, research waiting for a pool, then suggested memories grouped by project. Inputs:
- * the accounts read, the projects, each project's card activity and the suggestions read.
- * Output: the first three rows, every row and the total. */
+ * signed in (one row each, with Sign in again opening that account's sign-in; accounts sharing
+ * a name and provider fold into one row that opens Accounts), research waiting for a pool, then
+ * suggested memories grouped by project. Inputs: the accounts read, the projects, each
+ * project's card activity and the suggestions read. Output: the first three rows, every row
+ * and the total. */
 export function needsYou(accounts: Loaded<AccountView[]>, projects: ProjectRow[] = [], activity: Map<string, CardActivity> = new Map(),
   suggestions: Loaded<Suggestion[]> = { kind: "loading" }): { rows: NeedRow[]; all: NeedRow[]; total: number } {
   const all: NeedRow[] = [];
+  const unsigned = new Map<string, AccountView[]>();
   for (const account of accounts.kind === "ok" ? accounts.value : []) {
     if (account.status !== "not_signed_in") continue;
-    all.push({ key: `account-${account.id}`, icon: "circle-alert", project: null, text: `${account.name} isn't signed in.`,
-      action: "Sign in again", href: formatRoute({ name: "settings", tab: "accounts" }) });
+    const same = `${account.provider}\n${account.name}`;
+    unsigned.set(same, [...unsigned.get(same) ?? [], account]);
+  }
+  for (const [first, ...rest] of unsigned.values()) {
+    const row = { key: `account-${first!.id}`, icon: "circle-alert" as const, project: null };
+    if (rest.length === 0) {
+      all.push({ ...row, text: `${first!.name} isn't signed in.`, action: "Sign in again",
+        href: formatRoute({ name: "settings", tab: "accounts", action: "sign_in", account: first!.id }) });
+    } else {
+      all.push({ ...row, text: `${rest.length + 1} ${first!.provider_name} accounts named ${first!.name} aren't signed in.`,
+        action: "Open accounts", href: formatRoute({ name: "settings", tab: "accounts" }) });
+    }
   }
   for (const project of projects) {
     const work = activity.get(project.id);
