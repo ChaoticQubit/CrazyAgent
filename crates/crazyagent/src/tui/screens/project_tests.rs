@@ -160,7 +160,7 @@ async fn send(screen: &mut ProjectScreen, controller: &mut OwnerController, quer
 async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-project-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let sources = tempfile::tempdir().unwrap();
@@ -694,7 +694,7 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
 async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-agents-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);

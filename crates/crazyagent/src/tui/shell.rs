@@ -1078,7 +1078,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::Builder::new()
             .prefix("ca-hh-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let codex = root.path().join("codex");
         std::fs::write(&codex, "#!/bin/sh\n").unwrap();

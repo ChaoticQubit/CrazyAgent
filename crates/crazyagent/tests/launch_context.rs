@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
@@ -41,7 +41,7 @@ impl Case {
     async fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-lctx-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -59,7 +59,7 @@ impl Case {
         .unwrap();
         let home = tempfile::Builder::new()
             .prefix("ca-lctx-home-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let case = Self {
             root,

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 fn registered_cat_fixture_reports_actual_exit_and_stderr() {
     let root = tempfile::Builder::new()
         .prefix("ca-claude-copied-executable-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let home = root.path().join("home");

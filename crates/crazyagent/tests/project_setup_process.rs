@@ -67,7 +67,7 @@ async fn owner(root: &Path) -> OwnerController {
 async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_jobs() {
     let root = tempfile::Builder::new()
         .prefix("ca-setup-cli-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
@@ -85,7 +85,7 @@ async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_job
 
     let home = tempfile::Builder::new()
         .prefix("ca-setup-cli-home-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let home_path = home.path().canonicalize().unwrap();
     let engine = Engine::start(root.path()).await;

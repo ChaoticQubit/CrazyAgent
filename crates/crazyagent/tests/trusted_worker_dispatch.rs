@@ -61,7 +61,7 @@ where
 {
     let root = tempfile::Builder::new()
         .prefix("ca-ta-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     eprintln!("trusted-runner-auth root={}", root.path().display());

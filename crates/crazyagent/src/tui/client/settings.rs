@@ -922,7 +922,7 @@ mod tests {
     async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
         let root = tempfile::Builder::new()
             .prefix("ca-tset-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -1056,7 +1056,7 @@ mod tests {
     async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
         let root = tempfile::Builder::new()
             .prefix("ca-tplug-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -1289,7 +1289,7 @@ mod tests {
         {
             let root = tempfile::Builder::new()
                 .prefix("ca-tlost-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let (mut service, _stop) = engine(root.path()).await;

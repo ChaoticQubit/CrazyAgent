@@ -79,7 +79,7 @@ fn reference(value: &str) -> CredentialRef {
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-custody-db-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     root

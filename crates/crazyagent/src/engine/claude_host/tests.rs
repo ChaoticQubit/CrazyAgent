@@ -334,7 +334,7 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
     let reference = |value: &str| CredentialRef::new(value).unwrap();
     let root = tempfile::Builder::new()
         .prefix("ca-claude-master-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let database = root.path().join("engine.db");

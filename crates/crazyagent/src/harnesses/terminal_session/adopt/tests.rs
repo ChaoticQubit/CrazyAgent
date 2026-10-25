@@ -19,7 +19,7 @@ impl Fixture {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-adopt-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let tmux = installed(root.path()).expect("tmux must be installed on this machine");

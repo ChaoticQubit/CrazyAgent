@@ -719,7 +719,7 @@ mod lost_engine {
     async fn a_check_against_a_stopped_engine_shows_the_lost_connection_and_recovers() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacc-lost-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = crate::tui::test_home::engine_config();

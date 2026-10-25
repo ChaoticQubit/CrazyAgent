@@ -12,7 +12,7 @@ pub(in crate::tui) async fn projects_home(
 ) -> tempfile::TempDir {
     let home = tempfile::Builder::new()
         .prefix("ca-tui-home-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = std::fs::canonicalize(home.path()).unwrap();

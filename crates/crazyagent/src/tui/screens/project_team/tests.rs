@@ -550,7 +550,7 @@ fn titles_and_plain_reasons() {
 async fn a_real_engine_team_draws_and_keeps_warm() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-team-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
@@ -854,7 +854,7 @@ fn a_team_without_a_runnable_sub_agent_opens_no_composer() {
 async fn a_real_engine_takes_a_task_from_the_owner() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-team-task-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);

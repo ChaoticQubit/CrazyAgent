@@ -68,7 +68,7 @@ mod tests {
     async fn agent_controls_reach_the_engine_and_touch_only_one_agent() {
         let root = tempfile::Builder::new()
             .prefix("ca-cagent-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let home = root.path().canonicalize().unwrap();

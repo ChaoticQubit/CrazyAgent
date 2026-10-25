@@ -54,7 +54,7 @@ fn request(command: Command, sequence: u64, revision: u64) -> WireRequest {
 
 #[tokio::test]
 async fn pool_role_scope_is_enforced_before_plan_persistence() {
-    let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+    let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = directory.path().join("global.toml");
     std::fs::write(&global, CATALOG).unwrap();
@@ -204,7 +204,7 @@ async fn create_task(engine: &Engine, context: ExecutionContext) {
 }
 
 async fn rejected_pool(project: &str, account: &str, pool: &str, catalog: &str, code: &str) {
-    let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+    let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = directory.path().join("global.toml");
     std::fs::write(&global, catalog).unwrap();
@@ -330,7 +330,7 @@ fn absent_pool_ref_retains_the_existing_wire_shape() {
 
 #[tokio::test]
 async fn pool_policy_is_pinned_across_reload_restart_and_rechecked_before_routing() {
-    let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+    let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = directory.path().join("global.toml");
     let project = directory.path().join("project.toml");
@@ -482,7 +482,7 @@ async fn pool_policy_is_pinned_across_reload_restart_and_rechecked_before_routin
 
 #[tokio::test]
 async fn reservation_pins_exact_worker_connection() {
-    let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+    let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = directory.path().join("global.toml");
     std::fs::write(&global, CATALOG).unwrap();
@@ -567,7 +567,7 @@ async fn reservation_pins_exact_worker_connection() {
 async fn worker_binding_fixture(
     catalog: &str,
 ) -> (tempfile::TempDir, Engine, EffectiveConfig, WorkPlan) {
-    let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+    let directory = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = directory.path().join("global.toml");
     std::fs::write(&global, catalog).unwrap();

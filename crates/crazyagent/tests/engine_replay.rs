@@ -665,7 +665,7 @@ mod project_creation {
         };
         let create = owner_creation(&spec)
             .expect("closed owner CreateProject must deserialize before engine execution");
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut service = start_engine(root.path()).await;
         let old = desktop(root.path()).await;

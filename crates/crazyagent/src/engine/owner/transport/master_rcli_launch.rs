@@ -308,7 +308,7 @@ fallback_allowed = false
             assert!(config.contains(&format!("timeout_ms = {timeout_ms}\n")));
             let root = tempfile::Builder::new()
                 .prefix("ca-mrl-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let state = root.path().join("state");

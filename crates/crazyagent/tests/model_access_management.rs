@@ -41,7 +41,7 @@ fn model_access_edit_has_an_owner_wire_contract() {
 async fn explicit_host_sources_publish_one_durable_edit() {
     let root = tempfile::Builder::new()
         .prefix("ca-ma259-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");
@@ -155,7 +155,7 @@ impl Fixture {
     async fn start(writable: bool, global_bytes: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-m259-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -1082,7 +1082,7 @@ fn wire_rejects_secret_fields_client_paths_and_oversized_metadata() {
 async fn writable_bootstrap_is_explicit_and_uses_the_existing_owner_api() {
     let root = tempfile::Builder::new()
         .prefix("ca-b259-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");
@@ -1157,7 +1157,7 @@ async fn writable_bootstrap_is_explicit_and_uses_the_existing_owner_api() {
 async fn owner_settings_lists_catalog_with_knowledge() {
     let root = tempfile::Builder::new()
         .prefix("ca-management-259-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");

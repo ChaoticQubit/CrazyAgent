@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
@@ -112,7 +112,7 @@ fn first_request(session: &mut Session, bodies: &Bodies) -> String {
 async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
     let root = tempfile::Builder::new()
         .prefix("ca-lctx-live-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let base = private_directory(root.path());
     let global = base.join("global.toml");
@@ -133,7 +133,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
         .unwrap();
     let home_root = tempfile::Builder::new()
         .prefix("ca-lctx-live-home-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let home = home_root.path().canonicalize().unwrap();
     applied(

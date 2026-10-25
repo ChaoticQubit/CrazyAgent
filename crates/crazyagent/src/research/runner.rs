@@ -2020,7 +2020,7 @@ mod tests {
     fn engine_root() -> EngineRoot {
         let temp = tempfile::Builder::new()
             .prefix("ca-research-lease-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let base = temp.path().canonicalize().unwrap();

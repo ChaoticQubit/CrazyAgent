@@ -31,7 +31,7 @@ async fn tui_adds_lists_and_deletes_global_memory_through_the_real_engine() {
 
     let root = tempfile::Builder::new()
         .prefix("ca-tui-mem-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);

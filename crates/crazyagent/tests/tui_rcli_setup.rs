@@ -540,7 +540,7 @@ async fn exercise(mode: &str) {
     let _slot = UI_SLOT.lock().await;
     let root = tempfile::Builder::new()
         .prefix("ca-r953-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     private_file(&root.path().join("global.toml"), CATALOG.as_bytes());

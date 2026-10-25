@@ -208,7 +208,7 @@ fn assembled(root: &Path, session: &MasterSessionView, turn: &MasterTurnView) ->
 async fn current_project_brief_reaches_master_prompt_after_restart() {
     let root = tempfile::Builder::new()
         .prefix("ca-pb17-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let repository = root.path().join("repository");

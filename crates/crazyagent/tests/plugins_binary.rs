@@ -94,7 +94,7 @@ async fn controller(root: &Path) -> OwnerController {
 async fn skills_and_approved_servers_survive_a_real_engine_binary_restart() {
     let root = tempfile::Builder::new()
         .prefix("ca-plug-bin-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let path = root.path().to_path_buf();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
