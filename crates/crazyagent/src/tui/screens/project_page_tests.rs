@@ -105,6 +105,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("create");
                     connection.creation(*job).unwrap();
                 }
+                Request::Intake(job) => {
+                    sent.push("intake");
+                    connection.intake(*job).unwrap();
+                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
@@ -824,7 +828,9 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
         .find(|scope| scope.pool.as_str() == "pool-a")
         .expect("pool Main has a scope");
     assert!(
-        main.projects.iter().any(|id| id.as_str() == tidepool.as_str()),
+        main.projects
+            .iter()
+            .any(|id| id.as_str() == tidepool.as_str()),
         "the engine assigned pool Main to the project: {scopes:?}"
     );
     assert_eq!(kept_draft(), None, "a made project keeps no draft");

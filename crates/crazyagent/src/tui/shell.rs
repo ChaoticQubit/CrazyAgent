@@ -537,6 +537,7 @@ impl Shell {
             }
             _ => {}
         }
+        super::screens::new_project_page::carry_background(&arrival, &mut self.ctx);
         let count = self.stack.len();
         let mut top_flow = Flow::Handled;
         for index in (0..count).rev() {
