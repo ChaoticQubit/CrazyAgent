@@ -8,6 +8,7 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
+import { useUpdateWatch } from "./screens/settings/updates";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
@@ -108,5 +109,6 @@ export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
+  useUpdateWatch(session.showToast);
   return <AppView session={session} route={route} />;
 }
