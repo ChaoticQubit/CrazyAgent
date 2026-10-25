@@ -311,9 +311,10 @@ pub enum LinuxBackend {
 
 /// The Linux boundary for one project agent. It keeps the [`ProjectSandbox`] policy on both
 /// backends: the project folder is read-only, its existing entries are writable except the
-/// protected paths and symbolic links, and the agent's home, temp dir and worktrees are
-/// writable. Landlock limits outbound TCP to the model endpoint ports; bubblewrap cannot, so
-/// a tools-off agent needs Landlock.
+/// protected paths and symbolic links, or for a confined agent only its own worktree with that
+/// worktree's git admin folder and the object store, and the agent's home, temp dir and
+/// worktrees are writable. Landlock limits outbound TCP to the model endpoint ports;
+/// bubblewrap cannot, so a tools-off agent needs Landlock.
 #[derive(Debug)]
 pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
@@ -470,17 +471,26 @@ impl Grants {
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         let protected = sandbox.protected_paths();
         let mut write = Vec::new();
-        writable_children(project, &[&git, &state], &protected, &mut write)?;
-        for folder in [&git, &state] {
-            if fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()) {
-                writable_children(folder, &[], &protected, &mut write)?;
+        for root in sandbox.writable_roots() {
+            if root != project {
+                write.push(root.clone());
+                continue;
+            }
+            writable_children(project, &[&git, &state], &protected, &mut write)?;
+            for folder in [&git, &state] {
+                if fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()) {
+                    writable_children(folder, &[], &protected, &mut write)?;
+                }
             }
         }
-        write.push(sandbox.agent_home().to_path_buf());
-        write.push(sandbox.agent_tmp().to_path_buf());
-        write.extend(sandbox.worktrees.iter().cloned());
         let mut read = vec![project.to_path_buf()];
-        read.extend(sandbox.read_roots().iter().cloned());
+        read.extend(
+            sandbox
+                .read_roots()
+                .iter()
+                .filter(|root| *root != project)
+                .cloned(),
+        );
         if read.len() + write.len() > GRANTS_MAX {
             return Err(invalid("project folder has too many entries to grant"));
         }

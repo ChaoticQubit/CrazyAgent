@@ -24,6 +24,7 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
+const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
@@ -405,6 +406,17 @@ pub struct ProjectSandbox {
     network: SandboxNetwork,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
+    checkout: Option<Checkout>,
+}
+
+/// The one git worktree a confined agent writes in place of the whole project folder,
+/// with the two parts of the project repository its commits need: the worktree's own
+/// admin folder under `.git/worktrees` and the shared object store.
+#[derive(Debug, Clone)]
+struct Checkout {
+    worktree: PathBuf,
+    admin: PathBuf,
+    objects: PathBuf,
 }
 
 impl ProjectSandbox {
@@ -439,6 +451,7 @@ impl ProjectSandbox {
             network,
             owner_home: owner,
             engine_secrets: Vec::new(),
+            checkout: None,
         })
     }
 
@@ -481,6 +494,60 @@ impl ProjectSandbox {
         granted_root(worktree, &owner_home()?, &self.secret_paths())?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
+        Ok(self)
+    }
+
+    /// Confines the agent's writes to its own git worktree of the project: the worktree,
+    /// its admin folder in `.git/worktrees` and the shared object store, beside its home,
+    /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
+    /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
+    /// name each other. Output: the confined sandbox, or `Invalid`.
+    pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.checkout.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        if !clean_absolute(worktree)
+            || worktree.parent() != Some(worktrees.as_path())
+            || canonical(worktree)? != worktree
+        {
+            return Err(invalid(
+                "the worktree must be a canonical folder in worktrees/",
+            ));
+        }
+        let git = self.project_root.join(".git");
+        let admin = canonical(&worktree.join(git_link(&worktree.join(".git"), "gitdir: ")?))?;
+        if !clean_absolute(&admin) || admin.parent() != Some(git.join("worktrees").as_path()) {
+            return Err(invalid(
+                "the worktree's git folder must sit in .git/worktrees",
+            ));
+        }
+        let back = canonical(&admin.join(git_link(&admin.join("gitdir"), "")?))?;
+        if back != worktree.join(".git") {
+            return Err(invalid("the worktree's git folder names another worktree"));
+        }
+        let objects = git.join("objects");
+        if !objects.is_dir() || canonical(&objects)? != objects {
+            return Err(invalid("the project's git objects must be a plain folder"));
+        }
+        let secrets = self.secret_paths();
+        for root in [worktree, admin.as_path(), objects.as_path()] {
+            clear_of_secrets(root, &secrets)?;
+        }
+        assert!(
+            [worktree, admin.as_path(), objects.as_path()]
+                .iter()
+                .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
+        );
+        self.read_roots.push(self.project_root.clone());
+        self.checkout = Some(Checkout {
+            worktree: worktree.to_path_buf(),
+            admin,
+            objects,
+        });
         Ok(self)
     }
 
@@ -535,11 +602,17 @@ impl ProjectSandbox {
         ]
     }
 
-    /// Every folder this sandbox lets the agent write: the project folder, its own
-    /// home and temp dirs, then its worktrees.
+    /// Every folder this sandbox lets the agent write: the project folder, or for a
+    /// confined agent its worktree, that worktree's git admin folder and the git object
+    /// store, then its own home and temp dirs, then its extra worktrees.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        [&self.project_root, &self.agent_home, &self.agent_tmp]
+        let project: Vec<&PathBuf> = match &self.checkout {
+            Some(checkout) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
+            None => vec![&self.project_root],
+        };
+        project
             .into_iter()
+            .chain([&self.agent_home, &self.agent_tmp])
             .chain(self.worktrees.iter())
     }
 
@@ -599,6 +672,9 @@ impl ProjectSandbox {
             "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
+        if let Some(checkout) = &self.checkout {
+            text.push_str(&checkout.object_denies());
+        }
         text.push_str(
             "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
@@ -885,6 +961,48 @@ impl Sandbox for InstalledSandbox {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         InstalledSandbox::wrap(self, harness)
     }
+}
+
+impl Checkout {
+    /// The Seatbelt rules that let a confined agent add git objects but never change the
+    /// ones the owner and the other agents share: no write in `info/` or `pack/`, no move
+    /// of the store or a fan-out folder, and no rewrite, removal, replacement or hard link
+    /// of an object file. Git still creates new objects by link or rename. Seatbelt regexes
+    /// take no `{n}` counts, so the hex digits repeat. Input: the checkout. Output: the
+    /// rule text.
+    fn object_denies(&self) -> String {
+        const HEX: &str = "[0-9a-fA-F]";
+        let objects = self.objects.display();
+        let pattern = seatbelt_pattern(&self.objects);
+        let text = format!(
+            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n"
+        );
+        assert!(text.matches("(regex #\"^/").count() == 2);
+        text
+    }
+}
+
+/// Reads one git link file the engine's own `git worktree add` wrote: a plain file of at
+/// most 2 KiB holding `prefix`, one absolute or relative path and a newline. Input: the
+/// file and its prefix. Output: the path text, or `Invalid` for any other file.
+fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
+    use std::io::Read;
+    let refused = || invalid("the worktree's git link is not a plain git link file");
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > GIT_LINK_BYTES_MAX {
+        return Err(refused());
+    }
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(GIT_LINK_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| refused())?;
+    let target = text
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|target| !target.is_empty() && !target.contains('\n'))
+        .ok_or_else(refused)?;
+    Ok(target.to_owned())
 }
 
 /// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.

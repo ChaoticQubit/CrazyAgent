@@ -624,6 +624,8 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
+        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
