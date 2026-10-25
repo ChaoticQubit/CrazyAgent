@@ -57,6 +57,10 @@ test("step 2 lists catalog methods in order with Recommended first, and ChatGPT 
   assert.equal(single.length, 1);
   assert.equal(single[0].recommended, false);
   for (const tile of ["openai", "anthropic", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile]);
+  assert.match(TILE_LINES.openai_compatible, /OpenAI API/);
+  assert.match(TILE_LINES.local, /Ollama/);
+  const claudeKey = methodOptions(catalog[1]).find((option) => option.entry.method === "api_key");
+  assert.deepEqual([claudeKey.recommended, claudeKey.native], [false, undefined]);
 });
 
 const keyed = (url) => ({ method: "api_key", label: "Use an API key", url_preset: url, ...field("hidden", "required", "required") });
@@ -330,6 +334,9 @@ test("URL accounts show the base URL and model without routing identities; only 
   assert.match(endpoint, /id="account-model"/);
   assert.deepEqual([...endpoint.matchAll(/<input\b[^>]*type="password"[^>]*>/g)].map((match) => match[0].match(/id="([^"]+)"/)?.[1]), ["account-key"]);
   assert.match(endpoint, /API key \(optional\)/);
+  assert.match(endpoint, /<label for="account-url">Base URL<\/label>/);
+  assert.match(endpoint.match(/<input\b[^>]*id="account-url"[^>]*>/)?.[0] ?? "", /type="url"/);
+  assert.match(endpoint, /<label for="account-model">Model<\/label>/);
   for (const markup of [local, endpoint]) {
     assert.doesNotMatch(markup, routing);
     assert.doesNotMatch(markup, claims);
