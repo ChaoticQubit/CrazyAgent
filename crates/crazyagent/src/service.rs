@@ -16,6 +16,7 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
 const SCHTASKS: &str = "schtasks";
+const WINDOWS_SHELL: &str = r"%SystemRoot%\System32\cmd.exe";
 const SERVICE_PATH_EXTRAS: [&str; 6] = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -173,6 +174,14 @@ impl Service {
                 "service names and paths must be non-empty without control characters",
             ));
         }
+        if self.platform == Platform::Windows
+            && let Some(path) = required[1..].iter().find(|text| text.contains(['%', '"']))
+        {
+            return Err(failure(format!(
+                "{path}: the Windows logon task cannot pass a path containing % or \"; \
+                 move CrazyAgent or set CRAZYAGENT_HOME to a folder without them"
+            )));
+        }
         if !self.executable.is_absolute() || !self.root.is_absolute() {
             return Err(failure(
                 "the service executable and data folder must be absolute",
@@ -183,7 +192,8 @@ impl Service {
 
     /// The text of the service definition: a launchd property list, a systemd unit or a
     /// Task Scheduler XML document. It runs `<executable> engine --home <root>`, appends
-    /// output to `<root>/logs/engine.log` (launchd, systemd) and restarts after a crash.
+    /// output to `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no
+    /// output redirection) and restarts after a crash.
     pub fn definition_text(&self) -> Result<String, ServiceError> {
         self.checked()?;
         let executable = self.executable.to_string_lossy();
@@ -264,10 +274,14 @@ WantedBy=default.target\n",
   <Triggers><LogonTrigger><Enabled>true</Enabled>{trigger_user}</LogonTrigger></Triggers>\r\n\
   <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n\
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure><Hidden>true</Hidden></Settings>\r\n\
-  <Actions Context=\"Author\"><Exec><Command>{executable}</Command><Arguments>engine --home {root}</Arguments></Exec></Actions>\r\n\
+  <Actions Context=\"Author\"><Exec><Command>{WINDOWS_SHELL}</Command><Arguments>{arguments}</Arguments></Exec></Actions>\r\n\
 </Task>\r\n",
-                    executable = xml(&executable),
-                    root = xml(&windows_quoted(&root)),
+                    arguments = xml(&format!(
+                        "/d /s /c \"{} engine --home {} >> {} 2>&1\"",
+                        windows_quoted(&executable),
+                        windows_quoted(&root),
+                        windows_quoted(&log),
+                    )),
                 )
             }
         };

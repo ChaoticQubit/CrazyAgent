@@ -115,7 +115,7 @@ WantedBy=default.target
 }
 
 #[test]
-fn windows_task_runs_at_logon_for_the_user_and_quotes_the_root() {
+fn windows_task_runs_at_logon_for_the_user_and_appends_output_to_the_log() {
     let mut windows = service(Platform::Windows);
     windows.executable = PathBuf::from(r"C:\Users\owner\AppData\Local\CrazyAgent\crazyagent.exe");
     windows.root = PathBuf::from(r"C:\Users\owner\AppData\Local\CrazyAgent\engine");
@@ -129,6 +129,8 @@ fn windows_task_runs_at_logon_for_the_user_and_quotes_the_root() {
     let text = windows.definition_text().unwrap();
     let executable = windows.executable.to_string_lossy();
     let root = windows.root.to_string_lossy();
+    let log = windows.root.join("logs").join("engine.log");
+    let log = log.to_string_lossy();
     assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"));
     for part in [
         "<LogonTrigger><Enabled>true</Enabled><UserId>HOST\\owner</UserId></LogonTrigger>"
@@ -136,8 +138,11 @@ fn windows_task_runs_at_logon_for_the_user_and_quotes_the_root() {
         "<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>".to_owned(),
         "<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>".to_owned(),
         "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>".to_owned(),
-        format!("<Command>{executable}</Command>"),
-        format!("<Arguments>engine --home &quot;{root}&quot;</Arguments>"),
+        r"<Command>%SystemRoot%\System32\cmd.exe</Command>".to_owned(),
+        format!(
+            "<Arguments>/d /s /c &quot;&quot;{executable}&quot; engine --home &quot;{root}&quot; \
+             &gt;&gt; &quot;{log}&quot; 2&gt;&amp;1&quot;</Arguments>"
+        ),
     ] {
         assert!(text.contains(&part), "{part}\n{text}");
     }
@@ -164,6 +169,13 @@ fn definitions_refuse_control_characters_and_relative_paths() {
     let mut no_path = service(Platform::Linux);
     no_path.path = OsString::new();
     assert!(no_path.definition_text().is_err());
+    for expanded in ["/c/Users/100%owner/engine", "/c/Users/\"owner\"/engine"] {
+        let mut windows = service(Platform::Windows);
+        windows.path = OsString::new();
+        windows.root = PathBuf::from(expanded);
+        let error = windows.definition_text().unwrap_err();
+        assert!(error.0.contains("CRAZYAGENT_HOME"), "{error}");
+    }
 }
 
 #[test]
