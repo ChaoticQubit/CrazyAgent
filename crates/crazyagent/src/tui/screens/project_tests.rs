@@ -1,6 +1,7 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    JobLog, PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
+    JobLog, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, memory_source, plain_problem,
+    research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, project_screen};
@@ -1395,5 +1396,134 @@ fn the_add_file_box_general_form_and_remove_question_draw_with_their_keys() {
     assert_eq!(
         drawn.help,
         [("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")]
+    );
+}
+
+#[tokio::test]
+async fn failed_and_empty_reads_settle_back_off_and_say_why() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-quiet-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    std::fs::write(sources.path().join("empty.md"), "").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("quiet-notes").unwrap();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Quiet notes".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Notes that load once.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![sources.path().join("empty.md").to_str().unwrap().into()],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+    let look = Look::plain();
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let start = 1_793_000_000_000;
+    assert_eq!(
+        settle(&mut screen, &mut controller, start).await,
+        ["setup", "jobs", "context", "memories"]
+    );
+
+    screen.read("context/documents/empty.md");
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 100).await,
+        ["item"],
+        "an empty file is read once"
+    );
+    let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
+    assert!(shown.contains("This file is empty."), "{shown}");
+    assert!(!shown.contains("Loading..."), "{shown}");
+
+    screen.read("context/documents/gone.md");
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 200).await,
+        ["item"],
+        "a missing file is asked for once"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("That file is already gone.")
+    );
+    screen.problem = None;
+    assert!(
+        settle(&mut screen, &mut controller, start + 200 + REFRESH_MS)
+            .await
+            .iter()
+            .all(|read| *read != "item"),
+        "a missing file is not asked for again"
+    );
+    assert_eq!(screen.problem, None);
+    let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
+    assert!(shown.contains("That file is already gone."), "{shown}");
+    assert!(!shown.contains("Loading..."), "{shown}");
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let later = start + 10 * REFRESH_MS;
+    screen.open(Tab::Context);
+    assert_eq!(
+        settle(&mut screen, &mut controller, later).await,
+        ["context"],
+        "a failed context read waits before it is sent again"
+    );
+    assert!(screen.problem.take().is_some(), "the failure is shown");
+    assert!(
+        settle(&mut screen, &mut controller, later + 10)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        settle(&mut screen, &mut controller, later + REFRESH_MS).await,
+        ["context"]
+    );
+
+    let mut fresh = ProjectScreen::new(project.clone(), "loading".into(), None);
+    assert_eq!(
+        settle(&mut fresh, &mut controller, later).await,
+        ["setup"],
+        "a failed setup read waits instead of starving every other read"
+    );
+    assert!(fresh.problem.is_some());
+    assert!(
+        settle(&mut fresh, &mut controller, later + 10)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        settle(&mut fresh, &mut controller, later + REFRESH_MS).await,
+        ["setup"]
     );
 }

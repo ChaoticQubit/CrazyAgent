@@ -494,6 +494,49 @@ fn a_command_line_reads_back_as_the_same_command() {
 }
 
 #[test]
+fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exact() {
+    let specs = [
+        stdio("/opt/My Tools/uvx", &["mcp-server-x"]),
+        stdio(
+            "/usr/bin/grep",
+            &[r"--pattern=\d+", "it's", "a b", "", r"C:\path", "'", r"\"],
+        ),
+        stdio(
+            "/opt/homebrew/bin/npx",
+            &["@modelcontextprotocol/server-github"],
+        ),
+    ];
+    for spec in specs {
+        let line = spec.runs();
+        assert_eq!(command_spec(&line), Ok(spec.clone()), "{line}");
+        let mut ctx = plugin_ctx(80, 24);
+        let mut screen = EditServer::new(server("odd", spec.clone(), ServerStatus::Approved));
+        screen.key(&Key::Enter, &mut ctx);
+        assert_eq!(ctx.queued(), 0, "no write for an unchanged {line}");
+        assert_eq!(ctx.message().unwrap().lead, "Nothing changed.");
+        assert_eq!(screen.target.error, None, "{line}");
+        for character in " --read-only".chars() {
+            screen.key(&Key::Char(character), &mut ctx);
+        }
+        screen.key(&Key::Enter, &mut ctx);
+        let ServerSpec::Stdio { command, mut args } = spec else {
+            panic!("stdio spec expected");
+        };
+        args.push("--read-only".into());
+        let wanted = ServerSpec::Stdio { command, args };
+        match ctx.next_request() {
+            Some(Request::Settings(job)) => match *job {
+                SettingsJob::Plugin(PluginChange::Update { spec, .. }) => {
+                    assert_eq!(spec, wanted, "{line}");
+                }
+                other => panic!("update expected, got {other:?}"),
+            },
+            other => panic!("settings request expected for {line}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
     let mut ctx = plugin_ctx(80, 24);
     let mut screen = EditServer::new(github_with_token());
