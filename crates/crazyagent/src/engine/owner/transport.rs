@@ -2315,6 +2315,8 @@ async fn observe_dispatch(
                     "-c",
                     "core.fsmonitor=false",
                     "-c",
+                    "core.pager=cat",
+                    "-c",
                     "protocol.allow=never",
                 ])
                 .arg("--git-dir")
