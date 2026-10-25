@@ -11,7 +11,6 @@ use crazyagent::engine::owner::{
 use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
-use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -889,9 +888,7 @@ fn native_project_id() -> Result<ProjectId, BridgeError> {
 
 fn native_random_id() -> Result<String, BridgeError> {
     let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|_| failure("project_identity_unavailable"))?;
+    getrandom::fill(&mut bytes).map_err(|_| failure("project_identity_unavailable"))?;
     let mut id = String::with_capacity(64);
     for byte in bytes {
         use std::fmt::Write;
@@ -1105,4 +1102,65 @@ fn bounded<T: Serialize>(value: T) -> Result<T, BridgeError> {
     assert!(!bytes.is_empty());
     assert!(bytes.len() <= PROJECTION_BYTES_MAX);
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_ids_are_64_hex_characters_and_differ() {
+        let first = native_random_id().unwrap();
+        let second = native_random_id().unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+        assert!(
+            native_project_id()
+                .unwrap()
+                .as_str()
+                .starts_with("project-")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn random_ids_need_no_dev_urandom_file_as_on_windows() {
+        use std::process::{Command, Stdio};
+        const NO_URANDOM: &str =
+            "(version 1)(allow default)(deny file-read* (literal \"/dev/urandom\"))";
+        let denied = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", NO_URANDOM, "/usr/bin/head", "-c", "1", "/dev/urandom"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            !denied.status.success(),
+            "the sandbox let /dev/urandom be read"
+        );
+        let child = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", NO_URANDOM])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "bridge::tests::random_ids_are_64_hex_characters_and_differ",
+                    "--test-threads=1",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
 }
