@@ -108,10 +108,10 @@ test("links render as safe anchors and the sources list holds each link once", (
 });
 
 test("control and bidi characters are shown as visible escapes", () => {
-  const markup = render("name‮txt.exe and \u0007bell");
+  const markup = render("name\u202etxt.exe and \u0007bell");
   assert.match(markup, /\\u202e/);
   assert.match(markup, /\\u0007/);
-  assert.doesNotMatch(markup, /[‮\u0007]/u);
+  assert.doesNotMatch(markup, /[\u202e\u0007]/u);
 });
 
 test("heading sections list every heading in order for saving one section", () => {
@@ -142,7 +142,7 @@ test("heading and list lines that never match parse in linear time", () => {
     const blocks = md.parseMarkdown(source);
     return { blocks, ms: performance.now() - started };
   };
-  for (const source of ["#" + " ".repeat(16000) + " ", "-" + " ".repeat(200000) + " ", "1." + "\t".repeat(200000) + " "]) {
+  for (const source of ["#" + " ".repeat(16000) + "\u2028", "-" + " ".repeat(200000) + "\u2028", "1." + "\t".repeat(200000) + "\u2029"]) {
     const { blocks, ms } = timed(source);
     assert.ok(ms < 1000, `${JSON.stringify(source.slice(0, 3))} took ${ms} ms`);
     assert.equal(blocks.length, 1);
