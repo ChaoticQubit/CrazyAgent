@@ -389,6 +389,21 @@ impl LifetimeCase {
         reply.fact
     }
 
+    fn interrupted(&self, fact: &NativeAuthFact) {
+        let after = self.snapshot();
+        assert!(after.fences.is_empty(), "{after:?}");
+        assert_eq!(after.facts.len(), 1);
+        let settled = &after.facts[0];
+        assert_eq!(
+            (&settled.operation_id, settled.generation),
+            (&fact.operation_id, fact.generation)
+        );
+        assert_eq!(
+            (settled.phase, settled.code.as_deref()),
+            (NativeAuthPhase::Failed, Some("native_auth_interrupted"))
+        );
+    }
+
     async fn revoke(&self, kind: OwnerClientKind, id: &str) {
         self.host
             .control(OwnerControl {
@@ -599,21 +614,17 @@ async fn native_auth_dispatch_lifetime_dropped_request_keeps_actual_child_and_ex
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_auth_dispatch_lifetime_invalidate_rolls_back_real_pending_retirement() {
+async fn native_auth_dispatch_lifetime_invalidate_rolls_back_retirement_and_releases_the_reaped_fence()
+ {
     lifetime_case(|case| async move {
         let (fact, mut checkpoint) = case.held("invalidate-before-commit").await;
-        let before = case.snapshot();
         let pid = case.retained_pid();
         case.host.invalidate_native_auth_dispatch().unwrap();
         case.host.invalidate_native_auth_dispatch().unwrap();
         checkpoint.release().unwrap();
         case.drain().await;
         assert_reaped(pid);
-        let after = case.snapshot();
-        assert_eq!(after.fences, before.fences);
-        assert_eq!(after.facts.len(), 1);
-        assert_eq!(after.facts[0].operation_id, fact.operation_id);
-        assert_ne!(after.facts[0].phase, NativeAuthPhase::Unavailable);
+        case.interrupted(&fact);
         rustix::fs::flock(
             case.probe(),
             rustix::fs::FlockOperation::NonBlockingLockExclusive,
@@ -624,10 +635,9 @@ async fn native_auth_dispatch_lifetime_invalidate_rolls_back_real_pending_retire
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_auth_dispatch_lifetime_service_shutdown_reaps_child_and_preserves_fence() {
+async fn native_auth_dispatch_lifetime_service_shutdown_reaps_child_and_releases_its_fence() {
     lifetime_case(|case| async move {
-        let (_, mut checkpoint) = case.held("shutdown-before-commit").await;
-        let before = case.snapshot();
+        let (fact, mut checkpoint) = case.held("shutdown-before-commit").await;
         let pid = case.retained_pid();
         let mut service = case.service.lock().await.take().unwrap();
         let shutdown = tokio::spawn(async move { service.shutdown().await });
@@ -639,7 +649,7 @@ async fn native_auth_dispatch_lifetime_service_shutdown_reaps_child_and_preserve
             .unwrap()
             .unwrap();
         assert_reaped(pid);
-        assert_eq!(case.snapshot().fences, before.fences);
+        case.interrupted(&fact);
     })
     .await;
 }
@@ -743,7 +753,7 @@ async fn native_auth_dispatch_lifetime_registration_after_committed_work_is_reje
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_auth_dispatch_lifetime_real_spawn_failure_keeps_dispatched_fence() {
+async fn native_auth_dispatch_lifetime_real_spawn_failure_releases_the_dispatched_fence() {
     lifetime_case(|case| async move {
         let path = case.root.join("non-executable-image");
         let mut image = vec![0xce, 0xfa, 0xed, 0xfe, 18, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
@@ -753,8 +763,7 @@ async fn native_auth_dispatch_lifetime_real_spawn_failure_keeps_dispatched_fence
         case.host
             .register_native_auth_host(RegisteredNativeAuthHost::capture(&path).unwrap())
             .unwrap();
-        let (_, work) = case.work("actual-os-spawn-failure").await;
-        let before = case.snapshot();
+        let (fact, work) = case.work("actual-os-spawn-failure").await;
         assert!(crate::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
         case.retain(work);
         let drained = tokio::time::timeout(
@@ -763,18 +772,17 @@ async fn native_auth_dispatch_lifetime_real_spawn_failure_keeps_dispatched_fence
         )
         .await
         .unwrap();
-        assert_eq!(case.snapshot().fences, before.fences, "drain: {drained:?}");
-        assert_ne!(case.snapshot().facts[0].phase, NativeAuthPhase::Unavailable);
+        assert!(drained.is_ok(), "drain: {drained:?}");
+        case.interrupted(&fact);
         assert!(case.host.authority.native_auth.lock().unwrap().is_none());
     })
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_auth_dispatch_lifetime_real_broken_bootstrap_pipe_preserves_fence() {
+async fn native_auth_dispatch_lifetime_real_broken_bootstrap_pipe_releases_the_fence() {
     lifetime_case(|case| async move {
-        let (_, work) = case.work("actual-bootstrap-pipe-failure").await;
-        let before = case.snapshot();
+        let (fact, work) = case.work("actual-bootstrap-pipe-failure").await;
         let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
         let mut child = TestChild(
             crate::spawn_gate::spawn(
@@ -790,17 +798,15 @@ async fn native_auth_dispatch_lifetime_real_broken_bootstrap_pipe_preserves_fenc
         assert!(launch.write_bootstrap(input).is_err());
         case.host.invalidate_native_auth_dispatch().unwrap();
         case.drain().await;
-        assert_eq!(case.snapshot().fences, before.fences);
-        assert_ne!(case.snapshot().facts[0].phase, NativeAuthPhase::Unavailable);
+        case.interrupted(&fact);
     })
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_preserves_fence() {
+async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_releases_the_fence() {
     lifetime_case(|case| async move {
-        let (_, work) = case.work("actual-custodian-attach-failure").await;
-        let before = case.snapshot();
+        let (fact, work) = case.work("actual-custodian-attach-failure").await;
         let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
         let missing = case.root.join("empty-unregistered-runtime");
         std::fs::create_dir(&missing).unwrap();
@@ -835,8 +841,7 @@ async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_preserves_f
         assert!(!exited.unwrap().success());
         case.host.invalidate_native_auth_dispatch().unwrap();
         case.drain().await;
-        assert_eq!(case.snapshot().fences, before.fences);
-        assert_ne!(case.snapshot().facts[0].phase, NativeAuthPhase::Unavailable);
+        case.interrupted(&fact);
     })
     .await;
 }

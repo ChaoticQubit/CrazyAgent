@@ -79,6 +79,10 @@ pub(crate) enum Job {
         Arc<NativeAuthDispatch>,
         oneshot::Sender<Result<NativeAuthFact, EngineError>>,
     ),
+    NativeAuthCustodyReleased(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
+    ),
     NativeAuth(
         Admission,
         owner_auth::Command,
@@ -347,6 +351,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &native_auth::dispatch_host(&dispatch),
+                                    Some(dispatch.fact()),
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::NativeAuth(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
@@ -454,6 +471,14 @@ impl Storage {
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
+                                if let Err(error) = native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &started.host,
+                                    None,
+                                ) {
+                                    eprintln!("native_auth_recovery_deferred cause={}", error.0);
+                                }
                             }
                             let _ = reply.send(result);
                         }

@@ -237,7 +237,7 @@ pub(crate) fn observe_native_auth_custody(
     Ok(fact)
 }
 
-fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
+pub(super) fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
     HostStamp {
         db_instance: dispatch.admission().db_instance.clone(),
         engine_epoch: dispatch.admission().engine_epoch.clone(),
@@ -283,6 +283,79 @@ fn validate_dispatch(
         return Err(error("native_auth_operation_scope_conflict"));
     }
     Ok(fact)
+}
+
+/// Settles the sign-in that holds the native fence once no process holds its profile, so
+/// a crash, a killed custodian or an old engine run never blocks every later sign-in.
+/// Inputs: the database, the profile custody, this engine's host and, after one dispatch
+/// ended, its fact. Output: the settled fact, or `None` when nothing was released.
+pub(crate) fn recover_native_auth(
+    db: &mut Connection,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    ended: Option<&NativeAuthFact>,
+) -> Result<Option<NativeAuthFact>, EngineError> {
+    let custody = custody.as_ref().map_err(|error| error.clone())?;
+    settings::ensure_clear(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_host(&tx, host)?;
+    let fence: Option<(String, String, i64, String)> = tx
+        .query_row(
+            "SELECT profile_key,operation_id,generation,engine_epoch FROM native_auth_fences",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((key, operation, generation, epoch)) = fence else {
+        return Ok(None);
+    };
+    let id = RequestId::new(operation).map_err(|_| error("native_auth_fact_invalid"))?;
+    let mut fact = load_fact(&tx, &id)?;
+    if i64::try_from(fact.generation).ok() != Some(generation)
+        || key != profile_key(&fact.binding.connection)?
+    {
+        return Err(error("native_auth_fact_invalid"));
+    }
+    let eligible = match ended {
+        Some(ended) => {
+            ended.operation_id == fact.operation_id && ended.generation == fact.generation
+        }
+        None => epoch != host.engine_epoch,
+    };
+    if !eligible {
+        return Ok(None);
+    }
+    let Some(release) = custody.hold_released_profile(host, &key)? else {
+        if fact.phase != NativeAuthPhase::Uncertain {
+            apply_update(&mut fact, NativeAuthHostUpdate::CustodyUncertain)?;
+            store_fact(&tx, &fact)?;
+            tx.commit().map_err(error)?;
+        }
+        return Ok(None);
+    };
+    if fact.phase == NativeAuthPhase::Cancelling {
+        fact.phase = NativeAuthPhase::Cancelled;
+        fact.code = None;
+    } else if unfinished(fact.phase) || fact.phase == NativeAuthPhase::Uncertain {
+        fact.phase = NativeAuthPhase::Failed;
+        fact.code = Some("native_auth_interrupted".into());
+    }
+    store_fact(&tx, &fact)?;
+    let deleted = tx
+        .execute(
+            "DELETE FROM native_auth_fences WHERE operation_id=?1 AND generation=?2",
+            params![fact.operation_id.as_str(), generation],
+        )
+        .map_err(error)?;
+    assert_eq!(deleted, 1);
+    tx.commit().map_err(error)?;
+    drop(release);
+    assert!(db.is_autocommit());
+    assert!(!unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain);
+    Ok(Some(fact))
 }
 
 pub(crate) fn lose_native_auth_custody(
@@ -449,7 +522,19 @@ pub(crate) fn execute(
     command: Command,
 ) -> Result<NativeAuthBegin, EngineError> {
     let reply = match command {
-        Command::Read(request) => read_native_auth(db, config, sources, admission, &request)?,
+        Command::Read(request) => {
+            #[cfg(unix)]
+            recover_native_auth(
+                db,
+                custody,
+                &HostStamp {
+                    db_instance: admission.db_instance.clone(),
+                    engine_epoch: admission.engine_epoch.clone(),
+                },
+                None,
+            )?;
+            read_native_auth(db, config, sources, admission, &request)?
+        }
         Command::Cancel(request) => {
             let observed = read_native_auth(
                 db,
@@ -480,6 +565,12 @@ pub(crate) fn begin_native_auth(
     command: Command,
 ) -> Result<NativeAuthBegin, EngineError> {
     command.validate()?;
+    let host = HostStamp {
+        db_instance: admission.db_instance.clone(),
+        engine_epoch: admission.engine_epoch.clone(),
+    };
+    #[cfg(unix)]
+    recover_native_auth(db, custody, &host, None)?;
     settings::ensure_clear(db)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -497,10 +588,6 @@ pub(crate) fn begin_native_auth(
     ensure_capacity(&tx)?;
     ensure_idle(&tx, &key)?;
     tx.commit().map_err(error)?;
-    let host = HostStamp {
-        db_instance: admission.db_instance.clone(),
-        engine_epoch: admission.engine_epoch.clone(),
-    };
     let prepared = prepare_requested_profile(db, config, sources, custody, &host, &command)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

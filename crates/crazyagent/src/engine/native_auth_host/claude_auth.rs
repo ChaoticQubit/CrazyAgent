@@ -146,10 +146,12 @@ async fn finish_failure(
         };
         ClaudeAuthObservation::Failed { reason }
     };
+    let cancelled = matches!(observation, ClaudeAuthObservation::Cancelled);
     if matches!(
         session.observe_claude(channel, observation).await?,
         NativeAuthCustodyControl::Cancel
-    ) {
+    ) && !cancelled
+    {
         session
             .observe_claude(channel, ClaudeAuthObservation::Cancelled)
             .await?;

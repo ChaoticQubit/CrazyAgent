@@ -1501,6 +1501,10 @@ fn plain_sign_in(code: &str) -> &'static str {
             "The code may not have reached Claude. Wait a moment, then try again."
         }
         "native_auth_method_mismatch" => "This account cannot use that sign-in method.",
+        "native_auth_recovery_required" => {
+            "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent."
+        }
+        "native_auth_interrupted" => "The sign-in did not finish. Start it again.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
         other => crate::tui::native_auth::public_problem(other),
     }
