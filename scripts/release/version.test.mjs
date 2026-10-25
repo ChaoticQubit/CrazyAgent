@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -78,5 +78,39 @@ test("a version that is not semver is refused before any file changes", async ()
     assert.equal(await readFile(join(root, "Cargo.toml"), "utf8"), before);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a CRLF checkout, as on Windows, gets the same edits as LF and keeps CRLF; mixed endings are refused", async () => {
+  const root = await exported();
+  const reference = await exported();
+  try {
+    const crlf = (text) => text.replaceAll("\n", "\r\n");
+    const list = /^members = \[([^\]]*)\]$/m.exec(await readFile(join(root, "Cargo.toml"), "utf8"))[1];
+    const manifests = [...list.matchAll(/"([^"]+)"/g)].map((match) => `${match[1]}/Cargo.toml`);
+    assert.equal(manifests.length, 3);
+    const lf = {};
+    for (const file of [...FILES, ...manifests]) {
+      lf[file] = await readFile(join(root, file), "utf8");
+      assert(!lf[file].includes("\r"), file);
+      await writeFile(join(root, file), crlf(lf[file]));
+    }
+    const old = await workspaceVersion(reference);
+    assert.equal(await workspaceVersion(root), old);
+    const version = "0.9.4-dev.202610251607";
+    await applyVersion(reference, version);
+    assert.deepEqual((await applyVersion(root, version)).sort(), [...FILES].sort());
+    for (const file of [...FILES, ...manifests]) {
+      assert.equal(await readFile(join(root, file), "utf8"), crlf(await readFile(join(reference, file), "utf8")), file);
+    }
+    assert.equal(await workspaceVersion(root), version);
+    const mixed = "apps/desktop/package.json";
+    await writeFile(join(root, mixed), crlf(lf[mixed]).replace("\r\n", "\n"));
+    const cargo = await readFile(join(root, "Cargo.toml"), "utf8");
+    await assert.rejects(applyVersion(root, "0.9.5"), /release_line_endings_mixed:apps\/desktop\/package\.json/);
+    assert.equal(await readFile(join(root, "Cargo.toml"), "utf8"), cargo);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(reference, { recursive: true, force: true });
   }
 });

@@ -68,6 +68,15 @@ pub enum ToolControl {
     Limited { reason: String },
 }
 
+/// States whether a harness can run a team agent, the master or a sub-agent.
+/// Unavailable carries the plain reason, such as no reader for its replies yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TeamUse {
+    Available,
+    Unavailable { reason: String },
+}
+
 /// Describes one harness as documented by its vendor, independent of this machine.
 /// `binaries` are executable names searched in order; `locations` are extra
 /// install directories relative to HOME; `launch` is None when CrazyAgent
@@ -99,6 +108,8 @@ pub struct HarnessEntry {
     pub tools: ToolControl,
     pub model_selection: bool,
     pub account_kinds: Vec<AccountKind>,
+    pub team: TeamUse,
+    pub aliases: Vec<String>,
 }
 
 /// Where the catalog looks for harness executables.
@@ -238,6 +249,18 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                     }),
                 model_selection: spec.model_selection,
                 account_kinds: spec.account_kinds.to_vec(),
+                team: match interactive::support(spec.id) {
+                    interactive::Support::Terminal => TeamUse::Available,
+                    interactive::Support::HeadlessOnly { reason }
+                    | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
+                        reason: reason.into(),
+                    },
+                },
+                aliases: CONNECTION_NAMES
+                    .iter()
+                    .filter(|(_, catalog)| *catalog == spec.id)
+                    .map(|(name, _)| (*name).to_owned())
+                    .collect(),
             }
         })
         .collect();

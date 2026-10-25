@@ -79,7 +79,7 @@ const ok = (value) => ({ kind: "ok", value });
 const account = (patch) => ({ id: "a1", name: "ChatGPT 1", provider: "chatgpt", provider_name: "ChatGPT / Codex", method: "subscription",
   method_label: "Sign in with ChatGPT", url: null, model: null, status: "signed_in", status_label: "Signed in", ...patch });
 const harness = (id, kind) => ({ id, name: id, status: kind === "limited" ? { kind, reason: "x" } : { kind }, status_label: "", executable: null,
-  headless: "", tools: { kind: "switchable" }, model_selection: true, account_kinds: [] });
+  headless: "", tools: { kind: "switchable" }, model_selection: true, account_kinds: [], aliases: [] });
 const tool = (name, state) => ({ name, label: name, state });
 const toolsRead = (tmux, uv, graphify, patch = {}) => ok({
   dependencies: [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)], pack: [], running: false, ...patch,

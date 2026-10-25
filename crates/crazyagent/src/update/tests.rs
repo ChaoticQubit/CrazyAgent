@@ -298,6 +298,31 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
 }
 
 #[test]
+fn the_desktop_config_names_only_the_stable_manifest_and_each_channel_has_its_own() {
+    let config: serde_json::Value = serde_json::from_str(DESKTOP_CONFIG).unwrap();
+    assert_eq!(
+        config.pointer("/plugins/updater/endpoints").unwrap(),
+        &serde_json::json!([Channel::Stable.desktop_manifest_url()])
+    );
+    for channel in [Channel::Stable, Channel::Dev] {
+        for url in [channel.desktop_manifest_url(), channel.cli_manifest_url()] {
+            let parsed = allowed_url(url).unwrap();
+            assert_eq!(parsed.host_str(), Some("github.com"), "{url}");
+            assert!(
+                parsed
+                    .path()
+                    .starts_with("/ChaoticQubit/CrazyAgent/releases/"),
+                "{url}"
+            );
+            let tagged = parsed.path().contains("/releases/download/dev/");
+            assert_eq!(tagged, channel == Channel::Dev, "{url}");
+            let latest = parsed.path().contains("/releases/latest/download/");
+            assert_eq!(latest, channel == Channel::Stable, "{url}");
+        }
+    }
+}
+
+#[test]
 fn the_compiled_in_key_comes_from_the_desktop_updater_config() {
     let owner = signer();
     let config = format!(

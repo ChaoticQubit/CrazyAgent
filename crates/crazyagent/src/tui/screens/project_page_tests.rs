@@ -105,6 +105,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("create");
                     connection.creation(*job).unwrap();
                 }
+                Request::Intake(job) => {
+                    sent.push("intake");
+                    connection.intake(*job).unwrap();
+                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
@@ -765,6 +769,96 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
             .lines()
             .any(|line| line.starts_with("  Tidepool  ") && line.trim_end().ends_with(&folder)),
         "the title row shows the name and the folder in the projects home: {shown}"
+    );
+}
+
+fn go_to(shell: &mut Shell, query: &str) {
+    shell.key(Key::Ctrl('k'));
+    for character in query.chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("New project  /  Review"), "{shown}");
+    assert!(shown.contains("Main"), "{shown}");
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home), "Run in background");
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"create"), "{sent:?}");
+    assert!(
+        sent.contains(&"edit pool"),
+        "the picked pool is assigned without the page: {sent:?}"
+    );
+    assert!(sent.contains(&"pool projects"), "{sent:?}");
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+    let tidepool = shell
+        .ctx
+        .store
+        .projects
+        .ready()
+        .and_then(|cards| cards.iter().find(|card| card.name == "Tidepool"))
+        .map(|card| card.id.clone())
+        .expect("the project is listed");
+    let scopes = shell.ctx.store.pool_projects.ready().cloned().unwrap();
+    let main = scopes
+        .iter()
+        .find(|scope| scope.pool.as_str() == "pool-a")
+        .expect("pool Main has a scope");
+    assert!(
+        main.projects
+            .iter()
+            .any(|id| id.as_str() == tidepool.as_str()),
+        "the engine assigned pool Main to the project: {scopes:?}"
+    );
+    assert_eq!(kept_draft(), None, "a made project keeps no draft");
+
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"create"), "{sent:?}");
+    assert!(!sent.contains(&"edit pool"), "{sent:?}");
+    let refused = shell.ctx.message().expect("the refusal is shown");
+    assert!(
+        refused.lead.starts_with("Could not create"),
+        "{}",
+        refused.lead
+    );
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "the refused draft is kept for the next New project"
     );
 }
 

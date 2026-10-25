@@ -392,3 +392,226 @@ fn a_removed_project_stops_its_agents_and_their_panes() {
     assert!(!fixture.recorded(sub));
     assert!(team.shutdown().unwrap().is_empty());
 }
+
+fn count(connection: &Connection, sql: &str) -> i64 {
+    connection
+        .query_row(sql, [PROJECT], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results() {
+    use crate::protocol::Outcome;
+    use crate::team::{MESSAGES_PER_PROJECT_MAX, TASKS_PER_PROJECT_MAX, TeamAction};
+    let mut fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let tx = fixture.connection.transaction().unwrap();
+    let waiting = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "An early message the master has not answered",
+        MessageState::Pending,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,result,created_ms,finished_ms) VALUES (?1,'master','codex',0,'Early step','done','early result',1,1)",
+        [PROJECT],
+    )
+    .unwrap();
+    let undelivered = tx.last_insert_rowid();
+    for index in 1..TASKS_PER_PROJECT_MAX {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES (?1,'master','codex',0,'Old step','done',1,?2)",
+            params![PROJECT, index],
+        )
+        .unwrap();
+    }
+    for index in 1..MESSAGES_PER_PROJECT_MAX {
+        let (author, state) = if index % 2 == 1 {
+            (MessageAuthor::Owner, MessageState::Answered)
+        } else {
+            (MessageAuthor::Master, MessageState::Reply)
+        };
+        append_message(&tx, &project, author, "Old history", state, index)
+            .unwrap()
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    let all_messages = "SELECT COUNT(*) FROM team_messages WHERE project=?1";
+    let all_tasks = "SELECT COUNT(*) FROM team_tasks WHERE project=?1";
+    assert_eq!(
+        count(&fixture.connection, all_messages),
+        MESSAGES_PER_PROJECT_MAX
+    );
+    assert_eq!(count(&fixture.connection, all_tasks), TASKS_PER_PROJECT_MAX);
+
+    let tx = fixture.connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &TeamAction::Message {
+                project_id: project.clone(),
+                text: "Build the landing page".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied,
+        "message 2001 is accepted"
+    );
+    tx.commit().unwrap();
+    let latest: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1 AND author='owner'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let state = |id: i64| -> Option<String> {
+        Connection::open(fixture.base.join("engine.db"))
+            .unwrap()
+            .query_row("SELECT state FROM team_messages WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap()
+    };
+    assert_eq!(
+        state(waiting).as_deref(),
+        Some("pending"),
+        "the unanswered owner message outlived the append that pruned history"
+    );
+    let mut team = fixture.runtime();
+    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, vec![])
+        .unwrap();
+    team.finish_message(
+        &project,
+        latest,
+        "Here is the plan.\nDELEGATE: Write the landing page",
+        TurnEnd::Success,
+        vec![],
+    )
+    .unwrap();
+    let team_status = status(&fixture.connection, &fixture.setup).unwrap();
+    let replies: Vec<&str> = team_status
+        .messages
+        .iter()
+        .filter(|message| message.author == MessageAuthor::Master && message.id > latest)
+        .map(|message| message.text.as_str())
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            "Noted.",
+            "Here is the plan.\nDELEGATE: Write the landing page"
+        ]
+    );
+    assert_eq!(state(latest).as_deref(), Some("answered"));
+    assert_eq!(
+        state(waiting),
+        None,
+        "once answered, the oldest message is history and made room for its own reply"
+    );
+    let handed: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE project=?1 AND prompt='Write the landing page' AND source='master'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(count(&fixture.connection, all_messages) <= MESSAGES_PER_PROJECT_MAX);
+    assert!(count(&fixture.connection, all_tasks) <= TASKS_PER_PROJECT_MAX);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_tasks SET status='done', result='page written', finished_ms=2 WHERE id=?1",
+            [handed],
+        )
+        .unwrap();
+    team.deliver(&fixture.setup).unwrap();
+    let delivered: String = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_messages WHERE project=?1 AND author='engine' AND state='pending'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(delivered.contains("early result"), "{delivered}");
+    assert!(delivered.contains("page written"), "{delivered}");
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND delivered=0 AND source='master'"
+        ),
+        0
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row(
+                "SELECT delivered FROM team_tasks WHERE id=?1",
+                [undelivered],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the oldest undelivered result was kept until it was delivered"
+    );
+    assert!(count(&fixture.connection, all_messages) <= MESSAGES_PER_PROJECT_MAX);
+}
+
+#[test]
+fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner','Plan it','sent',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    for statement in [
+        "DELETE FROM team_tasks WHERE project=?1",
+        "DELETE FROM team_messages WHERE project=?1",
+        "DELETE FROM project_setups WHERE project=?1",
+        "DELETE FROM projects WHERE id=?1",
+    ] {
+        fixture.connection.execute(statement, [PROJECT]).unwrap();
+    }
+    let mut team = fixture.runtime();
+    team.finish_task(task, "page written", TurnEnd::Success)
+        .unwrap();
+    team.finish_task(task, "", TurnEnd::Closed).unwrap();
+    team.finish_message(&project, message, "", TurnEnd::Interrupted, vec![])
+        .unwrap();
+    team.finish_message(&project, message, "Done", TurnEnd::Success, vec![])
+        .unwrap();
+    for table in ["team_tasks", "team_messages"] {
+        assert_eq!(
+            count(
+                &fixture.connection,
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1")
+            ),
+            0,
+            "{table}"
+        );
+    }
+}

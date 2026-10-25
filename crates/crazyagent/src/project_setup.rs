@@ -2026,8 +2026,23 @@ fn retry_research(
     Ok(Outcome::Applied)
 }
 
+/// The tables whose rows belong to one project and go with it when it is removed.
+/// Live team agents are not listed: the team runtime stops them and keeps their rows.
+const REMOVED_WITH_PROJECT: [&str; 8] = [
+    "research_jobs",
+    "onboarding",
+    "team_messages",
+    "team_tasks",
+    "team_direct_inputs",
+    "team_settings",
+    "team_paused_projects",
+    "project_setups",
+];
+
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
-/// Takes the transaction and the project; its research stops as in `cancel_jobs`.
+/// Takes the transaction and the project. Its onboarding, research jobs, team conversation,
+/// tasks, settings and ended agents are deleted, so a waiting step is never claimed, a
+/// running step or job stops when it finds its row gone, and the folder can be added again.
 /// Returns `project_master_open` while its master conversation is open, since ending it
 /// releases the master's worktree, and `invalid_project` for an unknown project.
 fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, EngineError> {
@@ -2045,9 +2060,21 @@ fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, Engin
     if master_open {
         return Ok(rejected("project_master_open"));
     }
-    cancel_jobs(tx, "project", &project_id.as_str(), now_ms())?;
+    for table in REMOVED_WITH_PROJECT {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE project=?1"),
+            [project_id.as_str()],
+        )
+        .map_err(error)?;
+    }
     tx.execute(
-        "DELETE FROM project_setups WHERE project=?1",
+        "DELETE FROM team_panes WHERE agent IN
+         (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
+        [project_id.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "DELETE FROM team_agents WHERE project=?1 AND status IN ('stopped','failed')",
         [project_id.as_str()],
     )
     .map_err(error)?;

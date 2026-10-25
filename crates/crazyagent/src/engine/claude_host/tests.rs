@@ -443,3 +443,107 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
     claude.close().await.unwrap();
     assert!(!home.join(".credentials.json").exists());
 }
+
+async fn stand_in_master(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+) -> ClaudeHost {
+    let profile = fixture.lease("claude-group-turn", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", body);
+    let command =
+        launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-group-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("group-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-group-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        ResourceBudget::unit(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease() {
+    use crate::engine::master_host_fixture::{
+        HarnessProcesses, MasterFixture, PIPE_HOLDING_HARNESS,
+    };
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, PIPE_HOLDING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.leader)
+    );
+    assert!(fixture.lease("claude-group-busy", 2).is_err());
+    let started = std::time::Instant::now();
+    let cancelled = claude.cancel().await;
+    let elapsed = started.elapsed();
+    assert!(cancelled.is_ok(), "{cancelled:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+    assert!(fixture.lease("claude-group-next", 3).is_ok());
+}
+
+#[tokio::test]
+async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_lease() {
+    use crate::engine::master_host_fixture::{
+        GROUP_LEAVING_HARNESS, HarnessProcesses, MasterFixture,
+    };
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.descendant)
+    );
+    let started = std::time::Instant::now();
+    let cancelled = claude.cancel().await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        cancelled.map_err(|error| error.0),
+        Err("claude_host_cleanup_uncertain".to_owned()),
+        "after {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_harness_gone();
+    assert_eq!(
+        rustix::process::test_kill_process(processes.descendant),
+        Ok(())
+    );
+    assert!(fixture.lease("claude-group-next", 3).is_ok());
+}
+
+#[tokio::test]
+async fn closing_a_claude_master_is_not_failed_by_the_exit_its_closed_input_causes() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(
+        &mut fixture,
+        "#!/bin/sh\necho $$ > leader.pid\n/bin/cat > /dev/null\nexit 1\n",
+    )
+    .await;
+    let ready = fixture.project.join("leader.pid");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let closed = claude.close().await;
+    assert!(closed.is_ok(), "{closed:?}");
+    assert!(fixture.lease("claude-group-next", 3).is_ok());
+}

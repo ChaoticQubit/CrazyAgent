@@ -429,39 +429,69 @@ fn harness_ids_from_pools_teams_and_the_catalog_name_the_same_harness() {
 }
 
 #[test]
-fn harnesses_that_cannot_start_can_be_picked_but_missing_ones_cannot() {
+fn a_claude_subscription_counts_for_the_real_catalog_entry_and_its_aliases() {
+    let entries =
+        crate::harnesses::catalog(&crate::harnesses::Search::new(Vec::new(), None, Vec::new()));
+    let claude = entries
+        .iter()
+        .find(|entry| entry.name == "Claude Code")
+        .unwrap();
+    assert!(!claude.aliases.is_empty());
+    let mut wizard = wizard();
+    wizard.pool = Some(CredentialRef::new("pool-main").unwrap());
+    assert_eq!(wizard.pool_accounts(&claude.id), Some(1));
+    for alias in &claude.aliases {
+        assert_eq!(wizard.pool_accounts(alias), Some(1), "{alias}");
+    }
+}
+
+#[test]
+fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-team-use-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    for name in ["codex", "opencode"] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let choices = super::new_project_page::harness_choices_from(&entries);
+    let at = |id: &str| choices.iter().position(|choice| choice.id == id).unwrap();
+    assert_eq!(choices[at("codex")].state, HarnessState::Ready);
+    assert_eq!(choices[at("opencode")].state, HarnessState::CantStart);
     let mut wizard = wizard();
     wizard.research = vec![ResearchKind::MarketResearch];
     load_catalog(&mut wizard, &["c-codex"]);
     wizard.go(Step::Team);
-    wizard.set_harnesses(vec![
-        HarnessChoice {
-            id: "codex".into(),
-            name: "Codex".into(),
-            state: HarnessState::Ready,
-            limited: None,
-        },
-        HarnessChoice {
-            id: "opencode".into(),
-            name: "OpenCode".into(),
-            state: HarnessState::CantStart,
-            limited: Some("Limited control: installed, but CrazyAgent cannot start it yet.".into()),
-        },
-    ]);
+    wizard.set_harnesses(choices.clone());
+    assert_eq!(wizard.team.as_ref().unwrap().master, "codex");
     wizard.key(key(KeyCode::Enter));
-    assert!(wizard.picker.is_some());
-    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.picker.as_ref().unwrap().cursor, 0);
+    for _ in 0..at("opencode") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.picker.is_some(), "OpenCode is listed but not picked");
+    assert_eq!(wizard.team.as_ref().unwrap().master, "codex");
+    for _ in 0..at("opencode") {
+        wizard.key(key(KeyCode::Up));
+    }
     wizard.key(key(KeyCode::Enter));
     assert_eq!(wizard.picker, None);
-    assert_eq!(wizard.team.as_ref().unwrap().master, "opencode");
+    assert_eq!(wizard.team.as_ref().unwrap().master, "codex");
     assert!(wizard.check_team().is_ok());
+    wizard.team.as_mut().unwrap().master = "opencode".into();
     assert_eq!(
-        wizard.limited_note(),
-        Some("OpenCode: Limited control: installed, but CrazyAgent cannot start it yet.".into())
+        wizard.check_team().unwrap_err().text,
+        "OpenCode can't run team agents yet. Pick another harness."
     );
-    wizard.key(key(KeyCode::Down));
-    assert_eq!(wizard.team_row, 1);
-    assert_eq!(wizard.limited_note(), None);
 }
 
 #[test]

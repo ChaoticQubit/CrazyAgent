@@ -199,3 +199,33 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
         "update_archive_invalid"
     );
 }
+
+#[test]
+fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary() {
+    let install = tempfile::tempdir().unwrap();
+    script(&install.path().join("crazyagent"), "echo crazyagent 0.0.1");
+    let helpers = [
+        "crazyagent-rcli",
+        "crazyagent-runner",
+        "crazyagent-landlock",
+        "crazyagent-win-boundary",
+    ];
+    for helper in helpers {
+        script(&install.path().join(helper), "echo old");
+    }
+    let staged = install.path().join(".crazyagent-update-helpers");
+    std::fs::create_dir(&staged).unwrap();
+    executable(&staged.join("crazyagent"), &real_crazyagent());
+    for helper in helpers {
+        script(&staged.join(helper), &format!("echo new {helper}"));
+    }
+    update::swap(install.path(), &staged, VERSION).unwrap();
+    for helper in helpers {
+        assert_eq!(
+            std::fs::read_to_string(install.path().join(helper)).unwrap(),
+            format!("#!/bin/sh\necho new {helper}\n"),
+            "{helper}"
+        );
+    }
+    assert!(leftovers(install.path()).is_empty());
+}

@@ -95,6 +95,8 @@ export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { ki
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 
+export type TeamUse = { kind: "available" } | { kind: "unavailable"; reason: string };
+
 export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
 export interface HarnessEntry {
@@ -107,6 +109,8 @@ export interface HarnessEntry {
   tools: ToolControl;
   model_selection: boolean;
   account_kinds: AccountKind[];
+  team: TeamUse;
+  aliases: string[];
 }
 
 /** Lists every harness the engine knows, in owner order, with its status on this machine.

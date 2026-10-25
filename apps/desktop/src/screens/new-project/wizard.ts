@@ -287,16 +287,16 @@ export function teamNotes(team: TeamPlan, harnesses: HarnessEntry[] | null): str
 const GROUPS = { ready: "Ready", limited: "Limited control", not_installed: "Not installed" } as const;
 
 /** Orders every catalog harness for a picker: Ready, Limited control, Not installed.
- * Input: the catalog. Output: options; a harness that is not installed can't be picked. */
+ * Input: the catalog. Output: options; a harness that is not installed or can't run team
+ * agents can't be picked. */
 export function harnessChoices(harnesses: HarnessEntry[]): { id: string; label: string; group: string; disabled: boolean }[] {
   return (["ready", "limited", "not_installed"] as const).flatMap((kind) => harnesses
     .filter((harness) => harness.status.kind === kind)
-    .map((harness) => ({
-      id: harness.id,
-      label: kind === "not_installed" ? `${harness.name} - Not installed` : harness.name,
-      group: GROUPS[kind],
-      disabled: kind === "not_installed",
-    })));
+    .map((harness) => {
+      const blocked = harness.team.kind === "unavailable";
+      const label = kind === "not_installed" ? `${harness.name} - Not installed` : blocked ? `${harness.name} - Can't run team agents` : harness.name;
+      return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || blocked };
+    }));
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -311,6 +311,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
+    if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
     return undefined;
   };
   errors.master = harnessProblem(team.master, "the master");
@@ -437,13 +438,16 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
   return best?.pool.id ?? null;
 }
 
-/** Tells whether a pool holds an account a harness can use.
+/** Tells whether a pool holds an account a harness can use. A connection names its harness by
+ * the catalog id or by one of the entry's aliases from the engine, such as "claude" for Claude Code.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
+  const names = [harness.id, ...harness.aliases];
   return members.some((member) => {
-    if (member.auth.method === "native_managed") return member.harness === harness.id && harness.account_kinds.includes("subscription");
-    if (member.auth.method === "api_key" || member.auth.method === "oauth") return member.harness === harness.id || harness.account_kinds.includes("api_key");
-    return member.harness === harness.id || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
+    const same = names.includes(member.harness);
+    if (member.auth.method === "native_managed") return same && harness.account_kinds.includes("subscription");
+    if (member.auth.method === "api_key" || member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
+    return same || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
   });
 }
 

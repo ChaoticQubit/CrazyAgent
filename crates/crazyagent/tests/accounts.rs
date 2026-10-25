@@ -531,6 +531,116 @@ async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let old = format!("sk-old-{}-leaked", std::process::id());
+    let new = format!("sk-new-{}-rotated", std::process::id());
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Lab server",
+                Some(url),
+                Some("lab-model"),
+            ),
+            key(&old),
+        )
+        .await
+        .unwrap();
+    assert_eq!(holders(fixture.root.path(), old.as_bytes()).len(), 1);
+
+    let replaced = client
+        .replace_account_key(account.id.clone(), key(&new).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replaced.id, account.id, "the same account keeps its id");
+    assert_eq!(replaced.name, "Lab server");
+    assert_eq!(replaced.status_label, "Key saved");
+    assert!(!format!("{replaced:?}").contains(&new));
+    let listed = all_accounts(&client).await;
+    assert_eq!(listed.len(), 1, "no second account: {listed:?}");
+    assert_eq!(listed[0].id, account.id);
+    assert!(
+        holders(fixture.root.path(), old.as_bytes()).is_empty(),
+        "the old key is gone from disk"
+    );
+    let held = holders(fixture.root.path(), new.as_bytes());
+    assert_eq!(
+        held.len(),
+        1,
+        "only the key file holds the new key: {held:?}"
+    );
+    assert!(held[0].parent().unwrap().ends_with("account-keys"));
+    assert_eq!(
+        std::fs::metadata(&held[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_dir(held[0].parent().unwrap())
+            .unwrap()
+            .count(),
+        1,
+        "no temporary key file is left behind"
+    );
+
+    let (request, checked) = tokio::join!(
+        serve_once(&listener, "200 OK", r#"{"data":[{"id":"lab-model"}]}"#),
+        client.check_account(account.id.clone()),
+    );
+    assert_eq!(checked.unwrap().account.status_label, "Key saved");
+    assert!(
+        request.contains(&format!("\r\nAuthorization: Bearer {new}\r\n")),
+        "the new key reaches the request"
+    );
+    assert!(!request.contains(&old), "the old key is never sent again");
+
+    let local = client
+        .add_account(
+            draft(
+                Provider::Local,
+                SignInMethod::Url,
+                "Ollama",
+                None,
+                Some("qwen2.5:0.5b"),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .replace_account_key(local.id.clone(), key(&new).unwrap())
+            .await
+            .unwrap_err()
+            .0,
+        "account_key_not_allowed"
+    );
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert_eq!(
+        client
+            .replace_account_key(account.id.clone(), key(&new).unwrap())
+            .await
+            .unwrap_err()
+            .0,
+        "account_not_found"
+    );
+    assert!(
+        holders(fixture.root.path(), new.as_bytes()).is_empty(),
+        "a refused replace saves nothing"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_check_slower_than_the_owner_wait_still_answers() {
     let fixture = Fixture::start_with(1000).await;
     let client = fixture.client().await;

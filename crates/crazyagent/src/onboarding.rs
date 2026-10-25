@@ -255,7 +255,8 @@ fn real_dir(path: &Path) -> bool {
 /// is created through the projects home layout, or reused with its saved
 /// draft when it already exists; nothing in it is overwritten. Research stays
 /// off. Starting a folder that is already onboarding returns its project and
-/// retries only failed steps. Takes the transaction, configuration, engine
+/// retries only failed steps; an onboarding left by a removed project starts
+/// over as a new project. Takes the transaction, configuration, engine
 /// database path and action. Returns Applied or a plain rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
@@ -284,13 +285,6 @@ pub(crate) fn execute(
         )
         .optional()
         .map_err(error)?;
-    if let Some(known) = known {
-        if known != project_id.as_str() {
-            return Ok(rejected("onboarding_project_mismatch"));
-        }
-        restart(tx, &project_id, pool)?;
-        return Ok(Outcome::Applied);
-    }
     let exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
@@ -298,6 +292,17 @@ pub(crate) fn execute(
             |row| row.get(0),
         )
         .map_err(error)?;
+    if let Some(known) = known {
+        if known != project_id.as_str() {
+            return Ok(rejected("onboarding_project_mismatch"));
+        }
+        if exists {
+            restart(tx, &project_id, pool)?;
+            return Ok(Outcome::Applied);
+        }
+        tx.execute("DELETE FROM onboarding WHERE project=?1", [known])
+            .map_err(error)?;
+    }
     if exists {
         return Ok(rejected("project_exists"));
     }

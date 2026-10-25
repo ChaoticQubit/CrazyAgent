@@ -971,6 +971,10 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         .unwrap()
         .unwrap()
         .folder;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
+        1
+    );
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -983,11 +987,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         0
     );
     assert_eq!(
-        engine.rows(
-            "SELECT count(*) FROM research_jobs WHERE project='setup-pooled'
-            AND status='cancelled' AND cancel_requested=1"
-        ),
-        1
+        engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
+        0,
+        "the project's research jobs go with it"
     );
     assert!(
         Path::new(&folder)
