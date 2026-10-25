@@ -1917,8 +1917,14 @@ async fn serve_authenticated_owner(
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
+            return write_owner_reply(&mut stream, Err(error), id, mutation)
+                .await
+                .map(|()| None);
+        }
         let result = engine.dispatch_owner(a, request, None).await;
-        let result = setup::after_owner(&engine, &authority, &submitted, result, deadline).await;
+        let mut result =
+            setup::after_owner(&engine, &authority, &submitted, result, deadline).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),
@@ -1931,6 +1937,7 @@ async fn serve_authenticated_owner(
                 .committed(runtime, &submitted, reply)
             {
                 eprintln!("master_dispatch_not_started cause={}", error.0);
+                result = Err(failure("master_turn_not_started"));
             }
         }
         write_owner_reply(&mut stream, result, id, mutation)
@@ -1985,6 +1992,8 @@ async fn write_owner_reply(
                 | "owner_queue_not_submitted"
                 | "operation_identity_conflict"
                 | "master_transaction_rolled_back"
+                | "master_dispatch_stopped"
+                | "master_dispatch_capacity"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
