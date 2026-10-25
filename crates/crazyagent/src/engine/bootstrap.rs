@@ -819,8 +819,42 @@ impl EngineService {
             ordinary_socket,
         };
         self.publish(value, previous)?;
+        self.sweep_generations();
         cancelled(shutdown)?;
         Ok(())
+    }
+
+    /// Removes the owner generation folders an earlier engine run left in the anchor after
+    /// a crash or a failed shutdown, once the locator names this run's own generation; the
+    /// engine database lock makes this the only run on the anchor. Input: none. Output:
+    /// none; a folder that is not a private directory or cannot be removed is logged.
+    #[cfg(unix)]
+    fn sweep_generations(&self) {
+        let Some((current, _)) = &self.generation else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&self.anchor.path) else {
+            eprintln!("owner_generation_sweep_unavailable");
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let generation = name.len() == 9
+                && name.starts_with('o')
+                && name[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !generation || &name == current {
+                continue;
+            }
+            let private = self
+                .anchor
+                .metadata(&name)
+                .is_ok_and(|metadata| safe_directory(&metadata));
+            if !private || std::fs::remove_dir_all(self.anchor.path.join(&name)).is_err() {
+                eprintln!("owner_generation_sweep_kept");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1041,7 +1075,18 @@ impl EngineService {
                     }
                     std::fs::remove_file(path).map_err(io_error)?;
                 }
-                std::fs::remove_dir(self.anchor.path.join(generation)).map_err(io_error)
+                let path = self.anchor.path.join(&generation);
+                for entry in std::fs::read_dir(&path).map_err(io_error)? {
+                    let entry = entry.map_err(io_error)?;
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("master-runtime-")
+                    {
+                        std::fs::remove_dir_all(entry.path()).map_err(io_error)?;
+                    }
+                }
+                std::fs::remove_dir(path).map_err(io_error)
             })();
             if let Err(error) = clean {
                 errors.push(error.0);
