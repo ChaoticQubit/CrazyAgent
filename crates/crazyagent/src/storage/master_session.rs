@@ -3250,6 +3250,10 @@ mod rcli_configured_tests {
     mod brief_boundary_tests {
         include!("master_session/brief_boundary_tests.rs");
     }
+
+    mod readiness_tests {
+        include!("master_session/readiness_tests.rs");
+    }
     use crate::engine::owner::{ModelAccessCollection, Started};
     use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
     use crate::protocol::{CredentialRef, ProjectSpec};

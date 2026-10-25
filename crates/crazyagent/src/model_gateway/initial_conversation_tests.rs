@@ -316,29 +316,18 @@ fn explicit_unhealthy_exhausted_and_cooldown_states_remain_denied() {
 }
 
 #[test]
-fn expired_or_future_readiness_metadata_cannot_be_reclassified_as_absent() {
-    for (kind, observed, until, now) in [
-        (ObservationKind::Unknown, 100, 200, 200),
-        (ObservationKind::Unknown, 200, 300, 100),
-        (
-            ObservationKind::QuotaExhausted { retry_at_ms: None },
-            100,
-            200,
-            200,
-        ),
-        (
-            ObservationKind::Ready {
-                remaining: None,
-                capabilities: vec![],
-            },
-            100,
-            200,
-            200,
-        ),
+fn future_readiness_metadata_cannot_be_reclassified_as_absent() {
+    for kind in [
+        ObservationKind::Unknown,
+        ObservationKind::QuotaExhausted { retry_at_ms: None },
+        ObservationKind::Ready {
+            remaining: None,
+            capabilities: vec![],
+        },
     ] {
         let mut fixture = Fixture::new(CATALOG);
-        fixture.record(kind, observed, until);
-        fixture.reject(now, "gateway_initial_readiness_stale");
+        fixture.record(kind, 200, 300);
+        fixture.reject(100, "gateway_initial_readiness_stale");
     }
 }
 
@@ -552,4 +541,99 @@ fn initial_success_makes_the_next_ordinary_conversation_attempt_admissible() {
         "gateway_attempt_active"
     );
     tx.commit().unwrap();
+}
+
+fn finish(fixture: &mut Fixture, id: &RequestId, completion: AttemptCompletion) {
+    let tx = fixture.database.transaction().unwrap();
+    finish_attempt(&tx, id, &completion).unwrap();
+    tx.commit().unwrap();
+}
+
+fn observe_at(
+    fixture: &mut Fixture,
+    sequence: u64,
+    observed_at_ms: u64,
+    valid_until_ms: u64,
+    kind: ObservationKind,
+) {
+    let tx = fixture.database.transaction().unwrap();
+    observe(
+        &tx,
+        &fixture.config,
+        &Observation {
+            id: RequestId::new(format!("observation-{sequence}")).unwrap(),
+            connection: fixture.binding.connection.clone(),
+            sequence,
+            observed_at_ms,
+            valid_until_ms,
+            kind,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn expired_readiness_admits_one_probe_whose_success_restores_ready() {
+    for kind in [
+        ObservationKind::Unknown,
+        ObservationKind::QuotaExhausted { retry_at_ms: None },
+        ObservationKind::Ready {
+            remaining: None,
+            capabilities: vec![],
+        },
+    ] {
+        let mut fixture = Fixture::new(CATALOG);
+        fixture.record(kind, 100, 200);
+        let probe = fixture.begin(200).unwrap();
+        assert!(
+            probe
+                .attempt
+                .reasons
+                .iter()
+                .any(|reason| reason == "initial_conversation_readiness_unknown")
+        );
+        finish(
+            &mut fixture,
+            &probe.attempt.request.id,
+            AttemptCompletion {
+                outcome: AttemptOutcome::Succeeded,
+                effects: Effects::Committed,
+                finished_at_ms: 201,
+                retry_at_ms: None,
+            },
+        );
+        let state = connection_state(&fixture.database, &fixture.binding.connection, 202).unwrap();
+        assert_eq!(state.health, Health::Ready);
+        assert_eq!(state.observed_at_ms, Some(201));
+    }
+}
+
+#[test]
+fn an_older_retry_time_still_denies_a_probe_after_newer_readiness_expired() {
+    let mut fixture = Fixture::new(CATALOG);
+    observe_at(
+        &mut fixture,
+        1,
+        100,
+        5_000,
+        ObservationKind::RateLimited {
+            retry_at_ms: Some(5_000),
+        },
+    );
+    observe_at(
+        &mut fixture,
+        2,
+        200,
+        300,
+        ObservationKind::Ready {
+            remaining: None,
+            capabilities: vec![],
+        },
+    );
+    let state = connection_state(&fixture.database, &fixture.binding.connection, 300).unwrap();
+    assert_eq!(state.health, Health::Unknown);
+    assert_eq!(state.cooldown_until_ms, Some(5_000));
+    fixture.reject(4_999, "gateway_cooldown");
+    fixture.begin(5_000).unwrap();
 }
