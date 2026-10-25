@@ -42,6 +42,19 @@ enum Action {
     },
 }
 
+impl Action {
+    /// The longest the engine spends on an action once it has read it: one owner wait
+    /// for the account records, plus the network probes the action makes.
+    /// Input: the owner wait. Output: the action's budget.
+    fn time(&self, owner: Duration) -> Duration {
+        match self {
+            Self::Check { .. } | Self::LocalModels { .. } => owner + CHECK_PROBE,
+            Self::List { .. } | Self::Add { .. } | Self::Rename { .. } => owner + LIST_PROBE,
+            Self::Catalog | Self::Remove { .. } => owner,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
@@ -163,7 +176,8 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout, async {
+        let time = action.time(self.timeout) + self.timeout;
+        tokio::time::timeout(time, async {
             let envelope = Envelope {
                 accounts: action,
                 secret_present: key.is_some(),
@@ -212,6 +226,10 @@ impl OwnerClient {
     }
 }
 
+/// Serves one accounts owner request after the owner exchange deadline: the action runs
+/// under its own budget, which covers its network probes, and the reply write under the
+/// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
+/// bytes. Output: the reply written, a rejection code included.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -227,7 +245,14 @@ pub(super) async fn serve(
     } else {
         None
     };
-    let reply = match handle(engine, authority, packet, admission, envelope.accounts, key).await {
+    let time = envelope.accounts.time(engine.timeout);
+    let outcome = tokio::time::timeout(
+        time,
+        handle(engine, authority, packet, admission, envelope.accounts, key),
+    )
+    .await
+    .unwrap_or_else(|_| Err(unknown()));
+    let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
             code: public_code(error),
@@ -240,7 +265,10 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    tokio::time::timeout(engine.timeout, stream.write_all(&frame))
+        .await
+        .map_err(|_| unknown())?
+        .map_err(io_error)
 }
 
 async fn handle(
