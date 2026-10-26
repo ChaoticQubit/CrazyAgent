@@ -788,9 +788,13 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Plan the first slice"), "{shown}");
     assert!(shown.contains("RCLI"), "{shown}");
-    assert!(!shown.contains("could not start"), "{shown}");
+    assert!(!shown.contains("The master could not start"), "{shown}");
     assert!(!shown.contains("did not take"), "{shown}");
     assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(
+        shown.contains("(rcli_profile_configuration_required)"),
+        "{shown}"
+    );
 }
 
 async fn latest_master(
