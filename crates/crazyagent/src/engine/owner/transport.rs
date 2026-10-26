@@ -2202,18 +2202,30 @@ fn owner_reply_frame(
 /// Input: the dispatch error. Output: the line with the error code when it is a
 /// plain lowercase code, otherwise a redacted marker so private text never leaks.
 fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "native_auth_dispatch_error_redacted");
+    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
+}
+
+/// Renders a single-line engine diagnostic for a master turn that did not complete; a
+/// master turn takes no sign-in fence, so the line claims none. Input: the turn error.
+/// Output: the line with the error code when it is a plain lowercase code, otherwise a
+/// redacted marker so private text never leaks.
+fn master_turn_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "master_turn_error_redacted");
+    format!("master_turn_not_completed cause={cause}")
+}
+
+/// Picks the text an engine diagnostic may show for an error. Inputs: the error and the
+/// marker to show instead. Output: the error code when it is at most 192 lowercase
+/// letters, digits, `_`, `:` or `;`, else the marker.
+fn plain_cause<'a>(error: &'a EngineError, redacted: &'a str) -> &'a str {
     let code = error.0.as_str();
     let plain = !code.is_empty()
         && code.len() <= 192
         && code.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
         });
-    let cause = if plain {
-        code
-    } else {
-        "native_auth_dispatch_error_redacted"
-    };
-    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
+    if plain { code } else { redacted }
 }
 
 fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Instant> {

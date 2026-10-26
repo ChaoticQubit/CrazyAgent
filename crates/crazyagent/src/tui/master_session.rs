@@ -1637,6 +1637,9 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
         Some(reason) => format!("Turn {}: {phase} | {}", turn.ordinal, reason_text(reason)),
         None => format!("Turn {}: {phase}", turn.ordinal),
     });
+    if let Some(detail) = &turn.detail {
+        lines.push(super::views::safe_text(detail, 8192));
+    }
     if let Some(reply) = &turn.reply {
         lines.push(format!(
             "Actual reply | attempt {} | runtime {} | capture {} sequence {}\n{}",
@@ -2515,6 +2518,9 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::OutputLimit => "Reply was too long",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
         MasterReason::RepositoryMissing => "This project has no repository yet",
+        MasterReason::RepositoryConfigRefused => {
+            "A Git setting in this project's repository runs commands or redirects Git"
+        }
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Reason unknown",
     }
@@ -2581,6 +2587,7 @@ mod turn_line_tests {
             attempt: None,
             runtime: None,
             reply: None,
+            detail: None,
         };
         let mut lines = Vec::new();
         turn_lines(&turn, &mut lines);

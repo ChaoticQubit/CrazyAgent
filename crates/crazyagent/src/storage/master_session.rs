@@ -102,6 +102,7 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
         reason: MasterReason,
+        cause: String,
     },
 }
 
@@ -1949,6 +1950,22 @@ fn provision_bootstrap(
         Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
         Err(failure) => return Err(failure),
     }
+    let repository = master_repository(&tx, project_id)?;
+    let runtime_dir = path
+        .parent()
+        .ok_or_else(|| error("master_runtime_directory_missing"))?;
+    super::master_bootstrap::reserve(&tx, runtime_dir, &session, &repository, &auth)?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
+    crate::worktrees::provision(db, &session.bootstrap_task_id, &repository)?;
+    assert!(db.is_autocommit());
+    Ok(())
+}
+
+/// Reads the repository a project's master works in: the first one the project lists.
+/// Inputs: the transaction and the project. Output: the repository path, or
+/// `master_repository_missing` when the project lists none.
+fn master_repository(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<String, EngineError> {
     let body: String = tx
         .query_row(
             "SELECT body FROM projects WHERE id=?1",
@@ -1961,20 +1978,12 @@ fn provision_bootstrap(
     if project.project_id != *project_id {
         return Err(error("master_project_scope_conflict"));
     }
-    let repository = project
+    project
         .spec
         .repositories
         .first()
-        .ok_or_else(|| error("master_repository_missing"))?;
-    let runtime_dir = path
-        .parent()
-        .ok_or_else(|| error("master_runtime_directory_missing"))?;
-    super::master_bootstrap::reserve(&tx, runtime_dir, &session, repository, &auth)?;
-    tx.commit().map_err(error)?;
-    assert!(db.is_autocommit());
-    crate::worktrees::provision(db, &session.bootstrap_task_id, repository)?;
-    assert!(db.is_autocommit());
-    Ok(())
+        .cloned()
+        .ok_or_else(|| error("master_repository_missing"))
 }
 
 fn registration_session(
@@ -2788,7 +2797,7 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
-        MasterRuntimeCommand::Fail { reason, .. } => {
+        MasterRuntimeCommand::Fail { reason, cause, .. } => {
             if matches!(
                 turn.phase,
                 MasterTurnPhase::Queued | MasterTurnPhase::Prepared
@@ -2801,6 +2810,10 @@ pub(super) fn runtime(
                     MasterTurnPhase::Failed
                 };
                 turn.reason = Some(reason);
+                if reason == MasterReason::RepositoryConfigRefused {
+                    let repository = master_repository(&tx, &session.project_id)?;
+                    turn.detail = crate::worktrees::refused_config_line(&cause, &repository);
+                }
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
             }
@@ -2962,6 +2975,7 @@ fn execute(
                 attempt: None,
                 runtime: None,
                 reply: None,
+                detail: None,
             };
             let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(next)?, encode(&turn)?]).map_err(error)?;
             assert_eq!(changed, 1);

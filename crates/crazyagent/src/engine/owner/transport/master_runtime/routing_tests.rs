@@ -1008,3 +1008,150 @@ async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission(
     }
     case.finish().await;
 }
+
+#[tokio::test]
+async fn a_repository_vs_code_and_the_codex_app_wrote_to_gets_a_master_worktree_lease() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let mut tools = String::from(concat!(
+        "[remote \"origin\"]\n",
+        "\turl = https://example.invalid/owner/project.git\n",
+        "\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        "[branch \"trunk\"]\n",
+        "\tremote = origin\n",
+        "\tmerge = refs/heads/trunk\n",
+    ));
+    for index in 0..50 {
+        tools.push_str(&format!(
+            "[branch \"feature/{index}\"]\n\tvscode-merge-base = origin/trunk\n"
+        ));
+    }
+    let config = case.repository.join(".git/config");
+    let mut written = fs::read(&config).unwrap();
+    written.extend_from_slice(tools.as_bytes());
+    fs::write(&config, written).unwrap();
+    git(
+        &case.repository,
+        case.root.path(),
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    let linked = case.root.path().join("linked");
+    git(
+        &case.repository,
+        case.root.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+        ],
+    );
+    git(
+        &linked,
+        case.root.path(),
+        &[
+            "config",
+            "--worktree",
+            "codex.localEnvironmentConfigPath",
+            "__none__",
+        ],
+    );
+    assert!(
+        case.repository
+            .join(".git/worktrees/linked/config.worktree")
+            .is_file()
+    );
+    case.register().await;
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await;
+    let prepared = match result {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+        Ok(_) => panic!("the master turn was not prepared"),
+        Err(error) => panic!("the master refused the repository: {}", error.0),
+    };
+    assert_eq!(prepared.repository, case.repository);
+    assert_eq!(prepared.cwd, PathBuf::from(&prepared.lease.path));
+    assert_eq!(
+        fs::read(prepared.cwd.join("README")).unwrap(),
+        b"Actual master routing fixture.\n"
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_repository_whose_config_runs_a_command_is_refused_with_the_key_and_no_fence() {
+    for (key, value, code, named) in [
+        (
+            "core.hooksPath",
+            "/private/tmp",
+            "core_hookspath",
+            "core.hooksPath",
+        ),
+        (
+            "filter.lfs.process",
+            "git-lfs filter-process",
+            "filter_driver",
+            "filter.<driver>",
+        ),
+    ] {
+        let case = Fixture::new(MasterBackend::Rcli, true).await;
+        git(&case.repository, case.root.path(), &["config", key, value]);
+        let proof = case.register().await;
+        let returned = case.drive().await;
+        assert_eq!(
+            returned
+                .expect_err("a repository whose config runs a command must be refused")
+                .0,
+            format!("repository_config_refused:{code}"),
+            "{key}"
+        );
+        let failed = case.persisted_turn().await;
+        assert_eq!(failed.phase, MasterTurnPhase::Blocked, "{key}");
+        assert_eq!(
+            failed.reason,
+            Some(MasterReason::RepositoryConfigRefused),
+            "{key}"
+        );
+        let detail = failed
+            .detail
+            .as_deref()
+            .expect("the refusal names the repository, the key and why");
+        assert!(
+            detail.starts_with(&format!(
+                "{} has the Git setting {named}, which ",
+                case.repository.display()
+            )),
+            "{detail}"
+        );
+        let after = case.snapshot();
+        after.assert_no_effects();
+        {
+            let mut db = case.db();
+            let tx = db.transaction().unwrap();
+            assert!(rows(&tx, "native_auth_fences").is_empty(), "{key}");
+        }
+        let database = case.root.path().join("engine.db");
+        let custody =
+            NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
+        let profile = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
+        );
+        assert!(
+            custody
+                .hold_released_profile(&case.runtime().identity(), &profile)
+                .unwrap()
+                .is_some(),
+            "the refused turn left the profile held: {key}"
+        );
+        let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
+        assert_eq!(session.current_turn, None, "{key}");
+        case.finish().await;
+    }
+}

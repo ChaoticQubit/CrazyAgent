@@ -382,7 +382,10 @@ async fn hostile_config_filters_and_attributes_never_execute() {
         let expected = match hostile {
             "attributes" => ("allocation", "unsupported_or_unsafe_tree_entry"),
             "alternate" => ("admission", "unsupported_shared_or_partial_git_metadata"),
-            _ => ("admission", "unsupported_repository_config"),
+            "filter" => ("admission", "repository_config_refused:filter_driver"),
+            "include" => ("admission", "repository_config_refused:include"),
+            "fsmonitor" => ("admission", "repository_config_refused:core_fsmonitor"),
+            _ => unreachable!(),
         };
         assert_eq!(
             refusal,

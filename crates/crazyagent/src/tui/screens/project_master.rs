@@ -147,6 +147,11 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         ));
     }
     let retry = if latest { " Press r to try again." } else { "" };
+    if turn.reason == Some(MasterReason::RepositoryConfigRefused)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{harness} stopped: {detail}"));
+    }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
             "the account is not signed in. Sign in again in Settings, Accounts."
@@ -175,6 +180,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
         Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
+        Some(MasterReason::RepositoryConfigRefused) => {
+            "a Git setting in this project's repository runs commands or redirects Git."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -210,6 +218,7 @@ mod tests {
             attempt: None,
             runtime: None,
             reply: None,
+            detail: None,
         }
     }
 

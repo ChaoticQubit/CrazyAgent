@@ -1446,6 +1446,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
+  detail?: string | null;
 }
 
 export interface MasterState {
