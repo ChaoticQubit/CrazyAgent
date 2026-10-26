@@ -11,7 +11,7 @@ use crate::config::ModelAccess;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
-use crate::engine::{EngineError, NativeProfileCustody};
+use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
@@ -252,7 +252,7 @@ pub struct TeamRuntime {
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
-    delegation_tool: Option<PathBuf>,
+    delegation_tool: Option<RegisteredNativeAuthHost>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
@@ -590,15 +590,16 @@ impl TeamRuntime {
     }
 
     /// Gives every team master with tools on the engine's `delegate` tool, served by `executable`.
-    /// Takes the engine executable; its canonical path is used so the project sandbox can admit its folder.
-    /// Returns the runtime, or a plain code when the executable is not a file.
+    /// Takes the engine executable; the file at its canonical path is captured, so every later
+    /// master launch serves the tool from that same file or is refused.
+    /// Returns the runtime, or a plain code when the executable is not a file or is unsafe.
     pub fn with_delegation_tool(mut self, executable: &Path) -> Result<Self, EngineError> {
         let canonical = executable
             .canonicalize()
             .ok()
             .filter(|path| path.is_file())
             .ok_or_else(|| EngineError("team_executable_invalid".into()))?;
-        self.delegation_tool = Some(canonical);
+        self.delegation_tool = Some(RegisteredNativeAuthHost::capture(&canonical)?);
         Ok(self)
     }
 
@@ -1925,6 +1926,19 @@ impl TeamRuntime {
         sandbox = sandbox
             .confine_to_worktree(&working_dir)
             .map_err(sandboxed)?;
+        if let Some(engine) = self
+            .delegation_tool
+            .as_ref()
+            .filter(|_| role == AgentRole::Master && tools)
+        {
+            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
+            if sandbox.writes(engine.verified_path().map_err(changed)?) {
+                return Err(with_code(
+                    "the delegate engine is in a folder the agent can write",
+                    Some("team_delegate_writable"),
+                ));
+            }
+        }
         sandbox.install(&profile).map_err(sandboxed)?;
         let plan = Plan {
             harness: launch.into(),
@@ -1969,8 +1983,9 @@ impl TeamRuntime {
 
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
-    /// tool for a master with tools on, and the team's skill and server names for a master
-    /// with tools off. Takes the project, the agent id, its role and tools switch.
+    /// tool for a master with tools on, served by the captured engine while the file at its
+    /// path is still that one, and the team's skill and server names for a master with tools
+    /// off. Takes the project, the agent id, its role and tools switch.
     fn context(
         &self,
         project: &ProjectId,
@@ -1984,9 +1999,14 @@ impl TeamRuntime {
             crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
         let master = role == AgentRole::Master;
         match &self.delegation_tool {
-            Some(engine) if master && tools => context
-                .with_team_tool(engine, &self.tool_record(id))
-                .map_err(unread),
+            Some(engine) if master && tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_team_tool(engine, &self.tool_record(id))
+                    .map_err(unread)
+            }
             _ if master && !tools => context
                 .with_team_index(&self.connection, project)
                 .map_err(unread),

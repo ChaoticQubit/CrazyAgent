@@ -687,6 +687,13 @@ impl ProjectSandbox {
             .chain(self.worktrees.iter())
     }
 
+    /// Whether the agent could write `path` or move it away: true when the path is one of
+    /// [`Self::writable_roots`] or inside one. Input: an absolute canonical path. Output:
+    /// the answer.
+    pub fn writes(&self, path: &Path) -> bool {
+        self.writable_roots().any(|root| path.starts_with(root))
+    }
+
     /// The Seatbelt profile text for this agent.
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");

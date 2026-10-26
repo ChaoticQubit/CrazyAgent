@@ -453,6 +453,43 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     );
     turn.tool_record = record;
     assert_eq!(checked(MasterBackend::Codex, &turn, Some(&engine)), Ok(()));
+    let inside = worktree.join("crazyagent");
+    std::fs::write(&inside, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        checked(MasterBackend::Codex, &turn, Some(&inside)),
+        Err("master_delegate_writable".to_owned())
+    );
+    std::fs::remove_file(&inside).unwrap();
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "(echo x > {engine}) 2>/dev/null && echo engine=written || echo engine=refused\n\
+         (mv {engine} {moved}) 2>/dev/null && echo engine=moved || echo engine=kept\n\
+         (echo x > {probe}) 2>/dev/null && echo worktree=written || echo worktree=refused\n",
+        engine = quoted(&engine),
+        moved = quoted(&engine.with_extension("moved")),
+        probe = quoted(&worktree.join("probe.txt")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(turn.sandbox.profile())
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&worktree)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &turn.home)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "engine=refused\nengine=kept\nworktree=written\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let MasterTurnLaunch { credential, .. } = turn;
     drop(credential);
     assert!(!copy.exists());
