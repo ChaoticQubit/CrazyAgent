@@ -99,14 +99,33 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("blocked", "readiness_unknown")]), "Not signed in");
   assert.equal(research.masterStatus({ session_id: "s", phase: "closed", current_turn: null }, [turn("succeeded")]), "Stopped");
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("failed", "provider_error")]), "Stopped");
-  assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.");
-  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped: provider error.");
-  assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet.");
+  assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again. (readiness_stale)");
+  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped. (provider_error)");
+  assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet. (repository_missing)");
   assert.equal(research.resendText([{ ...turn("blocked", "repository_missing"), id: "t1", ordinal: 1 }], { t1: "first" }), "first");
   const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
-  assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused}`);
-  assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again.");
+  assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused} (repository_config_refused)`);
+  assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again. (repository_config_refused)");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
+});
+
+test("a stopped master turn shows a plain sentence and the cause the engine stored", () => {
+  const turn = (phase, reason, cause, detail = null) => ({ id: "t", ordinal: 1, phase, reason, cause, detail, reply: null });
+  const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+  assert.equal(research.turnLine(turn("blocked", "runtime_unavailable", "rcli_profile_configuration_required")),
+    "The master stopped: it could not start. Check it in Settings, Harnesses. (rcli_profile_configuration_required)");
+  assert.equal(research.turnLine(turn("failed", "unknown", "master_runtime_binding")), "The master stopped. (master_runtime_binding)");
+  assert.equal(research.turnLine(turn("blocked", "repository_config_refused", "repository_config_refused:core_hookspath", refused)),
+    `The master couldn't start: ${refused} (repository_config_refused:core_hookspath)`);
+  assert.equal(research.turnLine(turn("failed", "profile_busy", "native_profile_in_use")),
+    "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
+  assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
+    "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  for (const phase of ["failed", "blocked", "uncertain"]) {
+    const line = research.turnLine(turn(phase, "unknown", null));
+    assert.equal(line, `The master stopped. (${phase})`);
+    assert.ok(!line.includes("unknown"), line);
+  }
 });
 
 test("unassigning a pool removes only this project", () => {
@@ -255,7 +274,7 @@ test("a stopped or failed master turn offers its own message to send again", () 
   assert.equal(research.resendText([], {}), null);
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
-  assert.equal(research.turnLine(crashed), "The master stopped: capture incomplete.", "the line names what happened");
+  assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
   assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });

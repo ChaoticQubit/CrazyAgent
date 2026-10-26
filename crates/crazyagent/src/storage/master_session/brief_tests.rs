@@ -302,7 +302,7 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
         &client,
         &opened,
         "submit-master-brief",
-        MasterReason::Unknown,
+        MasterReason::RuntimeUnavailable,
     )
     .await;
     let initial = assembled(root.path(), &active, &first_turn);
@@ -404,7 +404,7 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
         &client,
         &reopened,
         "resubmit-master-brief",
-        MasterReason::Unknown,
+        MasterReason::RuntimeUnavailable,
     )
     .await;
     drop(client);

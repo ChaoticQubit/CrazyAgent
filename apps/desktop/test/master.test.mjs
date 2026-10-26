@@ -71,6 +71,9 @@ test("turn status labels are plain language for every phase", () => {
   assert.equal(label("blocked", "connection_changed"),
     "Blocked: settings or the engine changed since the master opened. Close it, open it again, then send again");
   assert.equal(label("uncertain"), "Outcome unclear");
+  assert.equal(label("failed", "unknown"), "Failed");
+  assert.equal(conversation.turnStatus({ id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_configuration_required", reply: null }),
+    "Blocked (rcli_profile_configuration_required)");
   for (const phase of ["delivering", "waiting_approval", "failed", "cancelled"]) assert.ok(label(phase).length > 0);
 });
 

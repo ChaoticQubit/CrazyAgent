@@ -588,7 +588,12 @@ async fn master_open_and_submit_precede_development_plan_with_real_applied_input
         .await;
     let turn = &f.settled(&reader, &session, "requirements").await;
     assert_eq!(f.page(&reader, &session).await.turns.len(), 1);
-    blocked(turn, &session, "requirements", MasterReason::Unknown);
+    blocked(
+        turn,
+        &session,
+        "requirements",
+        MasterReason::RuntimeUnavailable,
+    );
     assert_eq!(turn.ordinal, 1);
     let history = f.history(&reader, "p").await;
     assert_eq!(history.entries.len(), 1);
@@ -667,7 +672,7 @@ async fn master_configured_allowances_do_not_consume_the_single_active_capacity_
             &f.settled(&owner, &session, &format!("turn-{name}")).await,
             &session,
             &format!("turn-{name}"),
-            MasterReason::Unknown,
+            MasterReason::RuntimeUnavailable,
         );
     }
     let config = resolve_config(
@@ -834,12 +839,17 @@ async fn master_one_outstanding_turn_survives_competing_owner_requests() {
         &f.settled(&tui, &session, winner.as_str()).await,
         &session,
         winner.as_str(),
-        MasterReason::Unknown,
+        MasterReason::RuntimeUnavailable,
     );
     f.submit(&tui, "second-turn", &session, "Retry after the block.")
         .await;
     let retried = f.settled(&tui, &session, "second-turn").await;
-    blocked(&retried, &session, "second-turn", MasterReason::Unknown);
+    blocked(
+        &retried,
+        &session,
+        "second-turn",
+        MasterReason::RuntimeUnavailable,
+    );
     assert_eq!(retried.ordinal, 2);
     assert_eq!(f.page(&tui, &session).await.turns.len(), 2);
     assert_eq!(f.history(&desktop, "p").await.entries.len(), 2);
@@ -890,7 +900,7 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     )
     .await;
     let ended = f.settled(&owner, &session, "turn").await;
-    blocked(&ended, &session, "turn", MasterReason::Unknown);
+    blocked(&ended, &session, "turn", MasterReason::RuntimeUnavailable);
     rejected(
         owner
             .request(mutation(
@@ -947,7 +957,7 @@ async fn master_close_keeps_a_blocked_turn_and_its_reason_without_fabricating_a_
     )
     .await;
     let ended = f.settled(&owner, &session, "turn").await;
-    blocked(&ended, &session, "turn", MasterReason::Unknown);
+    blocked(&ended, &session, "turn", MasterReason::RuntimeUnavailable);
     f.close(&owner, "close", &session).await;
     let closed = f.session(&owner, "p").await.unwrap();
     assert_eq!(closed.phase, MasterSessionPhase::Closed);
@@ -997,7 +1007,12 @@ async fn master_restart_retains_owner_input_and_reconciles_the_original_receipt(
     assert!(replay.historical_replay);
     assert_eq!(replay.provenance, first.provenance);
     assert_eq!(f.page(&owner, &session).await, saved);
-    blocked(&saved.turns[0], &session, "turn", MasterReason::Unknown);
+    blocked(
+        &saved.turns[0],
+        &session,
+        "turn",
+        MasterReason::RuntimeUnavailable,
+    );
     let reply = owner
         .request(request(
             "reconcile",
@@ -1243,8 +1258,8 @@ async fn master_session_actions_cannot_cross_project_or_cancel_another_turn() {
         .await;
     let p_turn = f.settled(&owner, &p, "p-turn").await;
     let q_turn = f.settled(&owner, &q, "q-turn").await;
-    blocked(&p_turn, &p, "p-turn", MasterReason::Unknown);
-    blocked(&q_turn, &q, "q-turn", MasterReason::Unknown);
+    blocked(&p_turn, &p, "p-turn", MasterReason::RuntimeUnavailable);
+    blocked(&q_turn, &q, "q-turn", MasterReason::RuntimeUnavailable);
     for (index, action) in [
         MasterOwnerAction::Submit {
             project_id: project("q"),
@@ -1356,7 +1371,7 @@ async fn master_maximum_utf8_owner_input_is_not_a_model_reply_or_storage_only_se
         &f.settled(&owner, &session, "maximum").await,
         &session,
         "maximum",
-        MasterReason::Unknown,
+        MasterReason::RuntimeUnavailable,
     );
     applied(
         owner
@@ -1425,7 +1440,7 @@ async fn master_turn_pages_are_ordered_complete_bounded_and_resync_after_mutatio
         assert_eq!(turn.ordinal, u64::try_from(index + 1).unwrap());
         assert_eq!(turn.id, RequestId::new(format!("turn-{index}")).unwrap());
         assert_eq!(turn.phase, MasterTurnPhase::Blocked);
-        assert_eq!(turn.reason, Some(MasterReason::Unknown));
+        assert_eq!(turn.reason, Some(MasterReason::RuntimeUnavailable));
         assert_eq!(turn.reply, None);
     }
     f.submit(

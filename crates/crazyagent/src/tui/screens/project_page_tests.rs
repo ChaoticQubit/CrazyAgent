@@ -989,6 +989,11 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
 
     let shown = render(&mut shell, 100, 40);
     assert!(shown.contains("Stopped"), "{shown}");
+    assert!(
+        shown.contains("(rcli_profile_configuration_required)"),
+        "{shown}"
+    );
+    assert!(!shown.contains("something went wrong"), "{shown}");
     assert!(!shown.contains("e End conversation"), "{shown}");
     shell.key(Key::Esc);
     let shown = render(&mut shell, 100, 40);
