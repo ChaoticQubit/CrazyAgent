@@ -59,7 +59,8 @@ pub fn check_stdio(
 }
 
 /// Starts an already built MCP server command, such as one wrapped in the agent boundary,
-/// runs `initialize` and `tools/list`, then stops its whole process group. Inputs: the
+/// runs `initialize` and `tools/list`, then stops its whole process group and, through the
+/// warden a boundary command gets, every process left in its sandbox. Inputs: the
 /// command with its arguments, environment and folder set, and the time bound. Output:
 /// the tool names, or a plain rejection code.
 #[cfg(unix)]
@@ -69,17 +70,19 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = crate::spawn_gate::spawn(&mut process).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "server_command_not_found",
-        std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",
-        _ => "server_cant_start",
-    })?;
+    let (mut child, warden) =
+        crate::sandbox::warden::spawn(&mut process).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "server_command_not_found",
+            std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",
+            _ => "server_cant_start",
+        })?;
     let pid = child.id();
     let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
         (Some(stdin), Some(stdout)) => (stdin, stdout),
         _ => {
             stop(pid);
             let _ = child.wait();
+            crate::sandbox::warden::fire_reported(warden, "server_check");
             return Err("server_cant_start");
         }
     };
@@ -94,6 +97,7 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
     stop(pid);
     let _ = child.kill();
     let _ = child.wait();
+    crate::sandbox::warden::fire_reported(warden, "server_check");
     result
 }
 
@@ -349,5 +353,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!alive(pid), "the server's child process must stop too");
+    }
+
+    /// A server checked inside the agent boundary, as plugin checks run command servers,
+    /// leaves a process in its own session and a `nohup` orphan; once the check times out,
+    /// none of them is left.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_checked_server_in_the_agent_boundary_leaves_nothing_it_detached() {
+        use crate::sandbox::warden::fixture::{DetachingRun, survivors};
+        let run = DetachingRun::new();
+        let (processes, checked) = std::thread::scope(|scope| {
+            let check = scope
+                .spawn(|| check_command(run.command(&run.profile), Duration::from_millis(1500)));
+            (run.processes(), check.join().unwrap())
+        });
+        assert_eq!(checked.unwrap_err(), "server_check_timeout");
+        assert_eq!(survivors(processes, Duration::from_secs(1)), []);
     }
 }
