@@ -574,7 +574,9 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
         || prepared.attempt.completion.is_some()
         || prepared.attempt.request.project_id != prepared.session.project_id
         || !prepared.attempt_on_current_turn()
-        || prepared.attempt.config_id != prepared.session.config_id
+        || !prepared
+            .session
+            .admits_attempt(&prepared.attempt.config_id, true)
         || binding.connection != prepared.attempt.connection
         || lease.state != LeaseState::Ready
         || lease.project_id != prepared.session.project_id
