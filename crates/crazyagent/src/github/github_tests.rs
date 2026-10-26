@@ -1,5 +1,6 @@
 use super::test_server::{Answer, Seen, Server, base64};
 use super::*;
+use crate::credentials::test_keychain::TestKeychain;
 use crate::credentials::{Keychain, reference};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
@@ -9,6 +10,7 @@ struct Scratch {
     root: tempfile::TempDir,
     namespace: String,
     store: Arc<Keychain>,
+    _keychain: TestKeychain,
 }
 
 impl Scratch {
@@ -17,10 +19,13 @@ impl Scratch {
         getrandom::fill(&mut bytes).unwrap();
         let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         let namespace = format!("dev.crazyagent.test-{suffix}");
+        let mut keychain = TestKeychain::temporary();
+        keychain.serve(&namespace);
         Self {
             root: tempfile::tempdir().unwrap(),
             store: Arc::new(Keychain::new(&namespace).unwrap()),
             namespace,
+            _keychain: keychain,
         }
     }
 

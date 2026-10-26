@@ -28,6 +28,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(in crate::engine) mod diagnostic;
 #[cfg(unix)]
 mod process;
 
@@ -41,8 +42,23 @@ const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
 const TOOL_STEPS_MAX: &str = "24";
 #[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// master. In Claude Code 2.1.309 `claude -p` keeps running after a turn's result while a
+/// background task runs and then answers that task's `task_notification` with another turn,
+/// which would outlive the master turn; this variable makes the Bash tool ignore
+/// `run_in_background` and refuses background agent launches.
+#[cfg(unix)]
+const BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const NO_SERVERS: &str = "{\"mcpServers\":{}}";
 const MCP_CONFIG_FLAG: &str = "--mcp-config";
+const DENY_FLAG: &str = "--disallowedTools";
+const DENY_FLAG_SPELLINGS: [&str; 2] = [DENY_FLAG, "--disallowed-tools"];
+
+/// Claude Code's own sub-agent tools, denied to a tools-on master so it starts sub-agents only
+/// through the engine's `delegate` tool. Claude Code 2.1.309 names them `Agent` (offered as
+/// `Task` in print mode, its alias), `Workflow` and `TeamCreate`; denying a name also denies
+/// its aliases. Every other default tool stays.
+const BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
 
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
 /// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
@@ -230,12 +246,15 @@ fn command_for(
         command.args(["--model", model]);
     }
     match tools {
-        Some(_) => command.args([
-            "--tools",
-            "default",
-            "--permission-mode",
-            "bypassPermissions",
-        ]),
+        Some(_) => command
+            .args([
+                "--tools",
+                "default",
+                "--permission-mode",
+                "bypassPermissions",
+                DENY_FLAG,
+            ])
+            .args(BUILT_IN_AGENTS),
         None => command.args(["--tools", ""]),
     };
     command.args([
@@ -262,7 +281,9 @@ fn command_for(
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
     if tools.is_some() {
-        command.env("SHELL", TOOLS_SHELL);
+        command
+            .env("SHELL", TOOLS_SHELL)
+            .env(BACKGROUND_TASKS_OFF.0, BACKGROUND_TASKS_OFF.1);
     }
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
@@ -364,6 +385,7 @@ pub(in crate::engine) struct ClaudeHost {
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
     group: Arc<AtomicU32>,
+    diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
     expires: tokio::time::Instant,
 }
@@ -390,12 +412,14 @@ impl ClaudeHost {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let group = Arc::new(AtomicU32::new(0));
+        let kept = Arc::new(std::sync::Mutex::new(None));
         let mut host = Self {
             turns,
             events,
             status,
             stop: Arc::clone(&stop),
             group: Arc::clone(&group),
+            diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time,
             expires: tokio::time::Instant::now() + limits.run_time,
         };
@@ -415,6 +439,7 @@ impl ClaudeHost {
                         report,
                         stop,
                         group,
+                        diagnostic: kept,
                     },
                 );
             })
@@ -519,6 +544,17 @@ impl ClaudeHost {
         Some(self.group.load(Ordering::Acquire)).filter(|group| *group > 1)
     }
 
+    /// What the harness stream left for the engine log once the custodian retired it: its
+    /// fault, the kind of the line the protocol refused, the lines after the turn's result
+    /// and the last raw bytes. Input: the host. Output: the diagnostic, or none before the
+    /// harness is retired.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
+        self.diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         self.stop.store(true, Ordering::Release);
         self.close().await
@@ -588,6 +624,11 @@ impl ClaudeHost {
         match *self {}
     }
 
+    /// Never keeps a stream: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
+        match *self {}
+    }
+
     /// Never cancels: takes the host. Unreachable without a host value.
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         match *self {}
@@ -619,8 +660,9 @@ fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
 
 /// Confirms a Claude Code master command names exactly the delegate server the engine gave
 /// its turn: with `tools`, one MCP configuration whose only server is that engine executable
-/// serving `team-mcp` on that drop file; without, an empty server list. Input: the command
-/// and the expected tools. Output: Ok, or `master_delegate_unverified`.
+/// serving `team-mcp` on that drop file, and one deny list of exactly Claude Code's own
+/// sub-agent tools; without, an empty server list and no deny list. Input: the command and
+/// the expected tools. Output: Ok, or `master_delegate_unverified`.
 pub(in crate::engine) fn require_delegate(
     command: &Command,
     tools: Option<MasterTools<'_>>,
@@ -650,6 +692,41 @@ pub(in crate::engine) fn require_delegate(
     let named: serde_json::Value = serde_json::from_str(config).map_err(|_| refused())?;
     if named != expected {
         return Err(refused());
+    }
+    if args.iter().any(|arg| {
+        DENY_FLAG_SPELLINGS.iter().any(|flag| {
+            arg.as_encoded_bytes()
+                .starts_with(format!("{flag}=").as_bytes())
+        })
+    }) {
+        return Err(refused());
+    }
+    let mut denies = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| {
+            DENY_FLAG_SPELLINGS
+                .iter()
+                .any(|flag| **arg == std::ffi::OsStr::new(flag))
+        })
+        .map(|(index, _)| index);
+    match (tools, denies.next(), denies.next()) {
+        (None, None, _) => {}
+        (Some(_), Some(index), None) => {
+            let listed = args.get(index + 1..).unwrap_or_default();
+            let names = listed
+                .iter()
+                .copied()
+                .take(BUILT_IN_AGENTS.len())
+                .eq(BUILT_IN_AGENTS.map(std::ffi::OsStr::new));
+            let ends = listed
+                .get(BUILT_IN_AGENTS.len())
+                .is_none_or(|next| next.as_encoded_bytes().starts_with(b"-"));
+            if args[index] != std::ffi::OsStr::new(DENY_FLAG) || !names || !ends {
+                return Err(refused());
+            }
+        }
+        _ => return Err(refused()),
     }
     Ok(())
 }

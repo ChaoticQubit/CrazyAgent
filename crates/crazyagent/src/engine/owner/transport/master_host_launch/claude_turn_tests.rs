@@ -1,24 +1,31 @@
 use super::super::Root;
 use super::*;
 use crate::config::{ModelAuthentication, ModelReference};
+use crate::credentials::test_keychain::TestKeychain;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Copies a command with its MCP configuration replaced and arguments appended. Input: the
 /// command, the configuration text and the extra arguments. Output: the new command.
 fn configured(command: &Command, config: &str, extra: &[&str]) -> Command {
+    rewritten(command, |args| {
+        let index = args.iter().position(|arg| arg == "--mcp-config").unwrap();
+        args[index + 1] = config.to_owned();
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    })
+}
+
+fn rewritten(command: &Command, change: impl Fn(&mut Vec<String>)) -> Command {
     let mut args: Vec<String> = command
         .get_args()
         .map(|arg| arg.to_str().unwrap().to_owned())
         .collect();
-    let index = args.iter().position(|arg| arg == "--mcp-config").unwrap();
-    args[index + 1] = config.to_owned();
-    args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    change(&mut args);
     let mut copy = Command::new(command.get_program());
     copy.args(args)
         .current_dir(command.get_current_dir().unwrap())
@@ -38,66 +45,17 @@ fn private_directory(path: &Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Runs the system keychain tool against one home only, with secrets passed on stdin.
-/// Inputs: the home, the arguments and the optional stdin text. Output: a panic unless
-/// the tool succeeds.
-fn security(home: &Path, args: &[&str], input: Option<&str>) {
-    let mut child = crate::spawn_gate::spawn(
-        Command::new("/usr/bin/security")
-            .args(args)
-            .env_clear()
-            .env("HOME", home)
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-    )
-    .unwrap();
-    if let Some(input) = input {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "security {args:?} failed");
-}
-
 /// Stores a Claude Code sign-in record where Claude Code keeps it: the managed home's
-/// own login keychain, under the service named after that home.
-/// Inputs: the managed home and the record. Output: the keychain item exists.
-fn claude_keychain(home: &Path, record: &Value) {
-    let folder = home.join("Library/Keychains");
-    std::fs::create_dir_all(&folder).unwrap();
-    for private in [home.join("Library"), folder.clone()] {
-        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let keychain = folder.join("login.keychain-db");
-    let path = keychain.to_str().unwrap();
-    security(home, &["create-keychain", "-p", "", path], None);
+/// own login keychain, a temporary one, under the service named after that home.
+/// Inputs: the managed home and the record. Output: the keychain, deleted on drop.
+fn claude_keychain(home: &Path, record: &Value) -> TestKeychain {
+    let keychain = TestKeychain::create(home);
     let service = format!(
         "Claude Code-credentials-{}",
         &format!("{:x}", Sha256::digest(home.to_str().unwrap().as_bytes()))[..8]
     );
-    let hex: String = record
-        .to_string()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    security(
-        home,
-        &["-i"],
-        Some(&format!(
-            "add-generic-password -a unit -s \"{service}\" -X {hex} \"{path}\"\n"
-        )),
-    );
+    keychain.add("unit", &service, &record.to_string());
+    keychain
 }
 
 #[test]
@@ -172,7 +130,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         },
         "mcpOAuth": {"unit-server": {"accessToken": "mcp-unit-secret"}}
     });
-    claude_keychain(&managed, &record);
+    let _keychain = claude_keychain(&managed, &record);
     let runtime = base.join("runtime");
     private_directory(&runtime);
     let root = Root::open(&runtime).unwrap();
@@ -311,6 +269,49 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     assert_eq!(delegate(&command, None), unverified);
     assert_eq!(delegate(&off_command, None), Ok(()));
     assert_eq!(delegate(&off_command, Some(tools)), unverified);
+    let denied = args
+        .iter()
+        .position(|arg| *arg == "--disallowedTools")
+        .expect("a tools-on master denies Claude Code's own sub-agent tools");
+    assert_eq!(
+        args[denied + 1..denied + 5],
+        ["Agent", "Workflow", "TeamCreate", "--strict-mcp-config"]
+    );
+    let without = |names: usize| {
+        move |args: &mut Vec<String>| {
+            args.drain(denied + names..denied + 4);
+        }
+    };
+    for (name, changed) in [
+        ("no deny list", rewritten(&command, without(0))),
+        ("a shorter deny list", rewritten(&command, without(3))),
+        (
+            "a longer deny list",
+            rewritten(&command, |args| args.insert(denied + 4, "Bash".into())),
+        ),
+        (
+            "a second deny list",
+            rewritten(&command, |args| {
+                args.extend(["--disallowedTools", "Agent"].map(String::from));
+            }),
+        ),
+        (
+            "another spelling",
+            rewritten(&command, |args| {
+                args.extend(["--disallowed-tools", "Bash"].map(String::from));
+            }),
+        ),
+        (
+            "an inline deny list",
+            rewritten(&command, |args| args.push("--disallowedTools=Bash".into())),
+        ),
+    ] {
+        assert_eq!(delegate(&changed, Some(tools)), unverified, "{name}");
+    }
+    let off_denied = rewritten(&off_command, |args| {
+        args.extend(["--disallowedTools", "Agent", "Workflow", "TeamCreate"].map(String::from));
+    });
+    assert_eq!(delegate(&off_denied, None), unverified);
     let link = install.join("crazyagent-link");
     std::os::unix::fs::symlink(&engine, &link).unwrap();
     let hard = install.join("crazyagent-hard");

@@ -11,10 +11,11 @@ const OUTPUT_BYTES_MAX: usize = 4096;
 const ITEM_MISSING: i32 = 44;
 const NAMESPACE_ROOT: &str = "dev.crazyagent.";
 
-/// The macOS Keychain as a credential store. Every item lives in the owner's default
-/// keychain under services that start with this store's namespace, and every call names
-/// that keychain file, so lookups never depend on `HOME`. Items are written through
-/// `security -i` on stdin as hex, so a secret never appears in any process argument.
+/// The macOS Keychain as a credential store. Every item lives in one keychain file, the
+/// owner's default unless the store was opened with `at`, under services that start with
+/// this store's namespace, and every call names that file, so lookups never depend on
+/// `HOME`. Items are written through `security -i` on stdin as hex, so a secret never
+/// appears in any process argument.
 pub struct Keychain {
     namespace: String,
     keychain: PathBuf,
@@ -30,14 +31,8 @@ impl Keychain {
     /// such as `dev.crazyagent.e1a2b3`. Output: the store bound to the owner's default
     /// keychain file, or `credential_namespace_refused` / `credential_store_unavailable`.
     pub fn new(namespace: &str) -> Result<Self, StoreError> {
-        let namespace = checked_name(namespace)?;
-        if !namespace.starts_with(NAMESPACE_ROOT) || namespace.len() == NAMESPACE_ROOT.len() {
-            return Err(StoreError::code("credential_namespace_refused"));
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())
-            .ok_or_else(unavailable)?;
+        let namespace = owned_namespace(namespace)?;
+        let home = store_home(namespace)?;
         let ran = run(
             &["default-keychain".as_ref(), "-d".as_ref(), "user".as_ref()],
             None,
@@ -47,7 +42,15 @@ impl Keychain {
             return Err(unavailable());
         }
         let text = String::from_utf8(ran.stdout).map_err(|_| unavailable())?;
-        let keychain = PathBuf::from(text.trim().trim_matches('"'));
+        Self::at(namespace, Path::new(text.trim().trim_matches('"')))
+    }
+
+    /// Opens the store for one namespace in one named keychain file, such as a test's own
+    /// temporary keychain. Inputs: the namespace and the absolute keychain file. Output: the
+    /// store bound to that file, or `credential_namespace_refused` or
+    /// `credential_store_unavailable`.
+    pub fn at(namespace: &str, keychain: &Path) -> Result<Self, StoreError> {
+        let namespace = owned_namespace(namespace)?;
         let shown = keychain.to_str().ok_or_else(unavailable)?;
         if !keychain.is_absolute()
             || shown.contains(['\'', '"', '\\', '\n', '\r'])
@@ -57,7 +60,7 @@ impl Keychain {
         }
         Ok(Self {
             namespace: namespace.to_owned(),
-            keychain,
+            keychain: keychain.to_path_buf(),
         })
     }
 
@@ -183,6 +186,36 @@ impl Store for Keychain {
 
 fn unavailable() -> StoreError {
     StoreError::code("credential_store_unavailable")
+}
+
+fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
+    let namespace = checked_name(namespace)?;
+    if !namespace.starts_with(NAMESPACE_ROOT) || namespace.len() == NAMESPACE_ROOT.len() {
+        return Err(StoreError::code("credential_namespace_refused"));
+    }
+    Ok(namespace)
+}
+
+/// The home whose default keychain holds the store: the owner's `HOME`. Input: the
+/// namespace, unused here. Output: the absolute home, or `credential_store_unavailable`.
+#[cfg(not(test))]
+fn store_home(_namespace: &str) -> Result<PathBuf, StoreError> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or_else(unavailable)
+}
+
+/// The home whose default keychain holds the store in lib tests: the temporary home a
+/// test keychain serves for the namespace, never the owner's. Input: the namespace.
+/// Output: that home; a namespace no test keychain serves is refused with a panic.
+#[cfg(test)]
+fn store_home(namespace: &str) -> Result<PathBuf, StoreError> {
+    Ok(
+        super::test_keychain::home_for(namespace).unwrap_or_else(|| {
+            panic!("{namespace} has no temporary test keychain; lib tests never open the owner's")
+        }),
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

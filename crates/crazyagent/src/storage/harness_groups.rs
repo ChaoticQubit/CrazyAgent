@@ -1,7 +1,10 @@
 use crate::engine::EngineError;
 use crate::protocol::{RequestId, SessionId};
-use rusqlite::{Connection, Transaction, params};
+#[cfg(unix)]
+use rusqlite::Connection;
+use rusqlite::{Transaction, params};
 
+#[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE harness_groups (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     turn TEXT NOT NULL CHECK(length(turn) BETWEEN 1 AND 128),
@@ -9,11 +12,13 @@ const SCHEMA: &str = "CREATE TABLE harness_groups (
     started TEXT CHECK(length(started) BETWEEN 1 AND 64),
     UNIQUE(session,turn,process_group)
 )";
+#[cfg(unix)]
 const UNRECORDED: &str = "INSERT INTO harness_groups(session,turn,process_group,started)
     SELECT t.session,t.id,NULL,NULL FROM master_turns t JOIN master_sessions s ON s.id=t.session
     WHERE s.phase='configured' AND t.ordinal=(SELECT MAX(u.ordinal) FROM master_turns u
     WHERE u.session=t.session AND u.phase NOT IN ('queued','blocked','prepared'))";
 const ROWS_MAX: i64 = 64;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const STARTED_MAX: usize = 64;
 
 /// One recorded launch: its process group, unknown until the harness started, and the
@@ -27,6 +32,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Creates the record of the harness process groups master turns launched (LB-23).
 /// Input: the engine database. Output: success, or a schema conflict. The first creation
 /// marks each open session's latest turn that may have launched as having an unknown group.
+#[cfg(unix)]
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
     let actual: Option<String> = tx

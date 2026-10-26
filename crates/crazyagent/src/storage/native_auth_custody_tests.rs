@@ -58,7 +58,7 @@ struct Snapshot {
 
 struct CustodyCase {
     db: Connection,
-    _lock: File,
+    _lock: super::EngineLock,
     custody: Result<NativeProfileCustody, EngineError>,
     sources: settings::SettingsSources,
     config: EffectiveConfig,

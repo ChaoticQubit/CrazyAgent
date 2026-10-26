@@ -135,9 +135,10 @@ pub(super) fn engine_executable() -> PathBuf {
 }
 
 /// Qualifies a real Claude master turn with its tools on (DEC-093) inside the tools-on master
-/// sandbox: it writes a file in its worktree with its own tools, calls the engine's real
-/// `delegate` tool served by the built engine executable, and replies; the engine then takes
-/// the recorded task. The turn is bounded by a 240 s wall time.
+/// sandbox: it writes a file in its worktree with its own tools, starts the sub-agent it is
+/// asked for in plain words through the engine's real `delegate` tool served by the built
+/// engine executable, never through Claude Code's own sub-agent tools, and replies; the
+/// engine then takes the recorded task. The turn is bounded by a 240 s wall time.
 #[tokio::test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates() {
@@ -214,7 +215,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
     master
         .start_turn(
             turn.clone(),
-            "Do these steps in order. 1. With your file tools, create the file note.txt in your working folder containing exactly the word HERON. 2. Call the delegate tool once with the task \"Write the README\". 3. Reply with exactly the word DONE.",
+            "Do these steps in order. 1. With your file tools, create the file note.txt in your working folder containing exactly the word HERON. 2. Start one sub-agent that writes the README. Do not write the README yourself. 3. Reply with exactly the word DONE.",
         )
         .await
         .unwrap();
@@ -258,9 +259,137 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
             .any(|name| name == "mcp__crazyagent-team__delegate"),
         "{tools:?}"
     );
+    for built_in in ["Agent", "Task", "Workflow", "TeamCreate"] {
+        assert!(!tools.iter().any(|name| name == built_in), "{tools:?}");
+    }
     assert_eq!(delegations.len(), 1, "{delegations:?}");
-    assert_eq!(delegations[0].prompt, "Write the README");
+    assert!(
+        delegations[0].prompt.to_lowercase().contains("readme"),
+        "{delegations:?}"
+    );
     assert_eq!(std::fs::read_dir(&repository).unwrap().count(), 0);
+    drop(credential);
+    drop(folder);
+}
+
+/// Qualifies LB-44 on a real Claude master with its tools on: asked to start a background
+/// shell command and reply without waiting, the master's Bash tool has no background option,
+/// the turn ends at its result and the host closes cleanly. The turn is bounded by a 240 s
+/// wall time.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_result() {
+    let engine = engine_executable();
+    let mut signed_in = SignedIn::claude();
+    let connection = signed_in.connection.clone();
+    let turn = RequestId::new("claude-live-background-turn").unwrap();
+    let profile = signed_in.acquire(turn.as_str());
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-live-background-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let root = Root::open(&base).unwrap();
+    let repository = base.join("repository");
+    let worktree = base.join("worktrees").join("lease");
+    private_directory(&repository);
+    private_directory(&worktree);
+    let claude = crate::team::runtime::managed_agent::claude();
+    let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let budget = ResourceBudget {
+        wall_time_ms: 240_000,
+        ..ResourceBudget::unit()
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record: _,
+    } = claude_master_turn(
+        &place,
+        &profile,
+        &claude,
+        &connection,
+        "You are a test. Follow the user's steps exactly and use your tools for them.",
+        Duration::from_millis(budget.wall_time_ms),
+        Some(&engine),
+    )
+    .unwrap();
+    let mut master = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: SessionId::new("claude-live-background-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: signed_in.profile_ref(),
+            worktree_lease: RequestId::new("claude-live-background-lease").unwrap(),
+        },
+        connection.account_ref.clone(),
+        budget,
+    )
+    .await
+    .unwrap();
+    master
+        .start_turn(
+            turn.clone(),
+            "Do these steps in order. 1. Call your Bash tool once with run_in_background set to true and the command: sleep 5; echo LATE > late.txt 2. Do not wait for it and do not check on it. 3. Reply with exactly the word STARTED.",
+        )
+        .await
+        .unwrap();
+    let mut errors = Vec::new();
+    let mut tools = Vec::new();
+    let mut text = String::new();
+    let outcome = loop {
+        let event = master.next_event().await.unwrap();
+        match event.kind {
+            EventKind::AssistantError { code } => errors.push(code),
+            EventKind::ToolUse {
+                name,
+                input,
+                parent_tool_use_id: None,
+                ..
+            } => {
+                tools.push((name, input.get("run_in_background").cloned()));
+                text.clear();
+            }
+            EventKind::AssistantText {
+                text: part,
+                parent_tool_use_id: None,
+                ..
+            } => text.push_str(&part),
+            EventKind::TurnFinished { outcome, .. } => break outcome,
+            _ => {}
+        }
+    };
+    let late_at_result = worktree.join("late.txt").exists();
+    let closed = master.close().await.map_err(|error| error.0);
+    let diagnostic = master.diagnostic().unwrap();
+    println!(
+        "real claude background master turn: outcome={outcome:?} closed={closed:?} errors={errors:?} tools={tools:?} late_at_result={late_at_result} late_lines={} late={:?} fault={:?} reply={text:?}",
+        diagnostic.late_lines, diagnostic.late, diagnostic.fault
+    );
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(outcome, TurnOutcome::Success);
+    assert_eq!(closed, Ok(()));
+    assert!(text.contains("STARTED"), "{text}");
+    assert!(tools.iter().any(|(name, _)| name == "Bash"), "{tools:?}");
+    assert!(
+        tools
+            .iter()
+            .all(|(_, background)| background != &Some(serde_json::Value::Bool(true))),
+        "{tools:?}"
+    );
     drop(credential);
     drop(folder);
 }

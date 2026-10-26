@@ -73,7 +73,7 @@ pub(super) struct Renewal {
 impl NativeProfileUse {
     /// Takes this account's renewal lock. Input: the longest wait. Output: the lock, or
     /// `native_profile_renewal_busy`.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn hold_renewal(&self, wait: Duration) -> Result<HeldLock, EngineError> {
         hold(&self.profile.file, wait)
     }

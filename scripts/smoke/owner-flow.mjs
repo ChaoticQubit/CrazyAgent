@@ -687,6 +687,27 @@ async function main() {
       const sent = await send("Are you still there?", null, false);
       return realSend("Still there? Reply with one short sentence and use no tools.", false, sent.text);
     });
+    await step("3c", "a tools-on master starts a sub-agent through the engine: it shows in the team status and the Agents tab with its task and project (LB-43)", async () => {
+      if (!real) throw new Blocked("needs_real_signed_in_profile: a stand-in master cannot run a turn");
+      if (real.problem) throw new Blocked(real.problem);
+      if (!real.bridge) throw new Blocked("blocked_by_3: the real engine was not reached");
+      const realTeam = async () => value("desktop_team_status", { id: real.project }, real.bridge);
+      const status = await realTeam();
+      if (!status.harnesses.find((item) => item.role === "master")?.tools) throw new Blocked("real_project_master_tools_off: turn the master's tools on in the project's Team settings");
+      const known = new Set(status.tasks.map((task) => task.id));
+      const sent = await realSend("This is the owner-flow smoke. Start one sub-agent that lists the files in this repository. Do not list them yourself. Then reply with one short sentence.", true, "no stand-in turn");
+      for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
+        const current = await realTeam();
+        const task = current.tasks.find((item) => !known.has(item.id));
+        const member = current.agents.find((item) => item.id === task?.agent && item.role === "sub");
+        const view = member && (await value("desktop_agents", { projectId: real.project }, real.bridge)).find((item) => item.label === `Team sub-agent ${member.id}`);
+        if (member?.status === "working" && view?.state === "running") {
+          const stopped = await value("desktop_stop_agent", { id: view.id }, real.bridge);
+          return `${sent}; task ${task.id} "${task.prompt.split("\n")[0].slice(0, 80)}" in project ${real.project}, team ${member.status}, agents view ${view.state}, then stopped (${stopped.state})`;
+        }
+        if (Date.now() > deadline) throw new Refused(task ? `team_task_${task.status}_agent_${member?.status ?? "missing"}` : "master_started_no_team_task", teamNote(current));
+      }
+    });
     await step("4a", "change project settings (details and pool), send again (LB-14)", async () => {
       const project = needs(state.project, "1");
       const before = needs(state.pool, "2b");

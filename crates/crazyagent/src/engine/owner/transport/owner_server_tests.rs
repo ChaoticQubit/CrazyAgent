@@ -166,6 +166,12 @@ async fn an_owner_client_past_the_handshake_queue_is_refused_plainly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_owner_request_is_answered_and_the_server_keeps_serving() {
     let fixture = Fixture::start().await;
+    #[cfg(target_os = "macos")]
+    let _keychain = {
+        let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+        keychain.serve(&crate::github::namespace(fixture.root.path()));
+        keychain
+    };
     let client = fixture.client().await;
     let mut stream = admitted(&client).await;
     stream
