@@ -3,8 +3,8 @@
 use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError, SandboxNetwork,
-    agent_command, agent_env_refused, agent_variable_allowed,
+    AGENT_GIT_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError,
+    SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
 };
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -456,6 +456,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     ]
     .into_iter()
     .chain(AGENT_GIT_ENV)
+    .chain(AGENT_TLS_ENV)
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     assert_eq!(seen, expected);

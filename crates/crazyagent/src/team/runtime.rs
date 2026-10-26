@@ -2933,3 +2933,6 @@ mod dec_090_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_claude_tests.rs"]
 mod live_claude_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_codex_tests.rs"]
+mod live_codex_tests;

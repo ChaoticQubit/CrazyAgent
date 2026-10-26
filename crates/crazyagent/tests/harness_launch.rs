@@ -129,7 +129,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ("TMPDIR".into(), home_text),
     ]);
     expected.extend(
-        crazyagent::sandbox::AGENT_GIT_ENV.map(|(name, value)| (name.to_owned(), value.to_owned())),
+        crazyagent::sandbox::AGENT_GIT_ENV
+            .into_iter()
+            .chain(crazyagent::sandbox::AGENT_TLS_ENV)
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     assert_eq!(environment(&built), expected);
     assert_eq!(built.get_current_dir(), Some(work.path()));
@@ -254,6 +257,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let home_text = home.path().to_str().unwrap();
     assert_eq!(variables["CLAUDE_CONFIG_DIR"], home_text);
     assert_eq!(variables["CLAUDE_SECURESTORAGE_CONFIG_DIR"], home_text);
+    assert_eq!(variables["CLAUDE_CODE_TMPDIR"], home_text);
     assert!(!variables.contains_key("ANTHROPIC_API_KEY"));
     let args = arguments(&off);
     assert!(

@@ -195,6 +195,18 @@ pub const AGENT_GIT_ENV: [(&str, &str); 5] = [
     ("GIT_CONFIG_VALUE_0", ""),
 ];
 
+/// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
+/// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
+/// Codex does through rustls-native-certs, finds none there because every agent sandbox
+/// denies the keychain services, and fails every HTTPS request. Elsewhere the harness's
+/// own platform store is left as it is.
+#[cfg(target_os = "macos")]
+pub const AGENT_TLS_ENV: [(&str, &str); 1] = [("SSL_CERT_FILE", "/private/etc/ssl/cert.pem")];
+
+/// No fixed TLS setting outside macOS: the platform's own certificate store is reachable.
+#[cfg(not(target_os = "macos"))]
+pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
+
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
 /// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
@@ -239,7 +251,8 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
 
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`].
+/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`] and
+/// [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -274,7 +287,7 @@ pub fn agent_env<'a>(
         }
         set(&mut env, name, value);
     }
-    for (name, value) in AGENT_GIT_ENV {
+    for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
     if env.len() > AGENT_ENV_MAX {

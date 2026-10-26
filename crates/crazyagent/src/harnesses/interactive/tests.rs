@@ -101,7 +101,10 @@ fn run(key_file: Option<&Path>) -> Run<'_> {
 
 fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
     env.extend(
-        crate::sandbox::AGENT_GIT_ENV.map(|(name, value)| (name.to_owned(), value.to_owned())),
+        crate::sandbox::AGENT_GIT_ENV
+            .into_iter()
+            .chain(crate::sandbox::AGENT_TLS_ENV)
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     env
 }

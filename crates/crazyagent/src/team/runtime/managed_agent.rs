@@ -22,31 +22,53 @@ use std::time::Duration;
 const PROJECT: &str = "dec-090";
 const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
+const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
 
-/// The owner's signed-in managed Claude profile of a real engine, named by its slot folder
-/// in `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`, held through that engine's own custody, which
-/// only reads its database and takes a shared lock on the slot. Output of `open`: the
-/// profile's connection and custody, or a panic with the plain BLOCKED message.
-pub(crate) struct SignedInClaude {
+/// The owner's signed-in managed profile of a real engine, named by its slot folder in
+/// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` or `CRAZYAGENT_MANAGED_CODEX_PROFILE`, held through
+/// that engine's own custody, which only reads its database and takes a shared lock on the
+/// slot. Output of `claude` and `codex`: the profile's connection and custody, or a panic
+/// with the plain BLOCKED message.
+pub(crate) struct SignedIn {
     pub(crate) connection: ModelConnection,
     custody: NativeProfileCustody,
     host: HostStamp,
     binding: NativeProfileBinding,
 }
 
-impl SignedInClaude {
-    pub(crate) fn open() -> Self {
-        let slot = std::env::var_os(SIGNED_IN_CLAUDE).unwrap_or_else(|| {
+impl SignedIn {
+    /// The owner's signed-in Claude account. Output: the held profile.
+    pub(crate) fn claude() -> Self {
+        Self::open(SIGNED_IN_CLAUDE, "claude", "a Claude account")
+    }
+
+    /// The owner's signed-in ChatGPT account for Codex. Output: the held profile.
+    pub(crate) fn codex() -> Self {
+        Self::open(SIGNED_IN_CODEX, "codex", "a ChatGPT account for Codex")
+    }
+
+    /// Opens the slot one variable names and checks it belongs to the expected harness.
+    /// Inputs: the variable, the harness reference and the account wording. Output: the
+    /// held profile, or a panic with the plain BLOCKED message.
+    fn open(variable: &str, harness: &str, account: &str) -> Self {
+        let slot = std::env::var_os(variable).unwrap_or_else(|| {
             panic!(
-                "BLOCKED: no signed-in managed Claude profile. Sign in to a Claude account in CrazyAgent, then run with {SIGNED_IN_CLAUDE}=<engine folder>/native-profiles/<profile key>"
+                "BLOCKED: no signed-in managed {harness} profile. Sign in to {account} in CrazyAgent, then run with {variable}=<engine folder>/native-profiles/<profile key>"
             )
         });
         let slot = PathBuf::from(slot)
             .canonicalize()
-            .unwrap_or_else(|_| panic!("BLOCKED: {SIGNED_IN_CLAUDE} does not name a profile slot"));
+            .unwrap_or_else(|_| panic!("BLOCKED: {variable} does not name a profile slot"));
         let manifest = std::fs::read(slot.join("identity.json"))
-            .unwrap_or_else(|_| panic!("BLOCKED: {SIGNED_IN_CLAUDE} has no identity manifest"));
+            .unwrap_or_else(|_| panic!("BLOCKED: {variable} has no identity manifest"));
         let identity: Value = serde_json::from_slice(&manifest).unwrap();
+        let bound = |key: &str| reference(identity["binding"][key].as_str().unwrap());
+        if bound("harness").as_str() != harness {
+            panic!(
+                "BLOCKED: {variable} names a {} profile, not a {harness} one",
+                bound("harness").as_str()
+            );
+        }
         let database = slot
             .parent()
             .and_then(Path::parent)
@@ -56,9 +78,8 @@ impl SignedInClaude {
             .as_str()
             .unwrap()
             .to_owned();
-        let bound = |key: &str| reference(identity["binding"][key].as_str().unwrap());
         let connection = ModelConnection {
-            id: reference("claude-live-connection"),
+            id: reference(&format!("{harness}-live-connection")),
             provider: bound("provider"),
             harness: bound("harness"),
             protocol: bound("protocol"),
