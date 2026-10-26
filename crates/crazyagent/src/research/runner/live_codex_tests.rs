@@ -18,8 +18,11 @@ fn a_real_codex_research_run_is_signed_in_inside_the_research_sandbox() {
     fs::create_dir(&state).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     let database = engine.base.join("engine.db");
-    let runner =
-        ResearchRunner::new(&database, &state, &codex(), ResearchLimits::default()).unwrap();
+    let limits = ResearchLimits {
+        wall_time: Duration::from_secs(300),
+        ..ResearchLimits::default()
+    };
+    let runner = ResearchRunner::new(&database, &state, &codex(), limits).unwrap();
     let jobs = ResearchJobs::open(&database).unwrap();
     jobs.enqueue(PROJECT, "market_research", "codex", false)
         .unwrap();
@@ -37,18 +40,15 @@ fn a_real_codex_research_run_is_signed_in_inside_the_research_sandbox() {
     let agent = place.agent.clone();
     let profile = signed_in.acquire(&format!("research-{}", place.name));
     let managed = profile.profile_path().unwrap();
-    let started = Instant::now();
     let (ending, _, output) = runner
         .launch_leased(&jobs, &job, &account, place, Some((profile, None)))
         .unwrap();
-    let seconds = started.elapsed().as_secs();
     let report = fs::read_to_string(&output).unwrap_or_default();
     let errors = fs::read_to_string(agent.join("stderr.log")).unwrap_or_default();
     let events = fs::read_to_string(agent.join("events.jsonl")).unwrap_or_default();
-    let head: String = report.chars().take(80).collect();
-    println!("real codex research run: ending={ending:?} seconds={seconds} report={head:?}");
+    println!("real codex research run: ending={ending:?} report={report:?}");
     assert!(matches!(ending, Ending::Exited(true)), "{errors}\n{events}");
-    assert!(!report.trim().is_empty());
+    assert!(report.contains("OK"), "{report}");
     assert!(!agent.join("home").join("auth.json").exists());
     let rules = fs::read_to_string(state.join("profiles").join(format!(
         "{}.sb",
