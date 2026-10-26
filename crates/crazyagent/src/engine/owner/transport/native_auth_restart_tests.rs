@@ -267,6 +267,99 @@ impl Restart {
         .1
     }
 
+    /// Opens the team runtime the engine binary runs beside the engine, over this engine's
+    /// database and settings, for project-z: a Claude Code master and one Claude Code
+    /// sub-agent. Output: the runtime and the project's stored setup.
+    fn team(
+        &self,
+    ) -> (
+        crate::team::runtime::TeamRuntime,
+        crate::project_setup::StoredSetup,
+    ) {
+        let install = self.root.path().join("harness");
+        std::fs::create_dir_all(&install).unwrap();
+        let executable = install.join("claude");
+        std::fs::write(&executable, CLAUDE).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let folder = self.root.path().join("team-project");
+        std::fs::create_dir_all(&folder).unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: ProjectId::new("project-z").unwrap(),
+            name: "Team".into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "claude-code".into(),
+                master_tools: false,
+                sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                    harness: "claude-code".into(),
+                    agents: 1,
+                    tools: false,
+                }],
+                min_agents: 2,
+                max_agents: 4,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        database
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                rusqlite::params![
+                    setup.project_id.as_str(),
+                    serde_json::to_string(&setup).unwrap()
+                ],
+            )
+            .unwrap();
+        let access = self.config().settings.model_access.unwrap();
+        let team = crate::team::runtime::TeamRuntime::open(
+            &self.root.path().join("engine.db"),
+            &self.root.path().join("team"),
+            std::collections::BTreeMap::from([("claude-code", executable)]),
+            Box::new(move || Some(access.clone())),
+            crate::team::runtime::TeamLimits::default(),
+        )
+        .unwrap();
+        (team, setup)
+    }
+
+    /// Applies one owner team action for project-z the way the engine does.
+    /// Input: the action. Output: none; the action must apply.
+    fn team_action(&self, action: crate::team::TeamAction) {
+        let mut database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        let access = self.config().settings.model_access.unwrap();
+        let tx = database.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(&tx, &access, &action).unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+    }
+
+    /// Lists project-z's team agents of one role, oldest first.
+    /// Input: the role name. Output: each agent's connection, status and error.
+    fn team_agents(&self, role: &str) -> Vec<(String, String, Option<String>)> {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        let mut statement = database
+            .prepare(
+                "SELECT connection,status,error FROM team_agents WHERE project='project-z' AND role=?1 ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([role], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     /// Holds the account the way a running agent or research run does, with a shared
     /// execution lease on its profile, until the lease is dropped. Inputs: the run the
     /// account was signed in on, the sign-in and a launch name. Output: the held lease.
@@ -360,6 +453,50 @@ impl Run {
             expected_config_id: config_id,
             expected_source_hash: source_hash,
         }
+    }
+
+    /// Creates project-z through the owner, as Add project does, so the engine knows the
+    /// project its team agents run for. Output: none; the engine must apply it.
+    async fn create_project(&self) {
+        let client = self.client();
+        let read = client
+            .request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: request("restart-capabilities"),
+                expected_revision: Cursor::new(0),
+                operation: OwnerOperation::Read {
+                    query: OwnerRead::Capabilities,
+                },
+            })
+            .await
+            .unwrap();
+        let OwnerResponse::Read { state } = read.response else {
+            panic!("the engine did not return its capabilities")
+        };
+        let reply = client
+            .request(OwnerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: request("restart-create-project"),
+                expected_revision: state.revision,
+                operation: OwnerOperation::Apply {
+                    mutation: crate::engine::owner::OwnerMutation::CreateProject {
+                        project_id: ProjectId::new("project-z").unwrap(),
+                        spec: crate::protocol::ProjectSpec {
+                            name: "Team".into(),
+                            repositories: vec![],
+                        },
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let OwnerResponse::Applied { operation } = reply.response else {
+            panic!(
+                "the engine did not create the project: {:?}",
+                reply.response
+            )
+        };
+        assert_eq!(operation.result, crate::engine::owner::OwnerResult::Applied);
     }
 
     async fn sign_in(&self, restart: &Restart) -> NativeAuthFact {
@@ -817,4 +954,115 @@ async fn research_passes_over_an_account_whose_sign_in_was_rejected_to_the_next_
     })
     .await
     .expect("the research rejection case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next_one() {
+    use crate::team::{MessageAuthor, MessageState, TaskStatus, TeamAction};
+    let restart = Restart::with(TWO);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let first = CredentialRef::new("connection-y").unwrap();
+        run.sign_in_to(&restart, first.clone(), "team-sign-in-y")
+            .await;
+        run.sign_in(&restart).await;
+        restart.reject(&restart.model_of(&first));
+        run.create_project().await;
+        let (mut team, setup) = restart.team();
+        let project = setup.project_id.clone();
+        restart.team_action(TeamAction::KeepWarm {
+            project_id: project.clone(),
+            on: true,
+        });
+        team.tick().unwrap();
+        assert_eq!(
+            restart.team_agents("sub"),
+            [("connection-z".to_owned(), "idle".to_owned(), None)],
+            "the warm sub-agent starts on the account whose sign-in was not rejected"
+        );
+        restart.reject(&restart.model());
+        restart.team_action(TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        });
+        restart.team_action(TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        });
+        team.tick().unwrap();
+        let database = rusqlite::Connection::open(restart.root.path().join("engine.db")).unwrap();
+        let parked = crate::team::status(&database, &setup).unwrap();
+        assert_eq!(
+            parked
+                .messages
+                .iter()
+                .map(|m| (m.author, m.state, m.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+                (
+                    MessageAuthor::Engine,
+                    MessageState::Note,
+                    "The master could not start: Sign in again: the provider rejected the sign-in of every account in this project's pool that can run claude-code."
+                ),
+            ]
+        );
+        assert_eq!(parked.tasks[0].status, TaskStatus::NeedsPool);
+        assert!(restart.team_agents("master").is_empty());
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the team rejection case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next_account_takes_over()
+ {
+    use crate::team::TeamAction;
+    let restart = Restart::with(TWO);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let first = CredentialRef::new("connection-y").unwrap();
+        run.sign_in_to(&restart, first.clone(), "team-idle-sign-in-y")
+            .await;
+        run.sign_in(&restart).await;
+        run.create_project().await;
+        let (mut team, setup) = restart.team();
+        restart.team_action(TeamAction::KeepWarm {
+            project_id: setup.project_id.clone(),
+            on: true,
+        });
+        team.tick().unwrap();
+        assert_eq!(
+            restart.team_agents("sub"),
+            [("connection-y".to_owned(), "idle".to_owned(), None)]
+        );
+        restart.reject(&restart.model_of(&first));
+        let mut agents = Vec::new();
+        for _ in 0..100 {
+            team.tick().unwrap();
+            agents = restart.team_agents("sub");
+            if agents
+                .first()
+                .is_some_and(|(_, status, _)| status == "stopped")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            agents,
+            [
+                ("connection-y".to_owned(), "stopped".to_owned(), None),
+                ("connection-z".to_owned(), "idle".to_owned(), None),
+            ],
+            "the idle agent on the rejected account stops and the next account keeps the team warm"
+        );
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the idle team agent rejection case exceeded 60 seconds");
 }
