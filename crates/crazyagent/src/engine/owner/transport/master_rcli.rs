@@ -111,7 +111,10 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "master_runtime_host_unavailable" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     };
-    MasterRuntimeObservation::Failed { reason }
+    MasterRuntimeObservation::Failed {
+        reason,
+        code: Some(error.0.clone()),
+    }
 }
 
 impl OwnerRuntimeHandle {

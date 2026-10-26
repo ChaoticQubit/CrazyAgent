@@ -2535,6 +2535,7 @@ mod turn_line_tests {
             input_cursor: Cursor::new(1),
             phase,
             reason: None,
+            reason_code: None,
             attempt: None,
             runtime: None,
             reply: None,
@@ -2578,6 +2579,7 @@ mod turn_line_tests {
             input_cursor: Cursor::new(1),
             phase: MasterTurnPhase::Blocked,
             reason: Some(MasterReason::ReadinessUnknown),
+            reason_code: None,
             attempt: None,
             runtime: None,
             reply: None,
@@ -2593,6 +2595,7 @@ mod turn_line_tests {
         );
         let changed = MasterTurnView {
             reason: Some(MasterReason::ConnectionChanged),
+            reason_code: None,
             ..turn
         };
         let mut lines = Vec::new();

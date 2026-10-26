@@ -207,6 +207,7 @@ mod tests {
             input_cursor: Cursor::new(input),
             phase,
             reason,
+            reason_code: None,
             attempt: None,
             runtime: None,
             reply: None,

@@ -102,13 +102,21 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
         reason: MasterReason,
+        code: Option<String>,
     },
 }
 
 pub(crate) enum MasterRuntimeObservation {
-    Running { runtime: MasterRuntimeView },
-    Response { reply: MasterReply },
-    Failed { reason: MasterReason },
+    Running {
+        runtime: MasterRuntimeView,
+    },
+    Response {
+        reply: MasterReply,
+    },
+    Failed {
+        reason: MasterReason,
+        code: Option<String>,
+    },
     Cancelled,
     Disconnected,
 }
@@ -610,7 +618,7 @@ fn cancel_turn(
         complete_local(tx, &mut turn, MasterTurnPhase::Cancelled)?;
     }
     turn.phase = MasterTurnPhase::Cancelled;
-    turn.reason = Some(MasterReason::Cancelled);
+    turn.settle_reason(MasterReason::Cancelled, None);
     if queued {
         let changed = tx.execute("UPDATE master_turns SET phase='cancelled',body=?1 WHERE session=?2 AND id=?3 AND phase='queued'", params![encode(&turn)?, turn.session_id.as_str(), turn.id.as_str()]).map_err(error)?;
         assert_eq!(changed, 1);
@@ -781,6 +789,7 @@ fn now_ms() -> Result<u64, EngineError> {
 }
 
 fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineError> {
+    assert!(turn.reason_code.is_none() || turn.reason.is_some());
     let changed = tx
         .execute(
             "UPDATE master_turns SET phase=?1,body=?2 WHERE session=?3 AND id=?4",
@@ -932,7 +941,7 @@ pub(super) fn settle_stopped_commit(
         MasterTurnPhase::Delivering | MasterTurnPhase::Running => {
             complete_local(&tx, &mut turn, MasterTurnPhase::Uncertain)?;
             turn.phase = MasterTurnPhase::Uncertain;
-            turn.reason = Some(MasterReason::CaptureIncomplete);
+            turn.settle_reason(MasterReason::CaptureIncomplete, None);
         }
         MasterTurnPhase::Blocked
         | MasterTurnPhase::Succeeded
@@ -1526,7 +1535,7 @@ fn preflight_turn(
                 _ => return Err(failure),
             };
             turn.phase = phase;
-            turn.reason = Some(MasterReason::CapacityUnavailable);
+            turn.settle_reason(MasterReason::CapacityUnavailable, None);
             persist_runtime(tx, config, session, turn)?;
             Ok(false)
         }
@@ -1632,7 +1641,7 @@ fn block_unready(
     };
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
     turn.phase = MasterTurnPhase::Blocked;
-    turn.reason = Some(reason);
+    turn.settle_reason(reason, Some(&failure.0));
     persist_runtime(tx, config, session, turn)?;
     Ok(true)
 }
@@ -1726,7 +1735,7 @@ fn prepare_turn(
             tx.execute_batch("ROLLBACK TO master_admission; RELEASE master_admission")
                 .map_err(error)?;
             turn.phase = MasterTurnPhase::Blocked;
-            turn.reason = Some(admission_reason(&failure.0));
+            turn.settle_reason(admission_reason(&failure.0), Some(&failure.0));
             persist_runtime(tx, config, session, turn)?;
             return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
         }
@@ -1840,7 +1849,7 @@ fn observe_turn(
             turn.reply = Some(reply);
             turn.phase = MasterTurnPhase::Succeeded;
         }
-        MasterRuntimeObservation::Failed { reason } => {
+        MasterRuntimeObservation::Failed { reason, code } => {
             if turn.phase == MasterTurnPhase::Failed && turn.reason == Some(reason) {
                 return Ok(());
             }
@@ -1873,7 +1882,7 @@ fn observe_turn(
                 complete_local(tx, turn, MasterTurnPhase::Failed)?;
             }
             turn.phase = MasterTurnPhase::Failed;
-            turn.reason = Some(reason);
+            turn.settle_reason(reason, code.as_deref());
         }
         MasterRuntimeObservation::Cancelled => {
             if !matches!(
@@ -1887,7 +1896,7 @@ fn observe_turn(
             }
             complete_local(tx, turn, MasterTurnPhase::Cancelled)?;
             turn.phase = MasterTurnPhase::Cancelled;
-            turn.reason = Some(MasterReason::Cancelled);
+            turn.settle_reason(MasterReason::Cancelled, None);
         }
         MasterRuntimeObservation::Disconnected => {
             if turn.phase == MasterTurnPhase::Uncertain {
@@ -1901,7 +1910,7 @@ fn observe_turn(
             }
             complete_local(tx, turn, MasterTurnPhase::Uncertain)?;
             turn.phase = MasterTurnPhase::Uncertain;
-            turn.reason = Some(MasterReason::CaptureIncomplete);
+            turn.settle_reason(MasterReason::CaptureIncomplete, None);
         }
     }
     persist_runtime(tx, config, session, turn)
@@ -2773,7 +2782,8 @@ pub(super) fn runtime(
             let stopping = matches!(
                 observation,
                 MasterRuntimeObservation::Failed {
-                    reason: MasterReason::ScopeRevoked
+                    reason: MasterReason::ScopeRevoked,
+                    ..
                 } | MasterRuntimeObservation::Cancelled
                     | MasterRuntimeObservation::Disconnected
             );
@@ -2788,7 +2798,7 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
-        MasterRuntimeCommand::Fail { reason, .. } => {
+        MasterRuntimeCommand::Fail { reason, code, .. } => {
             if matches!(
                 turn.phase,
                 MasterTurnPhase::Queued | MasterTurnPhase::Prepared
@@ -2800,7 +2810,7 @@ pub(super) fn runtime(
                     complete_local(&tx, &mut turn, MasterTurnPhase::Failed)?;
                     MasterTurnPhase::Failed
                 };
-                turn.reason = Some(reason);
+                turn.settle_reason(reason, code.as_deref());
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
             }
@@ -2959,6 +2969,7 @@ fn execute(
                 input_cursor: Cursor::new(next),
                 phase: MasterTurnPhase::Queued,
                 reason: None,
+                reason_code: None,
                 attempt: None,
                 runtime: None,
                 reply: None,

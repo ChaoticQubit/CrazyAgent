@@ -228,9 +228,29 @@ pub struct MasterTurnView {
     pub input_cursor: Cursor,
     pub phase: MasterTurnPhase,
     pub reason: Option<MasterReason>,
+    /// The plain engine code the reason was derived from, from [`crate::protocol::plain_code`],
+    /// so a window can name a failure its reason does not explain. Absent when the reason
+    /// came from no engine failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
     pub attempt: Option<Attempt>,
     pub runtime: Option<MasterRuntimeView>,
     pub reply: Option<MasterReply>,
+}
+
+impl MasterTurnView {
+    /// Settles why the turn stopped, keeping the engine code it came from when there is one.
+    /// Inputs: the reason and the raw failure code, if the reason came from an engine
+    /// failure. Output: none; `reason` and `reason_code` are replaced together.
+    pub(crate) fn settle_reason(&mut self, reason: MasterReason, failure: Option<&str>) {
+        self.reason = Some(reason);
+        self.reason_code = failure.map(|code| crate::protocol::plain_code(code).to_owned());
+        assert!(
+            self.reason_code
+                .as_deref()
+                .is_none_or(|code| crate::protocol::plain_code(code) == code)
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,4 +425,57 @@ pub(crate) fn validate_selection(
         return Err(error("master_backend_account_denied"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::TEXT_WITHHELD;
+
+    fn turn() -> MasterTurnView {
+        MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Failed,
+            reason: None,
+            reason_code: None,
+            attempt: None,
+            runtime: None,
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn a_settled_reason_keeps_the_plain_engine_code_it_came_from() {
+        let mut turn = turn();
+        turn.settle_reason(MasterReason::Unknown, Some("claude_host_deadline"));
+        assert_eq!(turn.reason, Some(MasterReason::Unknown));
+        assert_eq!(turn.reason_code.as_deref(), Some("claude_host_deadline"));
+        turn.settle_reason(
+            MasterReason::Unknown,
+            Some("open /Users/mira/.codex/auth.json: denied"),
+        );
+        assert_eq!(turn.reason_code.as_deref(), Some(TEXT_WITHHELD));
+        turn.settle_reason(MasterReason::Cancelled, None);
+        assert_eq!(turn.reason, Some(MasterReason::Cancelled));
+        assert_eq!(turn.reason_code, None);
+        let json = serde_json::to_value(&turn).unwrap();
+        assert!(json.get("reason_code").is_none(), "{json}");
+        turn.settle_reason(
+            MasterReason::RuntimeUnavailable,
+            Some("gateway_no_eligible_account"),
+        );
+        let json = serde_json::to_string(&turn).unwrap();
+        let read: MasterTurnView = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            read.reason_code.as_deref(),
+            Some("gateway_no_eligible_account")
+        );
+        let mut stored = serde_json::to_value(&turn).unwrap();
+        stored.as_object_mut().unwrap().remove("reason_code");
+        let older: MasterTurnView = serde_json::from_value(stored).unwrap();
+        assert_eq!(older.reason_code, None);
+    }
 }

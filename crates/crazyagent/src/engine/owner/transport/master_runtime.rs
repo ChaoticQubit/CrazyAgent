@@ -288,15 +288,16 @@ impl OwnerRuntimeHandle {
     }
 
     /// Settles a master turn whose dispatch failed before it ran, so it never stays queued.
-    /// Inputs: the turn's project, session and id, and the reason the owner sees.
+    /// Inputs: the turn's project, session and id, and the dispatch failure.
     /// Output: the turn as stored: blocked (never admitted) or failed (admitted) with the
-    /// reason when it was the session's queued or prepared current turn, else unchanged.
+    /// failure's reason and code when it was the session's queued or prepared current turn,
+    /// else unchanged.
     async fn fail_master_turn(
         &self,
         project_id: &ProjectId,
         session_id: &SessionId,
         turn_id: &RequestId,
-        reason: MasterReason,
+        cause: &EngineError,
     ) -> Result<MasterTurnView, EngineError> {
         match self
             .master_runtime_command(MasterRuntimeCommand::Fail {
@@ -304,7 +305,8 @@ impl OwnerRuntimeHandle {
                 project_id: project_id.clone(),
                 session_id: session_id.clone(),
                 turn_id: turn_id.clone(),
-                reason,
+                reason: reason_for_error(cause),
+                code: Some(cause.0.clone()),
             })
             .await?
         {
@@ -329,7 +331,7 @@ impl OwnerRuntimeHandle {
             && cause.0 != super::master_dispatch::UNKNOWN_OUTCOME
         {
             let settled = self
-                .fail_master_turn(project_id, session_id, turn_id, reason_for_error(cause))
+                .fail_master_turn(project_id, session_id, turn_id, cause)
                 .await?;
             assert_eq!(&settled.id, turn_id);
             assert_eq!(&settled.session_id, session_id);
@@ -387,9 +389,7 @@ impl OwnerRuntimeHandle {
                 let observation = if cleanup_uncertain(&error) {
                     MasterRuntimeObservation::Disconnected
                 } else {
-                    MasterRuntimeObservation::Failed {
-                        reason: reason_for_error(&error),
-                    }
+                    failed(&error)
                 };
                 self.observe_master_turn(&prepared, turn_id, observation)
                     .await?;
@@ -679,6 +679,15 @@ fn validate_event(
 
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
+}
+
+/// The failed observation for a master dispatch error: the reason the owner reads and the
+/// engine code it came from. Input: the error. Output: `MasterRuntimeObservation::Failed`.
+fn failed(error: &EngineError) -> MasterRuntimeObservation {
+    MasterRuntimeObservation::Failed {
+        reason: reason_for_error(error),
+        code: Some(error.0.clone()),
+    }
 }
 
 fn reason_for_error(error: &EngineError) -> MasterReason {

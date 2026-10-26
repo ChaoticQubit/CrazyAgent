@@ -1426,6 +1426,12 @@ async fn master_turn_pages_are_ordered_complete_bounded_and_resync_after_mutatio
         assert_eq!(turn.id, RequestId::new(format!("turn-{index}")).unwrap());
         assert_eq!(turn.phase, MasterTurnPhase::Blocked);
         assert_eq!(turn.reason, Some(MasterReason::Unknown));
+        let code = turn
+            .reason_code
+            .as_deref()
+            .unwrap_or_else(|| panic!("an unknown reason without its engine code: {turn:?}"));
+        assert_eq!(crazyagent::protocol::plain_code(code), code);
+        assert_ne!(code, crazyagent::protocol::TEXT_WITHHELD);
         assert_eq!(turn.reply, None);
     }
     f.submit(
