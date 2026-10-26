@@ -409,7 +409,7 @@ async fn assert_unavailable(
     );
     assert!(reply.challenge.is_none());
     assert!(reply.account.is_none());
-    assert!(!format!("{reply:?}").contains("Ready"));
+    assert!(!format!("{reply:?}").contains("AuthenticatedObserved"));
     case.assert_gateway_unknown(basis.scope.connection.as_str())
         .await;
 }
@@ -424,14 +424,41 @@ fn assert_stored(rows: &[StoredAuth]) {
         assert_eq!(fact["operation_id"].as_str(), Some(row.id.as_str()));
         assert_eq!(fact["phase"], "unavailable");
         assert_eq!(fact["code"], "native_auth_host_unavailable");
+        let (mut fact_keys, mut request_keys) = (Vec::new(), Vec::new());
+        keys(&fact, &mut fact_keys);
+        keys(&request, &mut request_keys);
+        assert!(fact_keys.contains(&"operation_id"));
         for forbidden in ["challenge", "account", "auth_url", "user_code", "token"] {
-            assert!(fact.get(forbidden).is_none(), "durable field: {forbidden}");
             assert!(
-                request.get(forbidden).is_none(),
+                !fact_keys.contains(&forbidden),
+                "durable field: {forbidden}"
+            );
+            assert!(
+                !request_keys.contains(&forbidden),
                 "request field: {forbidden}"
             );
         }
-        assert!(!row.fact.windows(5).any(|bytes| bytes == b"Ready"));
+        let authenticated = serde_json::to_vec(&NativeAuthPhase::AuthenticatedObserved).unwrap();
+        assert!(
+            !row.fact
+                .windows(authenticated.len())
+                .any(|bytes| bytes == authenticated.as_slice())
+        );
+    }
+}
+
+/// Collects every object key at any depth of a JSON value.
+/// Takes the value and the list to extend. Nested objects and arrays are walked.
+fn keys<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                found.push(key);
+                keys(nested, found);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| keys(item, found)),
+        _ => {}
     }
 }
 
