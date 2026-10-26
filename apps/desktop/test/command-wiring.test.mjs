@@ -83,7 +83,7 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
 
 test("onboarding steps and setup states use the engine's tags", () => {
   const client = read("src/engine-client.ts");
-  assert.match(client, /export type OnboardingStep = \{ kind: "waiting" \} \| \{ kind: "running" \} \| \{ kind: "done" \} \| \{ kind: "off" \} \| \{ kind: "failed"; reason: string \};/);
+  assert.match(client, /export type OnboardingStep = \{ kind: "waiting" \} \| \{ kind: "running" \} \| \{ kind: "done" \} \| \{ kind: "off" \} \| \{ kind: "not_installed" \} \| \{ kind: "failed"; reason: string \};/);
   assert.match(client, /DependencyState =[\s\S]*?\{ state: "found"; version: string \}/);
   assert.match(client, /PackState =[\s\S]*?\{ state: "available" \}/);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/onboarding.rs", import.meta.url), "utf8");
