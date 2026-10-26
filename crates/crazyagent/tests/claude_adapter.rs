@@ -410,6 +410,43 @@ fn malformed_and_repeated_initialization_cannot_rebind_native_identity() {
 }
 
 #[test]
+fn every_later_turn_opens_with_an_init_for_the_bound_session() {
+    let mut p = active();
+    p.receive(&wire(result("result-1"))).unwrap();
+    p.start_turn(RequestId::new("request-two").unwrap(), "Again")
+        .unwrap();
+    let mut again = init();
+    again["uuid"] = json!("init-2");
+    assert!(p.receive(&wire(again)).unwrap().is_empty());
+    assert_eq!(p.state(), State::Active);
+    let text = p
+        .receive(&wire(assistant(
+            "assistant-2",
+            json!([{"type":"text","text":"two"}]),
+        )))
+        .unwrap();
+    assert_eq!(text.len(), 1);
+    p.receive(&wire(result("result-2"))).unwrap();
+    assert_eq!(p.state(), State::Idle);
+
+    let mut p = active();
+    let mut foreign = init();
+    foreign["uuid"] = json!("init-2");
+    foreign["session_id"] = json!("other-native-session");
+    assert_eq!(p.receive(&wire(foreign)), Err(ProtocolError::StaleMessage));
+    assert_eq!(p.state(), State::Failed);
+
+    let mut p = active();
+    let mut malformed = init();
+    malformed["uuid"] = json!("init-2");
+    malformed["capabilities"] = json!(["interrupt_receipt_v1", 3]);
+    assert_eq!(
+        p.receive(&wire(malformed)),
+        Err(ProtocolError::InvalidMessage)
+    );
+}
+
+#[test]
 fn invalid_prompt_and_output_expansion_leave_no_reserved_request() {
     let mut p = ready();
     for prompt in ["", "  ", "unsafe\0prompt"] {
