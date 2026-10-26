@@ -106,12 +106,6 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
 });
 
-test("unassigning a pool removes only this project", () => {
-  const pool = { id: "main", members: ["a"], projects: ["p-1", "p-2"], roles: ["project_leader"], fallback_allowed: false };
-  assert.deepEqual(api.unassignedPool(pool, "p-1"), { ...pool, projects: ["p-2"] });
-  assert.deepEqual(api.unassignedPool(pool, "p-9"), pool);
-});
-
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
   const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
@@ -382,14 +376,27 @@ test("project Settings opens Plugins and skills for the old Skills and MCP serve
   assert.equal(settings.settingsSection(null), "general");
 });
 
-test("Save pool assigns a new pool, drops the old one and records the choice in the project details", async () => {
+test("Save pool gives the project the chosen pool or none in one step and records the choice in the project details", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
-  assert.deepEqual(settings.poolSteps("old", "old", "new"), { add: true, drop: "old", record: true });
-  assert.deepEqual(settings.poolSteps(null, null, "new"), { add: true, drop: null, record: true });
-  assert.deepEqual(settings.poolSteps("new", "old", "new"), { add: false, drop: null, record: true });
-  assert.deepEqual(settings.poolSteps("new", "new", "new"), { add: false, drop: null, record: false });
-  assert.deepEqual(settings.poolSteps("old", undefined, "new"), { add: true, drop: "old", record: false });
-  assert.deepEqual(settings.poolSteps("old", "old", null), { add: false, drop: null, record: false });
+  assert.deepEqual(settings.poolSteps("old", "old", "new"), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps(null, null, "new"), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps("new", "old", "new"), { assign: false, record: true });
+  assert.deepEqual(settings.poolSteps("new", "new", "new"), { assign: false, record: false });
+  assert.deepEqual(settings.poolSteps("old", undefined, "new"), { assign: true, record: false });
+  assert.deepEqual(settings.poolSteps("old", "old", null), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps(null, null, null), { assign: false, record: false });
+});
+
+test("Project Settings offers No pool, and a project without a pool tells the owner to pick one", async () => {
+  const { PoolPicker } = await import("../src/screens/new-project/pool-picker.tsx");
+  const settings = await import("../src/screens/project/settings.tsx");
+  const choice = { pool: { id: "main", name: "Main", members: ["a"], projects: ["p-1"], roles: ["project_leader"], fallback_allowed: false }, members: [] };
+  const markup = renderToStaticMarkup(createElement(PoolPicker, { name: "ps-pool", pools: [choice], value: null, later: true, laterLabel: settings.NO_POOL.label, laterNote: settings.NO_POOL.note, onChange: () => {} }));
+  assert.match(markup, /<strong>No pool<\/strong>/);
+  assert.match(markup, /The master and agents wait and show Pick a pool to start\./);
+  assert.match(markup, /<label class="pj-radio-card selected"><input type="radio" name="ps-pool" checked="" value=""\/>/);
+  assert.equal(settings.poolSaved(null), "This project has no pool now. Pick a pool to start.");
+  assert.equal(settings.poolSaved("Main"), "Main is assigned.");
 });
 
 test("removing a project says its folder stays on disk", async () => {

@@ -53,7 +53,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !turnSettled(turn));
   const unseen = Object.keys(sent).some((id) => !turns.some((turn) => turn.id === id));
-  const status = needsPool ? "Needs a pool" : masterStatus(session, turns);
+  const noPool = needsPool || (data.pools?.kind === "ok" && data.assigned === null);
+  const status = noPool ? "Needs a pool" : masterStatus(session, turns);
 
   const setSent = (next: Record<string, string>) => {
     sentByProject.set(data.id, next);
@@ -191,7 +192,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     </div>
     {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
-    {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
+    {noPool && <div className="pj-note warn" role="alert"><p>Pick a pool to start. The master replies once this project has one.</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
