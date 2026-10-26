@@ -12,7 +12,9 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody};
-use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest};
+use crate::harnesses::launch::{
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+};
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
@@ -196,6 +198,7 @@ enum Report {
     Finished {
         text: String,
         end: TurnEnd,
+        cause: Option<String>,
     },
     Ended {
         problem: Option<String>,
@@ -1943,7 +1946,7 @@ impl TeamRuntime {
                     .map_err(error)?;
                 Ok(false)
             }
-            Report::Finished { text, end } => {
+            Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
                 if let Some(hosted) = &worker.hosted {
@@ -1964,14 +1967,23 @@ impl TeamRuntime {
                     .map_err(error)?;
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
-                    Some(Busy::Task(task)) => self.finish_task(task, &text, end)?,
+                    Some(Busy::Task(task)) => {
+                        self.finish_task(task, &text, end, cause.as_deref())?
+                    }
                     Some(Busy::Message(message)) => {
                         let proposed = if team_tool {
                             tool::take(&self.tool_record(id))
                         } else {
                             Vec::new()
                         };
-                        self.finish_message(&project, message, &text, end, proposed)?
+                        self.finish_message(
+                            &project,
+                            message,
+                            &text,
+                            end,
+                            cause.as_deref(),
+                            proposed,
+                        )?
                     }
                     None => {}
                 }
@@ -2000,12 +2012,13 @@ impl TeamRuntime {
                 }
                 match worker.busy {
                     Some(busy) if worker.held => self.release(busy)?,
-                    Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed)?,
+                    Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed, None)?,
                     Some(Busy::Message(message)) => self.finish_message(
                         &worker.project,
                         message,
                         "",
                         TurnEnd::Closed,
+                        None,
                         Vec::new(),
                     )?,
                     None => {}
@@ -2067,7 +2080,13 @@ impl TeamRuntime {
         Ok(())
     }
 
-    fn finish_task(&mut self, task: i64, text: &str, end: TurnEnd) -> Result<(), EngineError> {
+    fn finish_task(
+        &mut self,
+        task: i64,
+        text: &str,
+        end: TurnEnd,
+        cause: Option<&str>,
+    ) -> Result<(), EngineError> {
         let Some(attempts): Option<i64> = self
             .connection
             .query_row(
@@ -2081,6 +2100,7 @@ impl TeamRuntime {
             return Ok(());
         };
         let retry = attempts < self.limits.attempts_max;
+        let closed = with_code("The sub-agent stopped unexpectedly", cause);
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
             TurnEnd::Cancelled => (TaskStatus::Cancelled, Some("Cancelled by you")),
@@ -2112,7 +2132,7 @@ impl TeamRuntime {
                 } else {
                     TaskStatus::Failed
                 },
-                Some("The sub-agent stopped unexpectedly"),
+                Some(closed.as_str()),
             ),
         };
         let result =
@@ -2140,6 +2160,7 @@ impl TeamRuntime {
         message: i64,
         text: &str,
         end: TurnEnd,
+        cause: Option<&str>,
         proposed: Vec<Delegation>,
     ) -> Result<(), EngineError> {
         if end != TurnEnd::Success {
@@ -2156,11 +2177,11 @@ impl TeamRuntime {
                 .map_err(error)?;
             if state == "failed" && self.stored(project)?.is_some() {
                 let why = if end == TurnEnd::Interrupted {
-                    "You interrupted the master before it replied."
+                    "You interrupted the master before it replied.".to_owned()
                 } else {
-                    "The master stopped before it replied."
+                    with_code("The master stopped before it replied.", cause)
                 };
-                self.note(project, why)?;
+                self.note(project, &why)?;
             }
             return Ok(());
         }
@@ -2358,7 +2379,7 @@ fn work(
         Launch::Fresh(plan, mode) => match *mode {
             Mode::Kept { account, context } => {
                 AgentSession::start(plan.request(account), context, plan.pane.clone())
-                    .map_err(|problem| format!("The agent could not start ({})", problem.0))
+                    .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
             }
             Mode::PerTurn { home } => {
                 let problem = per_turn(
@@ -2377,9 +2398,9 @@ fn work(
             } = *adoption;
             AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
                 let _ = host.kill(&agent);
-                format!(
-                    "The agent's running terminal could not be taken over ({})",
-                    problem.0
+                with_code(
+                    "The agent's running terminal could not be taken over",
+                    Some(&problem.0),
                 )
             })
         }
@@ -2396,7 +2417,7 @@ fn work(
 enum Next {
     Turn(String, Option<Box<Grant>>),
     Stop,
-    Closed,
+    Closed(Option<String>),
 }
 
 /// Waits for the agent's next order. While it waits, an agent that keeps its process
@@ -2414,13 +2435,12 @@ fn next_turn(
             Ok(Order::Turn(prompt, grant)) => return Next::Turn(prompt, grant),
             Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
             Err(RecvTimeoutError::Timeout) => {
-                if let Some(session) = idle.as_deref_mut()
-                    && matches!(
-                        session.next_event(IDLE_EVENT_WAIT),
-                        Ok(Some(LaunchEvent::Exited { .. })) | Err(_)
-                    )
-                {
-                    return Next::Closed;
+                if let Some(session) = idle.as_deref_mut() {
+                    match session.next_event(IDLE_EVENT_WAIT) {
+                        Ok(Some(LaunchEvent::Exited { .. })) => return Next::Closed(None),
+                        Err(problem) => return Next::Closed(Some(problem.0)),
+                        Ok(_) => {}
+                    }
                 }
             }
         }
@@ -2448,21 +2468,21 @@ fn serve(
         let (prompt, grant) = match next_turn(orders, cancel, Some(&mut session)) {
             Next::Turn(prompt, grant) => (prompt, grant),
             Next::Stop => break,
-            Next::Closed => {
-                problem = Some("The agent process closed".to_owned());
+            Next::Closed(cause) => {
+                problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
                 break;
             }
         };
         assert!(grant.is_none());
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
         );
         if end == TurnEnd::Closed {
-            problem = Some("The agent process closed".to_owned());
+            problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
-        if reports.send(Report::Finished { text, end }).is_err() || !reusable {
+        if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             break;
         }
     }
@@ -2489,6 +2509,7 @@ fn per_turn(
             let _ = reports.send(Report::Finished {
                 text: String::new(),
                 end: TurnEnd::Closed,
+                cause: None,
             });
             return Some("The agent was given a turn without its signed-in account".into());
         };
@@ -2497,6 +2518,7 @@ fn per_turn(
             let _ = reports.send(Report::Finished {
                 text: String::new(),
                 end: TurnEnd::Closed,
+                cause: None,
             });
             return Some("The signed-in account changed".into());
         }
@@ -2509,26 +2531,51 @@ fn per_turn(
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
+                    cause: Some(problem.0.clone()),
                 });
-                return Some(format!("The agent could not start ({})", problem.0));
+                return Some(with_code("The agent could not start", Some(&problem.0)));
             }
         };
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
             pane: None,
         });
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let _ = session.stop();
         drop(profile);
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
         );
-        if reports.send(Report::Finished { text, end }).is_err() || !reusable {
-            return (end == TurnEnd::Closed).then(|| "The agent process closed".to_owned());
+        let closed = (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()));
+        if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
+            return closed;
         }
     }
     None
+}
+
+const PROCESS_CLOSED: &str = "The agent process closed";
+
+/// An owner line that names the plain launch code behind it, so a closed or failed agent is
+/// never opaque. Inputs: the sentence and the launch code, if any. Output: "sentence (code: x)"
+/// with x made plain by `plain_code`, or the sentence alone.
+fn with_code(sentence: &str, cause: Option<&str>) -> String {
+    match cause {
+        Some(code) => format!("{sentence} (code: {})", crate::protocol::plain_code(code)),
+        None => sentence.to_owned(),
+    }
+}
+
+/// How a turn ends on a launch error: the deadline and the output limits keep their own
+/// ends; any other error closes the agent and keeps its code.
+/// Input: the error. Output: the end and, for a closed agent, the launch code.
+fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
+    match problem.0.as_str() {
+        "launch_deadline" => (TurnEnd::TimedOut, None),
+        "launch_output_limit" | "launch_event_limit" => (TurnEnd::TooLong, None),
+        _ => (TurnEnd::Closed, Some(problem.0)),
+    }
 }
 
 fn turn(
@@ -2538,16 +2585,17 @@ fn turn(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     turn_time: Duration,
-) -> (String, TurnEnd) {
+) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
-    if session.send(prompt).is_err() {
-        return (String::new(), TurnEnd::Closed);
+    if let Err(problem) = session.send(prompt) {
+        return (String::new(), TurnEnd::Closed, Some(problem.0));
     }
     let deadline = Instant::now() + turn_time;
     let mut text = String::new();
     let mut limited = false;
     let mut interrupted = false;
     let mut progress = Instant::now();
+    let mut cause = None;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
@@ -2585,17 +2633,15 @@ fn turn(
             }
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
-                break match problem.0.as_str() {
-                    "launch_deadline" => TurnEnd::TimedOut,
-                    "launch_output_limit" | "launch_event_limit" => TurnEnd::TooLong,
-                    _ => TurnEnd::Closed,
-                };
+                let (end, code) = launch_end(problem);
+                cause = code;
+                break end;
             }
             Ok(Some(_)) => {}
         }
     };
     assert!(text.len() <= super::RESULT_BYTES_MAX * 4);
-    (text, end)
+    (text, end, cause)
 }
 
 /// Background loop that keeps every project's team moving.

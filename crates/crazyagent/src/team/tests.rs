@@ -1016,6 +1016,31 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
 
 #[test]
 fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
+    warm_agents_ended(b"#!/bin/sh\nexit 1\n");
+}
+
+#[test]
+fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
+    let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
+    for agent in &cold.agents {
+        assert_eq!(
+            agent.problem.as_deref(),
+            Some("The agent process closed (code: launch_protocol_failed)"),
+            "{cold:#?}"
+        );
+    }
+    assert!(
+        cold.messages
+            .iter()
+            .any(|m| m.text.contains("(code: launch_protocol_failed)")),
+        "{cold:#?}"
+    );
+}
+
+/// Runs a project that keeps its two codex sub-agents warm on a stand-in harness until a
+/// warm agent that ended before any work turns keeping warm off.
+/// Input: the stand-in harness script. Output: the team status once both agents ended.
+fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
@@ -1073,7 +1098,7 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let executable = harness(&base, b"#!/bin/sh\nexit 1\n");
+    let executable = harness(&base, script);
     let source = pool.clone();
     let mut team = runtime::TeamRuntime::open(
         &database,
@@ -1116,6 +1141,7 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
     );
     assert!(!team.has_live_agents());
     team.shutdown().unwrap();
+    cold
 }
 
 #[test]
