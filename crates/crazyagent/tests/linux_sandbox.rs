@@ -493,6 +493,77 @@ fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
 }
 
 #[test]
+fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_folder() {
+    let case = case();
+    let worktree = case
+        .outside
+        .parent()
+        .unwrap()
+        .join("lease")
+        .join("worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(worktree.join("README.md"), "lease\n").unwrap();
+    let leased = || {
+        policy(&case, SandboxNetwork::Open)
+            .allow_worktree(&worktree)
+            .unwrap()
+    };
+    let script = format!(
+        "mkdir {folder} && echo made > {file} && \
+         (echo x > {top} || true) && (mkdir {top_folder} || true)",
+        folder = quoted(&worktree.join("src2")),
+        file = quoted(&worktree.join("Makefile")),
+        top = quoted(&case.project.join("new.txt")),
+        top_folder = quoted(&case.project.join("src3")),
+    );
+    let landlock = LinuxSandbox::detect(leased(), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        leased(),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    for sandbox in [&landlock as &dyn Sandbox, &bubblewrap] {
+        let mut harness = Command::new("/bin/sh");
+        harness.arg("-c").arg(&script).current_dir(&worktree);
+        let output = crazyagent::spawn_gate::output(
+            sandbox
+                .wrap(&harness)
+                .unwrap()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(worktree.join("src2").is_dir());
+        assert_eq!(
+            fs::read_to_string(worktree.join("Makefile")).unwrap(),
+            "made\n"
+        );
+        assert!(!case.project.join("new.txt").exists());
+        assert!(!case.project.join("src3").exists());
+        fs::remove_dir(worktree.join("src2")).unwrap();
+        fs::remove_file(worktree.join("Makefile")).unwrap();
+    }
+}
+
+#[test]
 fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
     let case = case();
     let allowed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
