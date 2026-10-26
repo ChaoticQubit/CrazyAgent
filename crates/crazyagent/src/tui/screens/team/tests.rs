@@ -583,15 +583,15 @@ fn skipped_output_shows_as_a_marker_line_in_the_terminal() {
 }
 
 #[test]
-fn an_ended_terminal_keeps_its_last_screen_says_the_agent_stopped_and_takes_no_keys() {
+fn an_ended_terminal_keeps_its_last_screen_says_the_run_finished_and_takes_no_keys() {
     let mut shell = team();
     attach_master(&mut shell, b"$ cargo test\r\nok");
     close_master(&mut shell, "terminal_ended");
     let rows = render(&mut shell);
     assert_eq!(pane_row(&rows, 3), padded("$ cargo test"));
     assert_eq!(pane_row(&rows, 4), padded("ok"));
-    assert_eq!(pane_row(&rows, 19), padded("This agent has stopped."));
-    assert_eq!(pane_row(&rows, 20), padded("Its terminal is closed."));
+    assert_eq!(pane_row(&rows, 19), padded("This run finished."));
+    assert_eq!(pane_row(&rows, 20), padded("Its last screen stays here."));
     assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
     assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
     for key in [Key::Char('x'), Key::Tab, Key::Char('y')] {
@@ -601,6 +601,21 @@ fn an_ended_terminal_keeps_its_last_screen_says_the_agent_stopped_and_takes_no_k
         requests(&mut shell).is_empty(),
         "no key reaches a terminal that ended"
     );
+}
+
+#[test]
+fn a_finished_run_shows_its_finished_label_above_its_last_screen() {
+    let mut shell = team();
+    attach_master(
+        &mut shell,
+        b"$ cargo test\r\nok\x1b[0m\x1b[1;1H\x1b[L\x1b[7m Finished at 10:42 \x1b[0m\x1b[?25l\x1b[1;1H",
+    );
+    close_master(&mut shell, "terminal_ended");
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded(" Finished at 10:42"));
+    assert_eq!(pane_row(&rows, 4), padded("$ cargo test"));
+    assert_eq!(pane_row(&rows, 5), padded("ok"));
+    assert_eq!(pane_row(&rows, 19), padded("This run finished."));
 }
 
 #[test]
