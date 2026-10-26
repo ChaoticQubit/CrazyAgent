@@ -1327,12 +1327,12 @@ impl NativeOwner {
                 .agents_using(job.context.connection.id.clone())
                 .await
                 .map(native_auth::Output::Using)
-                .map_err(|error| native_auth::public_problem(&error.0).into()),
+                .map_err(|error| native_auth::public_problem(&error.0)),
             native_auth::Command::StopUsing => controller
                 .stop_agents_using(job.context.connection.id.clone())
                 .await
                 .map(native_auth::Output::Using)
-                .map_err(|error| native_auth::public_problem(&error.0).into()),
+                .map_err(|error| native_auth::public_problem(&error.0)),
             command => {
                 let reply = match command {
                     native_auth::Command::Start(request) => {
