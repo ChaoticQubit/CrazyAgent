@@ -53,6 +53,8 @@ mod native_auth_dispatch_diagnostic_tests;
 mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
+#[cfg(all(test, unix))]
+mod secret_storage_wait_tests;
 
 const SOCKET: &str = "owner.sock";
 const CLIENTS_MAX: usize = 2;
