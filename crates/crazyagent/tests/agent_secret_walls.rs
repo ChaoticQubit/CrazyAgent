@@ -739,3 +739,105 @@ fn a_headless_agent_cannot_open_the_engine_terminal() {
         assert!(text.contains(expected), "missing {expected} in {text}");
     }
 }
+
+struct TmuxServer {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl TmuxServer {
+    fn tmux(&self, arguments: &[&str]) -> Output {
+        crazyagent::spawn_gate::output(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .args(arguments)
+                .env_remove("TMUX")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]);
+    }
+}
+
+fn appears(path: &Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn a_tools_on_agent_cannot_drive_the_engine_tmux_server() {
+    let case = case();
+    let tmux = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("macOS test machines need tmux, as the engine does");
+    let terminal = case.runtime.join("terminal");
+    fs::create_dir_all(&terminal).unwrap();
+    let server = TmuxServer {
+        tmux,
+        socket: terminal.join("tmux.sock"),
+    };
+    let started = server.tmux(&[
+        "-f",
+        "/dev/null",
+        "new-session",
+        "-d",
+        "-s",
+        "crazyagent",
+        "/bin/sleep 120",
+    ]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let outside = case.profiles.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let control = outside.join("control");
+    let window = format!("/usr/bin/touch {}", quoted(&control));
+    assert!(server.tmux(&["new-window", "-d", &window]).status.success());
+    assert!(
+        appears(&control),
+        "the unsandboxed control must run a command through the server"
+    );
+    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let escaped = outside.join("escaped");
+    let output = shell(
+        &open,
+        &case.profiles.join("open.sb"),
+        &format!(
+            "cd \"$TMPDIR\" && {} -S ../../../../terminal/tmux.sock new-window -d \"/usr/bin/touch {}\"",
+            quoted(&server.tmux),
+            quoted(&escaped)
+        ),
+    );
+    let after = outside.join("after");
+    let window = format!("/usr/bin/touch {}", quoted(&after));
+    assert!(server.tmux(&["new-window", "-d", &window]).status.success());
+    assert!(appears(&after));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
+    assert!(
+        !escaped.exists(),
+        "the agent ran a command outside its sandbox"
+    );
+}
