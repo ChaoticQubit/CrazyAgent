@@ -425,7 +425,7 @@ async function main() {
     console.log(`note: ended the conversation first, since ${previous} failed (the owner's End conversation)`);
     return `fresh conversation since ${previous} failed; `;
   };
-  const send = async (text, serving = null, release = true) => {
+  const submit = async (text, release) => {
     const projectId = needs(state.project, "1");
     const opened = await value("desktop_open_project", { id: projectId });
     let master = await value("desktop_master_state", { ticket: opened.ticket });
@@ -458,6 +458,10 @@ async function main() {
       recovered = "new conversation after settings changed, ";
     }
     applied("submit_master", receipt);
+    return { opened, sessionId, receipt, recovered };
+  };
+  const send = async (text, serving = null, release = true) => {
+    const { opened, sessionId, receipt, recovered } = await submit(text, release);
     let turn;
     for (const deadline = Date.now() + TURN_MS; ; await pause(POLL_MS)) {
       const turns = await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null });
@@ -686,16 +690,7 @@ async function main() {
     });
     await step("6e3", "sign out the account a master turn is using: the refusal names the master conversation and its project, End conversation and sign out ends it and signs out", async () => {
       const project = needs(state.project, "1");
-      const opened = await value("desktop_open_project", { id: project });
-      let master = await value("desktop_master_state", { ticket: opened.ticket });
-      if (!master.session || master.session.phase !== "configured") {
-        applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
-        master = await value("desktop_master_state", { ticket: opened.ticket });
-        if (!master.session) throw new Refused("master_session_missing");
-      }
-      const sessionId = master.session.session_id;
-      const receipt = await value("desktop_submit_master", { ticket: opened.ticket, sessionId, text: "List every file in this repository with a one-paragraph summary of each, reading each file first.", generation: generation() });
-      applied("submit_master", receipt);
+      const { opened, sessionId, receipt } = await submit("List every file in this repository with a one-paragraph summary of each, reading each file first.", true);
       let turn;
       for (const deadline = Date.now() + TURN_MS; ; await pause(POLL_MS)) {
         turn = (await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null })).page.turns.find((item) => item.id === receipt.operation_id);
