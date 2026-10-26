@@ -949,9 +949,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "gateway_health_unknown"
         | "master_sign_in_missing"
         | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
-        "gateway_invalid_authentication" | "native_profile_credential_expiring" => {
-            MasterReason::InvalidAuthentication
-        }
+        "gateway_invalid_authentication"
+        | "native_profile_credential_expiring"
+        | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
         "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
@@ -1376,6 +1376,20 @@ mod tests {
             ),
         ] {
             assert_eq!(reason_for_error(&EngineError(gap.clone())), reason, "{gap}");
+        }
+    }
+
+    #[test]
+    fn a_revoked_or_expiring_profile_sign_in_asks_the_owner_to_sign_in_again() {
+        for code in [
+            "native_profile_sign_in_revoked",
+            "native_profile_credential_expiring",
+        ] {
+            assert_eq!(
+                reason_for_error(&EngineError(code.into())),
+                MasterReason::InvalidAuthentication,
+                "{code}"
+            );
         }
     }
 
