@@ -2,8 +2,8 @@
 use super::Identity;
 use super::master_runtime::MasterHostLaunch;
 use super::{EngineError, OwnerRuntimeHandle, Root, failure};
-use crate::config::ModelEndpoint;
-use crate::engine::bootstrap::NativeProfileUse;
+use crate::config::{ModelConnection, ModelEndpoint};
+use crate::engine::bootstrap::{AgentCredential, NativeProfileUse};
 use crate::engine::io_error;
 use crate::engine::owner::is_hex_id;
 #[cfg(unix)]
@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
+use std::time::Duration;
 
 #[cfg(unix)]
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
@@ -35,6 +36,8 @@ const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
 #[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
+#[cfg(unix)]
+const MASTER_HOME: &str = "home";
 #[cfg(unix)]
 const MASTER_PROFILE: &str = "sandbox.sb";
 #[cfg(unix)]
@@ -99,36 +102,50 @@ impl OwnerRuntimeHandle {
         }
         let (runtime_ref, capture_ref, capture) = allocate_master_capture(&self.authority.root)?;
         let folder = MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
-        let command = if prepared.session.selection.backend == MasterBackend::Claude {
-            let instructions = write_master_instructions(
-                &self.authority.root,
-                &runtime_ref,
-                &prepared.instructions,
-            )?;
-            crate::engine::claude_host::launch_command(
+        let place = MasterTurnPlace {
+            root: &self.authority.root,
+            runtime_ref: &runtime_ref,
+            repository: &prepared.repository,
+            worktree: &prepared.cwd,
+        };
+        let turn = if prepared.session.selection.backend == MasterBackend::Claude {
+            claude_master_turn(
+                &place,
+                profile,
                 executable.verified_path()?,
-                &prepared.cwd,
-                &home,
-                model,
-                Some(instructions.as_path()),
+                &prepared.attempt.connection,
+                &prepared.instructions,
+                Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms),
             )?
         } else {
-            master_command(executable.verified_path()?, &home, &prepared.cwd, model)?
+            MasterTurnLaunch {
+                command: master_command(executable.verified_path()?, &home, &prepared.cwd, model)?,
+                sandbox: master_sandbox(
+                    place.root,
+                    place.runtime_ref,
+                    place.repository,
+                    place.worktree,
+                    &home,
+                    executable.verified_path()?,
+                    &prepared.attempt.connection.endpoint,
+                )?,
+                home: home.clone(),
+                credential: None,
+            }
         };
-        let sandbox = master_sandbox(
-            &self.authority.root,
-            &runtime_ref,
-            &prepared.repository,
-            &prepared.cwd,
-            &home,
-            executable.verified_path()?,
-            &prepared.attempt.connection.endpoint,
-        )?;
+        let MasterTurnLaunch {
+            command,
+            sandbox,
+            home,
+            credential,
+        } = turn;
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
         Ok(MasterHostLaunch {
             command,
             sandbox,
+            home,
+            credential,
             artifact_sha256,
             runtime_ref,
             capture_ref,
@@ -136,6 +153,92 @@ impl OwnerRuntimeHandle {
             folder,
         })
     }
+}
+
+/// Where one master turn runs: the owner root, the turn's runtime reference from
+/// `allocate_master_capture`, and the project repository and leased worktree it works in.
+pub(super) struct MasterTurnPlace<'a> {
+    pub(super) root: &'a Root,
+    pub(super) runtime_ref: &'a RequestId,
+    pub(super) repository: &'a Path,
+    pub(super) worktree: &'a Path,
+}
+
+/// One master turn's command and Seatbelt boundary, the home both name, and the account
+/// credential copy that lives in that home until it is dropped at the end of the turn.
+pub(super) struct MasterTurnLaunch {
+    pub(super) command: Command,
+    pub(super) sandbox: InstalledSandbox,
+    pub(super) home: PathBuf,
+    pub(super) credential: Option<AgentCredential>,
+}
+
+/// Builds one Claude Code master turn: its startup instruction file, a private home in the
+/// turn folder holding a no-refresh copy of the account's credential (DEC-090), and the
+/// tools-off command and Seatbelt boundary on that home. The keychain stays denied and the
+/// managed home is never given to the master. Inputs: where the turn runs, the account
+/// lease, the registered executable, the attempt's connection, the instruction text and the
+/// turn's wall time. Output: the launch parts with the copy, or the refusal of the part that
+/// failed, `native_profile_credential_expiring` when the token lapses within the turn.
+pub(super) fn claude_master_turn(
+    place: &MasterTurnPlace<'_>,
+    profile: &NativeProfileUse,
+    executable: &Path,
+    connection: &ModelConnection,
+    instructions: &str,
+    wall_time: Duration,
+) -> Result<MasterTurnLaunch, EngineError> {
+    let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
+    let home = master_turn_home(place.root, place.runtime_ref)?;
+    let credential = profile.hand_to_agent(&home, wall_time)?;
+    let command = crate::engine::claude_host::launch_command(
+        executable,
+        place.worktree,
+        &home,
+        &connection.model.id,
+        Some(instructions.as_path()),
+    )?;
+    let sandbox = master_sandbox(
+        place.root,
+        place.runtime_ref,
+        place.repository,
+        place.worktree,
+        &home,
+        executable,
+        &connection.endpoint,
+    )?;
+    Ok(MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential: Some(credential),
+    })
+}
+
+/// Makes the private home of one Claude master turn inside its turn folder, so everything
+/// Claude Code writes there goes with the folder. Input: the owner root and the turn's
+/// runtime reference. Output: the new 0700 home, or a refusal when the folder is not the
+/// engine's or the home already exists.
+#[cfg(unix)]
+fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    rustix::fs::mkdirat(&runtime.directory, MASTER_HOME, Mode::RWXU).map_err(io_error)?;
+    let home = runtime.path.join(MASTER_HOME);
+    let made = std::fs::symlink_metadata(&home).map_err(io_error)?;
+    if !made.is_dir() || made.mode() & 0o7777 != 0o700 {
+        return Err(failure("master_home_unsafe"));
+    }
+    verify_master_runtime(root, &runtime, &name)?;
+    Ok(home)
+}
+
+/// Refuses a master turn home where the owner-only turn directory cannot be made.
+/// Takes the owner root and turn reference, both unused. Returns `master_capture_unavailable`.
+#[cfg(not(unix))]
+fn master_turn_home(_root: &Root, _runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    Err(failure("master_capture_unavailable"))
 }
 
 /// Owns one master turn's private folder in the owner generation, with its capture,
@@ -1045,3 +1148,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/dec_090_tests.rs"]
 mod dec_090_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/live_claude_tests.rs"]
+mod live_claude_tests;

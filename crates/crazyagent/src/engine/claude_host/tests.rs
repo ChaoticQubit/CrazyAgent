@@ -411,6 +411,7 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
         command,
         sandbox,
         profile,
+        home.clone(),
         NativeAction::Launch {
             session_id: SessionId::new("claude-master-session").unwrap(),
             harness: NativeHarness::Claude,
@@ -458,6 +459,7 @@ async fn stand_in_master(
         command,
         sandbox,
         profile,
+        home,
         NativeAction::Launch {
             session_id: crate::protocol::SessionId::new("claude-group-session").unwrap(),
             harness: NativeHarness::Claude,

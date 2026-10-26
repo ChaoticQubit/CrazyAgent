@@ -728,6 +728,49 @@ impl Fixture {
             .unwrap()
     }
 
+    fn reject_sign_in(&self, connection: &str, age: Duration) {
+        let config = crate::config::resolve_config(
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+        )
+        .unwrap();
+        let model = config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections
+            .iter()
+            .find(|item| item.id == reference(connection))
+            .unwrap()
+            .clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let observed_at_ms = u64::try_from(now.saturating_sub(age).as_millis()).unwrap();
+        let mut db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let tx = db.transaction().unwrap();
+        crate::model_gateway::observe(
+            &tx,
+            &config,
+            &crate::model_gateway::Observation {
+                id: RequestId::new(format!("routing-rejected-{connection}")).unwrap(),
+                connection: model,
+                sequence: 1,
+                observed_at_ms,
+                valid_until_ms: observed_at_ms + 60_000,
+                kind: crate::model_gateway::ObservationKind::InvalidAuthentication,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
     fn db(&self) -> Connection {
         let db = Connection::open_with_flags(
             self.root.path().join("engine.db"),
@@ -1549,6 +1592,104 @@ async fn a_rate_limited_account_hands_the_next_turn_and_the_conversation_to_the_
         Some(&reference("claude-b"))
     );
     drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_rejected_sign_in_is_not_paused_and_hands_the_next_turn_to_the_next_account() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    case.fail(
+        &case.turn.id,
+        &first.attempt.request.id,
+        MasterReason::InvalidAuthentication,
+    )
+    .await;
+    drop(first);
+    assert_eq!(case.paused_until("claude-a"), None);
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-b"));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_credential_copy_fails_hands_the_next_turn_to_the_next_account() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let result = case
+        .command(MasterRuntimeCommand::Fail {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            reason: MasterReason::InvalidAuthentication,
+            cause: "native_profile_credential_unavailable".into(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(failed) = result else {
+        panic!("the turn whose credential copy failed did not settle");
+    };
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::InvalidAuthentication));
+    drop(first);
+    assert_eq!(case.paused_until("claude-a"), None);
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-b"));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn an_account_whose_sign_in_was_rejected_reads_sign_in_again_however_long_ago() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.reject_sign_in("claude-a", Duration::from_secs(10 * 60));
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(blocked) = result else {
+        panic!("a turn was prepared on an account whose sign-in was rejected");
+    };
+    unallocated(
+        &blocked,
+        MasterTurnPhase::Blocked,
+        Some(MasterReason::InvalidAuthentication),
+    );
+    assert_eq!(blocked.cause.as_deref(), Some("master_sign_in_rejected"));
+    assert_eq!(
+        blocked.accounts,
+        vec![
+            account(
+                "claude-account-a",
+                "claude-a",
+                "claude",
+                Some(MasterReason::InvalidAuthentication)
+            ),
+            account(
+                "claude-account-b",
+                "claude-b",
+                "claude",
+                Some(MasterReason::ReadinessUnknown)
+            ),
+        ]
+    );
+    assert_eq!(case.paused_until("claude-a"), None);
     case.finish().await;
 }
 

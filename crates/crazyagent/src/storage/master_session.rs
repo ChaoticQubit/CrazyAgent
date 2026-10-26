@@ -890,6 +890,46 @@ fn persist_runtime(
     Ok(())
 }
 
+/// Ends an admitted turn that failed before its harness ran. A rejected sign-in, such as a
+/// sign-in whose credential could not be handed out, is reported to the gateway so the
+/// account waits for a fresh sign-in; any other failure ends locally.
+/// Inputs: the transaction, the prepared turn and the reason. Output: its attempt is ended.
+fn fail_before_running(
+    tx: &Transaction<'_>,
+    turn: &mut MasterTurnView,
+    reason: MasterReason,
+) -> Result<(), EngineError> {
+    let Some(attempt) = turn.attempt.as_ref().filter(|attempt| {
+        reason == MasterReason::InvalidAuthentication && attempt.completion.is_none()
+    }) else {
+        return complete_local(tx, turn, MasterTurnPhase::Failed);
+    };
+    let completion = AttemptCompletion {
+        outcome: AttemptOutcome::Failed(FailureKind::InvalidAuthentication),
+        effects: Effects::None,
+        finished_at_ms: now_ms()?.max(attempt.selected_at_ms),
+        retry_at_ms: None,
+    };
+    model_gateway::finish_attempt(tx, &attempt.request.id, &completion)?;
+    turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
+    Ok(())
+}
+
+/// Lifts the holds on an account that just signed in afresh: its pause and the provider's
+/// rejection of its earlier sign-in, so its next turn may run at once.
+/// Inputs: the transaction and the account's connection. Output: both holds are gone.
+pub(super) fn lift_account_holds(
+    tx: &Transaction<'_>,
+    connection: &ModelConnection,
+) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM team_paused_accounts WHERE connection=?1",
+        [connection.id.as_str()],
+    )
+    .map_err(error)?;
+    model_gateway::sign_in_renewed(tx, connection, now_ms()?)
+}
+
 fn complete_local(
     tx: &Transaction<'_>,
     turn: &mut MasterTurnView,
@@ -1579,10 +1619,7 @@ fn fails_over(reason: MasterReason) -> bool {
 fn pauses(reason: MasterReason) -> bool {
     matches!(
         reason,
-        MasterReason::InvalidAuthentication
-            | MasterReason::QuotaExhausted
-            | MasterReason::RateLimited
-            | MasterReason::CooldownActive
+        MasterReason::QuotaExhausted | MasterReason::RateLimited | MasterReason::CooldownActive
     )
 }
 
@@ -1600,8 +1637,8 @@ fn paused(
     .map_err(error)
 }
 
-/// Pauses a pool account whose turn hit a limit or a rejected sign-in, for as long as a
-/// sub-agent's account pauses. Inputs: the transaction and the account's connection.
+/// Pauses a pool account whose turn hit a limit, for as long as a sub-agent's account
+/// pauses. A rejected sign-in is never paused: it holds until a fresh sign-in. Inputs: the transaction and the account's connection.
 /// Output: the pause is stored; a longer pause already set is kept.
 fn pause_member(
     tx: &Transaction<'_>,
@@ -1636,6 +1673,12 @@ fn member_auth(
     if let Some(gap) = gap {
         return Ok(Err(gap));
     }
+    if model_gateway::sign_in_rejected(tx, member)? {
+        return Ok(Err((
+            MasterReason::InvalidAuthentication,
+            "master_sign_in_rejected".to_owned(),
+        )));
+    }
     if paused(tx, &member.id)? {
         return Ok(Err((
             MasterReason::CooldownActive,
@@ -1663,6 +1706,7 @@ fn other_ready(
             || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
             || !allowed_destination(config, &connection.id)
             || paused(tx, &connection.id)?
+            || model_gateway::sign_in_rejected(tx, connection)?
         {
             continue;
         }
@@ -3336,7 +3380,7 @@ pub(super) fn runtime(
                 turn.phase = if turn.phase == MasterTurnPhase::Queued {
                     MasterTurnPhase::Blocked
                 } else {
-                    complete_local(&tx, &mut turn, MasterTurnPhase::Failed)?;
+                    fail_before_running(&tx, &mut turn, reason)?;
                     MasterTurnPhase::Failed
                 };
                 turn.reason = Some(reason);

@@ -904,7 +904,24 @@ fn store_fact(tx: &Transaction<'_>, fact: &NativeAuthFact) -> Result<(), EngineE
         )
         .map_err(error)?;
     assert_eq!(updated, 1);
+    if fact.phase == NativeAuthPhase::AuthenticatedObserved && fresh_sign_in(&fact.action) {
+        master_session::lift_account_holds(tx, &fact.binding.connection)?;
+    }
     Ok(())
+}
+
+/// Tells whether an operation signs an account in afresh, as opposed to checking an
+/// existing sign-in or logging out; only a fresh sign-in lifts the account's holds.
+/// Input: the action. Output: true for a new sign-in.
+fn fresh_sign_in(action: &NativeAuthAction) -> bool {
+    matches!(
+        action,
+        NativeAuthAction::SignIn { method }
+            if !matches!(
+                method,
+                NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
+            )
+    )
 }
 
 fn stored_phase(phase: NativeAuthPhase) -> &'static str {

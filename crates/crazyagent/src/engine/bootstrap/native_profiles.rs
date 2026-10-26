@@ -15,6 +15,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
 mod agent_copy;
+pub(crate) use agent_copy::AgentCredential;
 mod configured_rcli;
 mod generated_configured_rcli;
 mod staging;

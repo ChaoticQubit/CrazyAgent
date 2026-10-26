@@ -15,7 +15,7 @@ use crate::sandbox::InstalledSandbox;
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::Arc;
@@ -265,6 +265,7 @@ impl ClaudeHost {
         command: Command,
         sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
         budget: ResourceBudget,
@@ -294,6 +295,7 @@ impl ClaudeHost {
                     command,
                     sandbox,
                     profile,
+                    home,
                     protocol,
                     limits,
                     process::Channels {
@@ -434,12 +436,13 @@ pub(in crate::engine) enum ClaudeHost {}
 
 #[cfg(not(unix))]
 impl ClaudeHost {
-    /// Never starts: takes the command, boundary, uninhabited profile lease, action,
-    /// account and budget. Returns nothing because the lease cannot exist.
+    /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
+    /// action, account and budget. Returns nothing because the lease cannot exist.
     pub(in crate::engine) async fn spawn(
         _command: Command,
         _sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        _home: PathBuf,
         _action: NativeAction,
         _account_ref: CredentialRef,
         _budget: ResourceBudget,
@@ -477,10 +480,11 @@ fn failure(code: &'static str) -> EngineError {
 }
 
 #[cfg(unix)]
-fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(), Fault> {
-    let home = profile
-        .profile_path()
-        .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
+fn validate_command(
+    command: &Command,
+    profile: &NativeProfileUse,
+    home: &Path,
+) -> Result<(), Fault> {
     let directory = command
         .get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
@@ -505,7 +509,7 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
     let expected = launch_command(
         Path::new(command.get_program()),
         directory,
-        &home,
+        home,
         model,
         instructions,
     )

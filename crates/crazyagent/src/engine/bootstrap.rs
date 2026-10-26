@@ -33,7 +33,9 @@ mod native_profiles;
 mod native_profiles;
 #[cfg(all(test, unix))]
 pub(crate) use native_profiles::MAX_PROFILES;
-pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
+pub(crate) use native_profiles::{
+    AgentCredential, NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose,
+};
 
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]

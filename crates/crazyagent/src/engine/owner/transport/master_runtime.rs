@@ -33,6 +33,8 @@ const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
+    pub(super) home: std::path::PathBuf,
+    pub(super) credential: Option<crate::engine::bootstrap::AgentCredential>,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
@@ -438,6 +440,7 @@ impl OwnerRuntimeHandle {
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile)?;
         let _folder = launch.folder;
+        let _credential = launch.credential;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -466,6 +469,7 @@ impl OwnerRuntimeHandle {
                     launch.command,
                     launch.sandbox,
                     profile,
+                    launch.home,
                     action,
                     account_ref,
                     resources,
@@ -708,7 +712,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_health_unknown" => MasterReason::ReadinessUnknown,
-        "gateway_invalid_authentication" => MasterReason::InvalidAuthentication,
+        "gateway_invalid_authentication"
+        | "native_profile_credential_unavailable"
+        | "native_profile_credential_expiring" => MasterReason::InvalidAuthentication,
         "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
