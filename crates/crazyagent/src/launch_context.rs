@@ -151,7 +151,7 @@ pub fn for_master(
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
 /// to the team, and the team plan's sub-agents, or plainly that the plan has none.
 /// Input: the project setup. Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
-fn master_tools_section(setup: &StoredSetup) -> String {
+pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
     let mut section = format!(
         "\n## Your tools\n\nYour tools are on in this conversation. You can read and search files, edit them and run shell commands in this conversation's own git worktree, your working folder. You cannot write outside it; the project folder itself stays read-only to you.\n\nTo start a sub-agent, call the `{}` tool of the `{}` MCP server with the task in plain words and, if you choose, a harness from the team plan. Each call hands over one task, at most {} in one reply. Start sub-agents only with this tool: your harness's own sub-agent tools are disabled, and only agents started with it run on the project's pool and appear in the project's Agents tab and Team view. When your reply ends, CrazyAgent checks each task against the team plan and runs it in its own git worktree. Its full progress and result show in the project's Team view. When it ends, a short note on how it went comes back to this conversation as an `Engine:` line you see on your next turn.\n\n",
         crate::team::tool::TOOL_NAME,

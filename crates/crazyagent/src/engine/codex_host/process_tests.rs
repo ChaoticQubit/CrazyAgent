@@ -319,3 +319,82 @@ fn a_codex_host_runs_in_the_home_its_command_names_and_never_in_another() {
         Err("codex_host_home_unsafe".to_owned())
     );
 }
+
+/// A stand-in Codex app-server that answers initialize, the master thread and the turn in
+/// Codex 0.164's shapes, then reports a turn on a thread the master never started.
+#[cfg(unix)]
+const FOREIGN_THREAD_APP_SERVER: &str = r#"#!/bin/sh
+read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+read -r line
+read -r line
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+printf '%s\n' '{"method":"turn/started","params":{"threadId":"stand-in-child","note":"sk-proj-NOTAREALKEY","turn":{"id":"stand-in-child-turn","items":[],"status":"inProgress"}}}'
+exec /bin/sleep 30
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_a_redacted_tail() {
+    use crate::adapters::{NativeAction, NativeHarness};
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::protocol::{CredentialRef, RequestId, SessionId};
+
+    let mut fixture = MasterFixture::new("codex");
+    let profile = fixture.lease("codex-diagnostic-turn", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("codex", FOREIGN_THREAD_APP_SERVER);
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut command = Command::new(&harness);
+    command
+        .args(["-c", "cli_auth_credentials_store=\"file\""])
+        .env("CODEX_HOME", &home)
+        .current_dir(std::fs::canonicalize(&fixture.project).unwrap());
+    let action = NativeAction::Launch {
+        session_id: SessionId::new("diagnostic-session").unwrap(),
+        harness: NativeHarness::Codex,
+        profile_ref: CredentialRef::new("group-master-profile").unwrap(),
+        worktree_lease: RequestId::new("diagnostic-lease").unwrap(),
+    };
+    let limits = ResourceBudget {
+        output_bytes: 65_536,
+        wall_time_ms: 20_000,
+        ..budget()
+    };
+    let mut host = super::CodexHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        action,
+        CredentialRef::new("group-master-account").unwrap(),
+        limits,
+        "stand-in instructions",
+    )
+    .await
+    .unwrap();
+    assert!(host.diagnostic().fault.is_none());
+    host.start_turn(RequestId::new("diagnostic-turn").unwrap(), "hello")
+        .await
+        .unwrap();
+    let failed = loop {
+        if let Err(error) = host.next_event().await {
+            break error;
+        }
+    };
+    assert_eq!(failed.0, "codex_host_protocol_stale_message");
+    let diagnostic = host.diagnostic();
+    assert_eq!(diagnostic.fault.as_deref(), Some(failed.0.as_str()));
+    assert_eq!(
+        diagnostic.message.as_deref(),
+        Some("turn/started id=- thread=stand-in-child parent=- turn=stand-in-child-turn")
+    );
+    let tail = diagnostic.tail();
+    assert!(tail.contains("\"stand-in-child-turn\""), "{tail}");
+    assert!(tail.contains("\"sk-[redacted]\""), "{tail}");
+    assert!(!tail.contains("NOTAREAL"), "{tail}");
+    let _ = host.close().await;
+}

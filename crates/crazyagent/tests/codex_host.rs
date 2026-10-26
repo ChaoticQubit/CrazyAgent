@@ -544,6 +544,44 @@ fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_suc
 }
 
 #[test]
+fn codex_host_names_the_frame_it_refused_for_the_stream_diagnostic() {
+    let (mut host, _) = active();
+    assert_eq!(host.refused(), None);
+    let refused = host.receive(&wire(json!({"method":"turn/started","params":{
+        "threadId":"unit-child-thread",
+        "turn":{"id":"unit-child-turn","items":[],"status":"inProgress"}
+    }})));
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("codex_host_protocol_stale_message")
+    );
+    assert_eq!(
+        host.refused(),
+        Some("turn/started id=- thread=unit-child-thread parent=- turn=unit-child-turn")
+    );
+    let (mut host, _) = active();
+    assert!(
+        host.receive(&wire(json!({"method":"thread/started","params":{
+            "thread":{"id":"unit child","parentThreadId":"unit-native-thread"}
+        }})))
+        .is_err()
+    );
+    assert_eq!(
+        host.refused(),
+        Some("thread/started id=- thread=? parent=unit-native-thread turn=-")
+    );
+    let (mut host, _) = active();
+    assert!(host.receive(&wire(json!({"id":99,"result":{}}))).is_err());
+    assert_eq!(
+        host.refused(),
+        Some("response id=99 thread=- parent=- turn=-")
+    );
+    let (mut host, _) = active();
+    assert!(host.receive(b"{not json\n").is_err());
+    assert_eq!(host.refused(), Some("unreadable"));
+}
+
+#[test]
 fn codex_host_eof_with_partial_frame_reports_disconnection_without_completion_or_identity() {
     let (mut host, request) = active();
     let partial = host.receive(b"{\"method\":\"turn/completed\"").unwrap();

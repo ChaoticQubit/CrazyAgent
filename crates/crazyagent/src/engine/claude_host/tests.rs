@@ -1269,6 +1269,20 @@ fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
 }
 
 #[test]
+fn a_stream_tail_redacts_openai_keys_and_tokens_but_keeps_plain_words() {
+    let mut diagnostic = diagnostic::StreamDiagnostic::default();
+    diagnostic.keep(
+        b"{\"key\":\"sk-proj-AbC_12-x\",\"access_token\":\"eyJhbGci.eyJzdWIi.c2ln-_x\",\
+\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ\"}\n",
+    );
+    assert_eq!(
+        diagnostic.tail(),
+        "{\"key\":\"sk-[redacted]\",\"access_token\":\"eyJ[redacted]\",\
+\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ[redacted]\"}\n"
+    );
+}
+
+#[test]
 fn a_stream_diagnostic_is_appended_private_rotated_and_never_through_a_link() {
     let directories = Directories::new();
     let logs = directories.root.join("logs");

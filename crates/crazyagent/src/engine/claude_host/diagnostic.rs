@@ -15,11 +15,13 @@ pub(in crate::engine) const LOG_FILE: &str = "master-stream.log";
 /// to `master-stream.log.1`, replacing the older copy.
 pub(in crate::engine) const ROTATE_BYTES: u64 = 256 * 1024;
 const CREDENTIAL_PREFIX: &[u8] = b"sk-ant-";
+/// OpenAI key and token prefixes, redacted only where a word starts so `task-` stays plain.
+const WORD_CREDENTIAL_PREFIXES: [&[u8]; 2] = [b"sk-", b"eyJ"];
 const REDACTED: &[u8] = b"[redacted]";
 
-/// What a Claude Code master host kept about its stream for the engine log: the fault that
-/// retired it, the type and subtype of the line that fault was found on, the kinds and count
-/// of the lines that came after its turn's result, and the last raw stream bytes.
+/// What a master host kept about its stream for the engine log: the fault that retired it,
+/// the line or frame that fault was found on, the kinds and count of the lines that came
+/// after a Claude Code turn's result, and the last raw stream bytes.
 #[derive(Clone, Debug, Default)]
 pub(in crate::engine) struct StreamDiagnostic {
     pub(in crate::engine) fault: Option<String>,
@@ -60,9 +62,10 @@ impl StreamDiagnostic {
         }
     }
 
-    /// The kept stream bytes as text with every Claude credential redacted. When older bytes
-    /// were dropped, the leading run of credential characters goes with them, so a credential
-    /// cut before its prefix never shows. Input: none. Output: the text.
+    /// The kept stream bytes as text with every Claude credential, OpenAI key (`sk-`) and
+    /// token (`eyJ`) redacted. When older bytes were dropped, the leading run of credential
+    /// characters goes with them, so a credential cut before its prefix never shows.
+    /// Input: none. Output: the text.
     pub(in crate::engine) fn tail(&self) -> String {
         let mut start = 0;
         if self.cut {
@@ -74,10 +77,20 @@ impl StreamDiagnostic {
         let mut text = Vec::with_capacity(bytes.len());
         let mut index = 0;
         while index < bytes.len() {
-            if bytes[index..].starts_with(CREDENTIAL_PREFIX) {
-                text.extend_from_slice(CREDENTIAL_PREFIX);
+            let word = index == 0 || !credential_byte(bytes[index - 1]);
+            let prefix = if bytes[index..].starts_with(CREDENTIAL_PREFIX) {
+                Some(CREDENTIAL_PREFIX)
+            } else if word {
+                WORD_CREDENTIAL_PREFIXES
+                    .into_iter()
+                    .find(|prefix| bytes[index..].starts_with(prefix))
+            } else {
+                None
+            };
+            if let Some(prefix) = prefix {
+                text.extend_from_slice(prefix);
                 text.extend_from_slice(REDACTED);
-                index += CREDENTIAL_PREFIX.len();
+                index += prefix.len();
                 while index < bytes.len() && credential_byte(bytes[index]) {
                     index += 1;
                 }
@@ -92,7 +105,7 @@ impl StreamDiagnostic {
 }
 
 fn credential_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
 }
 
 /// Names a stream line by its `type` and, when it has one, its `subtype`, such as

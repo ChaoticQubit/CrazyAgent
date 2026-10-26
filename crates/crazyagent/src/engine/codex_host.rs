@@ -9,6 +9,7 @@ use crate::adapters::codex::{AuthControl, State};
 use crate::adapters::events::ObservedEvent;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
@@ -27,6 +28,7 @@ pub(in crate::engine) struct CodexHost {
     auth: VecDeque<AuthControl>,
     outbound: VecDeque<Vec<u8>>,
     disconnected: bool,
+    diagnostic: StreamDiagnostic,
 }
 
 impl CodexHost {
@@ -62,6 +64,7 @@ impl CodexHost {
             auth: VecDeque::new(),
             outbound: VecDeque::new(),
             disconnected: false,
+            diagnostic: StreamDiagnostic::default(),
         };
         let bytes = host.protocol.initialize()?;
         host.process.send(&bytes).await?;
@@ -72,6 +75,13 @@ impl CodexHost {
         host.process.send(&bytes).await?;
         host.wait_for(State::Idle).await?;
         Ok(host)
+    }
+
+    /// What this host kept about its app-server stream for the engine log: the protocol
+    /// fault that ended it, the frame that fault was found on and the last raw bytes.
+    /// Input: the host. Output: a copy of the diagnostic.
+    pub(in crate::engine) fn diagnostic(&self) -> StreamDiagnostic {
+        self.diagnostic.clone()
     }
 
     pub(in crate::engine) async fn observe_account(&mut self) -> Result<AuthControl, EngineError> {
@@ -149,7 +159,11 @@ impl CodexHost {
         }
         match self.process.next_output().await? {
             CodexHostOutput::Stdout(bytes) => {
-                let batch = self.protocol.receive(&bytes)?;
+                self.diagnostic.keep(&bytes);
+                let batch = self.protocol.receive(&bytes).inspect_err(|error| {
+                    self.diagnostic.fault = Some(error.0.clone());
+                    self.diagnostic.message = self.protocol.refused().map(str::to_owned);
+                })?;
                 if self.events.len() + batch.events.len() > EVENTS_MAX
                     || self.auth.len() + batch.auth.len() > EVENTS_MAX
                     || self.outbound.len() + batch.outbound.len() > EVENTS_MAX

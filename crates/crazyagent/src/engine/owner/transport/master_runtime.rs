@@ -104,6 +104,15 @@ impl MasterHost {
             Self::Claude(host) => host.process_group(),
         }
     }
+
+    /// What the host kept about its harness stream for the engine log. Input: the host.
+    /// Output: the diagnostic, or none before a Claude Code host retired its stream.
+    fn diagnostic(&self) -> Option<StreamDiagnostic> {
+        match self {
+            Self::Codex(host) => Some(host.diagnostic()),
+            Self::Claude(host) => host.diagnostic(),
+        }
+    }
 }
 
 impl Capture {
@@ -602,8 +611,7 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
-        if let MasterHost::Claude(host) = &active.host
-            && let Some(diagnostic) = host.diagnostic()
+        if let Some(diagnostic) = active.host.diagnostic()
             && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
             && self.authority.root.verify().is_ok()
             && let Some(root) = self.authority.root.path.parent()
@@ -801,7 +809,7 @@ impl OwnerRuntimeHandle {
     }
 }
 
-/// Appends a Claude Code master turn's stream diagnostic to the engine log
+/// Appends a master turn's stream diagnostic to the engine log
 /// `logs/master-stream.log` (0600, rotated, credentials redacted) so a failed turn or one
 /// whose harness kept talking after its result can be explained later. Input: the engine
 /// root, the conversation, turn, runtime, diagnostic and the turn's error code when it
@@ -920,7 +928,7 @@ fn assistant_failure(code: &str) -> &'static str {
 /// Checks the account Codex reads locally before a master turn is a ChatGPT sign-in; no
 /// account at all is a missing sign-in, not a provider rejection.
 /// Input: Codex's account read. Output: success, or the failure the turn ends with.
-fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
+pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
     match read {
         AuthControl::AccountRead {
             account: Some(AuthAccount::Chatgpt { .. }),

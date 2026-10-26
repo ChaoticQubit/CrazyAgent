@@ -283,6 +283,7 @@ pub struct CodexProtocol {
     seen_server_ids: BTreeSet<WireId>,
     server_requests: BTreeMap<WireId, Option<ApprovalKind>>,
     login_ids: BTreeMap<String, LoginState>,
+    refused: Option<String>,
 }
 
 impl Default for CodexProtocol {
@@ -304,6 +305,7 @@ impl CodexProtocol {
             seen_server_ids: BTreeSet::new(),
             server_requests: BTreeMap::new(),
             login_ids: BTreeMap::new(),
+            refused: None,
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
@@ -568,6 +570,13 @@ impl CodexProtocol {
         result
     }
 
+    /// Names the frame the protocol last refused, for the engine's stream diagnostic: its
+    /// method or `response`, JSON-RPC id and the thread, parent thread and turn ids its params
+    /// carry, or `unreadable`. Input: none. Output: the name, or none before any refusal.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
+    }
+
     pub fn finish(&mut self) -> Result<(), ProtocolError> {
         self.assert_consistent();
         self.phase = State::Failed;
@@ -709,10 +718,16 @@ impl CodexProtocol {
                 return Err(ProtocolError::Capacity);
             }
             frames += 1;
-            let envelope: Envelope =
-                serde_json::from_slice(&self.buffer).map_err(|_| ProtocolError::InvalidMessage)?;
+            let Ok(envelope) = serde_json::from_slice::<Envelope>(&self.buffer) else {
+                self.refused = Some(frame_name(&self.buffer));
+                return Err(ProtocolError::InvalidMessage);
+            };
+            let observed = self.message(envelope);
+            if observed.is_err() {
+                self.refused = Some(frame_name(&self.buffer));
+            }
             self.buffer.clear();
-            if let Some(event) = self.message(envelope)? {
+            if let Some(event) = observed? {
                 events.push(event);
             }
             assert!(events.len() <= frames);
@@ -1380,6 +1395,53 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
         return Err(ProtocolError::InvalidMessage);
     }
     Ok(text.into())
+}
+
+/// Names one frame by its method (`response` without one), JSON-RPC id and the thread,
+/// parent thread and turn ids its params carry; an absent value shows as `-` and one that is
+/// not a short plain identifier as `?`. Input: the frame bytes. Output: the name, or
+/// `unreadable` for bytes that are not JSON.
+fn frame_name(frame: &[u8]) -> String {
+    let Ok(value) = serde_json::from_slice::<Value>(frame) else {
+        return "unreadable".to_owned();
+    };
+    let plain = |value: &Value| {
+        let text = match value {
+            Value::Null => return "-".to_owned(),
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            _ => return "?".to_owned(),
+        };
+        if (1..=ID_BYTES_MAX).contains(&text.len())
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_/.:".contains(&byte))
+        {
+            text
+        } else {
+            "?".to_owned()
+        }
+    };
+    let params = &value["params"];
+    let either = |first: &'static str, second: &'static str| {
+        if params[first].is_null() {
+            plain(&params[second]["id"])
+        } else {
+            plain(&params[first])
+        }
+    };
+    let method = if value.get("method").is_some() {
+        plain(&value["method"])
+    } else {
+        "response".to_owned()
+    };
+    format!(
+        "{method} id={} thread={} parent={} turn={}",
+        plain(&value["id"]),
+        either("threadId", "thread"),
+        plain(&params["thread"]["parentThreadId"]),
+        either("turnId", "turn"),
+    )
 }
 
 fn message_text(value: &Value) -> Result<String, ProtocolError> {

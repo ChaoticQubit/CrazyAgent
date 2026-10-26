@@ -123,6 +123,12 @@ impl CodexHostProtocol {
         self.protocol.state()
     }
 
+    /// Names the frame the Codex protocol last refused, for the master's stream diagnostic.
+    /// Input: none. Output: the name, or none before any refusal.
+    pub fn refused(&self) -> Option<&str> {
+        self.protocol.refused()
+    }
+
     pub fn disconnect(&mut self) -> ObservedEvent {
         let _ = self.protocol.finish();
         self.bridge
