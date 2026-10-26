@@ -493,3 +493,171 @@ fn a_new_pin_with_the_same_skill_names_replaces_the_old_copy() {
         .collect();
     assert_eq!(store, vec!["alpha"]);
 }
+
+fn owner_skill(connection: &mut Connection, root: &Path, parent: &Path, name: &str) -> String {
+    let folder = skill(parent, name);
+    std::fs::write(folder.join("NOTES.md"), "the owner's own copy").unwrap();
+    let plugins::ResultValue::Skill(change) = plugins::execute(
+        connection,
+        root,
+        plugins::Command::AddSkill {
+            scope: Scope::Global,
+            source: folder.display().to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("skill change required");
+    };
+    change.view.id
+}
+
+#[test]
+fn an_owner_skill_named_like_an_entry_survives_every_new_pin_and_switch() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let mine = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let id = owner_skill(&mut connection, root, mine.path(), "tiger-style");
+    let kept = |connection: &mut Connection| {
+        let listed = skills(connection, root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert!(PathBuf::from(&listed[0].folder).join("NOTES.md").is_file());
+        listed[0].enabled
+    };
+
+    let refused = install(
+        &mut connection,
+        root,
+        "tiger-style",
+        PRESENT,
+        vec![skill(&work.path().join("0"), "tiger-style")],
+        None,
+    );
+    assert_eq!(refused.unwrap_err().0, "pack_unknown");
+    assert!(kept(&mut connection));
+
+    for pin in ["1", "2"] {
+        install(
+            &mut connection,
+            root,
+            "tiger-style",
+            &format!("https://example.invalid/tiger-style@{pin}"),
+            vec![skill(&work.path().join(pin), "tiger-style")],
+            None,
+        )
+        .unwrap();
+        execute(&mut connection, root, Command::Sweep).unwrap();
+        assert!(kept(&mut connection));
+    }
+
+    let off = SetupAction::Set {
+        id: "tiger-style".into(),
+        on: false,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    install(
+        &mut connection,
+        root,
+        "tiger-style",
+        "https://example.invalid/tiger-style@3",
+        vec![skill(&work.path().join("3"), "tiger-style")],
+        None,
+    )
+    .unwrap();
+    execute(&mut connection, root, Command::Sweep).unwrap();
+    assert!(!kept(&mut connection));
+    assert_eq!(
+        pack_state(&status_of(&mut connection, root), "tiger-style"),
+        PackState::Off
+    );
+    let store: Vec<String> = std::fs::read_dir(root.join("plugins/skills/global"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(store, vec!["tiger-style"]);
+}
+
+#[test]
+fn an_owner_server_named_like_an_entry_keeps_its_secret_across_new_pins() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let plugins::ResultValue::Server(view) = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AddServer {
+            scope: Scope::Global,
+            name: "context-mode".into(),
+            spec: spec(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    let reference = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(root, &reference, b"dummy-owner-value".to_vec()).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AttachSecret {
+            id: view.id.clone(),
+            name: "API_TOKEN".into(),
+            reference: reference.clone(),
+        },
+    )
+    .unwrap();
+
+    for pin in ["1", "2"] {
+        install(
+            &mut connection,
+            root,
+            "context-mode",
+            &format!("https://example.invalid/context-mode@{pin}"),
+            Vec::new(),
+            Some(("context-mode".into(), spec())),
+        )
+        .unwrap();
+        execute(&mut connection, root, Command::Sweep).unwrap();
+        let listed = servers(&mut connection, root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, view.id);
+        assert!(
+            root.join(plugins::STORE)
+                .join(plugins::SECRETS)
+                .join(&reference)
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn a_pack_skill_named_like_its_entry_is_still_replaced_by_a_new_pin() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "graphify",
+        "https://example.invalid/graphify@1",
+        vec![skill(&work.path().join("1"), "graphify")],
+        None,
+    )
+    .unwrap();
+    let before = skills(&mut connection, root);
+    let newer = skill(&work.path().join("2"), "graphify");
+    std::fs::write(newer.join("NOTES.md"), "second pin").unwrap();
+    install(
+        &mut connection,
+        root,
+        "graphify",
+        "https://example.invalid/graphify@2",
+        vec![newer],
+        None,
+    )
+    .unwrap();
+    let after = skills(&mut connection, root);
+    assert_eq!(after.len(), 1);
+    assert_ne!(after[0].id, before[0].id);
+    assert!(PathBuf::from(&after[0].folder).join("NOTES.md").is_file());
+}
