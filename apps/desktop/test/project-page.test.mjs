@@ -262,6 +262,24 @@ test("a failed send says Couldn't send and keeps specific engine copy", () => {
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
 
+test("every refusal the engine gives a master send, start or end has its own plain sentence", () => {
+  const codes = ["master_source_conflict", "master_session_active", "master_session_capacity", "master_session_missing",
+    "master_session_not_active", "master_turn_outstanding", "master_turn_capacity", "master_turn_not_current",
+    "master_input_too_large", "master_scope_or_budget_denied", "master_pool_missing", "master_backend_account_denied",
+    "rcli_profile_identity_changed"];
+  for (const code of codes) assert.notEqual(research.sendFailureLine(code), "Couldn't send. Try again.", code);
+});
+
+test("only a send refused because the settings changed starts a new conversation", () => {
+  const receipt = (outcome, rejection) => ({ operation_id: "op", outcome, pending: false, rejection });
+  assert.equal(research.restartForSettings(receipt("rejected", "master_source_conflict")), true);
+  assert.equal(research.restartForSettings(receipt("rejected", "master_turn_outstanding")), false);
+  assert.equal(research.restartForSettings(receipt("applied", null)), false);
+  assert.equal(research.restartForSettings({ ...receipt("rejected", "master_source_conflict"), pending: true }), false,
+    "an unconfirmed send is checked, never resent");
+  assert.equal(research.NEW_CONVERSATION_NOTE, "Settings changed, so a new conversation started.");
+});
+
 test("a log follows new lines only while the owner is near its bottom", () => {
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 240 }), true);
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 240 }), true);
