@@ -1,7 +1,7 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    JobLog, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, memory_source, plain_problem,
-    research_kind,
+    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, Transcript,
+    memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, project_screen};
@@ -980,6 +980,79 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
         ["jobs"],
         "a refused change reads the jobs again"
     );
+}
+
+#[test]
+fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
+    let mut screen = ProjectScreen::new(
+        ProjectId::new("notes-cli").unwrap(),
+        "Notes CLI".into(),
+        None,
+    );
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: true,
+        status: MasterStatus::Stopped,
+        messages: Vec::new(),
+    });
+    screen.open(Tab::Conversation);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(screen.typing, "the Conversation tab opens on its input");
+    assert!(
+        drawn.help.contains(&("Esc", "Leave input")),
+        "{:?}",
+        drawn.help
+    );
+    assert!(
+        !drawn.help.contains(&("r", "Try again")),
+        "{:?}",
+        drawn.help
+    );
+    assert!(
+        !drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.input.value(),
+        "r",
+        "r types while the input has the keys"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(drawn.help.contains(&("r", "Try again")), "{:?}", drawn.help);
+    assert!(
+        drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('e'))),
+        ProjectReply::EndConversation
+    );
+    screen
+        .transcript
+        .as_mut()
+        .expect("the transcript is set above")
+        .open = false;
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        !drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Ignored);
 }
 
 #[test]

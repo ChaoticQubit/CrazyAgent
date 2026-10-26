@@ -15,7 +15,7 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::Status;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
-use crate::tui::seam::{Arrival, Request, ShellRequest};
+use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -955,6 +955,44 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
 }
 
 #[test]
+fn the_review_still_says_whether_a_code_graph_was_built() {
+    let graph_row = |rows: &[String], state: &str| {
+        rows.iter()
+            .any(|row| row.contains("Build the code graph") && row.contains(state))
+    };
+    let (mut shell, _) = review_with(|view| view.graph = Step::Off);
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Turned off"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Failed {
+            reason: "graphify not installed".into(),
+        }
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Failed"), "{rows:#?}");
+    assert!(shows(&rows, "graphify not installed"), "{rows:#?}");
+
+    let (mut shell, _) = waiting_review();
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Done"), "{rows:#?}");
+}
+
+#[test]
 fn a_graph_step_without_the_graphify_skill_says_it_is_not_installed_not_turned_off() {
     let (mut shell, _) = review_with(|view| {
         view.graph = Step::NotInstalled;
@@ -1045,6 +1083,97 @@ fn a_saved_setup_opens_with_its_saved_values_and_saves_changes() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Save changes"), "{rows:#?}");
     assert!(!shows(&rows, "Retry mapping"), "{rows:#?}");
+}
+
+/// The review of `notes` with the pool `main` in its draft, confirmed and saved
+/// by the engine. Returns the shell, the project and the pool change the page
+/// sends next, if any.
+fn confirmed_with_pool() -> (Shell, ProjectId, Option<Request>) {
+    let pool = crate::protocol::CredentialRef::new("main").unwrap();
+    let (mut shell, project) = review_with(|view| view.draft.pool = Some(pool.clone()));
+    while shell.ctx.next_request().is_some() {}
+    let stored = crate::project_setup::StoredSetup {
+        project_id: project.clone(),
+        name: "notes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: Some(pool),
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/Users/owner/Projects/notes".into(),
+        created_ms: 0,
+        revision: 7,
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Setup {
+                project: project.clone(),
+            },
+            result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                stored,
+            )))),
+        },
+    )))));
+    shell.key(Key::Tab);
+    keys(&mut shell, "Keeps notes.");
+    for _ in 0..3 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let Some(Request::Setup(SetupQuery::Change { action, generation })) = shell.ctx.next_request()
+    else {
+        panic!("confirm sends the setup change");
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Change { action, generation },
+            result: Ok(crate::project_setup::SetupView::Changed(
+                crate::engine::owner::OwnerResult::Applied,
+            )),
+        },
+    )))));
+    let next = shell.ctx.next_request();
+    (shell, project, next)
+}
+
+#[test]
+fn a_confirmed_setup_gives_its_pool_to_the_project_before_the_project_opens() {
+    let opened = |project: &ProjectId| Place::Project {
+        id: project.clone(),
+        name: "notes".into(),
+        tab: ProjectTab::Overview,
+    };
+    let (mut shell, project, next) = confirmed_with_pool();
+    let Some(Request::EditPool {
+        change: PoolChange::Assign { pool, project: to },
+    }) = next
+    else {
+        panic!("the saved setup's pool is given to the project: {next:?}");
+    };
+    assert_eq!(pool.as_ref().map(|id| id.as_str()), Some("main"));
+    assert_eq!(to, project);
+    assert_ne!(shell.place(), Some(opened(&project)));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    assert_eq!(shell.place(), Some(opened(&project)));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "notes is ready."), "{rows:#?}");
+
+    let (mut shell, project, _) = confirmed_with_pool();
+    shell.arrive(Arrival::PoolEdited(Err("pool_assignment_rejected".into())));
+    assert_eq!(shell.place(), Some(opened(&project)));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "notes is set up, but its pool is not assigned."),
+        "{rows:#?}"
+    );
 }
 
 #[test]

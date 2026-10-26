@@ -524,7 +524,9 @@ impl OnboardingPage {
         ctx: &Ctx,
     ) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
-        let mut lines = Vec::new();
+        let mut lines =
+            Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
+        lines.push(Line::default());
         if let Step::Failed { reason } = &review.onboarding.mapping
             && !review.onboarding.finished
         {
