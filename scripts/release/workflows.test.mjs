@@ -159,6 +159,22 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
   }
 });
 
+test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {
+  const lines = (await readFile(new URL("../../Makefile", import.meta.url), "utf8")).split("\n");
+  const exported = new Set(lines.flatMap((line) => {
+    const match = /^([a-z -]+): export CRAZYAGENT_TEST_NATIVE_AUTH_HOST = \S/.exec(line);
+    return match ? match[1].trim().split(/\s+/) : [];
+  }));
+  for (const target of ["test", "test-rust-selected"]) {
+    const start = lines.findIndex((line) => line.startsWith(`${target}:`) && !line.includes(" export "));
+    assert(start >= 0, target);
+    const end = lines.findIndex((line, index) => index > start && !line.startsWith("\t"));
+    const tests = lines.slice(start + 1, end).filter((line) => /\bcargo test\b/.test(line));
+    assert(tests.length > 0, target);
+    for (const line of tests) assert(exported.has(target) || line.includes("CRAZYAGENT_TEST_NATIVE_AUTH_HOST="), `${target}: ${line.trim()}`);
+  }
+});
+
 test("macOS release signing keeps the certificate in a job keychain under RUNNER_TEMP and always removes it", async () => {
   const release = await workflow("release.yml");
   const all = steps(release, "build");
