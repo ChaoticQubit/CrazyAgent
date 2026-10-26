@@ -202,8 +202,12 @@ fn graphify(status: &SetupStatus) -> DependencyState {
         .clone()
 }
 
+/// Wiring test: a fake graphify that sleeps and prints an invented version stands in for
+/// the real tool, so this checks the status read deadline only. No test reads the real
+/// installed graphify version: setup_status_lists_the_dependencies_and_the_shipped_pack
+/// accepts Found or Missing.
 #[tokio::test]
-async fn a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read() {
+async fn wiring_a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read() {
     let case = Case::new().await;
     let setup = case.root.path().join("setup");
     let bin = setup.join("bin");

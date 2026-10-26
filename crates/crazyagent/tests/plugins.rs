@@ -289,8 +289,13 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
     case.close().await;
 }
 
+/// Wiring test: tests/fixtures/mcp_fixture.py stands in for an MCP server and invents its
+/// tool list, so this checks approval, secrets and what agents are given. Real harnesses
+/// offered the approved server: launch_context_live.rs
+/// real_codex_and_claude_receive_the_approved_skill_server_and_context.
+/// No test checks a real third-party MCP server: none is installed or approved.
 #[tokio::test]
-async fn mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
+async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
     let mut case = Case::new().await;
     let mut controller = case.controller().await;
     let project = create_project(&mut controller, "app").await;

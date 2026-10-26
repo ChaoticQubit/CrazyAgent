@@ -103,8 +103,11 @@ fn replied(agents: &Agents, id: &str, text: &str) -> bool {
     view.last_text.as_deref() == Some(text) && !view.busy
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the supervisor's stop, process groups and listing only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn stopping_one_agent_ends_its_whole_process_group_and_leaves_the_others_running() {
+fn wiring_stopping_one_agent_ends_its_whole_process_group_and_leaves_the_others_running() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -170,8 +173,12 @@ fn a_launch_without_its_sandbox_profile_is_refused_before_it_is_listed() {
     assert!(!root.join("work").join("bare").join("pids.json").exists());
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, including the turn end after an interrupt, so this checks only that the
+/// owner's interrupt reaches one agent and its turn bookkeeping.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn interrupt_ends_only_the_current_turn_of_one_agent() {
+fn wiring_interrupt_ends_only_the_current_turn_of_one_agent() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -205,8 +212,11 @@ fn interrupt_ends_only_the_current_turn_of_one_agent() {
     agents.stop(&other.id).unwrap();
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the supervisor's restart bookkeeping and fresh process only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task() {
+fn wiring_restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -241,8 +251,11 @@ fn restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task() {
     );
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies and exit, so this checks only how the supervisor records an exit.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
+fn wiring_an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -264,8 +277,11 @@ fn an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
     });
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the supervisor's close and next start only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn closing_the_engine_stops_its_agents_and_says_so_after_the_next_start() {
+fn wiring_closing_the_engine_stops_its_agents_and_says_so_after_the_next_start() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -295,8 +311,11 @@ fn closing_the_engine_stops_its_agents_and_says_so_after_the_next_start() {
     reopened.stop(&agent.id).unwrap();
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the supervisor's key handling across restarts only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn a_keyed_agent_cannot_restart_once_its_key_is_gone() {
+fn wiring_a_keyed_agent_cannot_restart_once_its_key_is_gone() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -354,8 +373,11 @@ fn crashing_engine_process() {
     std::process::exit(0);
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the supervisor's reattachment after an engine crash only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
+fn wiring_after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
     let root = case.path();
     let status = crate::spawn_gate::status(
@@ -472,8 +494,11 @@ fn serve(
     }
 }
 
+/// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
+/// replies, so this checks the hosted-agent controls of the supervisor only.
+/// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
 #[test]
-fn a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_restart() {
+fn wiring_a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_restart() {
     let case = Case::new();
     let root = case.path();
     let agents = Arc::new(case.agents());
