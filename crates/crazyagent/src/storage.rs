@@ -179,6 +179,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    RunnerRead(Command, oneshot::Sender<Result<Outcome, EngineError>>),
     Plugins(
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
@@ -717,6 +718,13 @@ impl Storage {
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
+                        Job::RunnerRead(command, reply) => {
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                            let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
+                        }
                         Job::Plugins(command, reply) => {
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
@@ -1141,6 +1149,32 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
 /// Applies one revision-checked operation through the storage transaction.
 /// Takes current config, storage path and an identified request.
 /// Returns a durable reply while preserving replay and sensitive input hashes.
+/// Serves one engine-internal runner read, CoordinationState or TaskContext, at the
+/// current revision without touching the caller-keyed operations ledger, so no socket
+/// peer can pre-claim, replay or conflict with it.
+/// Output: the read's outcome, or `runner_read_kind` for any other command.
+fn runner_read(
+    connection: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    command: &Command,
+) -> Result<Outcome, EngineError> {
+    if !matches!(
+        command,
+        Command::CoordinationState { .. } | Command::TaskContext { .. }
+    ) {
+        return Err(error("runner_read_kind"));
+    }
+    let transaction = connection.transaction().map_err(error)?;
+    let revision: i64 = transaction
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    let revision = u64::try_from(revision).map_err(error)?;
+    execute(&transaction, config, path, command, revision)
+}
+
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
