@@ -90,6 +90,13 @@ impl NativeAuthSlot {
             && self.child.is_none()
             && !self.cleaning
     }
+
+    /// Tells whether the slot's custodian process may still hold the profile: its dispatch
+    /// task has not finished, or its child has not been reaped. Input: the slot. Output: true
+    /// until that process is gone; false for custody that runs without one.
+    fn custodian_running(&self) -> bool {
+        self.dispatch_task.is_some() || self.child.is_some() || self.cleaning
+    }
 }
 
 #[derive(Default)]
@@ -692,6 +699,9 @@ impl OwnerRuntimeHandle {
                 | crate::engine::owner::native_auth::Command::Logout(_)
         ) {
             self.authority
+                .native_auth_released(Instant::now() + CLEANUP_BOUND)
+                .await;
+            self.authority
                 .native_auth_host
                 .lock()
                 .map_err(|_| failure("native_auth_recovery_required"))?
@@ -726,6 +736,25 @@ impl OwnerRuntimeHandle {
 }
 
 impl Authority {
+    /// Waits, up to a deadline, while the host slot still releases an operation whose
+    /// outcome is committed, so a command sent as that operation ends starts once its
+    /// custodian is gone instead of finding the host busy. Input: the deadline. Output: none.
+    async fn native_auth_released(&self, deadline: Instant) {
+        loop {
+            let changed = self.native_auth_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let releasing = self.native_auth.lock().is_ok_and(|current| {
+                current
+                    .as_ref()
+                    .is_some_and(|slot| slot.committed && !slot.expired && !slot.cached())
+            });
+            if !releasing || tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return;
+            }
+        }
+    }
+
     fn native_auth_presentation(&self, reply: &mut NativeAuthReply) -> Result<(), EngineError> {
         let current = self
             .native_auth
@@ -734,6 +763,16 @@ impl Authority {
         let Some(slot) = current.as_ref().filter(|slot| !slot.expired) else {
             return Ok(());
         };
+        if slot.custodian_running()
+            && slot.fact.operation_id == reply.fact.operation_id
+            && slot.fact.generation == reply.fact.generation
+            && reply.fact.phase.releasing() != reply.fact.phase
+        {
+            reply.fact.phase = reply.fact.phase.releasing();
+            reply.fact.code = None;
+            assert!(reply.fact.phase.unfinished());
+            return Ok(());
+        }
         if self.claude_presentation(slot, reply)? {
             return Ok(());
         }

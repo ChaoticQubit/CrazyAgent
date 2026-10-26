@@ -110,6 +110,22 @@ impl NativeAuthPhase {
             Self::Starting | Self::AwaitingOwner | Self::CheckingAccount | Self::Cancelling
         )
     }
+
+    /// Names the phase an operation shows while its custodian still holds the profile after
+    /// committing its outcome, so no reader takes the account as settled before it is free.
+    /// Input: the committed phase. Output: cancelling for a cancellation, checking the
+    /// account for an observed outcome or a failure, and any other phase unchanged.
+    pub(crate) fn releasing(self) -> Self {
+        let shown = match self {
+            Self::Cancelled => Self::Cancelling,
+            Self::AuthenticatedObserved | Self::UnauthenticatedObserved | Self::Failed => {
+                Self::CheckingAccount
+            }
+            other => other,
+        };
+        assert!(shown == self || shown.unfinished());
+        shown
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

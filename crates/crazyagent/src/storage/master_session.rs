@@ -1737,7 +1737,8 @@ pub(super) fn native_target(
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
 /// this engine run, the same check every master turn uses. Input: the transaction, the
 /// active host, the connection and, for a master, the account its route names. Output:
-/// the authenticated sign-in fact, or the unknown, stale or in-use code.
+/// the authenticated sign-in fact, or the unknown or stale code; while the profile's latest
+/// operation still holds its fence it reads stale, as it does while it checks the account.
 pub(crate) fn native_sign_in(
     tx: &Transaction<'_>,
     host: &HostStamp,
@@ -1759,6 +1760,9 @@ pub(crate) fn native_sign_in(
         return Err(error("native_auth_request_bounds"));
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+    if super::native_auth::profile_fenced(tx, &key)? {
+        return Err(error("master_authentication_stale"));
+    }
     if let Some(gap) = sign_in_gap(fact.phase) {
         return Err(error(gap));
     }
@@ -1785,16 +1789,6 @@ pub(crate) fn native_sign_in(
         || fact.binding.at_revision.value() > owner_revision(tx)?
     {
         return Err(error("master_authentication_stale"));
-    }
-    let fenced: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)",
-            [&key],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if fenced {
-        return Err(error("native_profile_in_use"));
     }
     Ok(fact)
 }
