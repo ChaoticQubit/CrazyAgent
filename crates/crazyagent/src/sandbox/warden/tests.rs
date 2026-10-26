@@ -43,9 +43,10 @@ fn a_fired_warden_stops_every_process_its_run_detached_and_reports_it() {
     assert_eq!(survivors(processes, Duration::from_secs(1)), []);
 }
 
-#[test]
-fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
-    let run = DetachingRun::new();
+/// Starts a run whose session shim is forked by a process inside the run's own sandbox, so
+/// the warden can signal the process that started it. Takes the run. Returns the child and
+/// the engine's end of its warden.
+fn unarmed_run(run: &DetachingRun) -> (std::process::Child, std::os::unix::net::UnixStream) {
     let mut command = Command::new(super::super::SANDBOX_EXEC);
     command
         .arg("-f")
@@ -71,8 +72,18 @@ fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
         WARDEN_FD,
         std::os::fd::AsRawFd::as_raw_fd(&handed).to_string(),
     );
-    let mut child = crate::spawn_gate::spawn_handing(&mut command, handed).unwrap();
-    assert_eq!(Warden { engine }.fire(FIRE_TIME), Err("warden_unarmed"));
+    let child = crate::spawn_gate::spawn_handing(&mut command, handed).unwrap();
+    (child, engine)
+}
+
+#[test]
+fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
+    let run = DetachingRun::new();
+    let (mut child, engine) = unarmed_run(&run);
+    assert_eq!(
+        Warden::reported(engine, ARM_TIME).fire(FIRE_TIME),
+        Err("warden_unarmed")
+    );
     let harness = run.written("leader.pid");
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(rustix::process::test_kill_process(harness), Ok(()));
@@ -82,11 +93,31 @@ fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
 }
 
 #[test]
+fn an_unarmed_warden_that_already_exited_is_still_reported_unarmed() {
+    let run = DetachingRun::new();
+    let (mut child, engine) = unarmed_run(&run);
+    let warden = Warden::reported(engine, ARM_TIME);
+    assert_eq!(warden.report, b"U");
+    assert_eq!(
+        hear(
+            &warden.engine,
+            &mut [0_u8; 1],
+            Instant::now() + Duration::from_secs(2)
+        ),
+        Heard::Closed
+    );
+    assert_eq!(warden.fire(FIRE_TIME), Err("warden_unarmed"));
+    rustix::process::kill_process(run.written("leader.pid"), rustix::process::Signal::KILL)
+        .unwrap();
+    assert!(reaped_within(&mut child, Duration::from_secs(2)));
+}
+
+#[test]
 fn a_warden_stops_its_run_when_the_engine_holding_its_end_is_killed() {
     let run = DetachingRun::new();
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     let processes = run.processes();
-    let Warden { engine } = warden.unwrap();
+    let Warden { engine, .. } = warden.unwrap();
     let mut engine_process = crate::spawn_gate::spawn_handing(
         Command::new("/bin/sleep")
             .arg("30")
@@ -104,4 +135,30 @@ fn a_warden_stops_its_run_when_the_engine_holding_its_end_is_killed() {
     engine_process.wait().unwrap();
     assert!(reaped_within(&mut child, Duration::from_secs(2)));
     assert_eq!(survivors(processes, Duration::from_secs(1)), []);
+}
+
+#[test]
+fn a_group_signal_right_after_spawn_cannot_reach_the_warden() {
+    let run = DetachingRun::new();
+    let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
+    rustix::process::kill_process_group(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::Signal::TERM,
+    )
+    .unwrap();
+    assert!(reaped_within(&mut child, Duration::from_secs(2)));
+    assert_eq!(warden.unwrap().fire(FIRE_TIME), Ok(()));
+}
+
+#[test]
+fn a_warden_that_fired_and_closed_before_the_engine_reads_is_confirmed() {
+    let run = DetachingRun::new();
+    let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
+    let processes = run.processes();
+    let warden = warden.unwrap();
+    warden.engine.shutdown(std::net::Shutdown::Write).unwrap();
+    assert!(reaped_within(&mut child, Duration::from_secs(2)));
+    assert_eq!(survivors(processes, Duration::from_secs(1)), []);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(warden.fire(FIRE_TIME), Ok(()));
 }
