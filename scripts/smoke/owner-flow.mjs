@@ -9,6 +9,7 @@ const READY_MS = 60000;
 const AUTH_MS = 60000;
 const TURN_MS = 90000;
 const SETUP_MS = 180000;
+const TEAM_MS = 90000;
 const POLL_MS = 250;
 const MERGE_BASE_KEYS = 50;
 const LINKED_WORKTREES = 41;
@@ -16,9 +17,13 @@ const REPO = "owner-shaped";
 const ACTIVE_AUTH = new Set(["starting", "awaiting_owner", "checking_account", "cancelling"]);
 const ACTIVE_TURN = new Set(["queued", "prepared", "delivering", "running"]);
 const NOT_ADMITTED = new Set(["readiness_unknown", "readiness_stale", "invalid_authentication", "connection_changed", "scope_revoked", "repository_missing", "unknown"]);
+const TMUX_SEARCH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+const SILENT_MARK = "owner-flow-silent";
+const SILENT_TURN_S = 300;
 const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.owner-flow-signed-in"
 if [ "$1" != "auth" ]; then
+  case " $* " in *" --session-id "*|*" --print "*) [ -f "\${0%/*}/${SILENT_MARK}" ] && exec /bin/sleep ${SILENT_TURN_S} ;; esac
   echo "owner-flow stand-in: this claude only answers auth commands, it cannot run a turn" >&2
   exit 64
 fi
@@ -164,6 +169,15 @@ function recordedCode(database, operationId) {
   }
 }
 
+/** Ends the private tmux server the engine kept for its agent terminals, which outlives the
+ * engine by design so live agents can be reattached. Input: the engine's tmux socket path.
+ * Output: none; a missing socket or tmux means nothing was left running. */
+function stopTerminals(socket) {
+  if (!existsSync(socket)) return;
+  const tmux = TMUX_SEARCH.map((folder) => join(folder, "tmux")).find((path) => existsSync(path));
+  if (tmux) spawnSync(tmux, ["-S", socket, "kill-server"], { stdio: "ignore", env: { PATH: "/usr/bin:/bin" } });
+}
+
 /** Thrown when a bridge call or receipt stops a step; carries the engine code. */
 class Refused extends Error {
   constructor(code, detail) {
@@ -173,10 +187,51 @@ class Refused extends Error {
   }
 }
 
+/** Encodes a JSON value with every object's keys sorted, so equal values give equal text.
+ * Input: a JSON value. Output: its canonical text. */
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+/** Thrown when a step cannot run here without something the smoke may not fake; carries why. */
+class Blocked extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+/** Reads rows from the engine database without writing, as the leader reads the owner's.
+ * Input: the database path, the query and its parameters. Output: the rows, none without a database. */
+function engineRows(database, sql, ...params) {
+  if (!existsSync(database)) return [];
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    return db.prepare(sql).all(...params);
+  } finally {
+    db.close();
+  }
+}
+
+/** Tells whether any process of a process group is still alive. Input: the group id.
+ * Output: true while the group has a member, false once it is gone. */
+function groupAlive(group) {
+  try {
+    process.kill(-group, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 /** Drives the installed-style engine through the owner's path with the desktop bridge and
- * prints PASS or FAIL with the engine code per step. Send mirrors the app: an uncertain turn
+ * prints PASS, FAIL or BLOCKED with the engine code per step: the master, then the team
+ * (delegate, agent status, stop, failover, cleanup). Send mirrors the app: an uncertain turn
  * is stopped first (except in 3b), and a master_source_conflict ends the conversation, opens
- * a new one and resends once. Input: environment paths. Output: exit code 1 on any FAIL. */
+ * a new one and resends once. Input: environment paths. Output: exit 1 on any FAIL, 3 when
+ * only BLOCKED steps remain. */
 async function main() {
   const engineBinary = required("CRAZYAGENT_TEST_NATIVE_AUTH_HOST", "crazyagent binary (the engine and its native-auth host)");
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -231,7 +286,8 @@ async function main() {
     try {
       row = { id, title, result: "PASS", code: (await run()) ?? "ok" };
     } catch (failure) {
-      row = { id, title, result: "FAIL", code: failure instanceof Refused ? failure.code : `script:${failure.message}` };
+      const result = failure instanceof Blocked ? "BLOCKED" : "FAIL";
+      row = { id, title, result, code: failure instanceof Refused || failure instanceof Blocked ? failure.code : `script:${failure.message}` };
     }
     await pause(POLL_MS);
     const after = errText();
@@ -354,6 +410,29 @@ async function main() {
     return `${recovered}${turn.phase === "succeeded" ? "replied" : `admitted, harness not runnable here (${turn.phase}:${reason})`}`;
   };
 
+  const database = join(crazyHome, "engine.db");
+  const team = { accounts: [], pool: null, agents: [], view: null };
+  const teamStatus = async () => value("desktop_team_status", { id: needs(state.project, "1") });
+  const teamNote = (status) => status.messages.filter((message) => message.author === "engine").at(-1)?.text ?? "no engine note";
+  const delegate = async (prompt) => {
+    const project = needs(state.project, "1");
+    const before = new Set((await teamStatus()).tasks.map((task) => task.id));
+    applied("team_delegate", await value("desktop_team_delegate", { id: project, harness: "claude-code", prompt, generation: generation() }));
+    for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
+      const status = await teamStatus();
+      const task = status.tasks.find((item) => !before.has(item.id));
+      const agent = status.agents.find((item) => item.id === task?.agent) ?? null;
+      if (task && (agent || !["queued", "needs_pool"].includes(task.status))) return { status, task, agent };
+      if (Date.now() > deadline) throw new Refused(task ? `team_task_still_${task.status}` : "team_task_missing", teamNote(status));
+    }
+  };
+  const launched = (agent, task) => {
+    const problem = agent.problem ?? task.problem;
+    return `${agent.status}${problem ? `: ${problem}` : ""}`;
+  };
+  const liveTeamGroups = () => engineRows(database, "SELECT id, process_group FROM team_agents WHERE process_group IS NOT NULL")
+    .filter((row) => groupAlive(Number(row.process_group)));
+
   try {
     await startEngine();
     const started = await start(bridgeBinary, [join(crazyHome, "engine.sock")], env, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
@@ -447,6 +526,94 @@ async function main() {
       applied("remove_pool", await value("desktop_edit_model_access", { ticket: detail.ticket, edit: { kind: "remove_pool", id: pool }, generation: generation() }));
       return "applied";
     });
+    await step("6", "two more Claude accounts in a new pool assigned to the project, for the team", async () => {
+      const project = needs(state.project, "1");
+      team.accounts.push(await signIn("Team Claude C"));
+      team.accounts.push(await signIn("Team Claude D"));
+      const page = await value("desktop_model_access_page", { collection: "pools", next: false });
+      const id = "pool-ownerflowteam000000";
+      applied("create_pool", await value("desktop_edit_model_access", { ticket: page.ticket, edit: { kind: "create_pool", pool: { id, name: "Team pool", members: team.accounts.map((account) => account.id), projects: [], roles: [], fallback_allowed: false } }, generation: generation() }));
+      team.pool = id;
+      await assignPool(project, id, false);
+      await saveSetup(project, { pool: id });
+      return "applied";
+    });
+    await step("6a", "team settings with sub-agents and tools on", async () => {
+      const project = needs(state.project, "1");
+      needs(team.pool, "6");
+      const plan = { master: "claude-code", master_tools: true, sub_harnesses: [{ harness: "claude-code", agents: 2, tools: true }], min_agents: 1, max_agents: 3 };
+      await saveSetup(project, { team: plan });
+      const saved = (await value("desktop_project_setup", { id: project })).team;
+      if (canonical(saved) !== canonical(plan)) throw new Refused("team_plan_unconfirmed", JSON.stringify(saved));
+      const harness = (await teamStatus()).harnesses.find((item) => item.role === "sub" && item.harness === "claude-code");
+      if (!harness?.tools) throw new Refused("team_status_without_sub_tools", JSON.stringify(harness ?? null));
+      return `applied; sub-agent harness runnable=${harness.runnable}`;
+    });
+    await step("6b", "delegate a task: the engine prepares the sub-agent's worktree and launch", async () => {
+      writeFileSync(join(bin, SILENT_MARK), "", { mode: 0o600 });
+      const { task, agent } = await delegate("List the files in this repository.");
+      if (!agent) throw new Refused(`team_task_${task.status}`, task.problem ?? "no agent");
+      team.agents.push(agent.id);
+      if (!agent.worktree) throw new Refused("team_agent_without_worktree", launched(agent, task));
+      const folder = join(repo, agent.worktree);
+      const listed = existsSync(folder) && git(repo, "worktree", "list", "--porcelain").split("\n").some((line) => line === `worktree ${realpathSync(folder)}`);
+      if (!listed) throw new Refused("team_worktree_not_added", agent.worktree);
+      return `worktree ${agent.worktree}; launch ${launched(agent, task)}`;
+    });
+    await step("6c", "the agent shows in the team status and in the agents view", async () => {
+      const id = needs(team.agents[0], "6b");
+      const member = (await teamStatus()).agents.find((item) => item.id === id);
+      if (!member || member.role !== "sub") throw new Refused("team_status_without_agent");
+      const view = (await value("desktop_agents", { projectId: state.project })).find((item) => item.label === `Team sub-agent ${id}`);
+      if (!view) throw new Refused("agents_view_without_team_agent", `team ${member.status}`);
+      team.view = view.id;
+      if (member.status !== "working" || view.state !== "running" || !view.can_stop) throw new Refused(`team_agent_not_live_${member.status}`, `agents view ${view.state}, can_stop ${view.can_stop}, ${member.problem ?? "no problem"}`);
+      return `team ${member.status}, agents view ${view.state}`;
+    });
+    await step("6d", "stop the agent: it ends and its worktree is no longer held", async () => {
+      const id = needs(team.agents[0], "6b");
+      const stopped = await value("desktop_stop_agent", { id: needs(team.view, "6c") });
+      let member;
+      for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
+        member = (await teamStatus()).agents.find((item) => item.id === id);
+        if (member && ["stopped", "failed"].includes(member.status)) break;
+        if (Date.now() > deadline) throw new Refused(`team_agent_still_${member?.status ?? "missing"}`, `stop answered ${stopped.state}`);
+      }
+      if (member.process_group !== null && groupAlive(member.process_group)) throw new Refused("team_agent_group_alive", String(member.process_group));
+      const held = engineRows(database, "SELECT task FROM worktree_leases WHERE path LIKE ?1 OR body LIKE ?1", `%agent-${id}%`);
+      if (held.length) throw new Refused("worktree_lease_kept", held.map((row) => row.task).join(","));
+      const record = git(repo, "worktree", "list", "--porcelain").split("\n\n").find((entry) => entry.includes(`/agent-${id}\n`));
+      if (record?.includes("\nlocked")) throw new Refused("worktree_still_locked", member.worktree);
+      return `stop answered ${stopped.state}; team ${member.status}`;
+    });
+    await step("6e", "one pool account rate-limited: the next agent launch uses the other member (DEC-091)", async () => {
+      throw new Blocked("needs_a_real_rate_limit: only a provider reply pauses an account, and the smoke may not fabricate one");
+    });
+    await step("6e2", "one pool account signed out: the next agent launch uses the other member", async () => {
+      const [first, second] = [needs(team.accounts[0], "6"), needs(team.accounts[1], "6")];
+      await value("desktop_logout_native_auth", { ticket: (await connection(first.id)).ticket });
+      await settleAuth(first.id, "logout", "unauthenticated_observed");
+      const { task, agent } = await delegate("Read the README of this repository.");
+      if (!agent) throw new Refused(`team_task_${task.status}`, task.problem ?? "no agent");
+      team.agents.push(agent.id);
+      if (agent.account !== second.id) throw new Refused("team_agent_on_signed_out_account", agent.account ?? "no account");
+      return `agent on the other member; launch ${launched(agent, task)}`;
+    });
+    await step("6f", "End conversation and Remove project clean up the team's agents", async () => {
+      const project = needs(state.project, "1");
+      if (!team.agents.length) throw new Refused("blocked_by_6b");
+      await endConversation();
+      applied("remove_project", await value("desktop_remove_project", { id: project, generation: generation() }));
+      for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
+        const running = (await value("desktop_agents", { projectId: null })).filter((item) => item.project === project && item.state === "running");
+        const groups = liveTeamGroups();
+        if (!running.length && !groups.length) break;
+        if (Date.now() > deadline) throw new Refused("team_agents_left_running", `views ${running.map((item) => item.id).join(",") || "-"}, groups ${groups.map((row) => row.id).join(",") || "-"}`);
+      }
+      const after = await call("desktop_team_status", { id: project });
+      if ("value" in after) throw new Refused("team_status_after_remove", `${after.value.agents.length} agents`);
+      return `removed; team status ${failureCode("desktop_team_status", after)}`;
+    });
   } catch (failure) {
     results.push({ id: "setup", title: "start the engine and bridge", result: "FAIL", code: failure instanceof Refused ? failure.code : `script:${failure.message}`, causes: "-" });
     console.log(`FAIL setup [${results.at(-1).code}]`);
@@ -455,15 +622,17 @@ async function main() {
     await stop(bridgeProcess);
     await stop(engine);
     await pause(POLL_MS);
+    stopTerminals(join(crazyHome, "terminal", "tmux.sock"));
   }
   const shutdown = [...new Set(errText().slice(shutdownMark).match(/cause=[^\n]*/g) ?? [])].join("; ") || "-";
   console.log("\nstep | result | engine code | engine stderr | what");
   for (const row of results) console.log(`${row.id} | ${row.result} | ${row.code} | ${row.causes} | ${row.title}`);
   console.log(`engine stderr at the final shutdown (after the last step): ${shutdown}`);
   const failed = results.filter((row) => row.result === "FAIL").length;
-  console.log(`\n${results.length - failed} PASS, ${failed} FAIL; evidence ${process.env.SMOKE_EVIDENCE ? evidence : "removed (set SMOKE_EVIDENCE to keep it)"}`);
+  const blocked = results.filter((row) => row.result === "BLOCKED").length;
+  console.log(`\n${results.length - failed - blocked} PASS, ${failed} FAIL, ${blocked} BLOCKED; evidence ${process.env.SMOKE_EVIDENCE ? evidence : "removed (set SMOKE_EVIDENCE to keep it)"}`);
   if (!process.env.SMOKE_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-  process.exitCode = failed === 0 ? 0 : 1;
+  process.exitCode = failed > 0 ? 1 : blocked > 0 ? 3 : 0;
 }
 
 await main();
