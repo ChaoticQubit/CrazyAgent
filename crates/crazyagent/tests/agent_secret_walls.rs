@@ -625,7 +625,24 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
          ( exec 3<{other} ) 2>/dev/null && echo read_other=ok || echo read_other=denied\n\
          ( exec 3>{other} ) 2>/dev/null && echo write_other=ok || echo write_other=denied\n\
          n=$(/usr/bin/script -q /dev/null /usr/bin/tty </dev/null 2>&1)\n\
-         case $n in *\"/dev/ttys\"*) echo nested=ok ;; *) echo \"nested=failed $n\" ;; esac\n"
+         case $n in *\"/dev/ttys\"*) echo nested=ok ;; *) echo \"nested=failed $n\" ;; esac\n\
+         ( exec 3</dev/console ) 2>/dev/null && echo console=ok || echo console=denied\n\
+         ( exec 3</dev/auditsessions ) 2>/dev/null && echo device=ok || echo device=denied\n\
+         /bin/ls /dev >/dev/null 2>&1 && echo listing=ok || echo listing=denied\n\
+         /usr/bin/head -c 4 /dev/urandom >/dev/null 2>&1 && echo random=ok || echo random=denied\n\
+         ( echo x > /dev/stdout ) >/dev/null 2>&1 && echo stdout=ok || echo stdout=denied\n"
+    );
+    let control = crazyagent::spawn_gate::status(
+        Command::new("/bin/sh")
+            .args(["-c", "exec 3</dev/auditsessions"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        control.success(),
+        "this machine must let its user open /dev/auditsessions"
     );
     let inner = sandbox.command(&profile, Path::new("/bin/sh"));
     let mut command = Command::new("/usr/bin/script");
@@ -656,6 +673,11 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
         "nested=ok",
         "read_other=denied",
         "write_other=denied",
+        "console=denied",
+        "device=denied",
+        "listing=ok",
+        "random=ok",
+        "stdout=ok",
     ] {
         assert!(text.contains(expected), "missing {expected} in {text}");
     }

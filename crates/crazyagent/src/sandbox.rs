@@ -40,7 +40,6 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/private/etc",
     "/private/var/db",
     "/private/var/select",
-    "/dev",
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/lib",
@@ -676,7 +675,7 @@ impl ProjectSandbox {
             text.push_str(&checkout.object_denies());
         }
         text.push_str(
-            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
+            "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
         let network = text.len();
         match &self.network {
@@ -709,6 +708,7 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
             MACH_SERVICES
