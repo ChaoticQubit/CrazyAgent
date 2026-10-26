@@ -139,7 +139,7 @@ impl NativeProfileCustody {
         }
         self.verify()?;
         let (root, root_manifest, root_identity) = self.root(host)?;
-        lock(&root_manifest.file)?;
+        let _root_lock = lock(&root_manifest.file)?;
         let locked = LockedRoot {
             root: &root,
             manifest: &root_manifest,
@@ -152,8 +152,9 @@ impl NativeProfileCustody {
         if slots.contains_key(&key) {
             let (profile, manifest, actual) =
                 self.read_configured_slot(&root, &root_identity, &slots, &key, profile_ref)?;
-            lock(&manifest.file)?;
+            let manifest_lock = lock(&manifest.file)?;
             manifest.verify(&profile.file)?;
+            drop(manifest_lock);
             drop(manifest);
             if actual.connection != *connection {
                 let home = Directory::open(&homes.file, OsStr::new(&key))?;
