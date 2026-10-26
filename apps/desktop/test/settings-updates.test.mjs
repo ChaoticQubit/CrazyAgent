@@ -26,6 +26,17 @@ test("a check finds a newer release or says the app is current", () => {
   assert.match(failed.message, /update server/);
 });
 
+test("a channel with no published release says so instead of blaming the connection", () => {
+  const stable = run([{ kind: "check_started" }, { kind: "check_failed", code: "update_stable_not_published" }]);
+  assert.deepEqual(stable, { kind: "failed", update: null, message: "No stable release is published yet." });
+  assert.equal(updateMessage("update_dev_not_published"), "No dev release is published yet.");
+});
+
+test("a failed command line tool install says so instead of blaming the engine", () => {
+  assert.equal(updateMessage("update_link_cli_failed"), "Couldn't install the command line tool. Try again.");
+  assert.doesNotMatch(updateMessage("update_link_cli_failed"), /engine/);
+});
+
 test("installing needs a found release and the owner's click, and reports each step", () => {
   assert.deepEqual(run([{ kind: "install_started" }]), idle);
   assert.deepEqual(run([{ kind: "check_done", update: null, at: 1 }, { kind: "install_started" }]), { kind: "current", checkedAt: 1 });
