@@ -704,6 +704,7 @@ fn approve_assigned_accounts(
         .collect();
     if let Some(approved) = document
         .get_mut("routing")
+        .and_then(|routing| routing.as_table_like_mut())
         .and_then(|routing| routing.get_mut("approved_accounts"))
     {
         approved.as_array_mut().ok_or_else(shape)?.retain(|value| {
@@ -1178,6 +1179,18 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
             config.settings.allowed_destinations,
             vec![CredentialRef::new("owner-target").unwrap(), local_target]
         );
+    }
+
+    #[test]
+    fn an_edit_keeps_a_routing_table_that_approves_nothing() {
+        let global = "version = 1\n\n[routing]\npriority_weight = 2\n";
+        let edit = ModelAccessEdit::AddAccount {
+            account_ref: CredentialRef::new("account").unwrap(),
+        };
+        let (bytes, config) = edit_model_access(global, "", &edit, &[]).unwrap();
+        assert!(!bytes.contains("approved_accounts"), "{bytes}");
+        assert!(!bytes.contains("allowed_destinations"), "{bytes}");
+        assert_eq!(config.settings.routing.priority_weight, 2);
     }
 
     #[test]
