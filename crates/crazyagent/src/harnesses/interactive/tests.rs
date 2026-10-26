@@ -4,6 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
 const KEY: &str = "sk-interactive-test-7731";
+const SWAPPED_SECRET_MARKER: &str = "owner-secret-fixture-8818";
+const SWAP_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+const SWAP_LAUNCHES_MAX: u64 = 20_000;
 
 struct Case {
     root: tempfile::TempDir,
@@ -660,5 +663,108 @@ fn a_claude_home_skips_first_run_questions_and_keeps_its_sign_in() {
     assert_eq!(
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
         "launch_claude_config_invalid"
+    );
+}
+
+/// Whether the file at `path` is a config this module wrote from the swapped-in secret.
+/// Takes the path. Returns true only for a merged config holding the secret marker.
+fn merged_secret(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| {
+        let text = String::from_utf8_lossy(&bytes);
+        text.contains(SWAPPED_SECRET_MARKER) && text.contains("hasCompletedOnboarding")
+    })
+}
+
+#[test]
+fn a_claude_config_swapped_for_a_link_mid_launch_is_never_followed() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let case = Case::new();
+    let project = case.path().join("work");
+    let home = case.home();
+    let secret = case.path().join("owner-secret.json");
+    std::fs::write(
+        &secret,
+        format!("{{\"token\":\"{SWAPPED_SECRET_MARKER}\"}}"),
+    )
+    .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let leaks = Arc::new(AtomicUsize::new(0));
+    let swapper = {
+        let (home, stop, leaks) = (home.clone(), stop.clone(), leaks.clone());
+        std::thread::spawn(move || {
+            let config = home.join(".claude.json");
+            let (link, file) = (home.join(".swap-link"), home.join(".swap-file"));
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                for staged in [&link, &file] {
+                    if merged_secret(&config) {
+                        leaks.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if staged == &link {
+                        std::os::unix::fs::symlink(&secret, &link).unwrap();
+                    } else {
+                        std::fs::write(&file, "{}").unwrap();
+                    }
+                    std::fs::rename(staged, &config).unwrap();
+                }
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let mut outcomes = std::collections::BTreeMap::<String, u64>::new();
+    let deadline = std::time::Instant::now() + SWAP_TIME;
+    let mut launches = 0_u64;
+    while launches < SWAP_LAUNCHES_MAX
+        && std::time::Instant::now() < deadline
+        && leaks.load(Ordering::Relaxed) == 0
+    {
+        let outcome = match prepare_claude_home(&home, &project) {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => error.0,
+        };
+        if merged_secret(&home.join(".claude.json")) {
+            leaks.fetch_add(1, Ordering::Relaxed);
+        }
+        *outcomes.entry(outcome).or_default() += 1;
+        launches += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+    assert!(swaps > 0);
+    assert!(outcomes.get("ok").is_some_and(|ok| *ok > 0), "{outcomes:?}");
+    assert_eq!(
+        leaks.load(Ordering::Relaxed),
+        0,
+        "the engine merged a linked file: {outcomes:?} after {launches} launches and {swaps} swaps"
+    );
+}
+
+#[test]
+fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
+    let case = Case::new();
+    let project = case.path().join("work");
+    let config = case.home().join(".claude.json");
+    let fifo = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&config)
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    assert_eq!(
+        prepare_claude_home(&case.home(), &project).unwrap_err().0,
+        "launch_claude_config_unsafe"
+    );
+    std::fs::remove_file(&config).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &config).unwrap();
+    assert_eq!(
+        prepare_claude_home(&case.home(), &project).unwrap_err().0,
+        "launch_claude_config_unsafe"
+    );
+    std::fs::remove_file(&config).unwrap();
+    std::fs::write(&config, vec![b' '; CLAUDE_CONFIG_BYTES_MAX as usize + 1]).unwrap();
+    assert_eq!(
+        prepare_claude_home(&case.home(), &project).unwrap_err().0,
+        "launch_claude_config_unsafe"
     );
 }
