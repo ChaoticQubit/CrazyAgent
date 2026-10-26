@@ -728,9 +728,10 @@ impl Fixture {
         stale
     }
 
-    /// Commits many files and one large file to the repository, the size of an owner's
-    /// project, so a conversation worktree takes a while to check out. Input: the file
-    /// count and the large file's bytes. Output: none; the repository head has them.
+    /// Commits many files and one large file to the repository in one pack, as a clone
+    /// stores them, so a conversation worktree takes a while to check out without the
+    /// fixture writing a loose object per file. Input: the file count and the large file's
+    /// bytes. Output: none; the repository head has them.
     fn grow(&self, files: usize, large: usize) {
         private_directory(&self.repository.join("bulk"));
         for index in 0..files {
@@ -740,7 +741,11 @@ impl Fixture {
             );
         }
         private_file(&self.repository.join("large.bin"), &vec![7; large]);
-        git(&self.repository, self.root.path(), &["add", "-A"]);
+        git(
+            &self.repository,
+            self.root.path(),
+            &["-c", "core.bigFileThreshold=1", "add", "-A"],
+        );
         git(
             &self.repository,
             self.root.path(),
@@ -1576,7 +1581,7 @@ async fn a_repository_vs_code_and_the_codex_app_wrote_to_gets_a_master_worktree_
 #[tokio::test]
 async fn the_owner_reads_while_the_first_send_checks_out_the_conversation_worktree() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
-    case.grow(2000, 16 << 20);
+    case.grow(500, 16 << 20);
     case.register().await;
     let prepare = async {
         let result = case
@@ -1607,8 +1612,8 @@ async fn the_owner_reads_while_the_first_send_checks_out_the_conversation_worktr
         Err(error) => panic!("the master refused the repository: {}", error.0),
     };
     assert_eq!(
-        fs::read(prepared.cwd.join("bulk/01999.txt")).unwrap(),
-        b"Actual fixture file 1999.\n"
+        fs::read(prepared.cwd.join("bulk/00499.txt")).unwrap(),
+        b"Actual fixture file 499.\n"
     );
     assert!(
         read_at < prepared_at,
