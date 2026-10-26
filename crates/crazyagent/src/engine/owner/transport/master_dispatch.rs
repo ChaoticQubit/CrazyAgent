@@ -234,7 +234,10 @@ impl MasterDispatch {
 /// an unknown outcome, which asks the caller to reconcile by repeating the same request.
 /// Inputs: the drive step and the base pause, which grows linearly per attempt. Output:
 /// the first settled result, or the unknown outcome after DRIVE_ATTEMPTS tries.
-async fn drive_until_settled<F, Fut>(mut drive: F, pause: Duration) -> Result<(), EngineError>
+pub(super) async fn drive_until_settled<F, Fut>(
+    mut drive: F,
+    pause: Duration,
+) -> Result<(), EngineError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(), EngineError>>,
