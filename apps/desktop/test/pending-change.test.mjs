@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const client = await import("../src/engine-client.ts");
@@ -69,4 +70,29 @@ test("automatic checks are few, spaced out and end within a minute", () => {
   assert.ok(api.UNCONFIRMED_CHECKS_MS.length >= 3 && api.UNCONFIRMED_CHECKS_MS.length <= 6);
   assert.ok(api.UNCONFIRMED_CHECKS_MS.every((pause, index, all) => pause >= 1000 && (index === 0 || pause >= all[index - 1])));
   assert.ok(api.UNCONFIRMED_CHECKS_MS.reduce((sum, pause) => sum + pause, 0) <= 60_000);
+});
+
+test("every change the bridge can keep names itself in the banner and the toast", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  const mapping = bridge.slice(bridge.indexOf("pub fn pending_intent("), bridge.indexOf("bounded(Some(PendingIntent {"));
+  const kinds = [...new Set([...mapping.matchAll(/\(\s*"([a-z_]+)",/g)].map((match) => match[1]))];
+  const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  const union = client.slice(client.indexOf("export interface PendingIntent {"), client.indexOf("generation: string;", client.indexOf("export interface PendingIntent {")));
+  assert.ok(kinds.length >= 31, `only ${kinds.length} kinds read from the bridge`);
+  for (const kind of ["team", "project_setup_update", "project_remove", "research_cancel", "research_retry", "message", "pack_remove"]) assert.ok(kinds.includes(kind), kind);
+  for (const kind of kinds) {
+    assert.ok(union.includes(`"${kind}"`), `${kind} missing from PendingIntent`);
+    const label = api.changeLabel(intent(kind));
+    assert.match(label, /^[a-z][a-z' ]+[a-z]$/, kind);
+    assert.equal(api.unconfirmedLine(intent(kind), "not_recorded_at_barrier"), `${label.charAt(0).toUpperCase()}${label.slice(1)} hasn't reached the engine. Retry sends the same change again.`);
+    assert.equal(api.settledLine(receipt(kind, "applied", false)), `${label.charAt(0).toUpperCase()}${label.slice(1)} went through.`);
+  }
+  assert.equal(api.unconfirmedLine(intent("project_remove"), "unknown"), "We couldn't confirm removing the project. Other changes wait until it's checked.");
+});
+
+test("a change kind the window does not know still gets a plain banner and toast", () => {
+  assert.equal(api.unconfirmedLine(intent("a_future_change"), "not_recorded_at_barrier"), "Your change hasn't reached the engine. Retry sends the same change again.");
+  assert.equal(api.unconfirmedLine(intent("a_future_change"), null), "We couldn't confirm your change. Other changes wait until it's checked.");
+  assert.equal(api.settledLine(receipt("a_future_change", "applied", false)), "Your change went through.");
+  assert.equal(api.changeLabel(intent("model_access", { model_access: { kind: "add_connected_account", connection: {} } })), "changing accounts and pools");
 });
