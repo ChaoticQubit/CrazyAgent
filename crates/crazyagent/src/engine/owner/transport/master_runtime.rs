@@ -380,23 +380,28 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Stores what a running master turn did, writing the same observation again while
+    /// another engine connection holds the database, so a reply already in hand is never
+    /// lost to a busy write (CR2-22). Inputs: the prepared turn, its id and the observation.
+    /// Output: the stored turn, or `storage_busy` when the lock never freed.
     pub(super) async fn observe_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         observation: MasterRuntimeObservation,
     ) -> Result<MasterTurnView, EngineError> {
-        match self
-            .master_runtime_command(MasterRuntimeCommand::Observe {
+        let observed = when_storage_frees(|| {
+            self.master_runtime_command(MasterRuntimeCommand::Observe {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
                 session_id: prepared.session.session_id.clone(),
                 turn_id: turn_id.clone(),
                 attempt_id: prepared.attempt.request.id.clone(),
-                observation,
+                observation: observation.clone(),
             })
-            .await?
-        {
+        })
+        .await?;
+        match observed {
             MasterRuntimeResult::Turn(turn) => Ok(*turn),
             _ => Err(failure("master_runtime_result")),
         }
