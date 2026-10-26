@@ -142,7 +142,8 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 other => panic!("project pages never send {other:?}"),
             }
         }
-        quiet = if moved || connection.busy() {
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
             0
         } else {
             quiet + 1
@@ -1125,6 +1126,37 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
         !matches!(after, Ok(SetupView::Setup(Some(_)))),
         "the engine forgot the project: {after:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wizard_waits_for_an_engine_slow_to_accept_its_connection() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let engine = runtime.spawn(Engine::start()).await.unwrap();
+    let (blocking, blocked) = std::sync::mpsc::channel();
+    let busy = runtime.spawn(async move {
+        blocking.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    blocked.recv().unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    busy.await.unwrap();
+    drop(connection);
+    std::thread::spawn(move || {
+        drop(engine);
+        runtime.shutdown_timeout(Duration::from_secs(10));
+    })
+    .join()
+    .unwrap();
+    assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
