@@ -338,7 +338,7 @@ exec /bin/sleep 30
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_a_redacted_tail() {
+async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_without_content() {
     use crate::adapters::{NativeAction, NativeHarness};
     use crate::engine::master_host_fixture::MasterFixture;
     use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -392,9 +392,10 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_a_redacted_
         diagnostic.message.as_deref(),
         Some("turn/started id=- thread=stand-in-child parent=- turn=stand-in-child-turn")
     );
-    let tail = diagnostic.tail();
-    assert!(tail.contains("\"stand-in-child-turn\""), "{tail}");
-    assert!(tail.contains("\"sk-[redacted]\""), "{tail}");
-    assert!(!tail.contains("NOTAREAL"), "{tail}");
+    let frames = diagnostic.frames();
+    assert!(
+        frames.ends_with(&["response 82".to_owned(), "turn/started 162".to_owned()]),
+        "{frames:?}"
+    );
     let _ = host.close().await;
 }
