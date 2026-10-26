@@ -2,6 +2,7 @@ use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
 use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
+use crate::agents::{Hold, Holder};
 use crate::config::ModelAuthentication;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::ClaudeHost;
@@ -244,12 +245,16 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Takes the profile of a prepared master turn and names its conversation in the agent
+    /// register as a holder of the turn's account until the returned hold is dropped, which
+    /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
+    /// id. Returns the profile and its hold, none without a register, or the refusal.
     pub(super) async fn acquire_master_profile(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-    ) -> Result<NativeProfileUse, EngineError> {
-        match self
+    ) -> Result<(NativeProfileUse, Option<Hold>), EngineError> {
+        let profile = match self
             .master_runtime_command(MasterRuntimeCommand::AcquireProfile {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
@@ -259,10 +264,22 @@ impl OwnerRuntimeHandle {
             })
             .await?
         {
-            MasterRuntimeResult::Profile(profile) => Ok(*profile),
-            MasterRuntimeResult::Turn(_) => Err(failure("master_runtime_profile_not_acquired")),
-            _ => Err(failure("master_runtime_result")),
-        }
+            MasterRuntimeResult::Profile(profile) => *profile,
+            MasterRuntimeResult::Turn(_) => {
+                return Err(failure("master_runtime_profile_not_acquired"));
+            }
+            _ => return Err(failure("master_runtime_result")),
+        };
+        let hold = self.agents().ok().map(|agents| {
+            agents.hold(
+                prepared.profile.binding().connection.id.clone(),
+                Holder::Master {
+                    project: prepared.session.project_id.clone(),
+                    session: prepared.session.session_id.clone(),
+                },
+            )
+        });
+        Ok((profile, hold))
     }
 
     pub(super) async fn observe_master_turn(
@@ -418,7 +435,7 @@ impl OwnerRuntimeHandle {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
             _ => return Err(failure("gateway_invalid_authentication")),
         };
-        let profile = self.acquire_master_profile(prepared, turn_id).await?;
+        let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile)?;
         let _folder = launch.folder;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)

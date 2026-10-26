@@ -165,7 +165,7 @@ impl OwnerRuntimeHandle {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(resources.wall_time_ms))
             .ok_or_else(|| failure("master_runtime_budget_exhausted"))?;
-        let profile = self.acquire_master_profile(prepared, turn_id).await?;
+        let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(
                 &prepared.session.project_id,

@@ -487,7 +487,7 @@ fallback_allowed = false
             let MasterRuntimeResult::Prepared(prepared) = result else {
                 panic!("genuine Core prepared master turn required");
             };
-            let profile = host
+            let (profile, _) = host
                 .acquire_master_profile(&prepared, &turn.id)
                 .await
                 .unwrap();

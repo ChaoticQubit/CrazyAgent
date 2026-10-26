@@ -1,5 +1,6 @@
 use super::accounts::PROFILE_BUSY;
 use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use crate::agents::{Agents, Hold, Holder};
 use crate::config::ModelConnection;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
@@ -255,6 +256,7 @@ pub struct ResearchRunner {
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
     terminal: Option<Arc<dyn Host>>,
+    agents: Option<Arc<Agents>>,
 }
 
 enum Ending {
@@ -339,6 +341,7 @@ impl ResearchRunner {
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
             terminal: None,
+            agents: None,
         })
     }
 
@@ -360,6 +363,14 @@ impl ResearchRunner {
         }
         self.terminal = Some(host);
         Ok(self)
+    }
+
+    /// Names each running research job in the engine's agent register as a holder of the
+    /// account it signs in with, so a refused sign-out can name and cancel it. Takes the
+    /// register. Returns the runner.
+    pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
+        self.agents = Some(agents);
+        self
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`
@@ -581,7 +592,7 @@ impl ResearchRunner {
                         RunError::Account(code)
                     }
                 })?;
-                Some(self.lease(&host, &fact.binding, &name, u64::from(job.attempts))?)
+                Some(self.held_lease(&host, &fact.binding, &name, &id, job)?)
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
@@ -589,7 +600,7 @@ impl ResearchRunner {
         let home = agent.join("home");
         private_directory(&home)?;
         let credential = match &lease {
-            Some(lease) => Some(
+            Some((lease, _)) => Some(
                 lease
                     .hand_to_agent(&home, self.limits.wall_time)
                     .map_err(|problem| RunError::Account(problem.0))?,
@@ -775,6 +786,32 @@ impl ResearchRunner {
                     RunError::Account(problem.0)
                 }
             })
+    }
+
+    /// Takes a research job's profile lease and names the job in the agent register as a
+    /// holder of the lease's account until both are dropped together. Takes the engine
+    /// host, the sign-in binding, the launch name, the project and the claimed job.
+    /// Returns the lease and its hold, none without a register, or the lease's refusal.
+    fn held_lease(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        name: &str,
+        project: &ProjectId,
+        job: &ResearchJob,
+    ) -> Result<(NativeProfileUse, Option<Hold>), RunError> {
+        let lease = self.lease(host, binding, name, u64::from(job.attempts))?;
+        let hold = self.agents.as_ref().map(|agents| {
+            agents.hold(
+                binding.connection.id.clone(),
+                Holder::Research {
+                    project: project.clone(),
+                    job: job.id,
+                    title: kind_label(&job.kind),
+                },
+            )
+        });
+        Ok((lease, hold))
     }
 
     fn supervise(
@@ -2271,6 +2308,86 @@ mod tests {
         }
     }
 
+    /// The managed Codex connection these lease tests sign in with.
+    fn codex_connection() -> ModelConnection {
+        ModelConnection {
+            id: reference("codex-connection"),
+            provider: reference("openai"),
+            harness: reference("codex"),
+            protocol: reference("native"),
+            account_ref: reference("codex-account"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "native-default".into(),
+                author: reference("openai"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: reference("codex-profile"),
+            },
+        }
+    }
+
+    /// A research job's lease names the job as a holder of its account in the agent
+    /// register while the lease lives, and no longer once it ends.
+    #[test]
+    fn a_research_lease_names_its_job_as_a_holder_of_the_account_until_it_ends() {
+        let root = engine_root();
+        let agents = Arc::new(Agents::open(root.database.parent().unwrap()).unwrap());
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap()
+        .with_agents(agents.clone());
+        let host = host();
+        let connection = codex_connection();
+        let custody_id = {
+            let mut custody = runner.custody.lock().unwrap();
+            custody
+                .as_mut()
+                .unwrap()
+                .prepare(&host, &connection)
+                .unwrap()
+                .0
+        };
+        let binding = binding(&host, &connection, custody_id);
+        let job = ResearchJob {
+            id: 7,
+            project: "alpha".into(),
+            kind: "market_research".into(),
+            harness: "codex".into(),
+            tools: false,
+            status: ResearchStatus::Running,
+            attempts: 1,
+            claimer: Some("runner-test".into()),
+            report_path: None,
+            error: None,
+            cancel_requested: false,
+            output_bytes: 0,
+            created_ms: 1,
+            started_ms: Some(1),
+            heartbeat_ms: None,
+            finished_ms: None,
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let held = runner
+            .held_lease(&host, &binding, "job-7-1", &project, &job)
+            .unwrap();
+        assert_eq!(
+            agents.holders(&connection.id),
+            vec![Holder::Research {
+                project,
+                job: 7,
+                title: kind_label("market_research"),
+            }]
+        );
+        assert!(agents.holders(&reference("other-connection")).is_empty());
+        drop(held);
+        assert!(agents.holders(&connection.id).is_empty());
+    }
+
     fn binding(
         host: &HostStamp,
         connection: &ModelConnection,
@@ -2298,21 +2415,7 @@ mod tests {
         )
         .unwrap();
         let host = host();
-        let connection = ModelConnection {
-            id: reference("codex-connection"),
-            provider: reference("openai"),
-            harness: reference("codex"),
-            protocol: reference("native"),
-            account_ref: reference("codex-account"),
-            endpoint: ModelEndpoint::Native {},
-            model: ModelReference {
-                id: "native-default".into(),
-                author: reference("openai"),
-            },
-            auth: ModelAuthentication::NativeManaged {
-                profile_ref: reference("codex-profile"),
-            },
-        };
+        let connection = codex_connection();
         let (custody_id, default_home) = {
             let mut custody = runner.custody.lock().unwrap();
             let custody = custody.as_mut().unwrap();

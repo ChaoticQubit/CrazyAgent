@@ -1,7 +1,7 @@
 use super::app::UiEvent;
 use super::model_access::Basis;
 use crate::adapters::{claude, codex};
-use crate::agents::AgentView;
+use crate::agents::{AccountUse, Holder};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
@@ -32,7 +32,7 @@ pub(super) enum Command {
     Cancel(NativeAuthCancel),
     Logout(NativeAuthLogout),
     Using,
-    StopUsing,
+    Release,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub(super) struct Job {
 pub(super) enum Output {
     Inspected(Box<OwnerReadReply>),
     Auth(Box<NativeAuthReply>),
-    Using(Vec<AgentView>),
+    Using(AccountUse),
 }
 
 pub(super) struct Event {
@@ -72,7 +72,7 @@ pub(super) struct State {
     selected: usize,
     confirmation: Option<bool>,
     prior: Option<Retained>,
-    using: Option<(Vec<AgentView>, bool)>,
+    using: Option<(AccountUse, bool)>,
     scroll: u16,
     notice: &'static str,
     polled: Option<std::time::Instant>,
@@ -105,7 +105,7 @@ impl Default for State {
 impl Command {
     fn request_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect | Self::Using | Self::StopUsing => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.request_id),
             Self::Cancel(request) => Some(&request.request_id),
@@ -115,7 +115,7 @@ impl Command {
 
     fn operation_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect | Self::Using | Self::StopUsing => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.operation_id),
             Self::Cancel(request) => Some(&request.operation_id),
@@ -125,7 +125,7 @@ impl Command {
 
     fn scope(&self) -> Option<&NativeAuthScope> {
         match self {
-            Self::Inspect | Self::Using | Self::StopUsing => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.scope),
             Self::Read(request) => Some(&request.scope),
             Self::Cancel(request) => Some(&request.scope),
@@ -139,7 +139,7 @@ impl Command {
                 method: request.method,
             }),
             Self::Logout(_) => Some(NativeAuthAction::Logout),
-            Self::Inspect | Self::Read(_) | Self::Cancel(_) | Self::Using | Self::StopUsing => None,
+            Self::Inspect | Self::Read(_) | Self::Cancel(_) | Self::Using | Self::Release => None,
         }
     }
 }
@@ -420,7 +420,7 @@ impl State {
             let context = self.context.clone().ok_or("Select a native connection")?;
             return self.queue(Job {
                 context,
-                command: Command::StopUsing,
+                command: Command::Release,
             });
         }
         let claude = self
@@ -544,20 +544,20 @@ impl State {
                     "Selected connection or source changed; close and inspect again"
                 };
             }
-            Ok(Output::Using(agents))
-                if matches!(event.job.command, Command::Using | Command::StopUsing)
+            Ok(Output::Using(used))
+                if matches!(event.job.command, Command::Using | Command::Release)
                     && self.open
                     && self.context.as_ref() == Some(&event.job.context) =>
             {
-                sign_out = matches!(event.job.command, Command::StopUsing) && agents.is_empty();
+                sign_out = matches!(event.job.command, Command::Release) && used.is_free();
                 self.notice = if sign_out {
-                    "Agents stopped; signing out"
-                } else if agents.is_empty() {
+                    "Ended what used this account; signing out"
+                } else if used.is_free() {
                     "native_profile_in_use"
                 } else {
-                    "The agents below use this account; stop them to sign out"
+                    "What is listed below uses this account; end it to sign out"
                 };
-                self.using = (!agents.is_empty()).then_some((agents, false));
+                self.using = (!used.is_free()).then_some((used, false));
             }
             Err(problem) => {
                 self.presentation = None;
@@ -568,7 +568,7 @@ impl State {
                 if list_using {
                     self.retained = self.prior.take();
                 } else if problem != "native_auth_not_active"
-                    && !matches!(event.job.command, Command::Using | Command::StopUsing)
+                    && !matches!(event.job.command, Command::Using | Command::Release)
                     && let Some(retained) = &mut self.retained
                 {
                     retained.uncertain = true;
@@ -787,27 +787,37 @@ impl State {
     }
 
     fn action_lines(&self) -> Vec<String> {
-        if let Some((agents, stop)) = &self.using {
-            let mut names: Vec<String> = agents
+        if let Some((used, stop)) = &self.using {
+            let agents = used
+                .agents
                 .iter()
+                .map(|agent| (agent.label.as_str(), agent.project.as_str()));
+            let holders = used.holders.iter().map(|holder| match holder {
+                Holder::Master { project, .. } => ("Master conversation", project.as_str()),
+                Holder::Research { project, title, .. } => (title.as_str(), project.as_str()),
+            });
+            let listed = used.agents.len() + used.holders.len();
+            let mut names: Vec<String> = agents
+                .chain(holders)
                 .take(USING_SHOWN_MAX)
-                .map(|agent| {
+                .map(|(label, project)| {
                     format!(
                         "{} (project {})",
-                        display_text(&agent.label, 256),
-                        display_text(agent.project.as_str(), 256)
+                        display_text(label, 256),
+                        display_text(project, 256)
                     )
                 })
                 .collect();
-            if agents.len() > USING_SHOWN_MAX {
-                names.push(format!("and {} more", agents.len() - USING_SHOWN_MAX));
+            if listed > USING_SHOWN_MAX {
+                names.push(format!("and {} more", listed - USING_SHOWN_MAX));
             }
             vec![
                 format!("In use by: {}", names.join(", ")),
                 format!(
-                    "{} Back | {} Stop agents and sign out",
+                    "{} Back | {} {}",
                     if *stop { " " } else { ">" },
-                    if *stop { ">" } else { " " }
+                    if *stop { ">" } else { " " },
+                    release_label(used)
                 ),
             ]
         } else if let Some(confirm) = self.confirmation {
@@ -842,17 +852,33 @@ impl State {
         assert!(!self.open || self.context.is_some());
         assert!(!self.open || self.selected < self.choices().len());
         assert!(self.presentation.is_none() || (self.open && self.connected));
-        assert!(
-            self.using
-                .as_ref()
-                .is_none_or(|(agents, _)| !agents.is_empty())
-        );
+        assert!(self.using.as_ref().is_none_or(|(used, _)| !used.is_free()));
         if let Some(retained) = &self.retained {
             assert!(retained.original.command.action().is_some());
             assert!(retained.fact.as_ref().is_none_or(|fact| {
                 retained.original.command.operation_id() == Some(&fact.operation_id)
             }));
         }
+    }
+}
+
+/// The one owner action that ends what holds an account and then signs it out, named by
+/// what it ends: agents and research jobs are stopped, master conversations are ended.
+/// Input: what holds the account. Output: the action's label.
+pub(super) fn release_label(used: &AccountUse) -> &'static str {
+    let master = used
+        .holders
+        .iter()
+        .any(|holder| matches!(holder, Holder::Master { .. }));
+    let others = !used.agents.is_empty()
+        || used
+            .holders
+            .iter()
+            .any(|holder| matches!(holder, Holder::Research { .. }));
+    match (others, master) {
+        (true, true) => "Stop agents, end conversation and sign out",
+        (false, true) => "End conversation and sign out",
+        _ => "Stop agents and sign out",
     }
 }
 
