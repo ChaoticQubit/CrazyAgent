@@ -19,8 +19,10 @@ use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
-use crate::research::runner::{ResearchAccount, add_worktree, ensure_repository, model_remote};
-use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::research::runner::{
+    ResearchAccount, RunError, add_worktree, ensure_repository, model_remote,
+};
+use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1041,7 +1043,7 @@ impl TeamRuntime {
         let tx = self
             .connection
             .unchecked_transaction()
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "team_state_unavailable")?;
         let host = tx
             .query_row(
                 "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
@@ -1054,7 +1056,7 @@ impl TeamRuntime {
                 },
             )
             .optional()
-            .map_err(|e| e.to_string())?
+            .map_err(|_| "team_state_unavailable")?
             .ok_or("team_engine_not_ready")?;
         let fact = crate::storage::native_sign_in(&tx, &host, connection, None).map_err(|e| e.0)?;
         drop(tx);
@@ -1075,12 +1077,15 @@ impl TeamRuntime {
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
             Err(code) if code == "native_profile_in_use" => return Ok(None),
-            Err(code) => return Err(sign_in_problem(&code).to_owned()),
+            Err(code) => return Err(sign_in_problem(&code)),
         };
         let generation = self.workers[&id].grants + 1;
-        let operation =
-            RequestId::new(format!("team-agent-{id}-turn-{generation}")).map_err(|e| e.0)?;
-        let custody = self.custody.as_mut().map_err(|e| e.0.clone())?;
+        let operation = RequestId::new(format!("team-agent-{id}-turn-{generation}"))
+            .map_err(|e| with_code("the turn could not be named", Some(&e.0)))?;
+        let custody = self
+            .custody
+            .as_mut()
+            .map_err(|e| with_code("the account custody is not available", Some(&e.0)))?;
         let profile = match custody.acquire_use(
             &host,
             &fact.binding,
@@ -1090,7 +1095,12 @@ impl TeamRuntime {
         ) {
             Ok(profile) => profile,
             Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
-            Err(problem) => return Err(problem.0),
+            Err(problem) => {
+                return Err(with_code(
+                    "the account could not be handed to the agent",
+                    Some(&problem.0),
+                ));
+            }
         };
         let context = self.context(project, id, self.workers[&id].role, self.workers[&id].tools)?;
         self.workers.get_mut(&id).expect("worker exists").grants = generation;
@@ -1168,8 +1178,10 @@ impl TeamRuntime {
                                 [message],
                             )
                             .map_err(error)?;
-                        return self
-                            .note(project, &format!("The master could not start: {reason}."));
+                        return self.note(
+                            project,
+                            &full_stop(format!("The master could not start: {reason}")),
+                        );
                     }
                 }
             }
@@ -1190,7 +1202,10 @@ impl TeamRuntime {
                         .map_err(error)?;
                     return self.note(
                         project,
-                        &format!("The master could not start: {}.", bound_text(&reason, 300)),
+                        &full_stop(format!(
+                            "The master could not start: {}",
+                            bound_text(&reason, 300)
+                        )),
                     );
                 }
             }
@@ -1499,7 +1514,10 @@ impl TeamRuntime {
                         .map_err(error)?;
                     return self.note(
                         project,
-                        &format!("Keeping sub-agents warm was turned off: a sub-agent could not start ({}).", bound_text(&problem, 300)),
+                        &full_stop(format!(
+                            "Keeping sub-agents warm was turned off because a sub-agent could not start: {}",
+                            bound_text(&problem, 300)
+                        )),
                     );
                 }
             }
@@ -1703,16 +1721,21 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
     ) -> Result<(PathBuf, Plan, Mode), String> {
-        let plain = |e: &dyn std::fmt::Display| e.to_string();
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
             .executables
             .get(launch)
             .ok_or("harness is not installed")?;
+        let sandboxed = |e: SandboxError| {
+            with_code(
+                "the agent sandbox could not be set up",
+                Some(sandbox_code(&e)),
+            )
+        };
         let root = stored
             .project_folder()
             .canonicalize()
-            .map_err(|e| plain(&e))?;
+            .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
         }
@@ -1720,7 +1743,8 @@ impl TeamRuntime {
         let own_home = agent.join("home");
         let tmp = agent.join("tmp");
         for directory in [&agent, &own_home, &tmp] {
-            private_directory(directory).map_err(|e| e.0)?;
+            private_directory(directory)
+                .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint { base_url, model } => {
@@ -1728,7 +1752,9 @@ impl TeamRuntime {
                     base_url: base_url.clone(),
                     model: model.clone(),
                 };
-                let remote = model_remote(&endpoint).map_err(|e| plain(&e))?;
+                let remote = model_remote(&endpoint).map_err(|e| {
+                    with_code("the endpoint address was refused", Some(run_code(&e)))
+                })?;
                 (own_home, remote, Some(model.clone()))
             }
             TeamReach::Managed { model, .. } => {
@@ -1741,41 +1767,48 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
-        let mut sandbox =
-            ProjectSandbox::new(&root, &home, &tmp, network).map_err(|e| plain(&e))?;
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
-            sandbox = sandbox.guard_engine(runtime).map_err(|e| plain(&e))?;
+            sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
         let install = executable
             .canonicalize()
-            .map_err(|e| plain(&e))?
+            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        sandbox = sandbox.allow_read(&install).map_err(|e| plain(&e))?;
+        sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
         if tools {
             for server in context.read_paths() {
                 if let Some(folder) = server.parent() {
-                    sandbox = sandbox.allow_read(folder).map_err(|e| plain(&e))?;
+                    sandbox = sandbox.allow_read(folder).map_err(sandboxed)?;
                 }
             }
         }
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
-        sandbox.install(&profile).map_err(|e| plain(&e))?;
-        ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
+        sandbox.install(&profile).map_err(sandboxed)?;
+        ensure_repository(&root, &tmp).map_err(|e| {
+            with_code(
+                "the project repository could not be prepared",
+                Some(run_code(&e)),
+            )
+        })?;
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
-        let working_dir = worktree.canonicalize().map_err(|e| plain(&e))?;
+        add_worktree(&sandbox, &profile, &worktree)
+            .map_err(|e| with_code("the agent worktree could not be added", Some(run_code(&e))))?;
+        let working_dir = worktree
+            .canonicalize()
+            .map_err(|e| with_code("the agent worktree could not be opened", Some(io_code(&e))))?;
         if working_dir != worktree {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
         sandbox = sandbox
             .confine_to_worktree(&working_dir)
-            .map_err(|e| plain(&e))?;
-        sandbox.install(&profile).map_err(|e| plain(&e))?;
+            .map_err(sandboxed)?;
+        sandbox.install(&profile).map_err(sandboxed)?;
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),
@@ -1828,16 +1861,18 @@ impl TeamRuntime {
         role: AgentRole,
         tools: bool,
     ) -> Result<AgentContext, String> {
+        let unread =
+            |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
         let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+            crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
         let master = role == AgentRole::Master;
         match &self.delegation_tool {
             Some(engine) if master && tools => context
                 .with_team_tool(engine, &self.tool_record(id))
-                .map_err(|e| e.0),
+                .map_err(unread),
             _ if master && !tools => context
                 .with_team_index(&self.connection, project)
-                .map_err(|e| e.0),
+                .map_err(unread),
             _ => Ok(context),
         }
     }
@@ -1877,7 +1912,7 @@ impl TeamRuntime {
         agents
             .host(agent, again.map(|restart| restart.id.as_str()))
             .map(Some)
-            .map_err(|problem| format!("The agent could not be recorded ({})", problem.0))
+            .map_err(|problem| with_code("the agent could not be recorded", Some(&problem.0)))
     }
 
     fn collect(&mut self) -> Result<(), EngineError> {
@@ -2053,9 +2088,11 @@ impl TeamRuntime {
                         .map_err(error)?;
                     self.note(
                         &worker.project,
-                        &format!(
-                            "Keeping sub-agents warm was turned off: a warm sub-agent stopped before it did any work ({}).",
-                            bound_text(problem.as_deref().unwrap_or("no reason"), 300)
+                        &problem.as_deref().map_or_else(
+                            || full_stop(WARM_STOPPED.to_owned()),
+                            |problem| {
+                                full_stop(format!("{WARM_STOPPED}: {}", bound_text(problem, 300)))
+                            },
                         ),
                     )?;
                 }
@@ -2354,13 +2391,13 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
-fn sign_in_problem(code: &str) -> &'static str {
+fn sign_in_problem(code: &str) -> String {
     match code {
-        "master_authentication_unknown" => "the account is not signed in",
-        "master_authentication_stale" => "the account needs a fresh sign-in",
-        "team_account_left_pool" => "the account left the pool",
-        "team_engine_not_ready" => "the engine is not ready",
-        _ => "the account's sign-in could not be checked",
+        "master_authentication_unknown" => "the account is not signed in".into(),
+        "master_authentication_stale" => "the account needs a fresh sign-in".into(),
+        "team_account_left_pool" => "the account left the pool".into(),
+        "team_engine_not_ready" => "the engine is not ready".into(),
+        _ => with_code("the account's sign-in could not be checked", Some(code)),
     }
 }
 
@@ -2561,6 +2598,7 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
 
 /// An owner line that names the plain code behind it in the style every window uses, so a
 /// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
@@ -2572,6 +2610,58 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
             format!("{sentence}{stop} ({})", crate::protocol::plain_code(code))
         }
         None => sentence.to_owned(),
+    }
+}
+
+/// Ends an owner line with one full stop, leaving a line that already ends with a sentence
+/// stop or a named code as it is. Input: the line. Output: the finished line.
+fn full_stop(line: String) -> String {
+    if line.ends_with('.') || line.ends_with(')') {
+        line
+    } else {
+        line + "."
+    }
+}
+
+/// The plain code for a failed file step, named by its kind so an owner line never quotes
+/// the system's error text or a path. Input: the I/O error. Output: the code.
+fn io_code(error: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::NotFound => "io_not_found",
+        ErrorKind::PermissionDenied => "io_permission_denied",
+        ErrorKind::AlreadyExists => "io_already_exists",
+        ErrorKind::NotADirectory => "io_not_a_directory",
+        ErrorKind::IsADirectory => "io_is_a_directory",
+        ErrorKind::ReadOnlyFilesystem => "io_read_only",
+        ErrorKind::StorageFull => "io_storage_full",
+        ErrorKind::TimedOut => "io_timed_out",
+        ErrorKind::Interrupted => "io_interrupted",
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => "io_invalid",
+        _ => "io_failed",
+    }
+}
+
+/// The plain code for a failed agent sandbox step. Input: the error. Output: the code.
+fn sandbox_code(error: &SandboxError) -> &'static str {
+    match error {
+        SandboxError::Invalid(_) => "sandbox_refused",
+        SandboxError::Unavailable(_) => "sandbox_unavailable",
+        SandboxError::Io(error) => io_code(error),
+    }
+}
+
+/// The plain code for a failed repository, worktree or endpoint step.
+/// Input: the error. Output: the code; engine codes pass through `plain_code`.
+fn run_code(error: &RunError) -> &str {
+    match error {
+        RunError::Sandbox(error) => sandbox_code(error),
+        RunError::Io(error) => io_code(error),
+        RunError::Context(error) => crate::protocol::plain_code(&error.0),
+        RunError::Account(code) => crate::protocol::plain_code(code),
+        RunError::Invalid(_) => "setup_refused",
+        RunError::Jobs(_) => "research_jobs_failed",
+        RunError::Busy => "account_busy",
     }
 }
 

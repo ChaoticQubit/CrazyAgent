@@ -892,6 +892,83 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
     team.shutdown().unwrap();
 }
 
+/// The owner moved the project folder away before the master started. The agent and the
+/// owner's note name the plain code of the failed file step, never the system's error text
+/// or a path.
+#[test]
+fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let mut setup = stored("team-moved", vec![]);
+    setup.folder = base.join("moved-away").to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-moved", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Message {
+                project_id: setup.project_id.clone(),
+                text: "Plan the page".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 30\n");
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(pool.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    team.tick().unwrap();
+    let failed = status(&connection, &setup).unwrap();
+    let line = "the project folder could not be opened. (io_not_found)";
+    assert_eq!(failed.agents.len(), 1, "{failed:#?}");
+    assert_eq!(failed.agents[0].status, AgentStatus::Failed);
+    assert_eq!(failed.agents[0].problem.as_deref(), Some(line));
+    assert_eq!(
+        failed
+            .messages
+            .iter()
+            .map(|m| (m.author, m.state, m.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+            (
+                MessageAuthor::Engine,
+                MessageState::Note,
+                format!("The master could not start: {line}").as_str()
+            ),
+        ]
+    );
+    let shown = format!("{failed:?}");
+    assert!(
+        !shown.contains("os error") && !shown.contains("moved-away"),
+        "{shown}"
+    );
+    assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
+
 #[test]
 fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     let directory = tempfile::tempdir().unwrap();
