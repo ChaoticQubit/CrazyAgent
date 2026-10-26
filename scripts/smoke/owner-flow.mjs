@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { constants } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
@@ -20,6 +21,13 @@ const TREE_FILES = 16;
 const LARGE_BYTES = 50 * 1024 * 1024;
 const LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 const REPO = "owner-shaped";
+const ROOT_PREFIX = "ca-of-";
+const ROOT_NAME = /^ca-of-[A-Za-z0-9]{6}$/;
+const ROOT_MARK = "owner-flow-root";
+const ROOT_QUIET_MS = 15 * 60 * 1000;
+const ROOT_ACTIVITY = [".", "h/engine.db", "h/engine.db-wal", `repos/${REPO}/.git`, `repos/${REPO}/.git/index`];
+const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+const STAND_IN_SIGN = "owner-flow stand-in";
 const ACTIVE_AUTH = new Set(["starting", "awaiting_owner", "checking_account", "cancelling"]);
 const ACTIVE_TURN = new Set(["queued", "prepared", "delivering", "running"]);
 const NOT_ADMITTED = new Set(["readiness_unknown", "readiness_stale", "invalid_authentication", "connection_changed", "scope_revoked", "repository_missing", "unknown"]);
@@ -33,7 +41,7 @@ keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
   case " $* " in *" --session-id "*|*" --print "*) [ -f "\${0%/*}/${SILENT_MARK}" ] && exec /bin/sleep ${SILENT_TURN_S} ;; esac
-  echo "owner-flow stand-in: this claude only answers auth commands, it cannot run a turn" >&2
+  echo "${STAND_IN_SIGN}: this claude only answers auth commands, it cannot run a turn" >&2
   exit 64
 fi
 case "$2" in
@@ -60,6 +68,7 @@ case "$2" in
 esac
 exit 2
 `;
+const children = new Set();
 
 /** Reads an absolute path to a built binary from the environment, or stops the run.
  * Input: the variable name and what it names. Output: the existing path. */
@@ -157,6 +166,8 @@ function leaseCopy(database, repo) {
  * Output: the child and the ready line's match. */
 async function start(binary, args, env, evidence, name, ready) {
   const child = spawn(binary, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  children.add(child);
+  child.once("exit", () => children.delete(child));
   child.stderr.pipe(createWriteStream(join(evidence, `${name}.err`), { flags: "a", mode: 0o600 }));
   const out = createWriteStream(join(evidence, `${name}.out`), { flags: "a", mode: 0o600 });
   const match = await new Promise((done, fail) => {
@@ -304,6 +315,91 @@ function groupAlive(group) {
   }
 }
 
+/** Marks a temp root as this smoke's and removes it when the process ends: a normal exit, a thrown
+ * failure, or SIGINT, SIGTERM or SIGHUP once the engine and bridges have stopped. The marker stays
+ * open for the whole run, so --clean sees the root in use. Input: the root and whether
+ * SMOKE_EVIDENCE keeps it. Output: none. */
+function claimRoot(root, keep) {
+  writeSync(openSync(join(root, ROOT_MARK), "wx"), keep ? "kept\n" : "temporary\n");
+  process.once("exit", () => {
+    for (const child of children) child.kill("SIGTERM");
+    if (!keep) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  });
+  for (const signal of STOP_SIGNALS) {
+    process.once(signal, async () => {
+      console.log(`\n${signal}: stopping the engine and bridges`);
+      await Promise.all([...children].map(stop));
+      process.exit(128 + constants.signals[signal]);
+    });
+  }
+}
+
+/** Reads a regular file inside a temp root. Input: the path.
+ * Output: its text, or "" when it is missing or not a regular file. */
+function rootText(path) {
+  return lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : "";
+}
+
+/** Says why --clean keeps a ca-of-* folder: gone, not this user's folder, held open by a live
+ * process, without this smoke's stand-in claude, kept for SMOKE_EVIDENCE, or changed within 15
+ * minutes. Input: the folder, the pid holding a file in it (if any) and the time now.
+ * Output: the reason, or null when the folder may be removed. */
+function keepReason(root, holder, now) {
+  const folder = lstatSync(root, { throwIfNoEntry: false });
+  if (!folder) return "already gone";
+  if (!folder.isDirectory() || folder.uid !== process.getuid()) return "not this smoke's";
+  if (holder) return `in use by pid ${holder}`;
+  if (!rootText(join(root, "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
+  if (rootText(join(root, ROOT_MARK)) === "kept\n") return "kept for SMOKE_EVIDENCE";
+  const changed = Math.max(...ROOT_ACTIVITY.map((path) => lstatSync(join(root, path), { throwIfNoEntry: false })?.mtimeMs ?? 0));
+  if (now - changed < ROOT_QUIET_MS) return `changed ${Math.round((now - changed) / 60000)} min ago`;
+  return null;
+}
+
+/** Removes the temp roots that earlier smoke runs left in /tmp, keeping every folder keepReason
+ * names. lsof lists the open files of this user's processes once, so a running smoke's root is
+ * never touched. Input: whether to list only. Output: one line per ca-of-* folder and the counts;
+ * exit 2 when lsof cannot list, 1 when a root could not be removed. */
+function clean(dryRun) {
+  const base = realpathSync("/tmp");
+  const listed = spawnSync("lsof", ["-n", "-P", "-w", "-u", String(process.getuid()), "-F", "pn"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (listed.status !== 0 || !listed.stdout) {
+    console.error(`BLOCKED: lsof could not list open files (${listed.error?.code ?? listed.status}), so no root is known to be unused`);
+    process.exitCode = 2;
+    return;
+  }
+  const holders = new Map();
+  let pid = "";
+  for (const line of listed.stdout.split("\n")) {
+    if (line.startsWith("p")) pid = line.slice(1);
+    else if (line.startsWith(`n${base}/${ROOT_PREFIX}`)) {
+      const name = line.slice(base.length + 2).split("/")[0];
+      if (!holders.has(name)) holders.set(name, pid);
+    }
+  }
+  const counts = { removed: 0, kept: 0, failed: 0 };
+  const now = Date.now();
+  for (const name of readdirSync(base).filter((entry) => ROOT_NAME.test(entry)).sort()) {
+    const root = join(base, name);
+    const reason = keepReason(root, holders.get(name), now);
+    if (reason) {
+      counts.kept += 1;
+      console.log(`kept ${root} (${reason})`);
+      continue;
+    }
+    try {
+      if (!dryRun) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      counts.removed += 1;
+      console.log(`${dryRun ? "would remove" : "removed"} ${root}`);
+    } catch (error) {
+      counts.failed += 1;
+      console.log(`could not remove ${root}: ${error.code ?? error.message}`);
+    }
+  }
+  console.log(`\n${counts.removed} ${dryRun ? "would be removed" : "removed"}, ${counts.kept} kept, ${counts.failed} could not be removed`);
+  if (counts.failed) process.exitCode = 1;
+}
+
 /** Drives the installed-style engine through the owner's path with the desktop bridge and prints
  * PASS, FAIL or BLOCKED with the engine code per step. Send mirrors the app (stop an uncertain turn
  * except in 3b; on master_source_conflict end, reopen and resend once). A master step whose harness
@@ -314,14 +410,17 @@ async function main() {
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   const real = realProfile();
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "ca-of-")));
+  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), ROOT_PREFIX)));
+  const evidence = process.env.SMOKE_EVIDENCE && isAbsolute(process.env.SMOKE_EVIDENCE) ? process.env.SMOKE_EVIDENCE : join(root, "evidence");
+  const keep = Boolean(process.env.SMOKE_EVIDENCE) && evidence === join(root, "evidence");
+  claimRoot(root, keep);
+  console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const crazyHome = join(root, "h");
   const userHome = join(root, "u");
   const bin = join(root, "bin");
   const repo = join(root, "repos", REPO);
   const linked = join(root, "repos", `${REPO}-worktrees`);
   const projects = join(root, "projects");
-  const evidence = process.env.SMOKE_EVIDENCE && isAbsolute(process.env.SMOKE_EVIDENCE) ? process.env.SMOKE_EVIDENCE : join(root, "evidence");
   for (const folder of [crazyHome, userHome, bin, repo, linked, projects, evidence]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   process.env.SMOKE_GIT_HOME = userHome;
   writeFileSync(join(bin, "claude"), STAND_IN, { mode: 0o700 });
@@ -803,9 +902,14 @@ async function main() {
   console.log(`engine stderr at the final shutdown (after the last step): ${shutdown}`);
   const failed = results.filter((row) => row.result === "FAIL").length;
   const blocked = results.filter((row) => row.result === "BLOCKED").length;
-  console.log(`\n${results.length - failed - blocked} PASS, ${failed} FAIL, ${blocked} BLOCKED; evidence ${process.env.SMOKE_EVIDENCE ? evidence : "removed (set SMOKE_EVIDENCE to keep it)"}`);
-  if (!process.env.SMOKE_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  const where = keep ? `evidence and temp root kept at ${root}` : process.env.SMOKE_EVIDENCE ? `evidence ${evidence}, temp root removed` : "evidence and temp root removed (SMOKE_EVIDENCE=1 keeps them)";
+  console.log(`\n${results.length - failed - blocked} PASS, ${failed} FAIL, ${blocked} BLOCKED; ${where}`);
   process.exitCode = failed > 0 ? 1 : blocked > 0 ? 3 : 0;
 }
 
-await main();
+const mode = process.argv.slice(2).join(" ");
+if (mode === "--clean" || mode === "--clean --dry-run") clean(mode !== "--clean");
+else if (mode) {
+  console.error("usage: node scripts/smoke/owner-flow.mjs [--clean [--dry-run]]");
+  process.exitCode = 2;
+} else await main();
