@@ -122,8 +122,7 @@ fn linked(link: &Path, target: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::ErrorKind;
-    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    use std::path::{Path, PathBuf};
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
     fn temp() -> tempfile::TempDir {
         tempfile::Builder::new()

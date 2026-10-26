@@ -6,7 +6,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::{engine::Client, protocol::*};
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -494,6 +494,7 @@ fn cli_rejects_a_socket_name_too_long_even_for_the_short_address_precisely() {
 }
 
 fn owner_only(path: &Path, owner: u32, mode: u32) {
+    use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::symlink_metadata(path).unwrap();
     assert_eq!(metadata.uid(), owner, "{}", path.display());
     assert_eq!(metadata.mode() & 0o7777, mode, "{}", path.display());
@@ -528,6 +529,7 @@ async fn answers(root: &Path, id: &str) {
 
 #[tokio::test]
 async fn cli_starts_where_the_owner_socket_would_be_120_bytes_and_recovers_after_a_kill() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let parent = private_root();
     let real = std::fs::canonicalize(parent.path()).unwrap();
     let tail = "o00000000/owner.sock";
