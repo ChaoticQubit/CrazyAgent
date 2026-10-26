@@ -746,6 +746,40 @@ fn revalidation_rejects_extra_root_and_profile_layout_entries() {
 }
 
 #[test]
+fn revalidation_accepts_the_lock_claude_code_takes_beside_home_and_refuses_other_shapes_of_it() {
+    let mut case = UseCase::new();
+    let guard = case.acquire();
+    let lock = case.profile().join("home.lock");
+    std::fs::create_dir(&lock).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o755)).unwrap();
+    case.revalidate(&guard).unwrap();
+    std::fs::remove_dir(&lock).unwrap();
+    case.revalidate(&guard).unwrap();
+    for shape in ["file", "symlink", "writable"] {
+        match shape {
+            "file" => private_file(&lock, b"synthetic lock entry"),
+            "symlink" => symlink(case.home(), &lock).unwrap(),
+            _ => {
+                std::fs::create_dir(&lock).unwrap();
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o777)).unwrap();
+            }
+        }
+        assert_eq!(
+            case.revalidate(&guard).err().unwrap().0,
+            "native_profile_custody_unsafe",
+            "{shape}"
+        );
+        let kept = std::fs::symlink_metadata(&lock).unwrap();
+        if kept.is_dir() {
+            std::fs::remove_dir(&lock).unwrap();
+        } else {
+            std::fs::remove_file(&lock).unwrap();
+        }
+    }
+    case.revalidate(&guard).unwrap();
+}
+
+#[test]
 fn revalidation_rejects_missing_home_and_identity_without_recreation() {
     for home in [false, true] {
         let mut case = UseCase::new();
