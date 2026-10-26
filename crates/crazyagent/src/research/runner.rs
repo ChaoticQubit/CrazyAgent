@@ -2051,6 +2051,7 @@ fn await_group_exit(group: u32) {
 
 /// Copies an agent stream into its log, counting every byte read and logging
 /// at most `log_max` bytes, until the stream ends.
+#[cfg(unix)]
 pub(crate) fn drain(stream: Box<dyn Read + Send>, counted: &AtomicU64, log: File, log_max: u64) {
     drain_watching(stream, counted, log, log_max, None);
 }
