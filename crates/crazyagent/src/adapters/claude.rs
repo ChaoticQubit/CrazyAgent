@@ -479,7 +479,9 @@ fn assistant(value: &Value) -> Result<Vec<EventKind>, ProtocolError> {
     }
     let mut events = Vec::new();
     if let Some(code) = optional_text(value, "error")? {
-        events.push(EventKind::AssistantError { code });
+        events.push(EventKind::AssistantError {
+            code: harness_error(code, blocks),
+        });
     }
     for block in blocks {
         let kind = match identifier(field(block, "type")?)? {
@@ -512,6 +514,25 @@ fn assistant(value: &Value) -> Result<Vec<EventKind>, ProtocolError> {
         events.push(kind);
     }
     Ok(events)
+}
+
+/// Tells a sign-in the Claude harness found missing itself, before any provider call, apart
+/// from a provider rejecting the sign-in: the harness reports both as `authentication_failed`
+/// and only its own message says "Not logged in". Inputs: the reported error code and the
+/// message's content blocks. Output: `not_signed_in` for a missing sign-in, else the code.
+fn harness_error(code: String, blocks: &[Value]) -> String {
+    let missing = code == "authentication_failed"
+        && blocks.iter().any(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("Not logged in"))
+        });
+    if missing {
+        "not_signed_in".to_owned()
+    } else {
+        code
+    }
 }
 
 fn result(value: &Value) -> Result<EventKind, ProtocolError> {

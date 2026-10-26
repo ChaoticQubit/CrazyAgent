@@ -323,7 +323,7 @@ fn installed_claude() -> PathBuf {
 }
 
 #[tokio::test]
-async fn real_claude_master_host_without_sign_in_reports_authentication_failure() {
+async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::adapters::events::{EventKind, TurnOutcome};
     use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
@@ -428,10 +428,12 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
         .await
         .unwrap();
     let mut errors = Vec::new();
+    let mut texts = Vec::new();
     let outcome = loop {
         let event = claude.next_event().await.unwrap();
         match event.kind {
             EventKind::AssistantError { code } => errors.push(code),
+            EventKind::AssistantText { text, .. } => texts.push(text),
             EventKind::TurnFinished { outcome, .. } => {
                 assert_eq!(event.request_id.as_ref(), Some(&turn));
                 break outcome;
@@ -439,7 +441,11 @@ async fn real_claude_master_host_without_sign_in_reports_authentication_failure(
             _ => {}
         }
     };
-    assert_eq!(errors, ["authentication_failed"]);
+    assert!(
+        texts.iter().any(|text| text.starts_with("Not logged in")),
+        "{texts:?}"
+    );
+    assert_eq!(errors, ["not_signed_in"]);
     assert_ne!(outcome, TurnOutcome::Success);
     claude.close().await.unwrap();
     assert!(!home.join(".credentials.json").exists());

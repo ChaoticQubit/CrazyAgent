@@ -1856,6 +1856,40 @@ async fn a_turn_whose_credential_copy_fails_hands_the_next_turn_to_the_next_acco
 }
 
 #[tokio::test]
+async fn a_turn_whose_harness_has_no_sign_in_leaves_the_account_unrejected() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let missing = EngineError(assistant_failure("not_signed_in").into());
+    let result = case
+        .command(MasterRuntimeCommand::Fail {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            reason: reason_for_error(&missing),
+            cause: missing.0.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(failed) = result else {
+        panic!("the turn whose harness had no sign-in did not settle");
+    };
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::ReadinessUnknown));
+    assert_eq!(failed.cause.as_deref(), Some("master_sign_in_missing"));
+    drop(first);
+    assert_eq!(case.paused_until("claude-a"), None);
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-a"));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
 async fn an_account_whose_sign_in_was_rejected_reads_sign_in_again_however_long_ago() {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
     case.sign_in("claude-a", true).await;

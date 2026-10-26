@@ -638,13 +638,7 @@ impl OwnerRuntimeHandle {
             return Ok(MasterRuntimeObservation::Cancelled);
         }
         if let MasterHost::Codex(host) = &mut active.host {
-            match host.observe_account().await? {
-                AuthControl::AccountRead {
-                    account: Some(AuthAccount::Chatgpt { .. }),
-                    ..
-                } => {}
-                _ => return Err(failure("gateway_invalid_authentication")),
-            }
+            account_failure(&host.observe_account().await?)?;
         }
         if self
             .inspect_master_turn(
@@ -754,12 +748,7 @@ impl OwnerRuntimeHandle {
                 | EventKind::UnsupportedRequest { .. }
                 | EventKind::Unsupported { .. } => {}
                 EventKind::AssistantError { code } => {
-                    return Err(failure(match code.as_str() {
-                        "authentication_failed" => "gateway_invalid_authentication",
-                        "rate_limit" => "gateway_rate_limited",
-                        "billing_error" => "gateway_quota_exhausted",
-                        _ => "codex_host_turn_failed",
-                    }));
+                    return Err(failure(assistant_failure(&code)));
                 }
                 EventKind::RequestFailed { .. }
                 | EventKind::TurnError {
@@ -794,6 +783,33 @@ fn validate_event(
     Ok(())
 }
 
+/// Names the failure a harness error ends a master turn with: a provider's rejected sign-in,
+/// or a sign-in the harness found missing itself, which is no word from the provider.
+/// Input: the error code the harness reported. Output: the code the turn's reason reads.
+fn assistant_failure(code: &str) -> &'static str {
+    match code {
+        "authentication_failed" => "gateway_invalid_authentication",
+        "not_signed_in" => "master_sign_in_missing",
+        "rate_limit" => "gateway_rate_limited",
+        "billing_error" => "gateway_quota_exhausted",
+        _ => "codex_host_turn_failed",
+    }
+}
+
+/// Checks the account Codex reads locally before a master turn is a ChatGPT sign-in; no
+/// account at all is a missing sign-in, not a provider rejection.
+/// Input: Codex's account read. Output: success, or the failure the turn ends with.
+fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
+    match read {
+        AuthControl::AccountRead {
+            account: Some(AuthAccount::Chatgpt { .. }),
+            ..
+        } => Ok(()),
+        AuthControl::AccountRead { account: None, .. } => Err(failure("master_sign_in_missing")),
+        _ => Err(failure("gateway_invalid_authentication")),
+    }
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
@@ -801,7 +817,7 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
 fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
-        "gateway_health_unknown" => MasterReason::ReadinessUnknown,
+        "gateway_health_unknown" | "master_sign_in_missing" => MasterReason::ReadinessUnknown,
         "gateway_invalid_authentication"
         | "native_profile_credential_unavailable"
         | "native_profile_credential_expiring" => MasterReason::InvalidAuthentication,
@@ -1108,6 +1124,43 @@ mod tests {
                 expected,
                 "{code}"
             );
+        }
+    }
+
+    #[test]
+    fn a_harness_with_no_sign_in_fails_the_turn_without_a_provider_rejection() {
+        let read = |account| AuthControl::AccountRead {
+            id: 1,
+            account,
+            requires_openai_auth: true,
+        };
+        let chatgpt = AuthAccount::Chatgpt {
+            email: None,
+            plan_type: "plus".into(),
+        };
+        assert!(account_failure(&read(Some(chatgpt))).is_ok());
+        assert_eq!(assistant_failure("not_signed_in"), "master_sign_in_missing");
+        for (gap, reason) in [
+            (
+                assistant_failure("not_signed_in").to_owned(),
+                MasterReason::ReadinessUnknown,
+            ),
+            (
+                account_failure(&read(None)).unwrap_err().0,
+                MasterReason::ReadinessUnknown,
+            ),
+            (
+                assistant_failure("authentication_failed").to_owned(),
+                MasterReason::InvalidAuthentication,
+            ),
+            (
+                account_failure(&read(Some(AuthAccount::ApiKey)))
+                    .unwrap_err()
+                    .0,
+                MasterReason::InvalidAuthentication,
+            ),
+        ] {
+            assert_eq!(reason_for_error(&EngineError(gap.clone())), reason, "{gap}");
         }
     }
 
