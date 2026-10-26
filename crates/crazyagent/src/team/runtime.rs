@@ -1,8 +1,8 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
-    MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row,
-    append_message, bound_text, eligible_accounts, launch_harness, now_ms, parse_delegations,
-    pick_account, tool,
+    MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
+    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, now_ms,
+    parse_delegations, pick_account, tool,
 };
 use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
@@ -616,7 +616,83 @@ impl TeamRuntime {
         }
         self.collect()?;
         self.owner_controls();
+        self.note_conversations()?;
         self.sweep()
+    }
+
+    /// Writes the engine's note on each task a conversation master handed off that has
+    /// ended, at most `NOTES_PER_TICK_MAX` a tick, so that conversation and the master's
+    /// next turn learn how it went. Each task is noted once. Returns any SQLite failure.
+    fn note_conversations(&mut self) -> Result<(), EngineError> {
+        type Row = (
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT c.task,t.harness,t.status,t.prompt,t.result,t.error,t.agent,a.worktree
+                     FROM team_conversation_tasks c JOIN team_tasks t ON t.id=c.task
+                     LEFT JOIN team_agents a ON a.id=t.agent
+                     WHERE c.note IS NULL AND t.status IN ('done','failed','cancelled')
+                     ORDER BY c.task LIMIT ?1",
+                )
+                .map_err(error)?;
+            statement
+                .query_map([NOTES_PER_TICK_MAX], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                })
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let now = now_ms();
+        for (id, harness, status, prompt, result, problem, agent, worktree) in rows {
+            let status = TaskStatus::parse(&status)
+                .filter(|status| status.finished())
+                .expect("the sweep reads ended tasks only");
+            let note = conversation_note(&EndedTask {
+                id,
+                harness,
+                status,
+                prompt,
+                result,
+                problem,
+                agent,
+                worktree,
+            });
+            let changed = tx
+                .execute(
+                    "UPDATE team_conversation_tasks SET note=?2, noted_ms=?3 WHERE task=?1 AND note IS NULL",
+                    params![id, note, now],
+                )
+                .map_err(error)?;
+            assert!(changed <= 1);
+        }
+        tx.commit().map_err(error)
     }
 
     /// Applies the owner's stop and restart from the agent register to live agents and
@@ -2642,6 +2718,84 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const NOTE_PROMPT_BYTES_MAX: usize = 80;
+const NOTE_RESULT_BYTES_MAX: usize = 300;
+const NOTE_PROBLEM_BYTES_MAX: usize = 200;
+const NOTE_PLACE_BYTES_MAX: usize = 120;
+const NOTES_PER_TICK_MAX: i64 = 16;
+
+/// One task a conversation master handed off that has ended, as the note sweep reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EndedTask {
+    id: i64,
+    harness: String,
+    status: TaskStatus,
+    prompt: String,
+    result: Option<String>,
+    problem: Option<String>,
+    agent: Option<i64>,
+    worktree: Option<String>,
+}
+
+/// Words the engine's note on one conversation task that ended: the task and its prompt,
+/// its harness and sub-agent, how it ended and where its full result is, then a short
+/// excerpt of what it said. Takes the ended task. Returns at most `NOTE_BYTES_MAX` bytes.
+fn conversation_note(ended: &EndedTask) -> String {
+    let harness = excerpt(&ended.harness, 64);
+    let who = match ended.agent {
+        Some(agent) => format!("{harness}, sub-agent {agent}"),
+        None => harness,
+    };
+    let head = format!(
+        "Task {} \"{}\" ({who})",
+        ended.id,
+        excerpt(&ended.prompt, NOTE_PROMPT_BYTES_MAX)
+    );
+    let problem = excerpt(
+        ended.problem.as_deref().unwrap_or("no reason was recorded"),
+        NOTE_PROBLEM_BYTES_MAX,
+    );
+    let note = match ended.status {
+        TaskStatus::Done => {
+            let mut note = format!("{head} is done. Full result in the Team view");
+            if let Some(place) = &ended.worktree {
+                note.push_str(&format!(
+                    ", files in {}",
+                    excerpt(place, NOTE_PLACE_BYTES_MAX)
+                ));
+            }
+            note.push('.');
+            if let Some(result) = ended.result.as_deref().filter(|r| !r.trim().is_empty()) {
+                note.push_str(" It said: ");
+                note.push_str(&excerpt(result, NOTE_RESULT_BYTES_MAX));
+            }
+            note
+        }
+        TaskStatus::Failed => format!(
+            "{} Details in the Team view.",
+            full_stop(format!("{head} failed: {problem}"))
+        ),
+        _ => format!(
+            "{} Details in the Team view.",
+            full_stop(format!("{head} was stopped: {problem}"))
+        ),
+    };
+    assert!(note.len() <= NOTE_BYTES_MAX);
+    note
+}
+
+/// Flattens every whitespace run to one space and cuts the text to `max` bytes, ending a
+/// cut text with "...". Takes the text and the bound. Returns at most `max` bytes.
+fn excerpt(text: &str, max: usize) -> String {
+    assert!(max > 3);
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.len() <= max {
+        return flat;
+    }
+    let cut = format!("{}...", bound_text(&flat, max - 3).trim_end());
+    assert!(cut.len() <= max);
+    cut
+}
 const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
 
 /// An owner line that names the plain code behind it in the style every window uses, so a

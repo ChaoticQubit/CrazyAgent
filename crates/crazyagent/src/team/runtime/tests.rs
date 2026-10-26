@@ -1059,3 +1059,57 @@ fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
     assert!(!crate::agents::tests::alive(group));
     assert!(team.shutdown().unwrap().is_empty());
 }
+
+#[test]
+fn a_conversation_note_names_the_task_its_agent_how_it_ended_and_where_its_result_is() {
+    let ended =
+        |status, result: Option<&str>, problem: Option<&str>, agent: Option<i64>| EndedTask {
+            id: 7,
+            harness: "codex".into(),
+            status,
+            prompt: "Write   the\nREADME".into(),
+            result: result.map(Into::into),
+            problem: problem.map(Into::into),
+            agent,
+            worktree: agent.map(|id| format!(".crazyagent/worktrees/agent-{id}")),
+        };
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Done,
+            Some("README written.\n\nIt covers setup."),
+            None,
+            Some(3)
+        )),
+        "Task 7 \"Write the README\" (codex, sub-agent 3) is done. Full result in the Team view, files in .crazyagent/worktrees/agent-3. It said: README written. It covers setup."
+    );
+    assert_eq!(
+        conversation_note(&ended(TaskStatus::Done, None, None, None)),
+        "Task 7 \"Write the README\" (codex) is done. Full result in the Team view."
+    );
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Failed,
+            None,
+            Some("The sub-agent ran out of time"),
+            Some(3)
+        )),
+        "Task 7 \"Write the README\" (codex, sub-agent 3) failed: The sub-agent ran out of time. Details in the Team view."
+    );
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Cancelled,
+            None,
+            Some("Cancelled by you"),
+            None
+        )),
+        "Task 7 \"Write the README\" (codex) was stopped: Cancelled by you. Details in the Team view."
+    );
+    let long = "word ".repeat(400);
+    let mut huge = ended(TaskStatus::Done, Some(&long), Some(&long), Some(i64::MAX));
+    huge.prompt = long.clone();
+    huge.harness = "h".repeat(64);
+    huge.worktree = Some("w".repeat(400));
+    let note = conversation_note(&huge);
+    assert!(note.len() <= NOTE_BYTES_MAX, "{} bytes", note.len());
+    assert!(note.ends_with("..."), "a cut result says so: {note}");
+}
