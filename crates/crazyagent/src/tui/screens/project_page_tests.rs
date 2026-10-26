@@ -1045,7 +1045,7 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_open_master_conversation_ends_from_its_tab_so_the_project_can_be_removed() {
+async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_on_home() {
     let mut engine = Engine::start().await;
     let notes = engine.project("notes-cli", "Notes CLI", 1).await;
     let mut connection = engine.connect();
@@ -1084,41 +1084,47 @@ async fn an_open_master_conversation_ends_from_its_tab_so_the_project_can_be_rem
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Plan the first slice"), "{shown}");
     assert!(shown.contains("e End conversation"), "{shown}");
-
-    let remove = |shell: &mut Shell| {
-        for _ in 0..3 {
-            shell.key(Key::ShiftRight);
-        }
-        shell.key(Key::Char('x'));
-        shell.key(Key::Char('y'));
-    };
-    remove(&mut shell);
-    pump(&mut shell, &mut connection).await;
-    let shown = render(&mut shell, 80, 24);
-    assert!(
-        shown.contains("End this project's master conversation first"),
-        "{shown}"
-    );
-    assert_ne!(shell.place(), Some(Place::Home));
+    let (open, _) = latest_master(&mut engine, &notes).await;
+    let open = open.expect("the first message opened a master conversation");
+    assert_eq!(open.phase, MasterSessionPhase::Configured);
 
     for _ in 0..3 {
-        shell.key(Key::ShiftLeft);
+        shell.key(Key::ShiftRight);
     }
-    shell.key(Key::Esc);
-    shell.key(Key::Char('e'));
-    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('x'));
     let shown = render(&mut shell, 80, 24);
-    assert!(
-        shown.contains("The master conversation is closed."),
-        "{shown}"
-    );
-    assert!(!shown.contains("e End conversation"), "{shown}");
-
-    remove(&mut shell);
+    assert!(shown.contains("Its master conversation ends"), "{shown}");
+    shell.key(Key::Char('y'));
     pump(&mut shell, &mut connection).await;
     let shown = render(&mut shell, 80, 24);
     assert_eq!(shell.place(), Some(Place::Home), "{shown}");
     assert!(shown.contains("Notes CLI was removed."), "{shown}");
+
+    let (closed, _) = latest_master(&mut engine, &notes).await;
+    let closed = closed.expect("the ended conversation stays on record");
+    assert_eq!(closed.session_id, open.session_id);
+    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert!(closed.current_turn.is_none());
+
+    while shell.ctx.next_request().is_some() {}
+    let read = SetupQuery::Setup {
+        project: notes.clone(),
+    };
+    connection.project_setup(read.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let after = loop {
+        if let Some(OwnerEvent::Setup(event)) = connection.poll_owner().unwrap()
+            && event.query == read
+        {
+            break event.result;
+        }
+        assert!(Instant::now() < deadline, "the setup read never arrived");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        !matches!(after, Ok(SetupView::Setup(Some(_)))),
+        "the engine forgot the project: {after:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
