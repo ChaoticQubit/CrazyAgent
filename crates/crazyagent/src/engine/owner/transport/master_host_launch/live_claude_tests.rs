@@ -135,9 +135,10 @@ pub(super) fn engine_executable() -> PathBuf {
 }
 
 /// Qualifies a real Claude master turn with its tools on (DEC-093) inside the tools-on master
-/// sandbox: it writes a file in its worktree with its own tools, calls the engine's real
-/// `delegate` tool served by the built engine executable, and replies; the engine then takes
-/// the recorded task. The turn is bounded by a 240 s wall time.
+/// sandbox: it writes a file in its worktree with its own tools, starts the sub-agent it is
+/// asked for in plain words through the engine's real `delegate` tool served by the built
+/// engine executable, never through Claude Code's own sub-agent tools, and replies; the
+/// engine then takes the recorded task. The turn is bounded by a 240 s wall time.
 #[tokio::test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates() {
@@ -214,7 +215,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
     master
         .start_turn(
             turn.clone(),
-            "Do these steps in order. 1. With your file tools, create the file note.txt in your working folder containing exactly the word HERON. 2. Call the delegate tool once with the task \"Write the README\". 3. Reply with exactly the word DONE.",
+            "Do these steps in order. 1. With your file tools, create the file note.txt in your working folder containing exactly the word HERON. 2. Start one sub-agent that writes the README. Do not write the README yourself. 3. Reply with exactly the word DONE.",
         )
         .await
         .unwrap();
@@ -258,8 +259,14 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
             .any(|name| name == "mcp__crazyagent-team__delegate"),
         "{tools:?}"
     );
+    for built_in in ["Agent", "Task", "Workflow", "TeamCreate"] {
+        assert!(!tools.iter().any(|name| name == built_in), "{tools:?}");
+    }
     assert_eq!(delegations.len(), 1, "{delegations:?}");
-    assert_eq!(delegations[0].prompt, "Write the README");
+    assert!(
+        delegations[0].prompt.to_lowercase().contains("readme"),
+        "{delegations:?}"
+    );
     assert_eq!(std::fs::read_dir(&repository).unwrap().count(), 0);
     drop(credential);
     drop(folder);

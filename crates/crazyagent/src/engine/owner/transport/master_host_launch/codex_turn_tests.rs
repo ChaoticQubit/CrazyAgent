@@ -252,6 +252,8 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         "features.apps=false",
         "features.plugins=false",
         "features.goals=false",
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
     ] {
         assert!(settings.contains(&required.to_owned()), "{required}");
     }
@@ -327,6 +329,19 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         args[sandbox] = "sandbox_mode=\"read-only\"".into();
     });
     assert!(require_master_tool_policy(&read_only, Some(tools)).is_err());
+    for setting in [
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
+    ] {
+        let own_agents = changed(&command, |args| {
+            let at = args.iter().position(|arg| arg == setting).unwrap();
+            args.drain(at - 1..=at);
+        });
+        assert!(
+            require_master_tool_policy(&own_agents, Some(tools)).is_err(),
+            "{setting}"
+        );
+    }
     let no_server = changed(&command, |args| {
         let server = args
             .iter()
@@ -444,6 +459,63 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     drop(tools_folder);
     assert!(!home.exists());
     drop(profile);
+}
+
+#[test]
+fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
+    let codex = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
+        .into_iter()
+        .find(|entry| entry.id == "codex")
+        .and_then(|entry| entry.executable)
+        .expect("installed Codex");
+    let codex = std::fs::canonicalize(codex).unwrap();
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-codex-features-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let home = base.join("home");
+    private_directory(&home);
+    let drop = base.join("tmp").join(crate::team::tool::DROP_FILE);
+    let tools = crate::engine::claude_host::MasterTools {
+        engine: &codex,
+        drop: &drop,
+    };
+    let command = master_command(&codex, &home, &base, ACCOUNT_DEFAULT_MODEL, Some(tools)).unwrap();
+    let mut features = Command::new(&codex);
+    features
+        .args(
+            settings(&command)
+                .iter()
+                .flat_map(|setting| ["-c", setting]),
+        )
+        .args(["features", "list"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&base)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::spawn_gate::output(&mut features).unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = |name: &str| {
+        text.lines().find_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            (columns.first() == Some(&name))
+                .then(|| columns.last().copied())
+                .flatten()
+        })
+    };
+    assert_eq!(state("apps"), Some("false"), "{text}");
+    assert_eq!(state("multi_agent"), Some("false"), "{text}");
+    assert_eq!(state("multi_agent_v2"), Some("false"), "{text}");
+    assert_eq!(state("shell_tool"), Some("true"), "{text}");
 }
 
 #[test]

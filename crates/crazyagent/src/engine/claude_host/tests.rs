@@ -322,6 +322,72 @@ fn installed_claude() -> PathBuf {
     fs::canonicalize(entry.executable.expect("installed Claude Code")).unwrap()
 }
 
+#[test]
+fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_agent() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let directories = Directories::new();
+    let drop = directories
+        .root
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let mut command = tools_launch_command(
+        &installed_claude(),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        MasterTools {
+            engine: Path::new("/usr/bin/true"),
+            drop: &drop,
+        },
+    )
+    .unwrap();
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (send, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let tools: Vec<String> = loop {
+        let line = lines
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("Claude Code names its tools when its session starts");
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if event["type"] == "system" && event["subtype"] == "init" {
+            break serde_json::from_value(event["tools"].clone()).unwrap();
+        }
+    };
+    let _ = child.kill();
+    child.wait().unwrap();
+    for kept in ["Bash", "Edit", "Read", "Write"] {
+        assert!(tools.iter().any(|tool| tool == kept), "{kept}: {tools:?}");
+    }
+    for built_in in ["Agent", "Task", "Workflow", "TeamCreate"] {
+        assert!(
+            !tools.iter().any(|tool| tool == built_in),
+            "{built_in}: {tools:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::adapters::events::{EventKind, TurnOutcome};
@@ -610,7 +676,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
     };
     let command = launch(engine, &drop).unwrap();
     let args = arguments(&command);
-    let config: serde_json::Value = serde_json::from_str(&args[12]).unwrap();
+    let config: serde_json::Value = serde_json::from_str(&args[16]).unwrap();
     assert_eq!(
         config,
         serde_json::json!({"mcpServers": {"crazyagent-team": {
@@ -632,9 +698,13 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "default",
             "--permission-mode",
             "bypassPermissions",
+            "--disallowedTools",
+            "Agent",
+            "Workflow",
+            "TeamCreate",
             "--strict-mcp-config",
             "--mcp-config",
-            args[12].as_str(),
+            args[16].as_str(),
             "--setting-sources",
             "",
             "--settings",
