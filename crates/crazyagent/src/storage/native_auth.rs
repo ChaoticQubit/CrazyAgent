@@ -966,7 +966,9 @@ fn validate_method(
             NativeAuthMethod::CodexBrowser
             | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => connection.harness.as_str() == "codex",
-            NativeAuthMethod::ClaudeOfficial => connection.harness.as_str() == "claude",
+            NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting => {
+                connection.harness.as_str() == "claude"
+            }
         },
         Command::Logout(_) => matches!(connection.harness.as_str(), "codex" | "claude"),
         Command::Read(_) | Command::Cancel(_) => false,
@@ -1023,6 +1025,101 @@ fn existing(
         store_fact(tx, &fact)?;
     }
     Ok(Some(fact))
+}
+
+/// Lists the sign-ins a new engine run re-proves before trusting them: each native managed
+/// connection whose latest sign-in finished authenticated under an earlier run of this
+/// database and passes every other launch check under that run. Inputs: the database,
+/// settings, the running host and, for one master, its session. Output: one status-only
+/// account check per such connection, bound to the current settings.
+pub(crate) fn stale_sign_ins(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    session: Option<&SessionId>,
+) -> Result<Vec<NativeAuthStart>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    let only = match session {
+        None => None,
+        Some(session) => match master_session::native_target(&tx, session)? {
+            Some(target) => Some(target),
+            None => return Ok(Vec::new()),
+        },
+    };
+    let source_hash = settings::verified_source_hash(config, sources)?;
+    let connections = config
+        .settings
+        .model_access
+        .as_ref()
+        .map_or(&[][..], |access| &access.connections[..]);
+    let mut starts = Vec::new();
+    for connection in connections {
+        let method = match connection.harness.as_str() {
+            "claude" => NativeAuthMethod::ClaudeExisting,
+            "codex" => NativeAuthMethod::CodexExisting,
+            _ => continue,
+        };
+        if only.as_ref().is_some_and(|target| target != &connection.id)
+            || !matches!(
+                connection.auth,
+                crate::config::ModelAuthentication::NativeManaged { .. }
+            )
+        {
+            continue;
+        }
+        let Some(earlier) = earlier_run(&tx, connection, host)? else {
+            continue;
+        };
+        if crate::storage::native_sign_in(&tx, &earlier, connection, None).is_err() {
+            continue;
+        }
+        starts.push(NativeAuthStart {
+            request_id: RequestId::new(crate::engine::owner::random_id()?).map_err(error)?,
+            scope: NativeAuthScope {
+                expected_database_instance: host.db_instance.clone(),
+                connection: connection.id.clone(),
+                expected_config_id: config.id.clone(),
+                expected_source_hash: source_hash.clone(),
+            },
+            method,
+        });
+    }
+    drop(tx);
+    assert!(starts.len() <= connections.len());
+    Ok(starts)
+}
+
+/// The earlier engine run a connection's latest sign-in was proved under, when it finished
+/// authenticated in this database under another run. Inputs: the transaction, the
+/// connection and the running host. Output: that run's host stamp, or none.
+fn earlier_run(
+    tx: &Transaction<'_>,
+    connection: &crate::config::ModelConnection,
+    host: &HostStamp,
+) -> Result<Option<HostStamp>, EngineError> {
+    let row: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+            [profile_key(connection)?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(bytes) = row else {
+        return Ok(None);
+    };
+    let fact = decode_fact(&bytes)?;
+    if fact.phase != NativeAuthPhase::AuthenticatedObserved
+        || fact.binding.database_instance != host.db_instance
+        || fact.binding.engine_epoch == host.engine_epoch
+    {
+        return Ok(None);
+    }
+    Ok(Some(HostStamp {
+        db_instance: host.db_instance.clone(),
+        engine_epoch: fact.binding.engine_epoch,
+    }))
 }
 
 fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, EngineError> {

@@ -1361,6 +1361,20 @@ fn current_auth(
     .map(MasterBootstrapAuth::NativeSignIn)
 }
 
+/// Names the native connection whose sign-in a master session's turns launch on.
+/// Inputs: the transaction and the session. Output: that connection, or none for a
+/// missing session or a backend that launches without a native sign-in.
+pub(super) fn native_target(
+    tx: &Transaction<'_>,
+    session: &SessionId,
+) -> Result<Option<crate::protocol::CredentialRef>, EngineError> {
+    let Some(session) = load_session(tx, session, owner_revision(tx)?)? else {
+        return Ok(None);
+    };
+    Ok((session.selection.backend != MasterBackend::Rcli)
+        .then(|| session.selection.target_profile_ref.clone()))
+}
+
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
 /// this engine run, the same check every master turn uses. Input: the transaction, the
 /// active host, the connection and, for a master, the account its route names. Output:
@@ -1386,10 +1400,14 @@ pub(crate) fn native_sign_in(
         return Err(error("native_auth_request_bounds"));
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-    let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
     if let Some(gap) = sign_in_gap(fact.phase) {
         return Err(error(gap));
     }
+    if !matches!(fact.action, NativeAuthAction::SignIn { .. }) {
+        return Err(error("master_authentication_unknown"));
+    }
+    let start: NativeAuthStart =
+        serde_json::from_slice(&request).map_err(|_| error("master_authentication_stale"))?;
     if fact.operation_id.as_str() != id
         || signed(fact.generation)? != generation
         || fact.phase.name() != phase

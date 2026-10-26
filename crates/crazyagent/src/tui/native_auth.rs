@@ -821,6 +821,7 @@ fn action_text(action: NativeAuthAction) -> &'static str {
             NativeAuthMethod::CodexDeviceCode => "Codex device-code sign-in",
             NativeAuthMethod::CodexExisting => "Existing Codex sign-in check",
             NativeAuthMethod::ClaudeOfficial => "Claude official sign-in",
+            NativeAuthMethod::ClaudeExisting => "Existing Claude sign-in check",
         },
         NativeAuthAction::Logout => "Logout",
     }

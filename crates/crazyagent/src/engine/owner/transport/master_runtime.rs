@@ -354,6 +354,9 @@ impl OwnerRuntimeHandle {
         ) {
             return Ok(routed);
         }
+        if routed.phase == MasterTurnPhase::Queued {
+            self.reprove_sign_ins(Some(session_id.clone())).await;
+        }
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
             .await?

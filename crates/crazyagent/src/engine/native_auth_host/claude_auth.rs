@@ -170,15 +170,18 @@ pub(in crate::engine) async fn run(
     let first = match channel.fact().action {
         NativeAuthAction::SignIn {
             method: NativeAuthMethod::ClaudeOfficial,
-        } => ClaudeAuthCommand::Login,
-        NativeAuthAction::Logout => ClaudeAuthCommand::Logout,
+        } => Some(ClaudeAuthCommand::Login),
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::ClaudeExisting,
+        } => None,
+        NativeAuthAction::Logout => Some(ClaudeAuthCommand::Logout),
         _ => return Err(EngineError("native_auth_claude_method_unsupported".into())),
     };
     if channel.fact().binding.connection.harness.as_str() != "claude" {
         return Err(EngineError("native_auth_method_mismatch".into()));
     }
     let deadline = Instant::now()
-        + if first == ClaudeAuthCommand::Login {
+        + if first == Some(ClaudeAuthCommand::Login) {
             Duration::from_secs(590)
         } else {
             Duration::from_secs(9)
@@ -194,21 +197,24 @@ pub(in crate::engine) async fn run(
     if let Err(error) = keychain::prepare_profile_keychain(&home) {
         return finish_failure(session, channel, error).await;
     }
-    let first_result = run_child(&mut session, channel, executable, &home, first, deadline).await;
-    match first_result {
-        Ok(ChildOutput { exit: Some(0), .. }) => {}
-        Ok(_) => {
-            return finish_failure(
-                session,
-                channel,
-                EngineError("native_auth_claude_native_exit".into()),
-            )
-            .await;
+    if let Some(first) = first {
+        let first_result =
+            run_child(&mut session, channel, executable, &home, first, deadline).await;
+        match first_result {
+            Ok(ChildOutput { exit: Some(0), .. }) => {}
+            Ok(_) => {
+                return finish_failure(
+                    session,
+                    channel,
+                    EngineError("native_auth_claude_native_exit".into()),
+                )
+                .await;
+            }
+            Err(error) => return finish_failure(session, channel, error).await,
         }
-        Err(error) => return finish_failure(session, channel, error).await,
-    }
-    if let Err(error) = session.prepare_status_child() {
-        return finish_failure(session, channel, error).await;
+        if let Err(error) = session.prepare_status_child() {
+            return finish_failure(session, channel, error).await;
+        }
     }
     if matches!(
         session.check(channel).await?,
@@ -251,7 +257,7 @@ pub(in crate::engine) async fn run(
         Ok(account) => account,
         Err(error) => return finish_failure(session, channel, error).await,
     };
-    if first == ClaudeAuthCommand::Logout && account.is_some() {
+    if first == Some(ClaudeAuthCommand::Logout) && account.is_some() {
         return finish_failure(
             session,
             channel,
