@@ -14,6 +14,7 @@ pub mod github;
 pub mod harnesses;
 #[cfg(unix)]
 pub mod isolation;
+pub mod landing;
 pub mod launch_context;
 pub mod master_session;
 pub mod memory;
