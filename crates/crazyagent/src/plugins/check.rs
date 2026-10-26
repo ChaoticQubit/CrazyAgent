@@ -31,9 +31,10 @@ const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"
 #[cfg(unix)]
 type Line = Result<Vec<u8>, &'static str>;
 
-/// Starts a command MCP server, runs `initialize` and `tools/list`, then stops its whole
-/// process group. Inputs: the absolute command, its arguments, secret environment values
-/// and the time bound. Output: the tool names, or a plain rejection code.
+/// Starts a command MCP server as the engine's own user with no boundary, for trusted
+/// commands such as the engine's own team tool, then checks it like [`check_command`].
+/// Inputs: the absolute command, its arguments, secret environment values and the time
+/// bound. Output: the tool names, or a plain rejection code.
 #[cfg(unix)]
 pub fn check_stdio(
     command: &str,
@@ -45,11 +46,7 @@ pub fn check_stdio(
     process
         .args(args)
         .env_clear()
-        .current_dir(std::env::temp_dir())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .current_dir(std::env::temp_dir());
     for name in ENV_KEPT {
         if let Some(value) = std::env::var_os(name) {
             process.env(name, value);
@@ -58,6 +55,20 @@ pub fn check_stdio(
     for (name, value) in secrets {
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
+    check_command(process, limit)
+}
+
+/// Starts an already built MCP server command, such as one wrapped in the agent boundary,
+/// runs `initialize` and `tools/list`, then stops its whole process group. Inputs: the
+/// command with its arguments, environment and folder set, and the time bound. Output:
+/// the tool names, or a plain rejection code.
+#[cfg(unix)]
+pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String>, &'static str> {
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
     let mut child = crate::spawn_gate::spawn(&mut process).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => "server_command_not_found",
         std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",

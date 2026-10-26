@@ -1,6 +1,6 @@
 use super::{BoundaryError, Words, wide, windows};
 use crate::dacl::{ALL_APPLICATION_PACKAGES, holds, reads};
-use crate::plan::{Access, Ace, DENY_ALL, DENY_WRITE, MODIFY, READ_EXECUTE};
+use crate::plan::{Access, Ace, DENY_ALL, DENY_WRITE, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use std::io::ErrorKind;
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -15,9 +15,10 @@ use windows_sys::Win32::Security::{
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES,
-    FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC, WRITE_OWNER,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC,
+    WRITE_OWNER,
 };
 
 const _: () = assert!(READ_EXECUTE == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
@@ -35,15 +36,25 @@ const _: () = assert!(
             | WRITE_OWNER
 );
 const _: () = assert!(DENY_ALL == FILE_ALL_ACCESS);
+const _: () = assert!(
+    KEEP_ENTRIES
+        == FILE_ADD_FILE
+            | FILE_ADD_SUBDIRECTORY
+            | FILE_DELETE_CHILD
+            | DELETE
+            | WRITE_DAC
+            | WRITE_OWNER
+);
 
 const ACL_BYTES_MAX: usize = 64 * 1024;
 
 /// Puts each planned entry on its path for the container, skipping an entry the path already
 /// holds so later launches leave large folders alone. A granted root must exist and must not be
-/// a link or junction; a protected path that is missing, a link or a junction gets no entry. A
-/// read root the owner may not change is accepted only when every container can already read
-/// it, as with `C:\Program Files`. Inputs: the container SID and the plan. Output: Ok, or the
-/// refusal or failed step.
+/// a link or junction; a protected path that is missing, a link or a junction gets no entry,
+/// since the kept folder above it stops the container creating or swapping it. A read root the
+/// owner may not change is accepted only when every container can already read it, as with
+/// `C:\Program Files`. Inputs: the container SID and the plan. Output: Ok, or the refusal or
+/// failed step.
 pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError> {
     let sid = container.bytes();
     for ace in aces {
@@ -74,7 +85,7 @@ pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError
         if ace.access == Access::ReadExecute && reads(&current, &ALL_APPLICATION_PACKAGES) {
             continue;
         }
-        let inheritance = if folder {
+        let inheritance = if folder && ace.access.inherits() {
             SUB_CONTAINERS_AND_OBJECTS_INHERIT
         } else {
             NO_INHERITANCE
