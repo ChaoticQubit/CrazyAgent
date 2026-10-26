@@ -2776,3 +2776,11 @@ pub fn agents(
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/managed_agent.rs"]
+pub(crate) mod managed_agent;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/dec_090_tests.rs"]
+mod dec_090_tests;

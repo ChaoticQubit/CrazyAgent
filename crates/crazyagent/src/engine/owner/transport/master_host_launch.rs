@@ -1041,3 +1041,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/dec_090_tests.rs"]
+mod dec_090_tests;
