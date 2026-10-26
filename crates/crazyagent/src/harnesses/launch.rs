@@ -23,7 +23,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const LINE_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX;
+const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
+/// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
+/// for the JSON-RPC envelope around it.
+const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -690,7 +693,7 @@ impl Driver {
     }
 
     fn send(&mut self, text: &str) -> Result<Option<Vec<u8>>, LaunchError> {
-        if text.trim().is_empty() || text.contains('\0') || text.len() > LINE_BYTES_MAX / 2 {
+        if text.trim().is_empty() || text.contains('\0') || text.len() > PROMPT_BYTES_MAX {
             return Err(failure("launch_prompt_invalid"));
         }
         match self {

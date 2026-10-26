@@ -2,7 +2,7 @@ use super::events::{
     Capability, EventKind, HarnessEvent, Provenance, RateLimitStatus, Support, TokenUsage,
     TurnOutcome,
 };
-use super::{NativeAction, NativeHarness};
+use super::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -328,7 +328,7 @@ impl ClaudeProtocol {
     }
 
     fn assert_consistent(&self) {
-        assert!(self.buffer.len() <= FRAME_BYTES_MAX);
+        assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_events.len() <= NATIVE_IDS_MAX);
         assert!(self.seen_requests.len() <= REQUESTS_MAX);
         assert_eq!(self.provenance.harness, NativeHarness::Claude);
@@ -350,7 +350,7 @@ impl ClaudeProtocol {
     }
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Vec<HarnessEvent>, ProtocolError> {
-        if bytes.len() > FRAME_BYTES_MAX {
+        if bytes.len() > LINE_BYTES_MAX + 1 {
             return Err(ProtocolError::FrameTooLarge);
         }
         let mut events = Vec::new();
@@ -358,7 +358,7 @@ impl ClaudeProtocol {
         let mut output_bytes = 0_usize;
         for byte in bytes {
             if *byte != b'\n' {
-                if self.buffer.len() == FRAME_BYTES_MAX {
+                if self.buffer.len() == LINE_BYTES_MAX {
                     return Err(ProtocolError::FrameTooLarge);
                 }
                 self.buffer.push(*byte);
@@ -849,7 +849,7 @@ mod tests {
     #[should_panic]
     fn buffer_invariant_detects_overflow() {
         let mut p = protocol();
-        p.buffer = vec![0; FRAME_BYTES_MAX + 1];
+        p.buffer = vec![0; LINE_BYTES_MAX + 1];
         p.state();
     }
 }
