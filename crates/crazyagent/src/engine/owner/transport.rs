@@ -1351,7 +1351,7 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
-            eprintln!("master_dispatch_shutdown cause={}", error.0);
+            eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
         self.authority
             .usable
@@ -2202,22 +2202,37 @@ fn owner_reply_frame(
     encode_frame(&reply).map_err(|_| failure("owner_response_bounds"))
 }
 
-/// Renders a single-line engine diagnostic for a failed native auth dispatch.
-/// Input: the dispatch error. Output: the line with the error code when it is a
-/// plain lowercase code, otherwise a redacted marker so private text never leaks.
-fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
+/// Names an error in an engine log line only by its code, so driver, parser or private
+/// text never reaches the log. Inputs: the error and the marker for anything else.
+/// Output: the error when it is a plain lowercase code, otherwise the marker.
+fn plain_cause<'a>(error: &'a EngineError, redacted: &'static str) -> &'a str {
     let code = error.0.as_str();
     let plain = !code.is_empty()
         && code.len() <= 192
         && code.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
         });
-    let cause = if plain {
-        code
-    } else {
-        "native_auth_dispatch_error_redacted"
-    };
-    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
+    if plain { code } else { redacted }
+}
+
+/// Renders a single-line engine diagnostic for a failed native auth dispatch.
+/// Input: the dispatch error. Output: the line with the error code when it is a
+/// plain lowercase code, otherwise a redacted marker so private text never leaks.
+fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
+    format!(
+        "native_auth_dispatch_failed_fence_retained cause={}",
+        plain_cause(error, "native_auth_dispatch_error_redacted")
+    )
+}
+
+/// Renders the engine log line for a master dispatch that stopped with an error.
+/// Input: the error. Output: the line naming its plain code, or a redacted marker for
+/// driver or parser text.
+fn master_dispatch_shutdown_line(error: &EngineError) -> String {
+    format!(
+        "master_dispatch_shutdown cause={}",
+        plain_cause(error, "master_dispatch_error_redacted")
+    )
 }
 
 fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Instant> {

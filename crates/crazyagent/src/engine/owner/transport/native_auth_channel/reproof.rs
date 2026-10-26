@@ -24,7 +24,10 @@ impl OwnerRuntimeHandle {
         {
             Ok(starts) => starts,
             Err(error) => {
-                eprintln!("native_auth_reproof_deferred cause={}", error.0);
+                eprintln!(
+                    "native_auth_reproof_deferred cause={}",
+                    plain_cause(&error, "native_auth_reproof_error_redacted")
+                );
                 return;
             }
         };
@@ -33,7 +36,10 @@ impl OwnerRuntimeHandle {
                 continue;
             }
             if let Err(error) = self.reprove(&admission, start).await {
-                eprintln!("native_auth_reproof_unsettled cause={}", error.0);
+                eprintln!(
+                    "native_auth_reproof_unsettled cause={}",
+                    plain_cause(&error, "native_auth_reproof_error_redacted")
+                );
             }
         }
     }

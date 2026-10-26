@@ -1,4 +1,4 @@
-use super::native_auth_dispatch_diagnostic;
+use super::{master_dispatch_shutdown_line, native_auth_dispatch_diagnostic};
 use crate::engine::EngineError;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 use std::os::unix::fs::PermissionsExt;
@@ -56,4 +56,24 @@ fn native_auth_dispatch_diagnostic_shows_joined_internal_codes_but_not_paths() {
     );
     let path = EngineError("master_capture_unavailable:/private/tmp/secret".into());
     assert!(!native_auth_dispatch_diagnostic(&path).contains("/private"));
+}
+
+#[test]
+fn master_dispatch_shutdown_logs_a_plain_code_but_never_driver_or_parser_text() {
+    let parser = EngineError("missing field `method` at line 1 column 416".into());
+    let line = master_dispatch_shutdown_line(&parser);
+    assert_eq!(
+        line,
+        "master_dispatch_shutdown cause=master_dispatch_error_redacted"
+    );
+    assert!(!line.contains("method"));
+    let private = EngineError("master_capture_unavailable:/private/tmp/secret\nmore".into());
+    let line = master_dispatch_shutdown_line(&private);
+    assert!(!line.contains("/private") && !line.contains('\n'));
+    assert_eq!(
+        master_dispatch_shutdown_line(&EngineError(
+            "master_runtime_cleanup_uncertain:rcli_master_wait_failed".into()
+        )),
+        "master_dispatch_shutdown cause=master_runtime_cleanup_uncertain:rcli_master_wait_failed"
+    );
 }
