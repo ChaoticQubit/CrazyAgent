@@ -1112,6 +1112,9 @@ impl ResearchRunner {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
         }
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            return Ok(ReadOnlyEnding::Failed(line.into()));
+        }
         let folder = run.folder.canonicalize()?;
         if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
             return Err(RunError::Invalid(
@@ -1709,13 +1712,17 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     Ok(())
 }
 
-/// The owner's line for a team agent or research job on a system that runs no agent
-/// confined to its own git worktree: Linux in V1 (DEC-094), whose boundaries cannot keep the
-/// worktree's git links and shared objects read-only. Input: the operating system name as
-/// `std::env::consts::OS` gives it. Output: the line, or None where such agents run.
+/// The owner's line for a team agent, research job or onboarding mapping run on a system
+/// that runs no such agent in V1: Linux (DEC-094), whose boundaries cannot keep a worktree's
+/// git links read-only, and Windows, which cannot load the Seatbelt profile they run under.
+/// Input: the operating system name as `std::env::consts::OS` gives it. Output: the line,
+/// or None where such agents run.
 pub(crate) fn confined_unavailable(os: &str) -> Option<&'static str> {
-    (os == "linux")
-        .then_some("Team agents and research are not available on Linux in this version.")
+    match os {
+        "linux" => Some("Team agents and research are not available on Linux in this version."),
+        "windows" => Some("Team agents and research are not available on Windows in this version."),
+        _ => None,
+    }
 }
 
 /// Refuses to add a worktree with git under a Seatbelt profile, which Windows cannot load;
@@ -2434,14 +2441,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn only_linux_refuses_team_agents_and_research_with_a_plain_line() {
+    fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
         assert_eq!(
             confined_unavailable("linux"),
             Some("Team agents and research are not available on Linux in this version.")
         );
-        for os in ["macos", "windows"] {
-            assert_eq!(confined_unavailable(os), None, "{os}");
-        }
+        assert_eq!(
+            confined_unavailable("windows"),
+            Some("Team agents and research are not available on Windows in this version.")
+        );
+        assert_eq!(confined_unavailable("macos"), None);
     }
 
     /// Setting up one project's repository must not wait for another project's setup:
@@ -2972,6 +2981,7 @@ mod tests {
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
         let temp = tempfile::tempdir().unwrap();
@@ -3017,6 +3027,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(
             Command::new(GIT)
@@ -3069,6 +3080,7 @@ mod tests {
         assert!(filter_overrides(&many).is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn adding_an_agent_worktree_runs_no_command_the_repository_configures() {
         let mut problems = Vec::new();
