@@ -2541,6 +2541,7 @@ mod turn_line_tests {
             input_cursor: Cursor::new(1),
             phase,
             reason: None,
+            detail: None,
             attempt: None,
             runtime: None,
             reply: None,
