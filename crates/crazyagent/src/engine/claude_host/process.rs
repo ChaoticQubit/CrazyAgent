@@ -9,6 +9,7 @@ use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +67,7 @@ pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
     profile: NativeProfileUse,
+    home: PathBuf,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
     channels: Channels,
@@ -76,7 +78,7 @@ pub(super) fn run(
         report,
         stop,
     } = channels;
-    if let Err(error) = validate_command(&command, &profile) {
+    if let Err(error) = validate_command(&command, &profile, &home) {
         report.send_replace(Status {
             phase: Phase::Retired,
             fault: Some(error),
@@ -90,16 +92,6 @@ pub(super) fn run(
         });
         return;
     }
-    let home = match profile.profile_path() {
-        Ok(home) => home,
-        Err(_) => {
-            report.send_replace(Status {
-                phase: Phase::Retired,
-                fault: Some(Fault::Host("claude_host_profile_changed")),
-            });
-            return;
-        }
-    };
     command
         .env_clear()
         .env("HOME", &home)
