@@ -433,8 +433,12 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
     fixture.stop().await;
 }
 
+/// Wiring test: a local stand-in server answers /v1/models with an invented model list
+/// and an invented 401, so this checks what the engine sends and how it keeps the key,
+/// not a provider. Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
+/// A real 401 needs an approved provider profile and is not covered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() {
+async fn wiring_api_key_reaches_a_stand_in_server_only_in_the_authorization_header() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let secret = format!("sk-local-{}", std::process::id());
@@ -637,8 +641,11 @@ async fn a_saved_key_never_goes_out_over_plain_http_to_another_host() {
     fixture.stop().await;
 }
 
+/// Wiring test: a local stand-in server answers the check with an invented model list,
+/// so this checks the key replacement and what the engine sends, not a provider.
+/// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
+async fn wiring_replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let old = format!("sk-old-{}-leaked", std::process::id());
@@ -747,8 +754,11 @@ async fn replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
     fixture.stop().await;
 }
 
+/// Wiring test: a local stand-in server holds an invented model list past the owner wait,
+/// so this checks the engine's deadline handling; a slow real provider cannot be arranged.
+/// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_account_check_slower_than_the_owner_wait_still_answers() {
+async fn wiring_an_account_check_slower_than_the_owner_wait_still_answers() {
     let fixture = Fixture::start_with(1000).await;
     let client = fixture.client().await;
     let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
@@ -820,6 +830,37 @@ async fn local_model_discovery_reads_the_real_ollama() {
             .0,
         "account_local_url_required"
     );
+    fixture.stop().await;
+}
+
+/// Checks an OpenAI-compatible account pointed at the real local Ollama through the owner
+/// API: the engine reads the model list Ollama really serves at /v1/models. This is the
+/// real-provider counterpart of the stand-in server wiring tests; Ollama ignores the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_openai_compatible_account_check_lists_the_real_ollama_models() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Local Ollama",
+                Some("http://127.0.0.1:11434/v1".into()),
+                Some("qwen2.5:0.5b"),
+            ),
+            key("sk-local-ollama-check"),
+        )
+        .await
+        .unwrap();
+    let checked = client.check_account(account.id.clone()).await.unwrap();
+    assert!(
+        checked.models.iter().any(|model| model == "qwen2.5:0.5b"),
+        "real local ollama models: {:?}",
+        checked.models
+    );
+    assert_eq!(checked.account.status_label, "Key saved");
+    client.remove_account(account.id.clone()).await.unwrap();
     fixture.stop().await;
 }
 

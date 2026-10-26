@@ -53,8 +53,13 @@ fn typed_until(file: &Path, wanted: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Wiring test: a shell script stands in for Claude Code in a real tmux pane, so this
+/// checks TerminalSession's paste, key file and stop only. A real harness in a terminal:
+/// e2e_tui.rs the_tui_types_into_a_live_agent_terminal_from_the_team_tree, which needs
+/// a live team and reports UNAVAILABLE otherwise.
 #[test]
-fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_with_its_key_file() {
+fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_with_its_key_file()
+ {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -138,8 +143,12 @@ fn a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_stops_w
     assert!(config.contains("hasCompletedOnboarding"));
 }
 
+/// Wiring test: a shell script stands in for Claude Code in a real tmux pane, so this
+/// checks TerminalSession's first-prompt timing only. A real harness in a terminal:
+/// e2e_tui.rs the_tui_types_into_a_live_agent_terminal_from_the_team_tree, which needs
+/// a live team and reports UNAVAILABLE otherwise.
 #[test]
-fn the_first_prompt_waits_until_the_app_reads_keys_itself() {
+fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
