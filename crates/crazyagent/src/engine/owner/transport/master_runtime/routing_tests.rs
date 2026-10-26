@@ -2064,3 +2064,93 @@ async fn the_conversation_so_far_keeps_the_newest_turns_that_fit_the_prompt() {
     drop(last);
     case.finish().await;
 }
+
+/// Stores the project's team plan with the master tools switch for the routing fixture,
+/// through a second connection to its real engine database. Input: the fixture and the
+/// switch. Output: none; a panic if the row cannot be written.
+fn store_master_tools(case: &Fixture, master_tools: bool) {
+    let setup = crate::project_setup::StoredSetup {
+        project_id: case.session.project_id.clone(),
+        name: "Tools".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools,
+            sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                harness: "codex".into(),
+                agents: 1,
+                tools: true,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        },
+        documents: vec![],
+        folder: case.root.path().join("repository").display().to_string(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    writer
+        .execute(
+            "INSERT OR REPLACE INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+}
+
+/// The pool selection of a Codex master whose turns run on the pool's Codex account.
+fn codex_pool_selection() -> MasterSelection {
+    MasterSelection {
+        backend: MasterBackend::Codex,
+        pool_ref: reference("shared-pool"),
+        target_profile_ref: reference("codex-c"),
+        route: RouteRequest {
+            preferred_target: Some(reference("codex-c")),
+            required_target: Some(reference("codex-c")),
+            required_capabilities: vec![],
+            account_ref: reference("codex-account-c"),
+            budget_ref: reference("conversation-budget"),
+            resources: ResourceBudget::unit(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn a_codex_master_turn_is_prepared_with_the_project_s_master_tools_switch() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.session.selection.backend, MasterBackend::Codex);
+    assert!(prepared.tools, "the project's master tools switch is on");
+    assert!(
+        prepared.instructions.contains("Your tools are on"),
+        "{}",
+        prepared.instructions
+    );
+    drop(prepared);
+    case.finish().await;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, false);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(!prepared.tools, "the project's master tools switch is off");
+    assert!(
+        !prepared.instructions.contains("Your tools are on"),
+        "{}",
+        prepared.instructions
+    );
+    drop(prepared);
+    case.finish().await;
+}

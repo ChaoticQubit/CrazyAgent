@@ -35,7 +35,7 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
     let codex = crate::team::runtime::managed_agent::codex();
     let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
     let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
-    let command = master_command(&codex, &managed, &worktree, &connection.model.id).unwrap();
+    let command = master_command(&codex, &managed, &worktree, &connection.model.id, None).unwrap();
     let sandbox = master_sandbox(
         &root,
         &runtime_ref,
@@ -50,6 +50,7 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
         command,
         sandbox,
         profile,
+        managed.clone(),
         NativeAction::Launch {
             session_id: SessionId::new("codex-live-master-session").unwrap(),
             harness: NativeHarness::Codex,
@@ -92,4 +93,128 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
             .join(format!("master-runtime-{}", runtime_ref.as_str()))
             .exists()
     );
+}
+
+/// Qualifies a real Codex master turn with its tools on (DEC-093) inside the tools-on master
+/// sandbox, in its own home with a copy of the account's credential: it writes a file in its
+/// worktree with its own tools, calls the engine's real `delegate` tool served by the built
+/// engine executable, and replies; the engine then takes the recorded task. The reply is built
+/// as the master runtime builds it. The turn is bounded by a 240 s wall time.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates() {
+    use super::super::master_runtime::ReplyText;
+
+    let engine = super::live_claude_tests::engine_executable();
+    let mut signed_in = SignedIn::codex();
+    let connection = signed_in.connection.clone();
+    let turn = RequestId::new("codex-live-tools-turn").unwrap();
+    let profile = signed_in.acquire(turn.as_str());
+    let managed = profile.profile_path().unwrap();
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-live-tools-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let root = Root::open(&base).unwrap();
+    let repository = base.join("repository");
+    let worktree = base.join("worktrees").join("lease");
+    private_directory(&repository);
+    private_directory(&worktree);
+    let codex = crate::team::runtime::managed_agent::codex();
+    let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let budget = ResourceBudget {
+        wall_time_ms: 240_000,
+        ..ResourceBudget::unit()
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record,
+    } = codex_master_turn(
+        &place,
+        &profile,
+        &codex,
+        &connection,
+        Duration::from_millis(budget.wall_time_ms),
+        Some(&engine),
+    )
+    .unwrap();
+    require_master_tool_policy(&command, true).unwrap();
+    assert_ne!(home, managed);
+    let record = tool_record.unwrap();
+    let mut master = CodexHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: SessionId::new("codex-live-tools-session").unwrap(),
+            harness: NativeHarness::Codex,
+            profile_ref: signed_in.profile_ref(),
+            worktree_lease: RequestId::new("codex-live-tools-lease").unwrap(),
+        },
+        connection.account_ref.clone(),
+        budget,
+        "You are a test. Follow the user's steps exactly and use your tools for them.",
+    )
+    .await
+    .unwrap();
+    master
+        .start_turn(
+            turn.clone(),
+            "Do these steps in order. 1. With your shell, create the file note.txt in your working folder containing exactly the word HERON. 2. Call the delegate tool of the crazyagent-team MCP server once with the task \"Write the README\". 3. Reply with exactly the word DONE.",
+        )
+        .await
+        .unwrap();
+    let mut errors = Vec::new();
+    let mut steps = Vec::new();
+    let mut reply = ReplyText::default();
+    let outcome = loop {
+        let event = master.next_event().await.unwrap();
+        match event.kind {
+            EventKind::AssistantError { code } => errors.push(code),
+            EventKind::TurnError {
+                message,
+                will_retry: false,
+            } => errors.push(message),
+            EventKind::AssistantDelta { item_id, text } => {
+                reply.push(Some(&item_id), &text, true).unwrap()
+            }
+            EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
+            EventKind::UnsupportedRequest { method, .. } => steps.push(method),
+            EventKind::Unsupported {
+                subtype: Some(method),
+                ..
+            } if method == "item/started" || method == "item/completed" => steps.push(method),
+            EventKind::TurnFinished { outcome, .. } => break outcome,
+            _ => {}
+        }
+    };
+    master.close().await.unwrap();
+    let delegations = crate::team::tool::take(&record);
+    let note = std::fs::read_to_string(worktree.join("note.txt")).unwrap_or_default();
+    println!(
+        "real codex tools-on master turn: outcome={outcome:?} errors={errors:?} steps={steps:?} delegations={delegations:?} note={note:?} reply={:?}",
+        reply.text
+    );
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(outcome, TurnOutcome::Success);
+    assert!(reply.text.contains("DONE"), "{}", reply.text);
+    assert_eq!(note.trim(), "HERON");
+    assert_eq!(delegations.len(), 1, "{delegations:?}");
+    assert_eq!(delegations[0].prompt, "Write the README");
+    assert_eq!(std::fs::read_dir(&repository).unwrap().count(), 0);
+    drop(credential);
+    drop(folder);
 }

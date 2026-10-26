@@ -42,9 +42,9 @@ const TOOL_STEPS_MAX: &str = "24";
 #[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
 
-/// What a Claude Code master turn with its tools on is given beyond the team agents' tool
-/// set: the engine executable that serves its `delegate` tool, and the absolute drop file in
-/// the turn's private temporary folder where that tool records each proposed task.
+/// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
+/// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
+/// in the turn's private temporary folder where that tool records each proposed task.
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,

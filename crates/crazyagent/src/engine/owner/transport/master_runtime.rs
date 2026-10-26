@@ -572,6 +572,7 @@ impl OwnerRuntimeHandle {
                     launch.command,
                     launch.sandbox,
                     profile,
+                    launch.home,
                     action,
                     account_ref,
                     resources,
@@ -667,7 +668,7 @@ impl OwnerRuntimeHandle {
             .host
             .start_turn(turn_id.clone(), &prepared.text)
             .await?;
-        let mut text = String::new();
+        let mut reply = ReplyText::default();
         let mut inspect = tokio::time::interval(INSPECT_INTERVAL);
         inspect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -725,33 +726,31 @@ impl OwnerRuntimeHandle {
                     parent_tool_use_id, ..
                 } if prepared.tools => {
                     if parent_tool_use_id.is_none() {
-                        text.clear();
+                        reply.tool_step();
                     }
                 }
-                EventKind::AssistantDelta { text: delta, .. }
-                | EventKind::AssistantText { text: delta, .. } => {
-                    if text
-                        .len()
-                        .checked_add(delta.len())
-                        .is_none_or(|length| length > REPLY_BYTES_MAX)
-                    {
-                        return Err(failure("codex_host_output_limit"));
-                    }
-                    text.push_str(&delta);
-                    assert!(text.len() <= REPLY_BYTES_MAX);
+                EventKind::AssistantDelta {
+                    item_id,
+                    text: delta,
+                } => {
+                    reply.push(Some(&item_id), &delta, prepared.tools)?;
+                    assert!(active.capture.sequence > 0);
+                }
+                EventKind::AssistantText { text: delta, .. } => {
+                    reply.push(None, &delta, prepared.tools)?;
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::TurnFinished {
                     outcome: TurnOutcome::Success,
                     ..
                 } => {
-                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    if reply.text.trim().is_empty() || active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
                         reply: MasterReply {
-                            text,
+                            text: reply.text,
                             provenance: MasterReplyProvenance {
                                 attempt_id: prepared.attempt.request.id.clone(),
                                 runtime_ref: active.runtime.runtime_ref.clone(),
@@ -781,6 +780,50 @@ impl OwnerRuntimeHandle {
                 _ => {}
             }
         }
+    }
+}
+
+/// The reply a master turn is building: its text so far and, for a tools-on master, the
+/// agent message that text belongs to. A tools-on master's reply is what it says after its
+/// last tool step, so a new message or a top-level tool step starts the text over.
+#[derive(Default)]
+pub(super) struct ReplyText {
+    pub(super) text: String,
+    message: Option<String>,
+}
+
+impl ReplyText {
+    /// Starts the reply over after a top-level tool step of a tools-on master.
+    pub(super) fn tool_step(&mut self) {
+        self.text.clear();
+        self.message = None;
+    }
+
+    /// Adds streamed reply text. With tools on, text of a new agent message replaces what an
+    /// earlier message said; with tools off every message adds to the reply, as before.
+    /// Inputs: the agent message the text belongs to when the harness names one, the text and
+    /// the tools switch. Output: Ok, or `codex_host_output_limit` past `REPLY_BYTES_MAX`.
+    pub(super) fn push(
+        &mut self,
+        message: Option<&str>,
+        part: &str,
+        tools: bool,
+    ) -> Result<(), EngineError> {
+        if tools && message.is_some() && message != self.message.as_deref() {
+            self.text.clear();
+            self.message = message.map(str::to_owned);
+        }
+        if self
+            .text
+            .len()
+            .checked_add(part.len())
+            .is_none_or(|length| length > REPLY_BYTES_MAX)
+        {
+            return Err(failure("codex_host_output_limit"));
+        }
+        self.text.push_str(part);
+        assert!(self.text.len() <= REPLY_BYTES_MAX);
+        Ok(())
     }
 }
 
@@ -882,6 +925,39 @@ mod tests {
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {
+        let mut reply = ReplyText::default();
+        reply
+            .push(Some("message-1"), "I will write ", true)
+            .unwrap();
+        reply.push(Some("message-1"), "the note.", true).unwrap();
+        reply.push(Some("message-2"), "DO", true).unwrap();
+        reply.push(Some("message-2"), "NE", true).unwrap();
+        assert_eq!(reply.text, "DONE");
+        reply.push(None, " more", true).unwrap();
+        assert_eq!(reply.text, "DONE more");
+        reply.tool_step();
+        assert_eq!(reply.text, "");
+        reply.push(None, "After the step.", true).unwrap();
+        assert_eq!(reply.text, "After the step.");
+
+        let mut reply = ReplyText::default();
+        reply.push(Some("message-1"), "First. ", false).unwrap();
+        reply.push(Some("message-2"), "Second.", false).unwrap();
+        assert_eq!(reply.text, "First. Second.");
+
+        let mut reply = ReplyText::default();
+        let long = "x".repeat(REPLY_BYTES_MAX);
+        reply.push(Some("message-1"), &long, true).unwrap();
+        assert_eq!(
+            reply.push(Some("message-1"), "y", true),
+            Err(failure("codex_host_output_limit"))
+        );
+        reply.push(Some("message-2"), "z", true).unwrap();
+        assert_eq!(reply.text, "z");
+    }
 
     fn protocol_input() -> ObservedEvent {
         ObservedEvent {

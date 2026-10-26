@@ -202,3 +202,80 @@ async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lea
     );
     assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_codex_host_runs_in_the_home_its_command_names_and_never_in_another() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("codex");
+    let profile = fixture.lease("codex-home-turn", 1).unwrap();
+    let managed = profile.profile_path().unwrap();
+    let private = fixture.root.path().join("turn-home");
+    std::fs::create_dir(&private).unwrap();
+    let private = std::fs::canonicalize(&private).unwrap();
+    let project = std::fs::canonicalize(&fixture.project).unwrap();
+    let command = |home: &Path| {
+        let mut command = Command::new("/registered/codex");
+        command
+            .args(["-c", "cli_auth_credentials_store=\"file\"", "app-server"])
+            .current_dir(&project)
+            .env("HOME", home)
+            .env("CODEX_HOME", home);
+        command
+    };
+    let home_of = |command: &Command| -> Vec<(String, String)> {
+        command
+            .get_envs()
+            .filter(|(key, _)| *key == "HOME" || *key == "CODEX_HOME")
+            .map(|(key, value)| {
+                (
+                    key.to_str().unwrap().to_owned(),
+                    value.unwrap().to_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (selected, _, tools) =
+        super::prepare_command(command(&private), &profile, &private).unwrap();
+    assert!(
+        !tools,
+        "a command without the tools-on settings starts a read-only thread"
+    );
+    let private_text = private.to_str().unwrap().to_owned();
+    assert_eq!(
+        home_of(&selected),
+        [
+            ("CODEX_HOME".to_owned(), private_text.clone()),
+            ("HOME".to_owned(), private_text)
+        ]
+    );
+    let (selected, _, _) = super::prepare_command(command(&managed), &profile, &managed).unwrap();
+    let managed_text = managed.to_str().unwrap().to_owned();
+    assert_eq!(
+        home_of(&selected),
+        [
+            ("CODEX_HOME".to_owned(), managed_text.clone()),
+            ("HOME".to_owned(), managed_text)
+        ]
+    );
+    for (named, given) in [(&managed, &private), (&private, &managed)] {
+        assert_eq!(
+            super::prepare_command(command(named), &profile, given)
+                .map(|_| ())
+                .map_err(|error| error.0),
+            Err("codex_host_home_unsafe".to_owned())
+        );
+    }
+    let mut tools_on = command(&private);
+    tools_on.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    let (_, _, tools) = super::prepare_command(tools_on, &profile, &private).unwrap();
+    assert!(tools, "the tools-on command starts a tools thread");
+    let inside = managed.join("nested");
+    assert_eq!(
+        super::prepare_command(command(&inside), &profile, &inside)
+            .map(|_| ())
+            .map_err(|error| error.0),
+        Err("codex_host_home_unsafe".to_owned())
+    );
+}
