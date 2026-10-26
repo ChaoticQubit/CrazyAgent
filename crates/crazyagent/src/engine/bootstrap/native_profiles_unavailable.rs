@@ -105,11 +105,6 @@ impl NativeProfileCustody {
         match *self {}
     }
 
-    #[cfg(test)]
-    pub(crate) fn profile_home(&self, _profile_ref: &CredentialRef) -> PathBuf {
-        match *self {}
-    }
-
     pub(crate) fn generated_configured_home(&self, _profile_ref: &CredentialRef) -> PathBuf {
         match *self {}
     }
