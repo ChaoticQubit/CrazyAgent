@@ -49,6 +49,7 @@ const HISTORY_MESSAGES_MAX: i64 = 12;
 const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
 const TEAM_HOST: &str = "team";
+const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
@@ -858,6 +859,7 @@ impl TeamRuntime {
             return Ok(());
         }
         let paused = self.paused()?;
+        self.retire_rejected(project, access);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.feed_master(&stored, access, &paused)?;
@@ -874,7 +876,7 @@ impl TeamRuntime {
             };
             let usable = matches!(
                 eligible_accounts(access, &stored.project_id, launch),
-                Accounts::Usable(accounts) if accounts.iter().any(|a| self.ready(access, a))
+                Accounts::Usable(accounts) if accounts.iter().any(|a| self.refusal(access, a).is_none())
             );
             let (from, to) = if usable {
                 ("needs_pool", "queued")
@@ -1002,11 +1004,24 @@ impl TeamRuntime {
                 "No account in this project's pool can run {harness}"
             ));
         }
+        let mut refused = Vec::new();
         let accounts: Vec<TeamAccount> = fitting
             .into_iter()
-            .filter(|account| self.ready(access, account))
+            .filter(|account| match self.refusal(access, account) {
+                None => true,
+                Some(code) => {
+                    refused.push(code);
+                    false
+                }
+            })
             .collect();
         if accounts.is_empty() {
+            assert!(!refused.is_empty());
+            if refused.iter().all(|code| code == SIGN_IN_REJECTED) {
+                return Err(format!(
+                    "Sign in again: the provider rejected the sign-in of every account in this project's pool that can run {harness}"
+                ));
+            }
             return Err(format!(
                 "Sign in to an account in this project's pool to run {harness}"
             ));
@@ -1018,17 +1033,40 @@ impl TeamRuntime {
             })
     }
 
-    /// Tells whether an account can take agent work now: endpoints always, managed
+    /// Tells why an account cannot take agent work now: endpoints always can, managed
     /// profiles only while their sign-in passes the master's check for this engine run.
-    fn ready(&self, access: &ModelAccess, account: &TeamAccount) -> bool {
+    /// Takes the live access and the account. Returns the refusal code, or none.
+    fn refusal(&self, access: &ModelAccess, account: &TeamAccount) -> Option<String> {
         match account.reach {
-            TeamReach::Endpoint { .. } => true,
-            TeamReach::Managed { .. } => self.sign_in(access, &account.connection).is_ok(),
+            TeamReach::Endpoint { .. } => None,
+            TeamReach::Managed { .. } => self.sign_in(access, &account.connection).err(),
         }
     }
 
-    /// Proves a managed pool account is signed in for this engine run with the same
-    /// check every master turn uses. Takes the live access and the pool member.
+    /// Stops the project's idle agents whose account's sign-in the provider rejected, so
+    /// the next message or task starts on another pool account instead of failing on it.
+    /// Takes the project and the live access. Busy agents finish their turn first.
+    fn retire_rejected(&mut self, project: &ProjectId, access: &ModelAccess) {
+        let rejected: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| &w.project == project && w.managed && w.busy.is_none() && !w.stopping)
+            .filter(|(_, w)| {
+                self.sign_in(access, &w.connection)
+                    .is_err_and(|code| code == SIGN_IN_REJECTED)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in rejected {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    /// Proves a managed pool account is signed in for this engine run, and that the
+    /// provider did not reject that sign-in, with the same check every master turn uses.
+    /// Takes the live access and the pool member.
     /// Returns the active host and the sign-in, or a plain refusal code.
     fn sign_in(
         &self,
@@ -1059,6 +1097,9 @@ impl TeamRuntime {
             .map_err(|_| "team_state_unavailable")?
             .ok_or("team_engine_not_ready")?;
         let fact = crate::storage::native_sign_in(&tx, &host, connection, None).map_err(|e| e.0)?;
+        if crate::model_gateway::sign_in_rejected(&tx, connection).map_err(|e| e.0)? {
+            return Err(SIGN_IN_REJECTED.into());
+        }
         drop(tx);
         assert_eq!(fact.binding.engine_epoch, host.engine_epoch);
         Ok((host, fact))
@@ -2395,6 +2436,7 @@ fn sign_in_problem(code: &str) -> String {
     match code {
         "master_authentication_unknown" => "the account is not signed in".into(),
         "master_authentication_stale" => "the account needs a fresh sign-in".into(),
+        SIGN_IN_REJECTED => "the provider rejected the account's sign-in".into(),
         "team_account_left_pool" => "the account left the pool".into(),
         "team_engine_not_ready" => "the engine is not ready".into(),
         _ => with_code("the account's sign-in could not be checked", Some(code)),
