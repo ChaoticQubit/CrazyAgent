@@ -10,13 +10,16 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
 mod configured_rcli;
 mod generated_configured_rcli;
+mod staging;
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;
+use staging::{ROOT_STAGING, STAGING, Staging, step};
 
 const ROOT: &str = "native-profiles";
 const MANIFEST: &str = "identity.json";
@@ -506,7 +509,7 @@ impl NativeProfileCustody {
         let stable = StableBinding::of(&binding.connection)?;
         let key = stable.key();
         let profile = Directory::open(&root.file, OsStr::new(&key))?;
-        let (home, manifest) = prepare_profile(&profile, &root_identity, stable, false)?;
+        let (home, manifest) = prepare_profile(&profile, &root_identity, stable)?;
         let hash = digest(&manifest.bytes);
         if binding.custody_id != hash
             || self
@@ -615,12 +618,13 @@ impl NativeProfileCustody {
         if !exists && self.root_hash.is_some() {
             return Err(failure("native_profile_identity_changed"));
         }
-        let directory = if exists {
-            Directory::open(&self.anchor.directory, OsStr::new(ROOT))?
+        let (directory, manifest) = if exists {
+            let directory = Directory::open(&self.anchor.directory, OsStr::new(ROOT))?;
+            let manifest = Manifest::open(&directory.file, false)?;
+            (directory, manifest)
         } else {
-            Directory::create(&self.anchor.directory, OsStr::new(ROOT))?
+            self.create_root(host)?
         };
-        let mut manifest = Manifest::open(&directory.file, !exists)?;
         let expected = RootIdentity {
             version: 1,
             database_instance: host.db_instance.clone(),
@@ -629,21 +633,12 @@ impl NativeProfileCustody {
             directory: directory.identity,
             manifest: manifest.identity,
         };
-        if exists {
-            let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
-                .map_err(|_| failure("native_profile_identity_invalid"))?;
-            if actual != expected {
-                return Err(failure("native_profile_binding_conflict"));
-            }
-        } else {
-            manifest.write(
-                &directory.file,
-                serde_json::to_vec(&expected)
-                    .map_err(|_| failure("native_profile_identity_invalid"))?,
-            )?;
-            directory.file.sync_all().map_err(unsafe_custody)?;
-            self.anchor.directory.sync_all().map_err(unsafe_custody)?;
+        let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
+            .map_err(|_| failure("native_profile_identity_invalid"))?;
+        if actual != expected {
+            return Err(failure("native_profile_binding_conflict"));
         }
+        manifest.verify(&directory.file)?;
         let hash = digest(&manifest.bytes);
         if self
             .root_hash
@@ -654,6 +649,33 @@ impl NativeProfileCustody {
         }
         self.root_hash = Some(hash);
         Ok((directory, manifest, expected))
+    }
+
+    /// Builds the profile root with its identity manifest in a staging directory and
+    /// renames it into place whole. Input: the engine host stamp. Output: the root and
+    /// its manifest; an interruption leaves only a staging directory for the next sweep.
+    fn create_root(&self, host: &HostStamp) -> Result<(Directory, Manifest), EngineError> {
+        staging::sweep(&self.anchor.directory, ROOT_STAGING)?;
+        let staged = Staging::create(&self.anchor.directory, ROOT_STAGING)?;
+        let mut manifest = Manifest::open(&staged.directory.file, true)?;
+        step()?;
+        let expected = RootIdentity {
+            version: 1,
+            database_instance: host.db_instance.clone(),
+            state: self.anchor.identity,
+            database: self.database_identity,
+            directory: staged.directory.identity,
+            manifest: manifest.identity,
+        };
+        manifest.write(
+            &staged.directory.file,
+            serde_json::to_vec(&expected)
+                .map_err(|_| failure("native_profile_identity_invalid"))?,
+        )?;
+        step()?;
+        let directory = staged.commit(&self.anchor.directory, ROOT)?;
+        assert_eq!(directory.identity, expected.directory);
+        Ok((directory, manifest))
     }
 
     pub(crate) fn prepare(
@@ -676,9 +698,9 @@ impl NativeProfileCustody {
         let profile = if exists {
             Directory::open(&root.file, OsStr::new(&key))?
         } else {
-            Directory::create(&root.file, OsStr::new(&key))?
+            create_profile(&root.file, &key, &root_identity, binding.clone())?
         };
-        let (home, manifest) = prepare_profile(&profile, &root_identity, binding, !exists)?;
+        let (home, manifest) = prepare_profile(&profile, &root_identity, binding)?;
         let hash = digest(&manifest.bytes);
         if self
             .profiles
@@ -717,21 +739,48 @@ impl NativeProfileCustody {
     }
 }
 
+/// Builds a native profile slot with an empty home and its identity manifest in a
+/// staging directory and renames it to its key whole. Inputs: the profile root, the
+/// slot key, the root identity and the stable binding. Output: the slot directory.
+fn create_profile(
+    root: &File,
+    key: &str,
+    root_identity: &RootIdentity,
+    binding: StableBinding,
+) -> Result<Directory, EngineError> {
+    staging::sweep(root, STAGING)?;
+    let staged = Staging::create(root, STAGING)?;
+    let home = Directory::create(&staged.directory.file, OsStr::new("home"))?;
+    step()?;
+    require_empty_home(&home.file)?;
+    let mut manifest = Manifest::open(&staged.directory.file, true)?;
+    step()?;
+    let expected = ProfileIdentity {
+        version: 1,
+        root: root_identity.clone(),
+        binding,
+        directory: staged.directory.identity,
+        home: home.identity,
+        manifest: manifest.identity,
+    };
+    manifest.write(
+        &staged.directory.file,
+        serde_json::to_vec(&expected).map_err(|_| failure("native_profile_identity_invalid"))?,
+    )?;
+    home.file.sync_all().map_err(unsafe_custody)?;
+    step()?;
+    let profile = staged.commit(root, key)?;
+    assert_eq!(profile.identity, expected.directory);
+    Ok(profile)
+}
+
 fn prepare_profile(
     profile: &Directory,
     root: &RootIdentity,
     binding: StableBinding,
-    create: bool,
 ) -> Result<(Directory, Manifest), EngineError> {
-    let home = if create {
-        Directory::create(&profile.file, OsStr::new("home"))?
-    } else {
-        Directory::open(&profile.file, OsStr::new("home"))?
-    };
-    if create {
-        require_empty_home(&home.file)?;
-    }
-    let mut manifest = Manifest::open(&profile.file, create)?;
+    let home = Directory::open(&profile.file, OsStr::new("home"))?;
+    let manifest = Manifest::open(&profile.file, false)?;
     let expected = ProfileIdentity {
         version: 1,
         root: root.clone(),
@@ -740,20 +789,10 @@ fn prepare_profile(
         home: home.identity,
         manifest: manifest.identity,
     };
-    if create {
-        manifest.write(
-            &profile.file,
-            serde_json::to_vec(&expected)
-                .map_err(|_| failure("native_profile_identity_invalid"))?,
-        )?;
-        home.file.sync_all().map_err(unsafe_custody)?;
-        profile.file.sync_all().map_err(unsafe_custody)?;
-    } else {
-        let actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
-            .map_err(|_| failure("native_profile_identity_invalid"))?;
-        if actual != expected {
-            return Err(failure("native_profile_binding_conflict"));
-        }
+    let actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
+        .map_err(|_| failure("native_profile_identity_invalid"))?;
+    if actual != expected {
+        return Err(failure("native_profile_binding_conflict"));
     }
     require_profile_entries(&profile.file)?;
     Ok((home, manifest))
@@ -763,9 +802,10 @@ fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
     let mut slots = BTreeMap::new();
     let entries = Dir::read_from(root).map_err(unsafe_custody)?;
     let mut visited = 0;
+    let mut staged = 0;
     for entry in entries {
         visited += 1;
-        if visited > MAX_PROFILES + 3 {
+        if visited > MAX_PROFILES + staging::STAGING_MAX + 3 {
             return Err(failure("native_profile_capacity"));
         }
         let entry = entry.map_err(unsafe_custody)?;
@@ -774,11 +814,15 @@ fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
         if matches!(bytes, b"." | b".." | b"identity.json") {
             continue;
         }
+        let staging = staging::is_staging(bytes, STAGING);
         let key = std::str::from_utf8(bytes).map_err(unsafe_custody)?;
-        if !hex(key, 64) {
+        if !staging && !hex(key, 64) {
             return Err(failure("native_profile_custody_unsafe"));
         }
-        if slots.len() == MAX_PROFILES {
+        if staging {
+            staged += 1;
+        }
+        if slots.len() == MAX_PROFILES || staged > staging::STAGING_MAX {
             return Err(failure("native_profile_capacity"));
         }
         let metadata =
@@ -789,6 +833,9 @@ fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
             || metadata.st_ino == 0
         {
             return Err(failure("native_profile_custody_unsafe"));
+        }
+        if staging {
+            continue;
         }
         let identity = Identity {
             device: metadata.st_dev as u64,

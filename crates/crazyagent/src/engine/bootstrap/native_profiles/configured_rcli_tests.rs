@@ -391,3 +391,6 @@ fn configured_rcli_auth_none_requires_an_explicit_local_endpoint() {
 
 #[path = "generated_configured_profile_tests.rs"]
 mod generated_configured_profile_tests;
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;

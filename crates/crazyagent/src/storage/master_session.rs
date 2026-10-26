@@ -2191,11 +2191,17 @@ fn adopt_account_profile(
             continue;
         }
         if receipt.as_ref().is_some_and(|previous| {
-            previous.custody_id != candidate.custody_id
-                || previous.profile_config_sha256 != candidate.profile_config_sha256
-                || previous.profile_generation != candidate.profile_generation
+            previous.profile_generation == candidate.profile_generation
+                && (previous.custody_id != candidate.custody_id
+                    || previous.profile_config_sha256 != candidate.profile_config_sha256)
         }) {
             return Err(error("master_configured_receipt_conflict"));
+        }
+        if receipt
+            .as_ref()
+            .is_some_and(|previous| previous.profile_generation >= candidate.profile_generation)
+        {
+            continue;
         }
         receipt = Some(candidate);
     }
