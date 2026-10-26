@@ -297,6 +297,8 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
         "sandbox_mode=\"danger-full-access\"",
         "approval_policy=\"never\"",
         "features.goals=false",
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
         "mcp_servers={}",
     ] {
         assert!(

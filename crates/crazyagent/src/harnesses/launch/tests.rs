@@ -171,3 +171,84 @@ fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
         .unwrap();
     assert_eq!(turn_errors(&events), [false]);
 }
+
+struct TeamLaunch {
+    _directory: tempfile::TempDir,
+    request: LaunchRequest,
+    work: PathBuf,
+}
+
+fn team_launch(harness: &str) -> TeamLaunch {
+    use std::os::unix::fs::PermissionsExt;
+    let entry = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
+        .into_iter()
+        .find(|entry| entry.id == harness)
+        .and_then(|entry| entry.executable)
+        .unwrap_or_else(|| panic!("installed {harness}"));
+    let directory = tempfile::Builder::new()
+        .prefix("ca-team-launch-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let work = base.join("work");
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    TeamLaunch {
+        _directory: directory,
+        request: LaunchRequest {
+            harness: harness.into(),
+            executable: std::fs::canonicalize(entry).unwrap(),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home },
+            model: None,
+            tools: true,
+            sandbox_profile: Some(profile),
+            limits: LaunchLimits::default(),
+        },
+        work,
+    }
+}
+
+#[test]
+fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
+    let launch = team_launch("codex");
+    let mut features = std::process::Command::new(&launch.request.executable);
+    features
+        .args(
+            super::codex_configuration(&launch.request, false)
+                .iter()
+                .flat_map(|setting| ["-c", setting]),
+        )
+        .args(["features", "list"])
+        .env_clear()
+        .env("HOME", launch.request.account.home())
+        .env("CODEX_HOME", launch.request.account.home())
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&launch.work)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::spawn_gate::output(&mut features).unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = |name: &str| {
+        text.lines().find_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            (columns.first() == Some(&name))
+                .then(|| columns.last().copied())
+                .flatten()
+        })
+    };
+    assert_eq!(state("apps"), Some("false"), "{text}");
+    assert_eq!(state("multi_agent"), Some("false"), "{text}");
+    assert_eq!(state("multi_agent_v2"), Some("false"), "{text}");
+    assert_eq!(state("shell_tool"), Some("true"), "{text}");
+}

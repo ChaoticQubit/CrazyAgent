@@ -51,12 +51,14 @@ const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
-const CODEX_TOOLS_ON: [&str; 6] = [
+const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
     "features.apps=false",
     "features.plugins=false",
     "features.goals=false",
+    "features.multi_agent=false",
+    "features.multi_agent_v2=false",
     "mcp_servers={}",
 ];
 
