@@ -297,6 +297,8 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
         "sandbox_mode=\"danger-full-access\"",
         "approval_policy=\"never\"",
         "features.goals=false",
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
         "mcp_servers={}",
     ] {
         assert!(
@@ -454,12 +456,16 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
     let on = case.request("claude-code", case.subscription(), true);
     let built = command(&on, None, &run(None)).unwrap();
     assert_eq!(
-        built.argv[built.argv.len() - 4..],
+        built.argv[built.argv.len() - 8..],
         strings(&[
             "--tools",
             "default",
             "--permission-mode",
-            "bypassPermissions"
+            "bypassPermissions",
+            "--disallowedTools",
+            "Agent",
+            "Workflow",
+            "TeamCreate"
         ])
     );
     assert!(

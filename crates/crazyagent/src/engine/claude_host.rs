@@ -6,6 +6,7 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
+use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
@@ -51,14 +52,7 @@ const TOOLS_SHELL: &str = "/bin/zsh";
 const BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const NO_SERVERS: &str = "{\"mcpServers\":{}}";
 const MCP_CONFIG_FLAG: &str = "--mcp-config";
-const DENY_FLAG: &str = "--disallowedTools";
-const DENY_FLAG_SPELLINGS: [&str; 2] = [DENY_FLAG, "--disallowed-tools"];
-
-/// Claude Code's own sub-agent tools, denied to a tools-on master so it starts sub-agents only
-/// through the engine's `delegate` tool. Claude Code 2.1.309 names them `Agent` (offered as
-/// `Task` in print mode, its alias), `Workflow` and `TeamCreate`; denying a name also denies
-/// its aliases. Every other default tool stays.
-const BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
 /// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
@@ -252,9 +246,9 @@ fn command_for(
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
-                DENY_FLAG,
+                CLAUDE_DENY_FLAG,
             ])
-            .args(BUILT_IN_AGENTS),
+            .args(CLAUDE_BUILT_IN_AGENTS),
         None => command.args(["--tools", ""]),
     };
     command.args([
@@ -717,12 +711,12 @@ pub(in crate::engine) fn require_delegate(
             let names = listed
                 .iter()
                 .copied()
-                .take(BUILT_IN_AGENTS.len())
-                .eq(BUILT_IN_AGENTS.map(std::ffi::OsStr::new));
+                .take(CLAUDE_BUILT_IN_AGENTS.len())
+                .eq(CLAUDE_BUILT_IN_AGENTS.map(std::ffi::OsStr::new));
             let ends = listed
-                .get(BUILT_IN_AGENTS.len())
+                .get(CLAUDE_BUILT_IN_AGENTS.len())
                 .is_none_or(|next| next.as_encoded_bytes().starts_with(b"-"));
-            if args[index] != std::ffi::OsStr::new(DENY_FLAG) || !names || !ends {
+            if args[index] != std::ffi::OsStr::new(CLAUDE_DENY_FLAG) || !names || !ends {
                 return Err(refused());
             }
         }

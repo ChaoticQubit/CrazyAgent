@@ -1,7 +1,7 @@
 use super::launch::{
-    AccountBinding, CLAUDE_NO_MCP, CODEX_KEY_VARIABLE, LOCAL_PLACEHOLDER_KEY, LaunchError,
-    LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, codex_configuration,
-    failure, harness_id, validate,
+    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, CODEX_KEY_VARIABLE,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, codex_configuration, failure, harness_id, validate,
 };
 use crate::launch_context::Installed;
 use std::ffi::OsStr;
@@ -396,6 +396,8 @@ fn claude(
     }
     if request.tools {
         arguments.extend(CLAUDE_TOOLS_ON.map(str::to_owned));
+        arguments.push(CLAUDE_DENY_FLAG.to_owned());
+        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(str::to_owned));
     } else {
         arguments.extend(CLAUDE_TOOLS_OFF.map(str::to_owned));
     }
