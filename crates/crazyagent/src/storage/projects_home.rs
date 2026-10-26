@@ -389,7 +389,8 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
 
 /// Points every set-up project whose folder sat in the old home, under a name
 /// `arrived` accepts, at the same folder name in the new home, keeping an
-/// onboarded project's recorded `.crazyagent/` folder and onboarding folder.
+/// onboarded project's recorded `.crazyagent/` folder, its onboarding folder and
+/// each repository it lists inside that folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -437,7 +438,58 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
+        move_repositories(tx, &project, &folder, &moved)?;
     }
+    Ok(())
+}
+
+/// Rewrites the repositories a project lists inside its moved folder to the same
+/// place in the new folder, leaving those outside it. Inputs: the transaction,
+/// the project, its old folder and its new one. Output: the project row agrees
+/// with the move, or the bound the moved path breaks.
+fn move_repositories(
+    tx: &Transaction<'_>,
+    project: &str,
+    from: &Path,
+    to: &Path,
+) -> Result<(), EngineError> {
+    let Some(body) = tx
+        .query_row("SELECT body FROM projects WHERE id=?1", [project], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(error)?
+    else {
+        return Ok(());
+    };
+    let mut stored: crate::protocol::StoredProject = serde_json::from_str(&body).map_err(error)?;
+    let mut moved = 0;
+    for repository in &mut stored.spec.repositories {
+        let Ok(rest) = Path::new(repository.as_str()).strip_prefix(from) else {
+            continue;
+        };
+        let place = if rest.as_os_str().is_empty() {
+            to.to_path_buf()
+        } else {
+            to.join(rest)
+        };
+        *repository = place
+            .to_str()
+            .ok_or_else(|| error("projects_home_path_invalid"))?
+            .to_owned();
+        moved += 1;
+    }
+    if moved == 0 {
+        return Ok(());
+    }
+    stored.spec.validate().map_err(error)?;
+    let changed = tx
+        .execute(
+            "UPDATE projects SET body=?1 WHERE id=?2",
+            params![serde_json::to_string(&stored).map_err(error)?, project],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
     Ok(())
 }
 
