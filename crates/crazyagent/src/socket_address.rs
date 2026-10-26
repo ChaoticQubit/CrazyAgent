@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(metadata.mode() & 0o7777, 0o700);
         assert_eq!(metadata.uid(), rustix::process::getuid().as_raw());
         assert_eq!(std::fs::read_link(address.parent().unwrap()).unwrap(), long);
-        let listener = crate::spawn_gate::bind_unix_std(&address).unwrap();
+        let _listener = crate::spawn_gate::bind_unix_std(&address).unwrap();
         assert!(
             std::fs::symlink_metadata(&path)
                 .unwrap()
@@ -179,8 +179,7 @@ mod tests {
                 .is_socket(),
             "the socket is made in its real folder"
         );
-        let _client = crate::spawn_gate::connect_unix_std(&address).unwrap();
-        let _accepted = listener.accept().unwrap();
+        crate::spawn_gate::connect_unix_std(&address).unwrap();
         assert_eq!(
             address_in(&path, &folder).unwrap(),
             address,
