@@ -12,7 +12,6 @@ use crate::routing::{ResourceBudget, RouteRequest};
 use crate::storage::{self, OpenedDatabase, harness_groups, native_auth, settings};
 use crate::worktrees::{self, LeaseState, WorktreeLease};
 use rusqlite::Connection;
-use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -110,7 +109,7 @@ fn selection() -> MasterSelection {
 
 struct Case {
     db: Connection,
-    _lock: File,
+    _lock: storage::EngineLock,
     custody: Result<crate::engine::bootstrap::NativeProfileCustody, crate::engine::EngineError>,
     sources: settings::SettingsSources,
     config: EffectiveConfig,

@@ -824,14 +824,14 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Takes a database path and read-only mode and returns connection ownership.
 /// Rejects unsafe filesystem metadata and competing engine ownership.
 #[cfg(all(test, unix))]
-fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
+fn open_database(path: &Path, readonly: bool) -> Result<(Connection, EngineLock), EngineError> {
     let opened = open_actor_database(path, readonly, None)?;
     Ok((opened.connection, opened.lock))
 }
 
 struct OpenedDatabase {
     connection: Connection,
-    lock: std::fs::File,
+    lock: EngineLock,
     custody: Result<NativeProfileCustody, EngineError>,
 }
 
@@ -1105,8 +1105,21 @@ fn gateway_connection_state(
     Ok(state)
 }
 
+/// The engine's exclusive hold on its database. Dropping it unlocks the file before closing
+/// it, so a child forked meanwhile that still shares the file until its exec cannot keep the
+/// database locked after the hold ends (a restart in the same process then locks at once).
+struct EngineLock {
+    file: std::fs::File,
+}
+
+impl Drop for EngineLock {
+    fn drop(&mut self) {
+        let _ = unlock_database(&self.file);
+    }
+}
+
 #[cfg(unix)]
-fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
+fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     let lock_path = path.with_extension("engine-lock");
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -1129,21 +1142,26 @@ fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
         .map_err(|e| error(format!("database_lock_acquire_failed: {e}")))?;
     assert_eq!(lock.metadata().map_err(error)?.ino(), lock_metadata.ino());
     assert_eq!(lock.metadata().map_err(error)?.dev(), lock_metadata.dev());
-    Ok(lock)
+    Ok(EngineLock { file: lock })
 }
 
-/// Releases the engine database lock taken with the standard library file lock.
-/// Takes the locked file. Returns once the lock is released, or
-/// `database_lock_release_failed`.
+/// Releases the engine database lock and reports whether the unlock succeeded.
+/// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
+fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
+    unlock_database(&lock.file)
+}
+
+/// Unlocks the engine database lock file with the standard library file lock.
+/// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
 #[cfg(not(unix))]
-fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
-    lock.unlock()
+fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
+    file.unlock()
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
 #[cfg(unix)]
-fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
+fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock)
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
@@ -3539,7 +3557,7 @@ mod database_lock_tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let lock = lock_database(&path).unwrap();
-        let stale_alias = lock.try_clone().unwrap();
+        let stale_alias = lock.file.try_clone().unwrap();
         assert!(lock_database(&path).is_err());
 
         release_database_lock(lock).unwrap();
@@ -3550,6 +3568,22 @@ mod database_lock_tests {
         release_database_lock(new_owner).unwrap();
         let final_owner = lock_database(&path).unwrap();
         release_database_lock(final_owner).unwrap();
+    }
+
+    #[test]
+    fn dropping_the_lock_frees_it_while_a_forked_alias_still_shares_its_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let lock = lock_database(&path).unwrap();
+        let forked_alias = lock.file.try_clone().unwrap();
+
+        drop(lock);
+        let next_owner = lock_database(&path).unwrap();
+        drop(forked_alias);
+        assert!(lock_database(&path).is_err());
+
+        drop(next_owner);
+        release_database_lock(lock_database(&path).unwrap()).unwrap();
     }
 }
 
