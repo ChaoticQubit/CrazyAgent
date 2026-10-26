@@ -24,7 +24,7 @@ const ABOUT_CHARS_MAX: usize = 2_000;
 const STACK_CHARS_MAX: usize = 1_000;
 const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
-const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
+const GRAPH_OFF: &str = "The Graphify skill isn't on in Setup, so no code graph is built.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
