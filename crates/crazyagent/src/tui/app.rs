@@ -840,7 +840,11 @@ impl App {
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
             OwnerEvent::Master(event) => {
-                if let Some(submission) = self.master.apply(*event)? {
+                let routine = matches!(*event, master_session::Event::Read { .. });
+                let previous = self.master.notice.clone();
+                let completed = self.master.apply(*event)?;
+                let announce = !routine || completed.is_some() || self.master.notice != previous;
+                if let Some(submission) = completed {
                     self.complete_master_draft(&submission)?;
                     self.invalidate_evidence()?;
                 }
@@ -848,8 +852,10 @@ impl App {
                     self.owner_ready = false;
                     self.owner_problem = Some("master_owner_connection_unavailable".into());
                 }
-                let notice = self.master.notice.clone();
-                self.notice(&notice);
+                if announce {
+                    let notice = self.master.notice.clone();
+                    self.notice(&notice);
+                }
             }
             OwnerEvent::Dispatch(event) => {
                 self.sync_dispatch()?;
