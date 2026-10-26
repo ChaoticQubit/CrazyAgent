@@ -92,6 +92,21 @@ test("busy bridge calls are retried and other failures are not", async () => {
   assert.equal(calls, 8);
 });
 
+test("a burst of calls refused busy together does not retry in step until some give up", async () => {
+  const { retryBusy } = await import("../src/engine-client.ts");
+  let held = false;
+  const hold = async () => {
+    if (held) throw { code: "busy" };
+    held = true;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    held = false;
+    return "read";
+  };
+  const burst = Array.from({ length: 13 }, () => retryBusy(hold, 50));
+  const settled = await Promise.allSettled(burst);
+  assert.deepEqual(settled.filter((result) => result.status === "rejected").map((result) => result.reason), []);
+});
+
 test("master controls offer Close on an open master and Start again once it is closed", () => {
   assert.deepEqual(conversation.masterControls(undefined), { start: true, close: false });
   assert.deepEqual(conversation.masterControls("configured"), { start: false, close: true });
