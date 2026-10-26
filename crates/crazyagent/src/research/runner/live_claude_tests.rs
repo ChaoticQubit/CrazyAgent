@@ -6,6 +6,7 @@ const PROJECT: &str = "dec-090";
 const BRIEF: &str = "A launch check of the research agent. The whole report is the single word OK.";
 
 #[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_research_run_is_signed_in_inside_the_research_sandbox() {
     let mut signed_in = SignedInClaude::open();
     let engine = ManagedAgent::new("claude-code", &claude());

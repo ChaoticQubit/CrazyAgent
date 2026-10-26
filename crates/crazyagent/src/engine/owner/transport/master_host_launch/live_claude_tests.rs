@@ -14,6 +14,7 @@ fn private_directory(path: &Path) {
 }
 
 #[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
     let mut signed_in = SignedInClaude::open();
     let connection = signed_in.connection.clone();
