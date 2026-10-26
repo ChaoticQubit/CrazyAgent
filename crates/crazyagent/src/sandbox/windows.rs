@@ -27,6 +27,12 @@ pub const SEATBELT_MISSING: &str =
 
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
+/// The lock file git writes beside `.git\config` while it changes the config. The Windows
+/// boundary leaves it out of the protected paths: Windows cannot deny creating one name, so
+/// guarding a lock that is normally missing would stop new entries in all of `.git`, git's own
+/// `index.lock` among them. A lock an agent creates never becomes the config, since `config`
+/// denies writing and deleting and `.git` denies deleting its children.
+const GIT_CONFIG_LOCK: &str = "config.lock";
 
 /// The folder in the engine's data root where the boundary helper records the access entries
 /// it grants each agent's container, so a later, narrower profile can take them back.
@@ -264,11 +270,11 @@ pub fn container_name(sandbox: &ProjectSandbox) -> String {
     name
 }
 
-/// The boundary profile for a policy: its container, network capabilities, read roots and
-/// writable roots, the protected paths kept read-only, every secret path that is a plain
-/// drive path hidden, and the grants folder. The helper's own plan check runs here too, so a
-/// policy it would refuse, such as a grants folder inside a writable root, is refused at
-/// install. Inputs: the policy and the grants folder. Output: the profile, or the refusal.
+/// The boundary profile for a policy: container, network capabilities, read and writable
+/// roots, the protected paths but git's config lock kept read-only, plain drive secret paths
+/// hidden, and the grants folder. The helper's plan check runs here too, so a policy it would
+/// refuse, such as a grants folder in a writable root, is refused at install. Inputs: the
+/// policy and the grants folder. Output: the profile, or the refusal.
 pub fn boundary_profile(
     sandbox: &ProjectSandbox,
     grants: &Path,
@@ -283,9 +289,11 @@ pub fn boundary_profile(
         .writable_roots()
         .map(|root| drive_path(root))
         .collect::<Result<Vec<_>, _>>()?;
+    let config_lock = sandbox.project_root().join(".git").join(GIT_CONFIG_LOCK);
     let mut guarded = sandbox
         .protected_paths()
         .iter()
+        .filter(|path| **path != config_lock)
         .map(|path| {
             Ok(Guarded {
                 path: drive_path(path)?,
@@ -311,7 +319,7 @@ pub fn boundary_profile(
     profile
         .validate()
         .map_err(|error| invalid(&error.to_string()))?;
-    plan(&profile).map_err(invalid)?;
+    plan(&profile, |_| true).map_err(invalid)?;
     Ok(profile)
 }
 
@@ -460,11 +468,13 @@ mod tests {
             [&folders.project, &folders.home, &folders.tmp]
                 .map(|path| path.to_str().unwrap().to_owned())
         );
+        let config_lock = sandbox.project_root().join(".git").join(GIT_CONFIG_LOCK);
         for protected in sandbox.protected_paths() {
-            assert!(profile.guarded.contains(&Guarded {
+            let guarded = Guarded {
                 path: protected.to_str().unwrap().to_owned(),
                 guard: Guard::ReadOnly,
-            }));
+            };
+            assert_eq!(profile.guarded.contains(&guarded), protected != config_lock);
         }
         assert!(
             profile
@@ -734,8 +744,13 @@ mod tests {
         assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
         assert!(!run(r"mkdir .crazyagent\context"));
         assert!(!project.join(".crazyagent").exists());
-        assert!(!run(r"echo planted>.git\config.lock"));
-        assert!(!git.join("config.lock").exists());
+        assert!(!run(
+            r"echo planted>.git\config.lock&& move /Y .git\config.lock .git\config"
+        ));
+        assert_eq!(
+            fs::read_to_string(git.join("config")).unwrap(),
+            "[core]\r\n"
+        );
         assert!(!run(r"mkdir .git\hooks\planted"));
         assert!(!git.join("hooks").join("planted").exists());
         assert!(!run("ren context context-moved"));
@@ -745,6 +760,60 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.join("README.md")).unwrap(),
             "changed\r\n"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_agent_without_a_checkout_adds_top_level_files_and_takes_git_locks() {
+        let folders = folders();
+        let tests = std::env::current_exe().unwrap();
+        let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
+        assert!(
+            helper.is_file(),
+            "build crazyagent-win-boundary first: {}",
+            helper.display()
+        );
+        let project = &folders.project;
+        let git = project.join(".git");
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::write(git.join("config"), "[core]\r\n").unwrap();
+        fs::create_dir_all(project.join(".crazyagent").join("context")).unwrap();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let installed = WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &folders.profiles.join("agent.sb"),
+            &folders.grants,
+        )
+        .unwrap();
+        let run = |line: &str| {
+            let mut shell = Command::new(cmd());
+            shell.arg("/C").arg(line).current_dir(project);
+            crate::spawn_gate::status(
+                Sandbox::wrap(&installed, &shell)
+                    .unwrap()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap()
+            .success()
+        };
+        assert!(run(r"echo lock>.git\index.lock"));
+        assert!(run(r"move /Y .git\index.lock .git\index"));
+        assert!(git.join("index").is_file() && !git.join("index.lock").exists());
+        assert!(run("echo new>notes.txt"));
+        assert!(run("mkdir docs"));
+        assert!(project.join("notes.txt").is_file() && project.join("docs").is_dir());
+        assert!(!run(r"echo planted>.git\hooks\pre-commit"));
+        assert!(!git.join("hooks").join("pre-commit").exists());
+        assert!(!run(r"echo planted>.crazyagent\context\brief.md"));
+        assert!(!run("ren .git .git-moved"));
+        assert!(!run("rmdir /S /Q context"));
+        assert!(project.join("context").join("brief.md").is_file());
+        assert_eq!(
+            fs::read_to_string(git.join("config")).unwrap(),
+            "[core]\r\n"
         );
     }
 }

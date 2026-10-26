@@ -8,11 +8,12 @@ pub const ENTRIES_MAX: usize = 4096;
 /// The largest record the helper reads: every entry at the longest path a profile allows.
 pub const RECORD_BYTES_MAX: usize = ENTRIES_MAX * 1040;
 
-const ACCESSES: [(Access, &str); 5] = [
+const ACCESSES: [(Access, &str); 6] = [
     (Access::ReadExecute, "readexecute"),
     (Access::Modify, "modify"),
     (Access::DenyWrite, "denywrite"),
     (Access::DenyAll, "denyall"),
+    (Access::Anchor, "anchor"),
     (Access::KeepEntries, "keepentries"),
 ];
 
@@ -134,11 +135,13 @@ mod tests {
             ace(CONTEXT, Access::DenyWrite),
             ace(r"C:\Users\mira\Projects\shop\keys", Access::DenyAll),
             ace(PROJECT, Access::KeepEntries),
+            ace(r"C:\Users\mira\Projects\shop\.git", Access::Anchor),
         ];
         let text = encode(&record).unwrap();
         assert!(text.starts_with("crazyagent-win-grants 1\n"));
         assert!(text.contains("\nmodify C:\\Users\\mira\\Projects\\shop\n"));
         assert!(text.contains("\nkeepentries C:\\Users\\mira\\Projects\\shop\n"));
+        assert!(text.contains("\nanchor C:\\Users\\mira\\Projects\\shop\\.git\n"));
         assert!(text.ends_with('\n'));
         assert_eq!(decode(&text).unwrap(), record);
         assert_eq!(encode(&[]).unwrap(), format!("{HEADER}\n"));
@@ -212,6 +215,13 @@ mod tests {
             withdrawn(&[ace(PROJECT, Access::Modify)], &widened).is_empty(),
             "an added entry needs no withdrawal"
         );
+        let anchored = [ace(PROJECT, Access::Modify), ace(PROJECT, Access::Anchor)];
+        assert_eq!(
+            withdrawn(&widened, &anchored),
+            [PROJECT],
+            "a folder kept by an older plan loses its wider deny before it is anchored"
+        );
+        assert_eq!(withdrawn(&anchored, &widened), [PROJECT]);
     }
 
     #[test]
