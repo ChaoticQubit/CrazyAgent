@@ -21,7 +21,7 @@ impl Case {
     async fn start() -> TestResult<Self> {
         let root = tempfile::Builder::new()
             .prefix("ca-dpc-")
-            .tempdir_in("/private/tmp")?;
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
         let global = root.path().join("global.toml");
         std::fs::write(&global, "version = 1\ntimeout_ms = 1000\n")?;
@@ -162,7 +162,7 @@ async fn desktop_projects_home_answered_outcome_unknown_is_checked_once_without_
     let mut case = Case::start().await.unwrap();
     let home = tempfile::Builder::new()
         .prefix("ca-dpc-home-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let result: TestResult<()> = async {

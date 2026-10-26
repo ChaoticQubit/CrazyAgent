@@ -1061,7 +1061,7 @@ mod tests {
 
         let root = tempfile::Builder::new()
             .prefix("ca-tdel-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (mut service, _stop) = engine(root.path()).await;
@@ -1208,7 +1208,7 @@ mod tests {
 
         let root = tempfile::Builder::new()
             .prefix("ca-tadd-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (mut service, _stop) = engine(root.path()).await;

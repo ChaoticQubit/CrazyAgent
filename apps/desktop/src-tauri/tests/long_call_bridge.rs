@@ -46,7 +46,7 @@ async fn flow(root: &std::path::Path) -> TestResult<()> {
 async fn a_long_engine_call_leaves_the_bridge_free_for_other_commands() {
     let root = tempfile::Builder::new()
         .prefix("ca-dlc-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

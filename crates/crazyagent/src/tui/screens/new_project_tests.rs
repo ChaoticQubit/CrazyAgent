@@ -450,7 +450,7 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
     use std::os::unix::fs::PermissionsExt;
     let bin = tempfile::Builder::new()
         .prefix("ca-tui-team-use-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     for name in ["codex", "opencode"] {
         let path = bin.path().join(name);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
@@ -173,6 +173,21 @@ test("make test and test-rust-selected give every cargo test the native-auth hos
     assert(tests.length > 0, target);
     for (const line of tests) assert(exported.has(target) || line.includes("CRAZYAGENT_TEST_NATIVE_AUTH_HOST="), `${target}: ${line.trim()}`);
   }
+});
+
+test("Rust tests make their temp folders under the canonical /tmp, which also exists on Linux CI, never under /private/tmp", async () => {
+  const root = new URL("../../", import.meta.url);
+  const found = [];
+  for (const base of ["crates", "apps/desktop/src-tauri/src", "apps/desktop/src-tauri/tests"]) {
+    for (const name of await readdir(new URL(base, root), { recursive: true })) {
+      if (!name.endsWith(".rs")) continue;
+      const text = await readFile(new URL(`${base}/${name}`, root), "utf8");
+      text.split("\n").forEach((line, index) => {
+        if (/tempdir_in\(\s*"\/private\/tmp"/.test(line)) found.push(`${base}/${name}:${index + 1}`);
+      });
+    }
+  }
+  assert.deepEqual(found, []);
 });
 
 test("macOS release signing keeps the certificate in a job keychain under RUNNER_TEMP and always removes it", async () => {
