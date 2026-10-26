@@ -531,6 +531,10 @@ impl ResearchRunner {
             let status = jobs.fail(&job, "This harness is not installed on this computer", 1)?;
             return Ok(run(status, None, None));
         }
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            let status = jobs.fail(&job, line, 1)?;
+            return Ok(run(status, None, None));
+        }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
                 let report = match self.publish(&job, harness, project.root, &output) {
@@ -1705,6 +1709,15 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     Ok(())
 }
 
+/// The owner's line for a team agent or research job on a system that runs no agent
+/// confined to its own git worktree: Linux in V1 (DEC-094), whose boundaries cannot keep the
+/// worktree's git links and shared objects read-only. Input: the operating system name as
+/// `std::env::consts::OS` gives it. Output: the line, or None where such agents run.
+pub(crate) fn confined_unavailable(os: &str) -> Option<&'static str> {
+    (os == "linux")
+        .then_some("Team agents and research are not available on Linux in this version.")
+}
+
 /// Refuses to add a worktree with git under a Seatbelt profile, which Windows cannot load;
 /// no git runs unconfined in its place. Takes the sandbox, profile and worktree, all unused.
 /// Returns the sandbox's `Unavailable` refusal with the Seatbelt reason.
@@ -2419,6 +2432,17 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_linux_refuses_team_agents_and_research_with_a_plain_line() {
+        assert_eq!(
+            confined_unavailable("linux"),
+            Some("Team agents and research are not available on Linux in this version.")
+        );
+        for os in ["macos", "windows"] {
+            assert_eq!(confined_unavailable(os), None, "{os}");
+        }
+    }
 
     /// Setting up one project's repository must not wait for another project's setup:
     /// the lock covers one repository, so unrelated projects set up at the same time.

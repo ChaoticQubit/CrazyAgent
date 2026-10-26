@@ -20,7 +20,7 @@ use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{
-    ResearchAccount, RunError, add_worktree, ensure_repository, model_remote,
+    ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -1844,6 +1844,9 @@ impl TeamRuntime {
             .executables
             .get(launch)
             .ok_or("harness is not installed")?;
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            return Err(line.to_owned());
+        }
         let sandboxed = |e: SandboxError| {
             with_code(
                 "the agent sandbox could not be set up",

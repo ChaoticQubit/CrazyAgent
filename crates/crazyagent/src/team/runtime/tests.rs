@@ -1225,3 +1225,35 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
             .is_ok()
     );
 }
+
+/// On Linux, which runs no agent confined to its own worktree in V1 (DEC-094), a team agent
+/// stops before any sandbox or repository step, and its row carries the owner's plain line.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let Accounts::Usable(accounts) =
+        eligible_accounts(&fixture.access, &fixture.setup.project_id, "codex")
+    else {
+        panic!("the endpoint fits codex");
+    };
+    let line = "Team agents and research are not available on Linux in this version.";
+    let refused = team
+        .spawn_run(
+            &fixture.setup,
+            AgentRole::Sub,
+            "codex",
+            false,
+            &accounts[0],
+            None,
+        )
+        .unwrap();
+    assert_eq!(refused, Err(line.into()));
+    let agents = fixture.status().agents;
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].status, AgentStatus::Failed);
+    assert_eq!(agents[0].problem.as_deref(), Some(line));
+    assert!(!fixture.base.join("project").join(".git").exists());
+    assert!(team.shutdown().unwrap().is_empty());
+}
