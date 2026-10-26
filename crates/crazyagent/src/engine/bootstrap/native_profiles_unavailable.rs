@@ -39,6 +39,15 @@ pub(crate) enum NativeProfileCustody {}
 /// native profile custody. No value is ever made.
 pub(crate) enum NativeProfileRelease {}
 
+impl Drop for NativeProfileRelease {
+    /// Matches the Unix release, which unlocks the profile when dropped, so the sign-in
+    /// settlement that ends it at a chosen point means the same on every target.
+    /// No value is ever made, so this never runs.
+    fn drop(&mut self) {
+        match *self {}
+    }
+}
+
 /// A held native profile lease, which cannot exist without native profile custody.
 /// No value is ever made, so every method below is unreachable by construction.
 pub(crate) enum NativeProfileUse {}

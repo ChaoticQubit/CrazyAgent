@@ -9,9 +9,9 @@ fn database() -> Connection {
 
 fn skill(tx: &Transaction<'_>, name: &str, enabled: bool) {
     tx.execute(
-        "INSERT INTO plugin_items(id, kind, scope, name, body) VALUES('skill-1', 'skill', 'global', ?1, ?2)
+        "INSERT INTO plugin_items(id, kind, scope, name, body) VALUES(?1, 'skill', 'global', ?2, ?3)
          ON CONFLICT(kind, scope, name) DO UPDATE SET body=excluded.body",
-        [name, &format!("{{\"enabled\":{enabled}}}")],
+        [&format!("skill-{name}"), name, &format!("{{\"enabled\":{enabled}}}")],
     )
     .unwrap();
 }
@@ -38,7 +38,7 @@ fn a_pack_row_decides_the_switch_over_the_plugin_store() {
     let record = PackRecord {
         id: GRAPH_ENTRY.into(),
         source: PRESENT.into(),
-        skills: vec!["skill-1".into()],
+        skills: vec![format!("skill-{GRAPH_ENTRY}")],
         server: None,
         enabled: false,
     };

@@ -79,7 +79,10 @@ fn a_missing_graphify_skill_reaches_clients_as_not_installed() {
         serde_json::from_str::<Step>(r#"{"kind":"not_installed"}"#).unwrap(),
         Step::NotInstalled
     );
-    assert_eq!(serde_json::to_string(&Step::Off).unwrap(), r#"{"kind":"off"}"#);
+    assert_eq!(
+        serde_json::to_string(&Step::Off).unwrap(),
+        r#"{"kind":"off"}"#
+    );
 }
 
 #[test]

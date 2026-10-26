@@ -810,8 +810,7 @@ async fn adding_a_repo_in_place_onboards_it_where_it_is_and_keeps_its_worktree_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unticking_graphify_in_setup_installs_nothing_and_onboarding_says_graphify_is_not_installed()
-{
+async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_installed() {
     let mut bench = Bench::start_without_graphify(|_| {}).await;
     bench.generation += 1;
     let ran = bench

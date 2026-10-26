@@ -6,7 +6,7 @@ use crate::setup::{SetupAction, SetupStatus, progress};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS setup_pack (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536)
@@ -41,7 +41,7 @@ struct PackRecord {
 
 /// Creates the installed default-pack tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
@@ -114,26 +114,19 @@ fn adopted(
     Ok(Some(record))
 }
 
-/// Tells whether a pack entry is installed and switched on, counting an item the plugin
-/// store already holds. Onboarding builds a code graph only while the graphify entry is.
-/// Inputs: the transaction and the entry id. Output: true when on.
-#[cfg(unix)]
-pub(crate) fn entry_on(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
+/// Tells whether a pack entry is installed and, when it is, switched on, counting an item
+/// the plugin store already holds. Onboarding builds a code graph only while the graphify
+/// entry is on. Inputs: the transaction and the entry id. Output: none when nothing of the
+/// entry is installed, otherwise whether it is on.
+pub(crate) fn entry_switch(tx: &Transaction<'_>, id: &str) -> Result<Option<bool>, EngineError> {
     if let Some(record) = load_pack(tx, id)? {
-        return Ok(record.enabled);
+        return Ok(Some(record.enabled));
     }
     let manifest = manifest()?;
     let Some(entry) = manifest.entries.iter().find(|entry| entry.id == id) else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(present(tx, entry)?.is_some_and(|record| record.enabled))
-}
-
-/// Tells whether a pack entry is on where setup cannot install packs: never.
-/// Inputs: the transaction and the entry id. Output: false.
-#[cfg(not(unix))]
-pub(crate) fn entry_on(_tx: &Transaction<'_>, _id: &str) -> Result<bool, EngineError> {
-    Ok(false)
+    Ok(present(tx, entry)?.map(|record| record.enabled))
 }
 
 fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineError> {
@@ -390,8 +383,8 @@ pub(crate) fn apply_owner(
             if progress::snapshot(root).running {
                 return Ok(rejected("setup_busy"));
             }
-            let graph_tool =
-                pack.iter().any(|id| id.as_str() == GRAPH_ENTRY) || entry_on(tx, GRAPH_ENTRY)?;
+            let graph_tool = pack.iter().any(|id| id.as_str() == GRAPH_ENTRY)
+                || entry_switch(tx, GRAPH_ENTRY)? == Some(true);
             progress::with(root, |state| state.graph_tool = graph_tool);
             Ok(Outcome::Applied)
         }

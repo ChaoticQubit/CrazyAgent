@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS plugin_items (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
     kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
@@ -155,7 +155,7 @@ struct ServerRecord {
 
 /// Creates the skill and MCP server tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
