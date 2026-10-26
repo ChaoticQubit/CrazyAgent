@@ -1,10 +1,3 @@
-<!--
-  DEEP PRODUCT DOCUMENTATION — fill-in skeleton.
-  Copy this, then replace every <PLACEHOLDER> and each example mermaid block with
-  system-specific content. Delete sections that do not apply (see the outline's
-  applicability rule). Keep the "Documentation confidence" appendix honest.
--->
-
 # <PRODUCT NAME> — Product Documentation
 
 > <One-line definition of what the product is and does.>
@@ -66,7 +59,6 @@ flowchart TB
 
 ```mermaid
 classDiagram
-    %% Replace CoreType / Abstraction / method names with the real ones
     class CoreType {
         +method() ReturnType
     }
@@ -82,7 +74,6 @@ classDiagram
 
 ```mermaid
 erDiagram
-    %% Replace EntityA / EntityB / relationship with the real ones
     EntityA ||--o{ EntityB : relationship
 ```
 

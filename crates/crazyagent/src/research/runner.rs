@@ -20,20 +20,30 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
-const GIT_SAFE: [&str; 6] = [
+const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
     "-c",
     "core.pager=cat",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "protocol.allow=never",
 ];
-static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
+#[cfg(unix)]
+const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
+#[cfg(unix)]
+const FILTER_DRIVERS_MAX: usize = 64;
+static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -1459,15 +1469,45 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// The setup lock of one project repository; dropping it lets the next setup of that
+/// repository run.
+struct RepositorySetup(PathBuf);
+
+impl Drop for RepositorySetup {
+    fn drop(&mut self) {
+        REPOSITORIES_SETTING_UP
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+        REPOSITORY_FREED.notify_all();
+    }
+}
+
+/// Waits for and takes the setup lock of one project repository, so git init, the start
+/// commit and worktree adds on that repository never race, while other projects set up
+/// at the same time. Takes the project folder, compared after resolving links.
+/// Output: the lock, held until dropped.
+fn repository_setup(root: &Path) -> RepositorySetup {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut busy = REPOSITORIES_SETTING_UP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    while busy.contains(&key) {
+        busy = REPOSITORY_FREED
+            .wait(busy)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    assert!(busy.insert(key.clone()));
+    RepositorySetup(key)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
-/// once per process at a time. A folder with any `.git` entry is the owner's repository and
+/// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
 /// gets a repository from the engine. Takes the project folder and a private home for git.
 /// Returns Ok once the folder is a repository, or a plain refusal for an owner's folder.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(root);
     if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
     }
@@ -1532,8 +1572,10 @@ pub(crate) fn add_worktree(
     )))
 }
 
-/// Adds a detached git worktree at `worktree` inside the sandbox's project
-/// folder, running git under the installed profile with hooks disabled.
+/// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
+/// git under the installed profile so that no command the repository configures runs: the
+/// worktree is added without a checkout, its effective config is listed in the worktree's
+/// own context, and the checkout blanks every filter driver that listing names.
 /// Takes the sandbox, its installed profile and the new worktree path.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
@@ -1541,27 +1583,130 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
     fs::create_dir_all(&worktrees)?;
-    let mut git = sandbox.command(profile, Path::new(GIT));
-    git.args(GIT_SAFE)
-        .args(["worktree", "add", "-q", "--detach"])
+    let mut add = worktree_git(sandbox, profile);
+    add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
-        .arg("HEAD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if !wait_bounded(crate::spawn_gate::spawn(&mut git)?, SETUP_TIMEOUT)? {
+        .arg("HEAD");
+    if !wait_bounded(crate::spawn_gate::spawn(&mut add)?, SETUP_TIMEOUT)? {
         return Err(RunError::Invalid("git worktree add failed".into()));
+    }
+    let mut listing = worktree_git(sandbox, profile);
+    listing
+        .arg("-C")
+        .arg(worktree)
+        .args(["config", "--list", "--name-only", "-z"]);
+    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let mut checkout = worktree_git(sandbox, profile);
+    checkout
+        .args(&overrides)
+        .arg("-C")
+        .arg(worktree)
+        .args(["reset", "-q", "--hard", "HEAD"]);
+    if !wait_bounded(crate::spawn_gate::spawn(&mut checkout)?, SETUP_TIMEOUT)? {
+        return Err(RunError::Invalid(
+            "git could not check out the worktree".into(),
+        ));
     }
     assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
+}
+
+/// A git command for the engine's own worktree steps under the agent's installed profile:
+/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
+#[cfg(unix)]
+fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
+    let mut git = sandbox.command(profile, Path::new(GIT));
+    git.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(GIT_SAFE)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    git
+}
+
+/// Runs a setup git command whose output fits in [`GIT_CONFIG_LISTING_BYTES_MAX`] within
+/// the setup time limit. Takes the command. Returns what it printed, or `Invalid` when it
+/// fails, runs past the limit or prints more.
+#[cfg(unix)]
+fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
+    let refused = || RunError::Invalid("git could not list the worktree's config".into());
+    command.stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(command)?;
+    let stdout = child.stdout.take().ok_or_else(refused)?;
+    if !wait_bounded(child, SETUP_TIMEOUT)? {
+        return Err(refused());
+    }
+    let mut bytes = Vec::new();
+    stdout
+        .take(GIT_CONFIG_LISTING_BYTES_MAX as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > GIT_CONFIG_LISTING_BYTES_MAX {
+        return Err(refused());
+    }
+    Ok(bytes)
+}
+
+/// The `-c` arguments that switch off every filter driver a config listing names: empty
+/// smudge, clean and process commands and `required=false`, so a checkout runs none of them
+/// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
+/// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
+#[cfg(unix)]
+fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
+    let refused = || {
+        RunError::Invalid(
+            "the repository configures a git filter the engine cannot switch off; name its filters with letters, digits, dots, dashes or underscores".into(),
+        )
+    };
+    let mut drivers: Vec<&str> = Vec::new();
+    for key in listing
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = std::str::from_utf8(key).map_err(|_| refused())?;
+        let Some((driver, _)) = key
+            .strip_prefix("filter.")
+            .and_then(|rest| rest.rsplit_once('.'))
+        else {
+            continue;
+        };
+        if driver.is_empty()
+            || !driver
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(refused());
+        }
+        if !drivers.contains(&driver) {
+            drivers.push(driver);
+        }
+        if drivers.len() > FILTER_DRIVERS_MAX {
+            return Err(refused());
+        }
+    }
+    let mut arguments = Vec::with_capacity(drivers.len() * 8);
+    for driver in &drivers {
+        for setting in ["smudge=", "clean=", "process=", "required=false"] {
+            arguments.push("-c".to_owned());
+            arguments.push(format!("filter.{driver}.{setting}"));
+        }
+    }
+    assert_eq!(arguments.len(), drivers.len() * 8);
+    assert!(
+        arguments
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|argument| argument.starts_with("filter."))
+    );
+    Ok(arguments)
 }
 
 fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
@@ -2059,6 +2204,30 @@ mod tests {
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
 
+    /// Setting up one project's repository must not wait for another project's setup:
+    /// the lock covers one repository, so unrelated projects set up at the same time.
+    #[test]
+    fn a_project_repository_sets_up_while_another_projects_setup_holds_its_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let (busy, free, tmp) = (base.join("busy"), base.join("free"), base.join("tmp"));
+        for folder in [&busy, &free, &tmp] {
+            fs::create_dir(folder).unwrap();
+        }
+        let _held = repository_setup(&busy);
+        let (done, finished) = std::sync::mpsc::channel();
+        let root = free.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(ensure_repository(&root, &tmp).map_err(|e| e.to_string()));
+        });
+        finished
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the free project waited for the busy project's setup lock")
+            .unwrap();
+        assert!(free.join(".git").is_dir());
+        assert!(!busy.join(".git").exists());
+    }
+
     struct EngineRoot {
         _temp: tempfile::TempDir,
         base: PathBuf,
@@ -2485,6 +2654,193 @@ mod tests {
             !marker.exists(),
             "the engine's git ran the project fsmonitor"
         );
+    }
+
+    fn repository_git(project: &Path, arguments: &[&str]) {
+        let status = crate::spawn_gate::status(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .args(["-c", "user.name=Test", "-c", "user.email=test@invalid"])
+                .arg("-C")
+                .arg(project)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+
+    #[test]
+    fn filter_overrides_blank_each_named_driver_and_refuse_names_a_flag_cannot_carry() {
+        let listing = b"core.bare\0filter.lfs.smudge\0filter.lfs.clean\0filter.a.b.process\0filter.required\0";
+        let overrides = filter_overrides(listing).unwrap();
+        assert_eq!(overrides.len(), 16);
+        for expected in [
+            "filter.lfs.smudge=",
+            "filter.lfs.clean=",
+            "filter.lfs.process=",
+            "filter.lfs.required=false",
+            "filter.a.b.smudge=",
+            "filter.a.b.required=false",
+        ] {
+            assert!(
+                overrides.iter().any(|argument| argument == expected),
+                "{expected}"
+            );
+        }
+        assert!(filter_overrides(b"core.bare\0").unwrap().is_empty());
+        for refused in [
+            &b"filter.x=y.smudge\0"[..],
+            b"filter..smudge\0",
+            b"filter.a b.smudge\0",
+            b"filter.\xff.smudge\0",
+        ] {
+            assert!(filter_overrides(refused).is_err(), "{refused:?}");
+        }
+        let many: Vec<u8> = (0..=FILTER_DRIVERS_MAX)
+            .flat_map(|index| format!("filter.d{index}.smudge\0").into_bytes())
+            .collect();
+        assert!(filter_overrides(&many).is_err());
+    }
+
+    #[test]
+    fn adding_an_agent_worktree_runs_no_command_the_repository_configures() {
+        let mut problems = Vec::new();
+        for hostile in [
+            "smudge",
+            "process",
+            "required",
+            "dotted include",
+            "worktree include",
+            "info attributes",
+            "agent global config",
+            "post-checkout hook",
+            "unsafe driver name",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let project = base.join("project");
+            let home = base.join("agent").join("home");
+            let tmp = base.join("agent").join("tmp");
+            let profiles = base.join("profiles");
+            for folder in [&project, &home, &tmp, &profiles] {
+                fs::create_dir_all(folder).unwrap();
+            }
+            ensure_repository(&project, &tmp).unwrap();
+            let marker = tmp.join("ran");
+            let command = format!("/usr/bin/touch '{}'; /bin/cat", marker.display());
+            fs::write(project.join("a.txt"), "plain\n").unwrap();
+            let attributes = match hostile {
+                "dotted include" => Some("* filter=a.b\n"),
+                "worktree include" => Some("* filter=late\n"),
+                "unsafe driver name" => Some("* filter=x=y\n"),
+                "info attributes" | "agent global config" | "post-checkout hook" => None,
+                _ => Some("* filter=hostile\n"),
+            };
+            if let Some(attributes) = attributes {
+                fs::write(project.join(".gitattributes"), attributes).unwrap();
+            }
+            repository_git(&project, &["add", "-A"]);
+            repository_git(&project, &["commit", "-q", "-m", "files"]);
+            let git_dir = project.join(".git");
+            match hostile {
+                "smudge" => {
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command])
+                }
+                "process" => {
+                    repository_git(&project, &["config", "filter.hostile.process", &command])
+                }
+                "required" => {
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
+                    repository_git(&project, &["config", "filter.hostile.required", "true"]);
+                }
+                "dotted include" => {
+                    fs::write(
+                        git_dir.join("hostile.config"),
+                        format!("[filter \"a.b\"]\n\tsmudge = {command}\n"),
+                    )
+                    .unwrap();
+                    repository_git(&project, &["config", "include.path", "hostile.config"]);
+                }
+                "worktree include" => {
+                    fs::write(
+                        git_dir.join("late.config"),
+                        format!("[filter \"late\"]\n\tsmudge = {command}\n"),
+                    )
+                    .unwrap();
+                    repository_git(
+                        &project,
+                        &[
+                            "config",
+                            "includeIf.gitdir:**/worktrees/**.path",
+                            &git_dir.join("late.config").display().to_string(),
+                        ],
+                    );
+                }
+                "info attributes" => {
+                    fs::write(
+                        git_dir.join("info").join("attributes"),
+                        "* filter=hostile\n",
+                    )
+                    .unwrap();
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
+                }
+                "agent global config" => {
+                    fs::write(home.join("attributes"), "* filter=h\n").unwrap();
+                    fs::write(
+                        home.join(".gitconfig"),
+                        format!(
+                            "[core]\n\tattributesFile = {}\n[filter \"h\"]\n\tsmudge = {command}\n",
+                            home.join("attributes").display()
+                        ),
+                    )
+                    .unwrap();
+                }
+                "post-checkout hook" => {
+                    let hooks = git_dir.join("hooks");
+                    fs::create_dir_all(&hooks).unwrap();
+                    let hook = hooks.join("post-checkout");
+                    fs::write(
+                        &hook,
+                        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+                    )
+                    .unwrap();
+                    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                "unsafe driver name" => {
+                    repository_git(&project, &["config", "filter.x=y.smudge", &command])
+                }
+                other => panic!("no setup for {other}"),
+            }
+            let sandbox =
+                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+                    .unwrap();
+            let profile = profiles.join("agent.sb");
+            sandbox.install(&profile).unwrap();
+            let worktree = project.join("worktrees").join("agent-one");
+            let added = add_worktree(&sandbox, &profile, &worktree);
+            if marker.exists() {
+                problems.push(format!("{hostile}: the repository's command ran"));
+            }
+            let checked_out = fs::read_to_string(worktree.join("a.txt")).ok();
+            match (hostile, &added) {
+                ("unsafe driver name", Ok(())) => {
+                    problems.push(format!("{hostile}: the worktree was added"))
+                }
+                ("unsafe driver name", Err(_)) => {}
+                (_, Err(error)) => problems.push(format!("{hostile}: {error}")),
+                (_, Ok(())) if checked_out.as_deref() != Some("plain\n") => {
+                    problems.push(format!("{hostile}: checked out {checked_out:?}"))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(problems, Vec::<String>::new());
     }
 
     #[test]

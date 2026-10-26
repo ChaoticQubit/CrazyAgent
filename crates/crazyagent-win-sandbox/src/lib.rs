@@ -2,6 +2,7 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
 pub mod dacl;
+pub mod grants;
 pub mod plan;
 pub mod profile;
 pub mod quote;
@@ -10,4 +11,4 @@ pub mod request;
 mod win;
 
 #[cfg(windows)]
-pub use win::{BoundaryError, run};
+pub use win::{BoundaryError, release, run};

@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, Guarded, check_path};
+use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, Guarded, HEADER, check_path};
 use crazyagent_win_sandbox::request::REFUSED_EXIT;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -17,7 +17,9 @@ struct Case {
     home: PathBuf,
     outside: PathBuf,
     secret: PathBuf,
+    grants: PathBuf,
     profile: PathBuf,
+    base: BoundaryProfile,
 }
 
 fn plain(path: &Path) -> String {
@@ -40,6 +42,7 @@ fn case(container: &str) -> Case {
     let owner = root.join("owner");
     let outside = root.join("outside");
     let profiles = root.join("profiles");
+    let grants = root.join("grants");
     for folder in [
         &project,
         &project.join("context"),
@@ -48,6 +51,7 @@ fn case(container: &str) -> Case {
         &owner.join(".ssh"),
         &outside,
         &profiles,
+        &grants,
     ] {
         fs::create_dir_all(folder).unwrap();
     }
@@ -71,6 +75,7 @@ fn case(container: &str) -> Case {
             },
         ],
         active_processes: 32,
+        grants: plain(&grants),
     };
     let profile_path = profiles.join("agent.profile");
     fs::write(&profile_path, profile.encode().unwrap()).unwrap();
@@ -80,8 +85,28 @@ fn case(container: &str) -> Case {
         home,
         outside,
         secret,
+        grants,
         profile: profile_path,
+        base: profile,
     }
+}
+
+fn install(case: &Case, profile: &BoundaryProfile) {
+    fs::write(&case.profile, profile.encode().unwrap()).unwrap();
+}
+
+fn icacls(path: &Path) -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let output = Command::new(format!(r"{root}\System32\icacls.exe"))
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn boundary(case: &Case) -> Command {
@@ -185,7 +210,7 @@ fn a_bad_profile_or_batch_program_starts_nothing() {
     let marker = case.project.join("started.txt");
     fs::write(
         &case.profile,
-        "crazyagent-win-boundary 1\ncontainer crazyagent.test.refuse\n",
+        format!("{HEADER}\ncontainer crazyagent.test.refuse\n"),
     )
     .unwrap();
     let output = run(&case, &["/C", "echo", "started>", &plain(&marker)]);
@@ -201,4 +226,79 @@ fn a_bad_profile_or_batch_program_starts_nothing() {
         .unwrap();
     assert_eq!(batch.status.code(), Some(i32::from(REFUSED_EXIT)));
     assert!(String::from_utf8_lossy(&batch.stderr).contains("batch files are refused"));
+}
+
+#[test]
+fn a_narrower_profile_takes_back_what_the_one_before_granted() {
+    let case = case("crazyagent.test.contract");
+    let before = icacls(&case.outside);
+    let first = case.outside.join("first.txt");
+    let mut wide = case.base.clone();
+    wide.write_roots.push(plain(&case.outside));
+    install(&case, &wide);
+    run(&case, &["/C", "echo", "first>", &plain(&first)]);
+    assert!(
+        fs::read_to_string(&first).unwrap().starts_with("first"),
+        "the wide profile lets the agent write there"
+    );
+    assert_ne!(icacls(&case.outside), before);
+
+    let mut narrowed = case.base.clone();
+    narrowed.read_roots.push(plain(&case.outside));
+    install(&case, &narrowed);
+    let read = run(&case, &["/C", "type", &plain(&first)]);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(String::from_utf8_lossy(&read.stdout).contains("first"));
+    let second = case.outside.join("second.txt");
+    run(&case, &["/C", "echo", "second>", &plain(&second)]);
+    run(&case, &["/C", "del", "/F", "/Q", &plain(&first)]);
+    assert!(
+        !second.exists(),
+        "modify narrowed to read and run takes back writes"
+    );
+    assert!(first.is_file(), "and deletes");
+
+    install(&case, &case.base);
+    let hidden = run(&case, &["/C", "type", &plain(&first)]);
+    assert!(!hidden.status.success());
+    assert!(!String::from_utf8_lossy(&hidden.stdout).contains("first"));
+    assert_eq!(
+        icacls(&case.outside),
+        before,
+        "a root the profile no longer names keeps no entry of the container"
+    );
+}
+
+#[test]
+fn releasing_a_profile_takes_back_every_grant_and_its_record() {
+    let case = case("crazyagent.test.release");
+    let context = case.project.join("context");
+    let before = [&case.project, &context, &case.home].map(|path| icacls(path));
+    let readme = run(
+        &case,
+        &["/C", "type", &plain(&case.project.join("readme.txt"))],
+    );
+    assert!(
+        readme.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readme.stderr)
+    );
+    let granted = [&case.project, &context, &case.home].map(|path| icacls(path));
+    for (granted, before) in granted.iter().zip(&before) {
+        assert_ne!(granted, before);
+    }
+    let record = case.grants.join("container-crazyagent.test.release.grants");
+    assert!(record.is_file());
+    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert_eq!(
+        [&case.project, &context, &case.home].map(|path| icacls(path)),
+        before,
+        "every root and protected path is back to the access list it had"
+    );
+    assert!(!record.exists());
+    crazyagent_win_sandbox::release(&case.profile).unwrap();
 }

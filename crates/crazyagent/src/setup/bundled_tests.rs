@@ -24,6 +24,95 @@ fn private() -> tempfile::TempDir {
     dir
 }
 
+fn slashes(line: &str) -> bool {
+    line.match_indices("//").any(|(at, _)| {
+        line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
+    })
+}
+
+fn hashed(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "#" || trimmed.starts_with("# ") || line.contains(" # ")
+}
+
+fn comments(path: &str, text: &str) -> Vec<String> {
+    let script = [".html", ".cjs", ".js", ".css"]
+        .iter()
+        .any(|ext| path.ends_with(ext));
+    let mut fence: Option<String> = None;
+    let mut found = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if path.ends_with(".md") && trimmed.starts_with("```") {
+            fence = match fence {
+                Some(_) => None,
+                None => Some(trimmed.trim_start_matches('`').trim().to_owned()),
+            };
+            continue;
+        }
+        let lang = fence.as_deref();
+        let c_like = lang.map_or(script, |lang| {
+            ["html", "css", "js", "javascript", "ts", "typescript"].contains(&lang)
+        });
+        let hash = lang.is_some_and(|lang| ["", "bash", "sh", "python", "yaml"].contains(&lang));
+        let comment = line.contains("<!--")
+            || (c_like && (line.contains("/*") || slashes(line)))
+            || (hash && hashed(line))
+            || (lang == Some("mermaid") && trimmed.starts_with("%%"));
+        if comment {
+            found.push(format!("{path}:{}: {trimmed}", number + 1));
+        }
+    }
+    found
+}
+
+#[test]
+fn the_comment_check_finds_each_kind_and_leaves_code_alone() {
+    let flagged = |path: &str, text: &str| comments(path, text).len();
+    assert_eq!(flagged("a.html", "<p>\n<!-- note -->\n</p>"), 1);
+    assert_eq!(flagged("a.html", "a{color:red}/* note */"), 1);
+    assert_eq!(
+        flagged("a.cjs", "#!/usr/bin/env node\nlet a = 1; // note"),
+        1
+    );
+    assert_eq!(flagged("a.cjs", "const u = \"https://x.invalid/a//b\";"), 0);
+    assert_eq!(flagged("a.md", "<!-- note -->\n# Title"), 1);
+    assert_eq!(
+        flagged("a.md", "```bash\n# note\nls '*/.git/*' # why\n```"),
+        2
+    );
+    assert_eq!(flagged("a.md", "```\nx = 1  # note\n```"), 1);
+    assert_eq!(flagged("a.md", "```mermaid\n%% note\nflowchart LR\n```"), 1);
+    assert_eq!(
+        flagged("a.md", "```html\n<script>f(){/* note */}</script>\n```"),
+        1
+    );
+    assert_eq!(
+        flagged(
+            "a.md",
+            "Globs like `src/**/*.rs` and #tags.\n```text\n# heading\n```"
+        ),
+        0
+    );
+}
+
+#[test]
+fn no_bundled_pack_file_carries_a_comment() {
+    let found: Vec<String> = FILES
+        .iter()
+        .flat_map(|(path, bytes)| {
+            comments(
+                path,
+                std::str::from_utf8(bytes).expect("pack files are text"),
+            )
+        })
+        .collect();
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
 #[test]
 fn the_compiled_files_are_exactly_the_shipped_skill_files() {
     let root = assets();

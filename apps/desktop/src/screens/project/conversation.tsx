@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, accountLines, canSend, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
@@ -41,6 +41,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState("");
+  const [note, setNote] = useState("");
   const [needsPool, setNeedsPool] = useState(false);
   const [notReady, setNotReady] = useState(false);
   const current = useRef(data.id);
@@ -116,24 +117,35 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (element && nearBottom(element)) element.scrollTop = element.scrollHeight;
   }, [turns.length, Object.keys(sent).length]);
 
+  async function begin() {
+    confirm(unwrap(await startMaster(ticket, nextGeneration())));
+    setNeedsPool(false);
+    const state = unwrap(await readMaster(ticket));
+    setMaster(state);
+    if (state.session?.phase !== "configured") throw { code: "master_outcome_pending" };
+    setTurns([]);
+    return state.session;
+  }
+
   const send = (again?: string) => act(async () => {
     const message = (again ?? text).trim();
     const at = Date.now();
     if (!message || !ticket) return;
-    let live = session;
-    if (!active) {
-      confirm(unwrap(await startMaster(ticket, nextGeneration())));
-      setNeedsPool(false);
-      const state = unwrap(await readMaster(ticket));
-      setMaster(state);
-      live = state.session;
-      if (live?.phase !== "configured") throw { code: "master_outcome_pending" };
-      setTurns([]);
+    setNote("");
+    let fresh = !active;
+    let live = active && session ? session : await begin();
+    let receipt = unwrap(await sendToMaster(ticket, live.session_id, message, nextGeneration()));
+    if (restartForSettings(receipt)) {
+      confirm(unwrap(await endMaster(ticket, live.session_id, nextGeneration())));
+      live = await begin();
+      fresh = true;
+      receipt = unwrap(await sendToMaster(ticket, live.session_id, message, nextGeneration()));
+      if (receiptState(receipt).kind === "applied") setNote(NEW_CONVERSATION_NOTE);
     }
-    const receipt = unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration()));
+    if (receiptState(receipt).kind === "rejected") await refresh().catch(() => undefined);
     confirm(receipt);
-    sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [receipt.operation_id]: at });
-    setSent({ ...(active ? sent : {}), [receipt.operation_id]: message });
+    sentAtByProject.set(data.id, { ...(fresh ? {} : sentAtByProject.get(data.id)), [receipt.operation_id]: at });
+    setSent({ ...(fresh ? {} : sent), [receipt.operation_id]: message });
     if (again === undefined) setText("");
     await refresh();
   }, sendFailureLine);
@@ -196,6 +208,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
+    {note && <p className="pj-small pj-muted" role="status">{note}</p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); if (sendable) void send(); }}>
       <label htmlFor="pj-composer" className="pj-sr">Message the master</label>

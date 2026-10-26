@@ -11,16 +11,19 @@ pub(crate) mod draft;
 pub(crate) mod graph;
 pub mod service;
 
+#[cfg(test)]
+mod step_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
 const PROJECT_ID_BYTES_MAX: usize = 64;
 const REASON_BYTES_MAX: usize = 256;
+const GRAPHIFY_NOT_INSTALLED: &str = "graphify_not_installed";
 
 /// Where one onboarding step stands: not started, running, finished, off
-/// (the graph step only, while the Graphify entry is not on in Setup), or
-/// failed with a plain reason the owner can act on, such as
-/// "graphify not installed".
+/// (the graph step only, while the Graphify entry is switched off in Setup),
+/// not installed (the graph step only, while Setup never installed the
+/// Graphify skill), or failed with a plain reason the owner can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Step {
@@ -28,6 +31,7 @@ pub enum Step {
     Running,
     Done,
     Off,
+    NotInstalled,
     Failed { reason: String },
 }
 
@@ -90,13 +94,16 @@ impl OnboardingAction {
 }
 
 impl Step {
-    /// The stored state name and reason of this step.
+    /// The stored state name and reason of this step. A step that is not
+    /// installed is stored as off with its own reason, so every query that
+    /// counts an off graph as settled counts it too.
     pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
         match self {
             Self::Waiting => ("waiting", None),
             Self::Running => ("running", None),
             Self::Done => ("done", None),
             Self::Off => ("off", None),
+            Self::NotInstalled => ("off", Some(GRAPHIFY_NOT_INSTALLED)),
             Self::Failed { reason } => ("failed", Some(reason.as_str())),
         }
     }
@@ -107,7 +114,11 @@ impl Step {
             "waiting" => Self::Waiting,
             "running" => Self::Running,
             "done" => Self::Done,
-            "off" => Self::Off,
+            "off" => match reason.as_deref() {
+                None => Self::Off,
+                Some(GRAPHIFY_NOT_INSTALLED) => Self::NotInstalled,
+                Some(_) => return Err(failure("onboarding_step_invalid")),
+            },
             "failed" => Self::Failed {
                 reason: reason.unwrap_or_default(),
             },
@@ -357,16 +368,19 @@ pub(crate) fn execute(
         crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
     }
     let now = now_ms();
+    let graph = graph_step(tx)?;
+    let (graph_state, graph_reason) = graph.columns();
     tx.execute(
-        "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
-         VALUES (?1,?2,?3,?6,'waiting',?4,?5,?5)",
+        "INSERT INTO onboarding(project,repo,pool,graph_state,graph_reason,mapping_state,drafted,created_ms,updated_ms)
+         VALUES (?1,?2,?3,?6,?7,'waiting',?4,?5,?5)",
         params![
             project_id.as_str(),
             repo_text,
             pool.as_str(),
             serde_json::to_string(&drafted).map_err(error)?,
             now,
-            graph_step(tx)?.columns().0
+            graph_state,
+            graph_reason
         ],
     )
     .map_err(error)?;
@@ -374,33 +388,47 @@ pub(crate) fn execute(
 }
 
 /// Where a new or restarted graph step begins: waiting while the Graphify
-/// pack entry is installed and on, otherwise off so no graph is built.
+/// pack entry is installed and on, off while it is switched off, and not
+/// installed while Setup never installed it; no graph is built unless on.
 fn graph_step(tx: &Transaction<'_>) -> Result<Step, EngineError> {
-    let on = crate::storage::setup::entry_on(tx, crate::setup::pack::GRAPH_ENTRY)?;
-    Ok(if on { Step::Waiting } else { Step::Off })
+    let switch = crate::storage::setup::entry_switch(tx, crate::setup::pack::GRAPH_ENTRY)?;
+    Ok(match switch {
+        Some(true) => Step::Waiting,
+        Some(false) => Step::Off,
+        None => Step::NotInstalled,
+    })
 }
 
 /// Sends the failed steps of an onboarding back to waiting on `pool`, so a
 /// second start retries them, and a failed or off graph step to `graph`, so
-/// switching Graphify on or off in Setup counts on the next start; finished
-/// and running steps keep their state.
+/// installing Graphify or switching it on or off in Setup counts on the next
+/// start; finished and running steps keep their state.
 fn restart(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     pool: &CredentialRef,
     graph: Step,
 ) -> Result<(), EngineError> {
-    assert!(matches!(graph, Step::Waiting | Step::Off));
+    assert!(matches!(
+        graph,
+        Step::Waiting | Step::Off | Step::NotInstalled
+    ));
     let changed = tx
         .execute(
             "UPDATE onboarding SET pool=?2,
-                graph_reason=CASE WHEN graph_state IN ('failed','off') THEN NULL ELSE graph_reason END,
+                graph_reason=CASE WHEN graph_state IN ('failed','off') THEN ?5 ELSE graph_reason END,
                 graph_state=CASE WHEN graph_state IN ('failed','off') THEN ?4 ELSE graph_state END,
                 mapping_reason=CASE WHEN mapping_state='failed' THEN NULL ELSE mapping_reason END,
                 mapping_state=CASE WHEN mapping_state='failed' THEN 'waiting' ELSE mapping_state END,
                 updated_ms=?3
              WHERE project=?1",
-            params![project_id.as_str(), pool.as_str(), now_ms(), graph.columns().0],
+            params![
+                project_id.as_str(),
+                pool.as_str(),
+                now_ms(),
+                graph.columns().0,
+                graph.columns().1
+            ],
         )
         .map_err(error)?;
     assert_eq!(changed, 1);

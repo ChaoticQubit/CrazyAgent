@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PAGE TITLE</title>
 <style>
-/* ============ design tokens — tune per page, keep ONE accent ============ */
 :root{
   --bg:#fdfdfc; --surface:#f4f4f1; --ink:#1a1a18; --muted:#6b6b66;
   --line:#e3e3de; --accent:#2563eb; --accent-soft:#eaf1fe;
@@ -17,7 +16,6 @@ html[data-theme="dark"]{
   --bg:#121210; --surface:#1c1c1a; --ink:#ecece8; --muted:#9a9a93;
   --line:#2c2c29; --accent:#60a5fa; --accent-soft:#172441; --warnbg:#2b2013;
 }
-/* ============ base ============ */
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
   line-height:1.65;font-size:16.5px;-webkit-font-smoothing:antialiased}
@@ -41,18 +39,14 @@ img,svg{max-width:100%;height:auto}
   border-radius:99px;text-transform:none;letter-spacing:0;margin-right:8px}
 .chip{font-family:var(--mono);font-size:.75rem;background:var(--surface);
   border:1px solid var(--line);border-radius:99px;padding:2px 8px;color:var(--muted)}
-/* ============ progress bar ============ */
 #bar{position:fixed;top:0;left:0;height:3px;width:0;background:var(--accent);z-index:99}
-/* ============ TL;DR (rare — prefer gist row) ============ */
 .tldr{background:var(--accent-soft);border-left:4px solid var(--accent);
   padding:14px 18px;border-radius:0 8px 8px 0;margin:1.4rem 0}
-/* ============ icon card grid ============ */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:1.2rem 0}
 .card{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--bg)}
 .card .ico{font-size:1.5rem;display:block;margin-bottom:6px}
 .card h3{margin:0 0 4px;font-size:.98rem}
 .card p{margin:0;font-size:.86rem;color:var(--muted);line-height:1.45}
-/* ============ flip cards ============ */
 .flip{position:relative;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--bg);
   cursor:pointer;text-align:left;font:inherit;color:inherit;min-height:120px}
 .flip .f-back{display:none;font-size:.87rem;line-height:1.5}
@@ -62,7 +56,6 @@ img,svg{max-width:100%;height:auto}
 .flip .f-front i{display:block;color:var(--muted);font-style:normal;font-size:.83rem;margin-top:4px}
 .flip .f-front .ico{font-size:1.5rem;display:block;margin-bottom:6px}
 .flip::after{content:"↻";position:absolute;top:10px;right:12px;color:var(--muted);font-size:.8rem}
-/* ============ flow strip ============ */
 .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:1.2rem 0}
 .fstep{flex:1 1 140px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;
   position:relative;background:var(--surface);font-size:.85rem}
@@ -70,41 +63,34 @@ img,svg{max-width:100%;height:auto}
 .fstep span{color:var(--muted)}
 .fstep:not(:last-child)::after{content:"→";position:absolute;right:-12px;top:42%;color:var(--accent);z-index:2}
 .fstep.fail{border-color:var(--bad)}
-/* ============ stat tiles / gist row ============ */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:1.2rem 0}
 .stat{border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center;background:var(--surface)}
 .stat b{font-size:1.5rem;letter-spacing:-.02em;display:block}
 .stat span{font-size:.78rem;color:var(--muted);line-height:1.35;display:block;margin-top:4px}
 .stat em.up{color:var(--good);font-style:normal}.stat em.down{color:var(--bad);font-style:normal}
-/* ============ pull quote / hero ============ */
 .pull{font-size:1.3rem;line-height:1.45;border-left:4px solid var(--accent);
   padding:6px 0 6px 20px;margin:1.6rem 0;letter-spacing:-.01em}
 .pull cite{display:block;font-size:.8rem;color:var(--muted);margin-top:6px;font-style:normal}
 .hero{font-size:1.45rem;letter-spacing:-.02em;line-height:1.35;margin:1.4rem 0 .8rem;font-weight:700}
-/* ============ timeline ============ */
 .timeline{list-style:none;border-left:2px solid var(--line);padding-left:22px;margin:1.2rem 0}
 .timeline li{position:relative;margin:.7rem 0;font-size:.92rem}
 .timeline .t{font-family:var(--mono);color:var(--muted);margin-right:8px;font-size:.8rem}
 .timeline .dot{position:absolute;left:-28px;top:6px;width:10px;height:10px;border-radius:50%}
-/* ============ media (video toggles, figures) ============ */
 .vidwrap{position:relative;aspect-ratio:16/9;margin:.6rem 0}
 .vidwrap iframe,.vidwrap video{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:10px}
 .vidsum{font-size:.92rem}
 figure{margin:1.2rem 0}
 figure img{max-width:100%;border-radius:10px;display:block}
 figcaption{font-size:.8rem;color:var(--muted);margin-top:6px}
-/* ============ math ============ */
 .formula{text-align:center;font-size:1.15rem;margin:1.2rem 0;font-family:Georgia,serif}
 .frac{display:inline-flex;flex-direction:column;text-align:center;vertical-align:middle;font-size:.85em}
 .frac>span:first-child{border-bottom:1px solid var(--ink);padding:0 4px}
-/* ============ TOC ============ */
 .toc{position:sticky;top:28px;align-self:start;font-size:.88rem}
 .toc-title{text-transform:uppercase;letter-spacing:.08em;font-size:.72rem;
   color:var(--muted);margin:0 0 .5rem}
 .toc a{display:block;color:var(--muted);text-decoration:none;padding:4px 0 4px 12px;
   border-left:2px solid var(--line)}
 .toc a.on{color:var(--accent);border-left-color:var(--accent);font-weight:600}
-/* ============ collapsibles ============ */
 details.step{border:1px solid var(--line);border-radius:10px;margin:.6rem 0;background:var(--bg)}
 details.step summary{padding:12px 16px;cursor:pointer;font-weight:600;list-style:none;display:flex;gap:10px;align-items:center}
 details.step summary::-webkit-details-marker{display:none}
@@ -113,7 +99,6 @@ details.step[open] summary::before{content:"▾"}
 details.step>*:not(summary){padding:0 16px;}
 details.step>:last-child{padding-bottom:14px}
 .step-no{font-family:var(--mono);color:var(--accent);font-size:.85em}
-/* ============ tabs ============ */
 .tabs{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:1rem 0}
 .tab-bar{display:flex;background:var(--surface);border-bottom:1px solid var(--line)}
 .tab-bar button{border:0;background:none;padding:10px 16px;cursor:pointer;
@@ -121,26 +106,21 @@ details.step>:last-child{padding-bottom:14px}
 .tab-bar button.on{background:var(--bg);color:var(--accent);font-weight:700}
 .tab-panes>div{display:none;padding:4px 16px}
 .tab-panes>div.on{display:block}
-/* ============ callouts ============ */
 .callout{padding:12px 16px;border-radius:8px;margin:1rem 0;border-left:4px solid}
 .callout.warn{background:var(--warnbg);border-color:var(--warnline)}
 .callout.tip{background:var(--accent-soft);border-color:var(--accent)}
 .callout.analogy{background:var(--surface);border-color:var(--good)}
-/* ============ glossary tooltip ============ */
 .term{border-bottom:1px dotted var(--accent);cursor:help;position:relative}
 .term:hover::after,.term:focus::after{content:attr(data-def);position:absolute;left:0;top:1.6em;
   z-index:9;background:var(--ink);color:var(--bg);padding:8px 10px;border-radius:8px;
   width:250px;font-size:.83rem;line-height:1.45;font-weight:400}
-/* ============ code copy ============ */
 .codewrap{position:relative}
 .codewrap .copy{position:absolute;top:8px;right:8px;border:1px solid var(--line);
   background:var(--bg);color:var(--muted);border-radius:6px;padding:3px 10px;
   font-size:.75rem;cursor:pointer;font-family:var(--mono)}
-/* ============ tables ============ */
 table{border-collapse:collapse;width:100%;font-size:.9rem;margin:1rem 0}
 th,td{border:1px solid var(--line);padding:8px 12px;text-align:left;vertical-align:top}
 thead th{background:var(--surface)}
-/* ============ quiz ============ */
 .quiz .q{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:.8rem 0}
 .quiz .q button{display:block;width:100%;text-align:left;margin:.35rem 0;padding:9px 12px;
   border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);cursor:pointer;font-size:.95rem}
@@ -150,13 +130,11 @@ thead th{background:var(--surface)}
 .quiz .qreset{border:1px solid var(--line);background:var(--surface);color:var(--muted);
   border-radius:8px;padding:5px 11px;cursor:pointer;font-size:.8rem;margin-top:.4rem}
 .hidden{display:none}
-/* ============ simulation ============ */
 .sim{border:1px solid var(--line);border-radius:12px;padding:16px;margin:1.2rem 0;background:var(--surface)}
 .sim-controls{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:.9rem}
 .sim-controls button{border:1px solid var(--line);background:var(--bg);color:var(--ink);
   border-radius:8px;padding:6px 12px;cursor:pointer}
 .sim .readout{font-family:var(--mono);font-size:.85rem;color:var(--muted);margin:.6rem 0 0}
-/* ============ header utils ============ */
 .pagebar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
 .pagebar .tools{display:flex;gap:8px}
 .pagebar .tools button,.pagebar .tools a{display:inline-flex;align-items:center;gap:6px;
@@ -176,7 +154,6 @@ thead th{background:var(--surface)}
   margin-left:8px;vertical-align:middle}
 footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);
   color:var(--muted);font-size:.85rem}
-/* ============ responsive ============ */
 @media(max-width:900px){main{grid-template-columns:1fr}.toc{position:static;order:-1;
   border:1px solid var(--line);border-radius:10px;padding:12px 16px}}
 </style>
@@ -201,7 +178,6 @@ footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);
     <h1 id="top">Page title that states the payoff</h1>
     <p style="color:var(--muted);margin-top:-.4rem">One-line subtitle: the payoff in one sentence.</p>
 
-    <!-- gist row: replaces prose TL;DR — 3–5 takeaways at a glance -->
     <div class="stats" id="gist">
       <div class="stat"><b>~70%</b><span>headline number</span></div>
       <div class="stat"><b>4×</b><span>second takeaway</span></div>
@@ -256,7 +232,6 @@ footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);
 </main>
 
 <script>
-/* ---------- progress bar + reading time ---------- */
 const bar=document.getElementById('bar');
 addEventListener('scroll',()=>{const h=document.documentElement;
   bar.style.width=(h.scrollTop/(h.scrollHeight-h.clientHeight)*100)+'%'},{passive:true});
@@ -264,13 +239,6 @@ const words=document.querySelector('article').innerText.split(/\s+/).length;
 const rtEl=document.getElementById('rt');
 if(rtEl)rtEl.textContent='~'+Math.max(1,Math.round(words/220))+' min read';
 
-/* ---------- auto-save to disk via the Explainers library server ----------
-   Page JS alone cannot write to the hard drive (browser sandbox, http or
-   file). When this page is served by the library server, its /__progress
-   endpoint exists: load merges the server's snapshot into localStorage,
-   and every change is POSTed back into the library's SQLite store.
-   The site id is this page's directory URL, so one server keeps every
-   course's progress without configuration. No server → silent fallback. */
 const SYNC='/__progress?site='+(encodeURIComponent(location.pathname.replace(/\/[^/]*$/,''))||'_root');
 let canSync=false;
 function snapshot(){const d={};try{for(const k of Object.keys(localStorage))
@@ -283,7 +251,6 @@ if(location.protocol.indexOf('http')===0)
     try{for(const k in d)if(localStorage.getItem(k)!==d[k]){localStorage.setItem(k,d[k]);changed=true}}catch(e){}
     if(changed)location.reload();else syncSoon();}).catch(()=>{});
 
-/* ---------- theme: dark by default, choice persists across pages ---------- */
 const root=document.documentElement;
 try{const t=localStorage.getItem('theme');if(t)root.dataset.theme=t}catch(e){}
 document.getElementById('themeBtn').onclick=()=>{
@@ -292,7 +259,6 @@ document.getElementById('themeBtn').onclick=()=>{
   syncSoon();
 };
 
-/* ---------- TOC scrollspy ---------- */
 const tocLinks=[...document.querySelectorAll('.toc a')];
 const obs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
   tocLinks.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+e.target.id));}})},
@@ -300,30 +266,22 @@ const obs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
 document.querySelectorAll('[id]').forEach(el=>{
   if(tocLinks.some(a=>a.getAttribute('href')==='#'+el.id))obs.observe(el)});
 
-/* ---------- expand / collapse all ---------- */
 const exBtn=document.getElementById('expandBtn');
 exBtn.onclick=()=>{const ds=[...document.querySelectorAll('details')];
   const open=ds.some(d=>!d.open);ds.forEach(d=>d.open=open);
   exBtn.textContent=open?'collapse all':'expand all'};
 
-/* ---------- flip cards ---------- */
 document.querySelectorAll('[data-flip]').forEach(f=>f.onclick=()=>f.classList.toggle('on'));
 
-/* ---------- tabs ---------- */
 document.querySelectorAll('[data-tabs]').forEach(t=>{
   const bs=[...t.querySelectorAll('.tab-bar button')],ps=[...t.querySelector('.tab-panes').children];
   bs.forEach((b,i)=>b.onclick=()=>{bs.forEach((x,j)=>{x.classList.toggle('on',j===i);
     ps[j].classList.toggle('on',j===i)})})});
 
-/* ---------- copy buttons ---------- */
 document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
   navigator.clipboard.writeText(b.parentElement.querySelector('pre').innerText)
     .then(()=>{b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})});
 
-/* ---------- page completion + home navigation ----------
-   Each lesson page tracks done:<its path>. Auto-completes when every quiz
-   question on the page is answered; manual toggle for pages without quizzes.
-   The library server derives course-level completion from these keys. */
 const DKEY='done:'+location.pathname;
 const doneBtn=document.getElementById('doneBtn');
 if(location.protocol.indexOf('http')===0){const h=document.getElementById('homeLink');if(h)h.hidden=false}
@@ -343,7 +301,6 @@ function maybeCompletePage(){
   for(const q of qs)if(!q.dataset.done)return;
   try{if(!localStorage.getItem(DKEY))window.setPageDone(true)}catch(e){}
 }
-/* no quizzes on this page: 2 min of visible reading + reached bottom -> auto-done */
 if(window.setPageDone&&!document.querySelector('[data-quiz]')){
   let secs=0,bottom=false;
   const atBottom=()=>{const h=document.documentElement;
@@ -357,7 +314,6 @@ if(window.setPageDone&&!document.querySelector('[data-quiz]')){
     if(secs>=120&&bottom){clearInterval(adIv);window.setPageDone(true)}
   },1000);
 }
-/* index page: green check on lesson links whose page is done */
 if(/(^|\/)(index\.html)?$/.test(location.pathname)){
   const dir=location.pathname.replace(/\/[^/]*$/,'');
   document.querySelectorAll('a[href]').forEach(a=>{
@@ -371,7 +327,6 @@ if(/(^|\/)(index\.html)?$/.test(location.pathname)){
   });
 }
 
-/* ---------- quiz (answers + score persist per page via localStorage) ---------- */
 document.querySelectorAll('[data-quiz]').forEach((qz,qi)=>{
   const key='quiz:'+location.pathname+':'+(qz.getAttribute('data-quiz')||qi);
   let saved={};try{saved=JSON.parse(localStorage.getItem(key))||{}}catch(e){}
@@ -395,11 +350,6 @@ document.querySelectorAll('[data-quiz]').forEach((qz,qi)=>{
       .catch(()=>{}).finally(()=>location.reload())}else location.reload()};
 });
 
-/* ---------- save / load progress as a real file on disk ----------
-   localStorage already survives browser restarts, but it dies with
-   "clear browsing data", private windows, or a different browser/machine.
-   These buttons export/import every quiz answer, module checkbox and the
-   theme as progress.json — a file the reader owns. */
 document.getElementById('saveBtn').onclick=()=>{
   const data={};
   try{for(const k of Object.keys(localStorage))

@@ -535,7 +535,12 @@ async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let onboarding = engine.controller.onboarding(project.clone()).await.unwrap();
-        let done = |step: &Step| matches!(step, Step::Done | Step::Off | Step::Failed { .. });
+        let done = |step: &Step| {
+            matches!(
+                step,
+                Step::Done | Step::Off | Step::NotInstalled | Step::Failed { .. }
+            )
+        };
         if done(&onboarding.graph) && done(&onboarding.mapping) {
             break;
         }
@@ -866,6 +871,26 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
         shows(
             &rows,
             "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
+fn a_graph_step_without_the_graphify_skill_says_it_is_not_installed_not_turned_off() {
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::NotInstalled;
+        view.mapping = Step::Running;
+    });
+    let rows = render(&mut shell, 80, 40);
+    let missing = format!("{} Not installed", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, &missing), "{rows:#?}");
+    assert!(!shows(&rows, "Turned off"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify isn't installed, so no code graph is built. Install it in Setup."
         ),
         "{rows:#?}"
     );

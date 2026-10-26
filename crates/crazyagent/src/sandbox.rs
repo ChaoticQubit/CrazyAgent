@@ -899,14 +899,19 @@ pub struct InstalledSandbox {
 impl InstalledSandbox {
     /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]); on
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
-    /// Windows, writes the boundary profile for the helper next to the engine's executable
-    /// (see [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that
-    /// profile, the install refusal, or `Unavailable` where this system has no boundary.
+    /// Windows, checks the helper next to the engine's executable first, then writes its
+    /// boundary profile with the engine's grants folder (see
+    /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
+    /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(target_os = "windows")]
         {
-            let helper = std::env::current_exe()?.with_file_name(windows::HELPER_NAME);
-            let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile)?;
+            let helper = windows::existing_helper(
+                &std::env::current_exe()?.with_file_name(windows::HELPER_NAME),
+            )?;
+            let grants = windows::grants_folder()?;
+            let windows =
+                windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
             assert!(profile.is_file());
             Ok(Self {
                 sandbox,
