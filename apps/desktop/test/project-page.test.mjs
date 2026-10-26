@@ -133,6 +133,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
   assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
+    "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
   for (const phase of ["failed", "blocked", "uncertain"]) {
     const line = research.turnLine(turn(phase, "unknown", null));
     assert.equal(line, `The master stopped. (${phase})`);
@@ -149,6 +151,7 @@ test("a master turn names its account, and a turn no account could run names eac
     accounts: [
       { account_ref: "work-claude", connection: "claude-a", harness: "claude", reason: "readiness_unknown" },
       { account_ref: "home-claude", connection: "claude-b", harness: "claude", reason: "rate_limited" },
+      { account_ref: "spare-claude", connection: "claude-d", harness: "claude", reason: "transient_failure" },
       { account_ref: "work-codex", connection: "codex-c", harness: "codex", reason: null },
     ],
   };
@@ -156,6 +159,7 @@ test("a master turn names its account, and a turn no account could run names eac
   assert.deepEqual(research.accountLines(blocked), [
     "work-claude: not signed in",
     "home-claude: rate limited, paused for a few minutes",
+    "spare-claude: sign-in could not be renewed just now, available again in a minute",
     "work-codex is ready on codex: change the master to codex to use it.",
   ]);
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
