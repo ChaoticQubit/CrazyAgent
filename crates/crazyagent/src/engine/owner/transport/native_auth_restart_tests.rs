@@ -399,12 +399,15 @@ impl Run {
     }
 
     async fn status(&self) -> AccountStatus {
+        self.account().await.status
+    }
+
+    async fn account(&self) -> crate::accounts::AccountView {
         let page = self.client().list_accounts(None, 50).await.unwrap();
         page.accounts
             .into_iter()
             .find(|account| account.id == connection())
             .expect("the configured account is listed")
-            .status
     }
 
     async fn stop(self) {
@@ -550,7 +553,7 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
         first.stop().await;
         let second = restart.start().await;
         assert_eq!(
-            settled(&restart, &second, AccountStatus::SignedIn).await,
+            settled(&restart, &second, AccountStatus::NotSignedIn).await,
             Ok(())
         );
         assert_eq!(
@@ -561,6 +564,44 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
     })
     .await
     .expect("the sign-in hold case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_account_reads_rejected_until_it_signs_in_again_on_the_same_account() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        run.sign_in(&restart).await;
+        assert_eq!(run.status().await, AccountStatus::SignedIn);
+        restart.hold();
+        let rejected = run.account().await;
+        assert_eq!(
+            (rejected.status, rejected.status_label.as_str()),
+            (AccountStatus::NotSignedIn, "Sign-in rejected")
+        );
+        run.authenticate(
+            &restart,
+            connection(),
+            "rejected-check",
+            NativeAuthMethod::ClaudeExisting,
+        )
+        .await;
+        assert_eq!(run.account().await, rejected);
+        run.sign_in_to(&restart, connection(), "rejected-sign-in-again")
+            .await;
+        let again = run.account().await;
+        assert_eq!(
+            (again.id, again.status, again.status_label.as_str()),
+            (connection(), AccountStatus::SignedIn, "Signed in")
+        );
+        assert_eq!(
+            restart.held(),
+            (false, crate::model_gateway::Health::Unknown)
+        );
+        run.stop().await;
+    })
+    .await
+    .expect("the rejected account case exceeded 60 seconds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
