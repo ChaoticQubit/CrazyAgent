@@ -14,7 +14,7 @@ use super::settings_plugins::{AddPlugin, EditServer};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
-use crate::project_setup::{SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
 use crate::tui::client::{OwnerEvent, SetupEvent};
@@ -175,7 +175,8 @@ pub(in crate::tui) struct ProjectPage {
     screen: ProjectScreen,
     view: View,
     sent: Vec<SetupQuery>,
-    assigning: Option<String>,
+    assigning: Option<(Option<CredentialRef>, Option<String>)>,
+    recording: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
@@ -197,6 +198,7 @@ impl ProjectPage {
             view: View::default(),
             sent: Vec::new(),
             assigning: None,
+            recording: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
@@ -404,9 +406,19 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
-        let SetupQuery::Change { action, .. } = &query else {
+        let SetupQuery::Change { action, generation } = &query else {
             return;
         };
+        if self.recording == Some(*generation) {
+            self.recording = None;
+            if !applied {
+                ctx.say(Message::warning(
+                    "The pool is changed, but the project details still name the old one.",
+                    "Pick the pool again to save it.",
+                ));
+            }
+            return;
+        }
         let name = |job: i64| {
             self.screen
                 .jobs
@@ -490,7 +502,7 @@ impl ProjectPage {
         self.screen.pool_ready = true;
     }
 
-    fn assign(&mut self, pool: CredentialRef, ctx: &mut Ctx) {
+    fn assign(&mut self, pool: Option<CredentialRef>, ctx: &mut Ctx) {
         if self.assigning.is_some() {
             ctx.say(Message::warning(
                 "Still assigning the pool.",
@@ -498,13 +510,14 @@ impl ProjectPage {
             ));
             return;
         }
-        let name = self
-            .screen
-            .pool_choices
-            .iter()
-            .find(|choice| choice.id == pool)
-            .map_or_else(|| "The pool".to_owned(), |choice| choice.name.clone());
-        self.assigning = Some(name);
+        let name = pool.as_ref().map(|pool| {
+            self.screen
+                .pool_choices
+                .iter()
+                .find(|choice| &choice.id == pool)
+                .map_or_else(|| "The pool".to_owned(), |choice| choice.name.clone())
+        });
+        self.assigning = Some((pool.clone(), name));
         ctx.request(Request::EditPool {
             change: PoolChange::Assign {
                 pool,
@@ -513,17 +526,53 @@ impl ProjectPage {
         });
     }
 
-    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
-        let Some(name) = self.assigning.take() else {
+    /// Records the pool the owner just gave the project in its details too, so a removed
+    /// pool is not offered again as the picked one. Takes the pool, None for no pool.
+    /// Sends nothing when the details already name it; its reply stays quiet unless it fails.
+    fn record_pool(&mut self, pool: Option<CredentialRef>, ctx: &mut Ctx) {
+        let Some(setup) = self.screen.setup.as_ref() else {
             return;
         };
-        match result {
-            Ok(()) => ctx.say(Message::success(
+        if setup.pool == pool {
+            return;
+        }
+        let action = SetupAction::Update {
+            project_id: setup.project_id.clone(),
+            expected_revision: setup.revision,
+            name: None,
+            setup: ProjectSetup {
+                about: setup.about.clone(),
+                tech_stack: setup.tech_stack.clone(),
+                platforms: setup.platforms.clone(),
+                research: setup.research.clone(),
+                pool,
+                team: Some(setup.team.clone()),
+                documents: Vec::new(),
+            },
+        };
+        let generation = ctx.next_generation();
+        self.recording = Some(generation);
+        self.send(SetupQuery::Change { action, generation }, ctx);
+    }
+
+    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
+        let Some((pool, name)) = self.assigning.take() else {
+            return;
+        };
+        if result.is_ok() {
+            self.record_pool(pool, ctx);
+        }
+        match (result, name) {
+            (Ok(()), Some(name)) => ctx.say(Message::success(
                 &format!("{name} is assigned."),
                 "Work can start now.",
             )),
-            Err(code) => ctx.say(Message::error(
-                "The pool was not assigned.",
+            (Ok(()), None) => ctx.say(Message::success(
+                "This project has no pool now.",
+                "Pick a pool to start.",
+            )),
+            (Err(code), _) => ctx.say(Message::error(
+                "The pool was not changed.",
                 &plain_problem(code),
             )),
         }

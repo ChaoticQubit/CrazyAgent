@@ -327,6 +327,22 @@ pub(in crate::tui) fn project_screen(
                 row
             });
         }
+        let none = screen.pool_choices.len();
+        if none < first + PICKER_ROWS {
+            let unassigned = !screen.pool.as_ref().is_some_and(|pool| pool.assigned);
+            let row = Row::of(
+                format!("{} No pool", if unassigned { "(*)" } else { "( )" }),
+                look.fg,
+            )
+            .pad(32)
+            .push("Agents wait", look.muted)
+            .pad(44);
+            body.push(if cursor == none {
+                row.restyle(look.selection)
+            } else {
+                row
+            });
+        }
         rows = modal(&rows, width, 50, "Pick a pool", body, 4, look);
         help = vec![
             ("\u{2191}\u{2193}", "Move"),
@@ -590,7 +606,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
             ),
             None => (
                 "This project has no pool, so no agent can start.".to_owned(),
-                "Pick a pool in Settings. Work starts as soon as you do.",
+                "Pick a pool to start. Work starts as soon as you do.",
                 "[> Pick a pool ]".to_owned(),
                 ("Enter", "Pick a pool"),
             ),
@@ -906,7 +922,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 Row::of("Press s to open project settings and pick one.", look.fg),
             ],
             true,
-            Row::of("> Pick a pool first", look.muted),
+            Row::of("> Pick a pool to start", look.muted),
             vec![("s", "Project settings"), TABS, ("Esc", "Home")],
         )
     } else if let Some(transcript) = screen.transcript.as_ref() {
@@ -1033,6 +1049,15 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         TABS,
         ("Esc", "Home"),
     ]);
+    if screen.pool_ready && !screen.pool.as_ref().is_some_and(|pool| pool.assigned) {
+        lines.push(Row::of(
+            "This project has no pool. Pick a pool to start.",
+            look.warning,
+        ));
+        if wide {
+            lines.push(Row::default());
+        }
+    }
     let Some(jobs) = &screen.jobs else {
         lines.push(Row::of("Loading...", look.muted));
         return (lines, None, help);

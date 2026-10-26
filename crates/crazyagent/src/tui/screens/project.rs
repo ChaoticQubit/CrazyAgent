@@ -458,7 +458,7 @@ pub(in crate::tui) enum ProjectReply {
     },
     Open(OpenRequest),
     PickPool,
-    Assign(crate::protocol::CredentialRef),
+    Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
     StopTurn,
     Retry,
@@ -1529,7 +1529,7 @@ impl ProjectScreen {
         }
         let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
         match (&self.pool, picked) {
-            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
+            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(Some(id)),
             _ if self.pool_choices.is_empty() => ProjectReply::PickPool,
             (pool, _) => {
                 let current = pool.as_ref().filter(|pool| pool.assigned).and_then(|pool| {
@@ -1543,18 +1543,22 @@ impl ProjectScreen {
         }
     }
 
+    /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
+    /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
-        assert!(cursor < self.pool_choices.len().max(1));
-        let last = self.pool_choices.len().saturating_sub(1);
+        let last = self.pool_choices.len();
+        assert!(cursor <= last);
         match key.code {
             KeyCode::Up => self.pool_picker = Some(cursor.saturating_sub(1)),
             KeyCode::Down => self.pool_picker = Some((cursor + 1).min(last)),
             KeyCode::Esc => self.pool_picker = None,
             KeyCode::Enter => {
                 self.pool_picker = None;
-                if let Some(choice) = self.pool_choices.get(cursor) {
-                    return ProjectReply::Assign(choice.id.clone());
-                }
+                return ProjectReply::Assign(
+                    self.pool_choices
+                        .get(cursor)
+                        .map(|choice| choice.id.clone()),
+                );
             }
             _ => {}
         }
@@ -1562,15 +1566,15 @@ impl ProjectScreen {
     }
 
     /// Replaces the pools the picker lists.
-    /// Takes the choices in the engine's order; an open picker keeps a cursor inside the list.
-    /// Returns nothing.
+    /// Takes the choices in the engine's order; an open picker keeps a cursor on a pool
+    /// or on "No pool", and closes when no pool is left. Returns nothing.
     pub fn set_pool_choices(&mut self, choices: Vec<PoolChoice>) {
         self.pool_choices = choices;
         if let Some(cursor) = self.pool_picker {
             self.pool_picker = if self.pool_choices.is_empty() {
                 None
             } else {
-                Some(cursor.min(self.pool_choices.len() - 1))
+                Some(cursor.min(self.pool_choices.len()))
             };
         }
     }
@@ -1692,7 +1696,7 @@ impl ProjectScreen {
 
     fn assert_consistent(&self) {
         if let Some(cursor) = self.pool_picker {
-            assert!(cursor < self.pool_choices.len());
+            assert!(!self.pool_choices.is_empty() && cursor <= self.pool_choices.len());
         }
         if let Some(jobs) = &self.jobs {
             assert!(self.agents_cursor <= jobs.len());

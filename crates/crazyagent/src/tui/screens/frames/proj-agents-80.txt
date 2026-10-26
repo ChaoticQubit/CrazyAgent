@@ -3,6 +3,7 @@
   ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
 ────────────────────────────────━━━━━━━━────────────────────────────────────────
   Agents  3 waiting
+  This project has no pool. Pick a pool to start.
     Agent                    Harness        Status
   > ◔ Market research        Codex          ! Needs a pool
     ◬ Design research        Codex          ! Needs a pool
@@ -15,7 +16,6 @@
   Activity
   hh:mm  Queued
          Waiting for a pool
-
 
 
 
