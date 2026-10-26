@@ -140,6 +140,7 @@ pub enum MasterReason {
     QuotaExhausted,
     RateLimited,
     CooldownActive,
+    TransientFailure,
     ConnectionChanged,
     ScopeRevoked,
     CapacityUnavailable,

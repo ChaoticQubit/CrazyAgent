@@ -60,7 +60,11 @@ fn a_paused_mapping_lets_newer_projects_go_first_until_its_pause_ends() {
     pause(&database, "older", later);
 
     assert_eq!(claimed(&database).as_deref(), Some("newer"));
-    assert_eq!(claimed(&database), None, "the paused project is not claimed again");
+    assert_eq!(
+        claimed(&database),
+        None,
+        "the paused project is not claimed again"
+    );
     database
         .execute(
             "UPDATE onboarding SET mapping_reason=?1 WHERE project='older'",

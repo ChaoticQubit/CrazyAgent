@@ -183,6 +183,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::RateLimited | MasterReason::CooldownActive) => {
             "the account is resting after too many requests."
         }
+        Some(MasterReason::TransientFailure) => "the account is unavailable for a moment.",
         Some(MasterReason::CapacityUnavailable) => "another turn is still running.",
         Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
@@ -519,6 +520,7 @@ mod tests {
             (MasterReason::QuotaExhausted, "quota_exhausted"),
             (MasterReason::RateLimited, "rate_limited"),
             (MasterReason::CooldownActive, "cooldown_active"),
+            (MasterReason::TransientFailure, "transient_failure"),
             (MasterReason::ConnectionChanged, "connection_changed"),
             (MasterReason::ScopeRevoked, "scope_revoked"),
             (MasterReason::CapacityUnavailable, "capacity_unavailable"),

@@ -692,7 +692,12 @@ async fn a_home_move_points_the_project_repository_at_the_moved_folder() {
         "declared",
         "Declared repos",
         vec![
-            first.join("declared-repos").join("api").to_str().unwrap().into(),
+            first
+                .join("declared-repos")
+                .join("api")
+                .to_str()
+                .unwrap()
+                .into(),
             elsewhere.to_str().unwrap().into(),
         ],
     )

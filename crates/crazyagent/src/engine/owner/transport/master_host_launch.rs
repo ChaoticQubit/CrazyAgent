@@ -197,8 +197,8 @@ pub(super) struct MasterTurnLaunch {
 /// denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text,
 /// the turn's wall time and the engine executable for tools on. Output: the launch parts with
-/// the copy, or the refusal of the part that failed, `native_profile_credential_expiring`
-/// when the token lapses within the turn.
+/// the copy, or the refusal of the part that failed, `native_profile_renewal_failed`, a
+/// transient refusal, when the token still lapses within a minute after a renewal.
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
