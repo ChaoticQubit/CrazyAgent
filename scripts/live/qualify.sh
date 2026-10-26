@@ -3,7 +3,7 @@ set -u
 cd "$(dirname "$0")/../.." || exit 1
 tests="engine::owner::transport::master_host_launch::live_claude_tests::a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox
 team::runtime::live_claude_tests::a_real_claude_team_agent_turn_is_signed_in_inside_the_agent_sandbox
-research::runner::live_claude_tests::a_real_claude_research_run_is_signed_in_inside_the_research_sandbox
+research::runner::live_claude_tests::a_real_claude_research_run_on_a_fast_model_is_signed_in_inside_the_research_sandbox
 engine::owner::transport::master_host_launch::live_codex_tests::a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox
 team::runtime::live_codex_tests::a_real_codex_team_agent_turn_is_signed_in_inside_the_agent_sandbox
 research::runner::live_codex_tests::a_real_codex_research_run_is_signed_in_inside_the_research_sandbox"
