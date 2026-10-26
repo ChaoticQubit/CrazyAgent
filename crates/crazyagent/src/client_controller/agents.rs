@@ -137,4 +137,70 @@ mod tests {
             !alive(restarted_pid) && !alive(second_pid) && !alive(second_grandchild)
         });
     }
+
+    /// The owner stops a hosted agent, such as a team agent, whose host has not ended it
+    /// yet. The engine answers inside its own request deadline with the agent shown as
+    /// stopping, never an unknown outcome, and the agents view shows it stopped once the
+    /// host has ended it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_slower_than_the_request_deadline_answers_stopping_then_reads_stopped() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-cstop-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let global = home.join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 1000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            &home,
+            "e.sock",
+            &global,
+            &home.join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let agents = service.owner_runtime().unwrap().agents().unwrap();
+        let project = ProjectId::new("slow-stop").unwrap();
+        let hosted = agents
+            .host(
+                crate::agents::HostedAgent {
+                    project: project.clone(),
+                    role: crate::agents::AgentRole::SubAgent,
+                    label: "Team sub-agent 1".into(),
+                    harness: "codex".into(),
+                    host: "team",
+                    reference: "1".into(),
+                },
+                None,
+            )
+            .unwrap();
+        let (_, controller) = OwnerController::attach_configured(
+            Client::new(home.join("e.sock"), Duration::from_secs(10)).unwrap(),
+            OwnerClientKind::Desktop,
+        )
+        .await
+        .unwrap();
+
+        let stopping = controller
+            .stop_agent(hosted.id().to_owned())
+            .await
+            .unwrap();
+        assert_eq!(stopping.state, AgentState::Running);
+        assert_eq!(stopping.status, "Stopping");
+        assert!(!stopping.can_stop);
+        assert_eq!(
+            hosted.requested(),
+            Some(crate::agents::HostedRequest::Stop)
+        );
+
+        hosted.finish(AgentState::Stopped, None);
+        let listed = controller.agents(Some(project)).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, AgentState::Stopped);
+        assert_eq!(listed[0].status, "Stopped");
+    }
 }

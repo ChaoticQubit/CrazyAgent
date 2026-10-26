@@ -96,3 +96,33 @@ impl NativeBridge {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine's own refusals of an agent control reach the window as they are, so the
+    /// owner sees why a stop or restart did not happen instead of an unknown outcome.
+    #[test]
+    fn engine_agent_control_codes_pass_through_unchanged() {
+        for code in [
+            "agent_hosted",
+            "agent_restart_unavailable",
+            "agent_identity_unavailable",
+            "owner_busy",
+            "owner_request_failed",
+            "peer_owner_mismatch",
+            "owner_root_unavailable",
+        ] {
+            assert_eq!(agent_error(EngineError(code.into())).code, code);
+        }
+        assert_eq!(
+            agent_error(EngineError("launch_spawn_failed".into())).code,
+            "agent_launch_failed"
+        );
+        assert_eq!(
+            agent_error(EngineError("Not A Code".into())).code,
+            "agents_outcome_unknown"
+        );
+    }
+}
