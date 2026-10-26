@@ -8,10 +8,11 @@ use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse};
+use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
+use crate::master_session::{MasterSessionPhase, MasterSessionView, MasterTurnView};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
-use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
@@ -777,6 +778,248 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     assert!(!shown.contains("could not start"), "{shown}");
     assert!(!shown.contains("did not take"), "{shown}");
     assert!(!shown.contains("No messages yet."), "{shown}");
+}
+
+async fn latest_master(
+    engine: &mut Engine,
+    project: &ProjectId,
+) -> (Option<MasterSessionView>, ConfigId) {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ProjectMaster {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    let OwnerData::ProjectMaster { session } = reply.data else {
+        panic!("a master read answers with the master session");
+    };
+    (session.map(|session| *session), reply.config_id)
+}
+
+async fn session_turns(
+    engine: &mut Engine,
+    project: &ProjectId,
+    session: &SessionId,
+) -> Vec<MasterTurnView> {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ProjectMasterTurns {
+            project_id: project.clone(),
+            session_id: session.clone(),
+            cursor: None,
+            limit: 32,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ProjectMasterTurns { page } = reply.data else {
+        panic!("a turn read answers with a turn page");
+    };
+    assert!(page.next.is_none());
+    page.turns
+}
+
+async fn turn_text(engine: &mut Engine, project: &ProjectId, turn: &MasterTurnView) -> String {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ConversationHistory {
+            project_id: project.clone(),
+            cursor: None,
+            limit: 32,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ConversationHistory { page } = reply.data else {
+        panic!("a conversation read answers with a history page");
+    };
+    page.entries
+        .into_iter()
+        .find(|entry| entry.event_cursor == turn.input_cursor)
+        .expect("every master turn keeps its owner message")
+        .text
+}
+
+async fn until(
+    shell: &mut Shell,
+    connection: &mut Connection,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        shell.refresh();
+        pump(shell, connection).await;
+        let shown = render(shell, 100, 40);
+        if done(&shown) {
+            return shown;
+        }
+        assert!(Instant::now() < deadline, "never shown:\n{shown}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn settled_master(
+    engine: &mut Engine,
+    project: &ProjectId,
+    shell: &mut Shell,
+    connection: &mut Connection,
+    turns: usize,
+) -> MasterSessionView {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        shell.refresh();
+        pump(shell, connection).await;
+        if let (Some(session), _) = latest_master(engine, project).await
+            && session.current_turn.is_none()
+            && session_turns(engine, project, &session.session_id)
+                .await
+                .len()
+                == turns
+        {
+            return session;
+        }
+        assert!(Instant::now() < deadline, "the master turn never settled");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn say(shell: &mut Shell, connection: &mut Connection, text: &str) {
+    shell.key(Key::Enter);
+    for character in text.chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    pump(shell, connection).await;
+}
+
+async fn conversation_with_a_settled_turn(
+    engine: &mut Engine,
+) -> (ProjectId, Shell, Connection, MasterSessionView) {
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 40);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    say(&mut shell, &mut connection, "Plan the first slice").await;
+    let first = settled_master(engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_eq!(first.phase, MasterSessionPhase::Configured);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Plan the first slice") && !shown.contains("Thinking")
+    })
+    .await;
+    (notes, shell, connection, first)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+
+    shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Spare is assigned.")
+    })
+    .await;
+    let (open, changed) = latest_master(&mut engine, &notes).await;
+    assert_eq!(open.as_ref(), Some(&first));
+    assert_ne!(first.config_id, changed);
+
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Settings changed, so a new conversation started.")
+    })
+    .await;
+    assert!(!shown.contains("did not take"), "{shown}");
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(second.phase, MasterSessionPhase::Configured);
+    assert_eq!(second.config_id, latest_master(&mut engine, &notes).await.1);
+    assert_eq!(second.selection.pool_ref.as_str(), "pool-b");
+    let turns = session_turns(&mut engine, &notes, &second.session_id).await;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turn_text(&mut engine, &notes, &turns[0]).await,
+        "Add a dark theme"
+    );
+    let stale = session_turns(&mut engine, &notes, &first.session_id).await;
+    assert_eq!(stale.len(), 1);
+    assert_eq!(
+        turn_text(&mut engine, &notes, &stale[0]).await,
+        "Plan the first slice"
+    );
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Stopped"), "{shown}");
+    assert!(!shown.contains("e End conversation"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("e End conversation"), "{shown}");
+    shell.key(Key::Char('e'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("The master conversation is closed.")
+    })
+    .await;
+    assert!(!shown.contains("e End conversation"), "{shown}");
+    let (closed, _) = latest_master(&mut engine, &notes).await;
+    let closed = closed.unwrap();
+    assert_eq!(closed.session_id, first.session_id);
+    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.current_turn, None);
+
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(second.phase, MasterSessionPhase::Configured);
+    let turns = session_turns(&mut engine, &notes, &second.session_id).await;
+    assert_eq!(
+        turn_text(&mut engine, &notes, &turns[0]).await,
+        "Add a dark theme"
+    );
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("is closed"), "{shown}");
+    assert!(!shown.contains("Settings changed"), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

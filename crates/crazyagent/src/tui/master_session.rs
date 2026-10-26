@@ -384,6 +384,40 @@ impl State {
         self.enqueue(action, self.forms[index].generation)
     }
 
+    /// Drops the setup picks the current catalog no longer offers: a pool that no longer
+    /// leads this project, an account no longer in it, or a sandbox no longer allowed.
+    /// Input: none. Output: none; a dropped pick is chosen again from current settings.
+    fn forget_stale_picks(&mut self) {
+        let (Some(index), Some(catalog)) = (self.form_index(), self.catalog.as_ref()) else {
+            return;
+        };
+        let form = &self.forms[index];
+        let pool = form.pool.as_ref().is_some_and(|pool| {
+            !catalog
+                .pools(form)
+                .iter()
+                .any(|offered| &offered.id == pool)
+        });
+        let account = form
+            .account
+            .as_ref()
+            .is_some_and(|account| !catalog.accounts(form).contains(account));
+        let target = form
+            .target
+            .as_ref()
+            .is_some_and(|target| !catalog.target_choices(form).contains(target));
+        let form = &mut self.forms[index];
+        if pool {
+            form.pool = None;
+        }
+        if pool || account {
+            form.account = None;
+        }
+        if pool || account || target {
+            form.target = None;
+        }
+    }
+
     fn prefer_assigned_backend(&mut self) {
         let (Some(index), Some(catalog)) = (self.form_index(), self.catalog.as_ref()) else {
             return;
@@ -757,6 +791,7 @@ impl State {
         match result {
             Ok(catalog) => {
                 self.catalog = Some(*catalog);
+                self.forget_stale_picks();
                 self.prefer_assigned_backend();
                 self.defaults();
                 self.notice = concat!(

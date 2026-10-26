@@ -5,7 +5,7 @@ use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
     plain_problem, project_pool,
 };
-use super::project_master::{MasterRead, transcript_from};
+use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
@@ -180,6 +180,7 @@ pub(in crate::tui) struct ProjectPage {
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
     retried: bool,
+    renewed: bool,
 }
 
 impl ProjectPage {
@@ -201,6 +202,7 @@ impl ProjectPage {
             master_sent: Vec::new(),
             waiting: None,
             retried: false,
+            renewed: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -288,6 +290,7 @@ impl ProjectPage {
             ));
             return;
         }
+        self.renewed = false;
         let session = self.master.transcript().and_then(|(session, turns, _)| {
             session.map(|session| {
                 (
@@ -339,14 +342,9 @@ impl ProjectPage {
         let barrier = not_recorded(event);
         let failed = matches!(event, MasterEvent::Mutation { result: Err(_), .. });
         let applied = self.master.apply(event.clone());
-        if let (Some(code), Some(text)) = (&rejected, submitted_text(event)) {
-            if self.screen.input.value().is_empty() {
-                self.screen.input.set(text);
-            }
-            ctx.say(Message::error(
-                "The master did not take that message.",
-                &plain_problem(code),
-            ));
+        let renewing = self.renew(rejected.as_deref(), submitted_text(event));
+        if let Some(code) = rejected.as_deref().filter(|_| !renewing) {
+            self.refused(event, code, ctx);
         }
         if (barrier || failed) && !self.retried {
             self.retried = true;
@@ -363,18 +361,84 @@ impl ProjectPage {
         }
         match applied {
             Err(_) => self.drop_waiting(ctx, "The master conversation stopped updating."),
-            Ok(Some(confirmed)) => {
-                if matches!(confirmed.action, MasterOwnerAction::Open { .. })
-                    && let Some(waiting) = self.waiting.take()
-                {
-                    self.retried = false;
-                    if self.master.submit(&waiting.text, ctx.next_generation()) != Ok(true) {
-                        self.waiting = Some(waiting);
-                        self.drop_waiting(ctx, "The master started but did not take the message.");
-                    }
+            Ok(Some(confirmed)) => self.confirmed(&confirmed.action, ctx),
+            Ok(None) if renewing => {}
+            Ok(None) => self.advance_open(event, rejected.is_some() || failed, ctx),
+        }
+    }
+
+    /// Ends a conversation the engine refused a message for because it opened before a
+    /// settings change, so the message is sent once more in a new conversation.
+    /// Takes the rejection code and the refused text.
+    /// Returns true when the stale conversation is being ended.
+    fn renew(&mut self, code: Option<&str>, text: Option<&str>) -> bool {
+        let (Some("master_source_conflict"), Some(text)) = (code, text) else {
+            return false;
+        };
+        if self.renewed || self.waiting.is_some() || self.master.control(true).is_err() {
+            return false;
+        }
+        self.renewed = true;
+        self.waiting = Some(Waiting {
+            text: text.to_owned(),
+            opening: false,
+        });
+        true
+    }
+
+    /// Tells the owner the engine refused a master request, in plain words with its code.
+    /// Takes the event and the rejection code; a refused message goes back in the input box.
+    fn refused(&mut self, event: &MasterEvent, code: &str, ctx: &mut Ctx) {
+        let MasterEvent::Mutation { submission, .. } = event else {
+            return;
+        };
+        let lead = match &submission.action {
+            MasterOwnerAction::Submit { text, .. } => {
+                if self.screen.input.value().is_empty() {
+                    self.screen.input.set(text);
+                }
+                "The master did not take that message."
+            }
+            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
+                "The master could not start."
+            }
+            MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
+            MasterOwnerAction::Close { .. } => "The conversation did not end.",
+        };
+        let problem = master_problem(code);
+        if self.waiting.is_some() {
+            self.drop_waiting(ctx, &format!("{lead} {problem}"));
+        } else {
+            ctx.say(Message::error(lead, &problem));
+        }
+    }
+
+    /// Carries on after the engine confirmed a master request: an opened master takes the
+    /// waiting message, and a conversation ended for a renewal opens a new one.
+    /// Takes the confirmed action.
+    fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
+        match action {
+            MasterOwnerAction::Open { .. } => {
+                let Some(waiting) = self.waiting.take() else {
+                    return;
+                };
+                self.retried = false;
+                if self.master.submit(&waiting.text, ctx.next_generation()) != Ok(true) {
+                    self.waiting = Some(waiting);
+                    self.drop_waiting(ctx, "The master started but did not take the message.");
+                } else if self.renewed {
+                    ctx.say(Message::warning(
+                        "Settings changed, so a new conversation started.",
+                        "",
+                    ));
                 }
             }
-            Ok(None) => self.advance_open(event, rejected.is_some() || failed, ctx),
+            MasterOwnerAction::Close { .. }
+                if self.waiting.is_some() && self.master.open().is_err() =>
+            {
+                self.drop_waiting(ctx, "The master could not start.");
+            }
+            _ => {}
         }
     }
 
@@ -459,6 +523,26 @@ impl ProjectPage {
             Ok(()) => ctx.say(Message::success("Stopping the master's turn.", "")),
             Err(_) => ctx.say(Message::warning(
                 "The master is not working on anything.",
+                "",
+            )),
+        }
+    }
+
+    fn end_master(&mut self, ctx: &mut Ctx) {
+        if self.waiting.is_some() || self.master.has_pending() {
+            ctx.say(Message::warning(
+                "The master is still taking your last message.",
+                "Wait a moment, then try again.",
+            ));
+            return;
+        }
+        match self.master.control(true) {
+            Ok(()) => ctx.say(Message::success(
+                "Ending the conversation.",
+                "Your next message starts a new one.",
+            )),
+            Err(_) => ctx.say(Message::warning(
+                "There is no open conversation to end.",
                 "",
             )),
         }
@@ -624,6 +708,10 @@ impl ProjectPage {
             }
             ProjectReply::StopTurn => {
                 self.stop_master(ctx);
+                Flow::Handled
+            }
+            ProjectReply::EndConversation => {
+                self.end_master(ctx);
                 Flow::Handled
             }
             ProjectReply::Retry => {
