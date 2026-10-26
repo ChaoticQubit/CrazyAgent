@@ -13,7 +13,8 @@ test("a Tauri command that is not registered yet maps to a typed not-ready resul
 test("bridge refusals map to plain copy and never echo raw codes or unknown text", () => {
   const limit = api.classifyFailure({ code: "pool_member_limit" });
   assert.deepEqual(limit, { kind: "error", code: "pool_member_limit", message: "A pool can hold up to 15 accounts." });
-  assert.equal(api.classifyFailure({ code: "pool_in_use" }).message, "Can't delete this pool. A project uses it. Choose another pool for it first.");
+  assert.equal(api.classifyFailure({ code: "pool_needs_account" }).message, "A pool needs at least one account. Add another account first, or delete the pool.");
+  assert.equal(api.classifyFailure({ code: "pool_project_limit" }).message, "A pool can serve up to 64 projects. Pick another pool for this project.");
   assert.equal(api.classifyFailure({ code: "approved_accounts_limit" }).message,
     "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.");
   assert.equal(api.classifyFailure({ code: "allowed_destinations_limit" }).message,

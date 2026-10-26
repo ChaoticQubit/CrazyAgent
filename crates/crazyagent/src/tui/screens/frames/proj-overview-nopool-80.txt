@@ -6,7 +6,7 @@
   Offline field notes for ecologists.
 
   This project has no pool, so no agent can start.
-  Pick a pool in Settings. Work starts as soon as you do.
+  Pick a pool to start. Work starts as soon as you do.
 
   [> Pick a pool ]
 

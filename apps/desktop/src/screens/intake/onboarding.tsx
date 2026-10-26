@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
-  assignPool, loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, updateProjectSetup, type ProjectCatalog, type StoredSetup,
+  loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, setProjectPool, updateProjectSetup, type ProjectCatalog, type StoredSetup,
 } from "../../api-projects";
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
@@ -151,7 +151,7 @@ export function OnboardingReview({ id }: { id: string }) {
     if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state.code)); return; }
     if (state.kind === "unconfirmed") { setBusy(false); setProblem("We couldn't confirm setup was saved. Check the project and save again."); return; }
     const pool = request.setup.pool;
-    const assigned = pool ? await assignPool(id, pool, nextGeneration()) : null;
+    const assigned = pool ? await setProjectPool(id, pool, nextGeneration()) : null;
     setBusy(false);
     const unassigned = assigned !== null && (assigned.kind !== "ok" || assigned.value.kind !== "applied")
       ? ` Couldn't give ${pool} to its master. Choose it again in the project's Settings, Pool.` : "";

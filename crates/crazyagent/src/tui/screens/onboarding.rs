@@ -369,7 +369,10 @@ impl OnboardingPage {
                         match review.onboarding.draft.pool.clone() {
                             Some(pool) => {
                                 ctx.request(Request::EditPool {
-                                    change: PoolChange::Assign { pool, project },
+                                    change: PoolChange::Assign {
+                                        pool: Some(pool),
+                                        project,
+                                    },
                                 });
                                 self.phase = Phase::Assigning(name);
                                 Flow::Handled

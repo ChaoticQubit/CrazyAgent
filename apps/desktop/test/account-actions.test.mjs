@@ -5,8 +5,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { AccountsView, accountActions, deletePlan, deleteAccounts, deleteSummary, linkedSignIn, signInPolling } = await import("../src/screens/settings/accounts.tsx");
-const { removeBody } = await import("../src/screens/settings/account-drawer.tsx");
+const { AccountsView, accountActions, deleteDialog, deleteAccounts, deleteSummary, linkedSignIn, signInPolling } = await import("../src/screens/settings/accounts.tsx");
+const { poolEffect } = await import("../src/screens/settings/account-drawer.tsx");
 const { cancelSignIn, cancelError, discardAccount } = await import("../src/screens/settings/sign-in.tsx");
 
 const account = (id, patch = {}) => ({ id, name: `Claude ${id}`, provider: "claude", provider_name: "Claude", method: "subscription",
@@ -40,16 +40,26 @@ test("a Sign in again link opens that account with its sign-in, or its details o
   assert.equal(linkedSignIn({ kind: "loading" }, "a"), undefined);
 });
 
-test("delete leaves out accounts a pool uses and names the pools, since the engine refuses them", () => {
+test("deleting accounts in pools names the pools they leave and the pools deleted with them, then removes them all", () => {
   const accounts = [account("a"), account("b"), keyed("c")];
-  const plan = deletePlan(accounts, [pool("Main", ["b"]), pool("Spare", ["b", "x"])]);
-  assert.deepEqual(plan.remove.map((item) => item.id), ["a", "c"]);
-  assert.deepEqual(plan.blocked, [{ name: "Claude b", message: "Claude b is in Main and Spare. Remove it from those pools first." }]);
-  assert.deepEqual(deletePlan(accounts, undefined).remove.map((item) => item.id), ["a", "b", "c"]);
-  assert.equal(api.plainError("account_in_pool"), "This account is in a pool. Remove it from the pool first.");
-  assert.equal(removeBody([]), "It isn't in any pool.");
-  assert.equal(removeBody(["Main"]), "It is in Main. Remove it from that pool first.");
-  assert.equal(removeBody(["Main", "Spare"]), "It is in Main and Spare. Remove it from those pools first.");
+  const pools = [pool("Main", ["b"]), pool("Spare", ["b", "x"])];
+  const many = deleteDialog(accounts, pools);
+  assert.equal(many.title, "Delete 3 accounts?");
+  assert.equal(many.confirmLabel, "Remove from pools and delete");
+  assert.deepEqual(many.lines, [
+    "Claude a, Claude b and Claude c and their saved sign-ins or keys are removed from CrazyAgent. A running sign-in is cancelled first.",
+    "They leave pools Main and Spare. Main has no other account, so it is deleted too and its projects have no pool.",
+  ]);
+  const one = deleteDialog([accounts[1]], [pool("Spare", ["b", "x"])]);
+  assert.equal(one.title, "Delete Claude b?");
+  assert.equal(one.confirmLabel, "Remove from pools and delete");
+  assert.deepEqual(one.lines.slice(1), ["It leaves pool Spare."]);
+  assert.equal(deleteDialog([accounts[0]], pools).confirmLabel, "Delete account");
+  assert.equal(deleteDialog(accounts, undefined).confirmLabel, "Delete 3 accounts");
+  assert.equal(deleteDialog(accounts, undefined).lines.length, 1);
+  assert.equal(poolEffect(["a"], pools), undefined);
+  assert.equal(poolEffect(["b", "x"], pools), "They leave pools Main and Spare. Main and Spare have no other account, so they are deleted too and their projects have no pool.");
+  assert.equal(api.plainError("account_in_pool"), api.plainError("made_up_code"));
 });
 
 test("deleting a selection tries every account once, cancels a running sign-in first, and reports what was left", async () => {
@@ -60,8 +70,8 @@ test("deleting a selection tries every account once, cancels a running sign-in f
   assert.deepEqual(codes, ["engine_unreachable", "engine_unreachable", "engine_unreachable"]);
   assert.equal(deleteSummary(result.removed, result.failures), "Couldn't delete Claude a and Claude b. CrazyAgent's engine isn't running.");
   assert.equal(deleteSummary(["Claude a", "Claude b"], []), "Deleted Claude a and Claude b.");
-  assert.equal(deleteSummary(["Claude a"], [{ name: "Claude b", message: "This account is in a pool. Remove it from the pool first." }]),
-    "Deleted Claude a. Couldn't delete Claude b. This account is in a pool. Remove it from the pool first.");
+  assert.equal(deleteSummary(["Claude a"], [{ name: "Claude b", message: "This account no longer exists." }]),
+    "Deleted Claude a. Couldn't delete Claude b. This account no longer exists.");
 });
 
 test("cancelling a sign-in reaches the engine and says plainly when the engine can no longer stop it", async () => {

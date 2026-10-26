@@ -569,6 +569,19 @@ async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
     assert!(shown.contains("Main   Enter Change"), "{shown}");
+
+    shell.key(Key::Enter);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("(*) Main"), "{shown}");
+    assert!(shown.contains("( ) No pool"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("This project has no pool now."), "{shown}");
+    assert!(shown.contains("No pool yet"), "{shown}");
 }
 
 #[test]

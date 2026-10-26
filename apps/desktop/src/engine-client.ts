@@ -204,7 +204,8 @@ export function errorMessage(error: unknown): string {
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
-    pool_in_use: "This pool is used by a project. Remove it from the project first.",
+    pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
+    pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
     owner_profile_name: "Enter your name, up to 100 characters.",
     skill_folder_not_found: "That folder was not found.",
@@ -1205,7 +1206,7 @@ export function readAccountProfile(): Promise<AccountProfileView> {
 
 export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };
 
-export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool };
+export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool } | { kind: "assign_project_pool"; project: string; pool: string | null };
 
 export interface ModelAccessBasis {
   ticket: string;

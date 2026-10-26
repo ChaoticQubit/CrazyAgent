@@ -26,7 +26,6 @@ const ACCOUNT_CODES: &[&str] = &[
     "account_identity_unavailable",
     "account_not_found",
     "account_exists",
-    "account_in_pool",
     "account_reply_invalid",
     "account_reply_too_large",
     "accounts_page_limit",
