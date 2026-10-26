@@ -1081,7 +1081,7 @@ fn a_confirmed_setup_gives_its_pool_to_the_project_before_the_project_opens() {
     else {
         panic!("the saved setup's pool is given to the project: {next:?}");
     };
-    assert_eq!(pool.as_str(), "main");
+    assert_eq!(pool.as_ref().map(|id| id.as_str()), Some("main"));
     assert_eq!(to, project);
     assert_ne!(shell.place(), Some(opened(&project)));
     shell.arrive(Arrival::PoolEdited(Ok(())));
