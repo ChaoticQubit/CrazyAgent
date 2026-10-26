@@ -1,6 +1,7 @@
+use crate::project_setup::DOCUMENT_EXTENSIONS;
 use std::ffi::OsStr;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub(crate) mod unix_socket;
@@ -78,6 +79,9 @@ pub(crate) fn owned_by_effective_user(_metadata: &std::fs::Metadata) -> bool {
 
 /// The most text one clipboard copy takes, so a copy never holds a large buffer.
 pub const CLIPBOARD_BYTES_MAX: usize = 64 * 1024;
+
+/// The longest project folder or context path handed to the opener checks.
+pub const OPEN_PATH_BYTES_MAX: usize = 4096;
 
 #[cfg(target_os = "macos")]
 const OPEN: &str = "/usr/bin/open";
@@ -182,6 +186,57 @@ pub fn clipboard_command() -> Result<Command, &'static str> {
     {
         Err("clipboard_unavailable")
     }
+}
+
+/// Resolves a project's stored folder before it is shown to the owner. Input: the folder
+/// the engine recorded. Output: its canonical path when it is an existing absolute folder of
+/// at most `OPEN_PATH_BYTES_MAX` bytes, or `project_folder_missing`. Show it with [`reveal`],
+/// never [`open`], so a folder named like an app bundle is not launched.
+pub fn project_folder(stored: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(stored);
+    if !path.is_absolute() || stored.len() > OPEN_PATH_BYTES_MAX {
+        return Err("project_folder_missing");
+    }
+    let canonical = path.canonicalize().map_err(|_| "project_folder_missing")?;
+    if !canonical.is_dir() {
+        return Err("project_folder_missing");
+    }
+    Ok(canonical)
+}
+
+/// Resolves one context file to open with its default app: a relative path of plain parts,
+/// a document type the project accepts, not a link, and a regular file still inside the
+/// project folder. Inputs: the canonical project folder and the relative path.
+/// Output: the file's canonical path, or `context_item_not_openable`.
+pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static str> {
+    assert!(folder.is_absolute());
+    let refused = "context_item_not_openable";
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || relative.len() > OPEN_PATH_BYTES_MAX
+        || !path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(refused);
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    if !extension.is_some_and(|value| DOCUMENT_EXTENSIONS.contains(&value.as_str())) {
+        return Err(refused);
+    }
+    let joined = folder.join(path);
+    let metadata = std::fs::symlink_metadata(&joined).map_err(|_| refused)?;
+    if !metadata.file_type().is_file() {
+        return Err(refused);
+    }
+    let canonical = joined.canonicalize().map_err(|_| refused)?;
+    if !canonical.starts_with(folder) || !canonical.is_file() {
+        return Err(refused);
+    }
+    Ok(canonical)
 }
 
 /// Opens one file, folder or web link with the owner's default app and waits for the opener.
