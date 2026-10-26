@@ -626,10 +626,6 @@ impl CodexProtocol {
         if let Some(turn) = &self.turn {
             assert!(self.thread_id.is_some());
             assert!(self.seen_turns.contains(&turn.id));
-            assert!(
-                turn.status == TurnStatus::InProgress
-                    || self.server_requests.values().all(Option::is_none)
-            );
         }
         if self.phase == State::Active {
             assert_eq!(
@@ -976,7 +972,6 @@ impl CodexProtocol {
             }
         } else {
             self.phase = State::Idle;
-            self.server_requests.clear();
             Event::TurnCompleted {
                 turn_id: turn.id.clone(),
                 status: turn.status,

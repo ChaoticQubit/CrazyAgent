@@ -527,6 +527,60 @@ fn codex_host_approval_request_is_observed_and_declined_through_supported_rpc() 
 }
 
 #[test]
+fn codex_host_declines_requests_read_together_with_their_turn_end() {
+    let (mut host, request) = active();
+    let mut input = wire(json!({
+        "id":7, "method":"item/commandExecution/requestApproval", "params":{
+            "threadId":"unit-native-thread", "turnId":"unit-native-turn",
+            "itemId":"unit-command", "startedAtMs":1
+        }
+    }));
+    input.extend(wire(json!({
+        "id":8, "method":"item/tool/requestUserInput", "params":{
+            "threadId":"unit-native-thread", "turnId":"unit-native-turn",
+            "itemId":"unit-input", "isBlocking":false,
+            "questions":[{"id":"scope","header":"Scope","question":"Which work?"}]
+        }
+    })));
+    input.extend(completed("completed"));
+    let batch = host.receive(&input).unwrap();
+    assert_eq!(batch.events.len(), 3);
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::ApprovalRequired { .. }
+    ));
+    assert!(matches!(
+        &batch.events[1].kind,
+        EventKind::UnsupportedRequest { .. }
+    ));
+    assert!(matches!(
+        &batch.events[2].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Success,
+            ..
+        }
+    ));
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|event| event.request_id.as_ref() == Some(&request))
+    );
+    assert_eq!(batch.outbound.len(), 2);
+    assert_eq!(
+        message(&batch.outbound[0]),
+        json!({"id":7,"result":{"decision":"decline"}})
+    );
+    assert_eq!(
+        message(&batch.outbound[1]),
+        json!({"id":8,"error":{"code":-32601,"message":"unsupported native request"}})
+    );
+    assert_eq!(host.state(), State::Idle);
+    let next = RequestId::new("unit-next-turn").unwrap();
+    assert!(host.start_turn(next, "unit next prompt").is_ok());
+}
+
+#[test]
 fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_success() {
     let (mut host, _) = active();
     assert!(

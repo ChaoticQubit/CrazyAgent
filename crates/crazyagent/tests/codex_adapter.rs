@@ -532,7 +532,7 @@ fn numeric_server_ids_have_a_separate_direction_from_client_correlation() {
 }
 
 #[test]
-fn pending_approvals_are_bounded_and_expire_on_turn_completion() {
+fn pending_approvals_are_bounded_and_outlive_turn_completion_until_declined() {
     let mut protocol = active();
     for id in 0..16 {
         protocol
@@ -552,9 +552,70 @@ fn pending_approvals_are_bounded_and_expire_on_turn_completion() {
         .receive(&notification("turn/completed", "turn-unit", "completed"))
         .unwrap();
     assert_eq!(
+        protocol.start_turn("next"),
+        Err(ProtocolError::InvalidState)
+    );
+    assert_eq!(
+        request(&protocol.deny_request(&WireId::Text("unit".into())).unwrap()),
+        json!({"id":"unit","result":{"decision":"decline"}})
+    );
+    assert_eq!(
         protocol.deny_request(&WireId::Text("unit".into())),
         Err(ProtocolError::StaleMessage)
     );
+    assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
+}
+
+#[test]
+fn requests_read_together_with_their_turn_end_are_still_declined_by_their_own_protocol() {
+    let mut protocol = active();
+    let mut input = approval(json!(7), "item/commandExecution/requestApproval");
+    input.extend(wire(json!({
+        "id":8, "method":"item/tool/requestUserInput", "params":{
+            "threadId":"thread-unit", "turnId":"turn-unit", "itemId":"item-input",
+            "isBlocking":false,
+            "questions":[{"id":"scope","header":"Scope","question":"Which work?"}]
+        }
+    })));
+    input.extend(notification("turn/completed", "turn-unit", "completed"));
+    let events = protocol.receive(&input).unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        &events[0],
+        Event::ApprovalRequired {
+            id: WireId::Number(7),
+            kind: ApprovalKind::Command,
+            ..
+        }
+    ));
+    assert_eq!(
+        events[1],
+        Event::UnsupportedRequest {
+            id: WireId::Number(8),
+            method: "item/tool/requestUserInput".into()
+        }
+    );
+    assert_eq!(
+        events[2],
+        Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }
+    );
+    assert_eq!(protocol.state(), State::Idle);
+    assert_eq!(
+        request(&protocol.deny_request(&WireId::Number(7)).unwrap()),
+        json!({"id":7,"result":{"decision":"decline"}})
+    );
+    assert_eq!(
+        protocol.start_turn("next"),
+        Err(ProtocolError::InvalidState)
+    );
+    assert_eq!(
+        request(&protocol.deny_request(&WireId::Number(8)).unwrap()),
+        json!({"id":8,"error":{"code":-32601,"message":"unsupported native request"}})
+    );
+    assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
 }
 
 #[test]
