@@ -149,6 +149,11 @@ test("every master stop reads as a sentence that ends with the code the turn sto
       assert.ok(line.endsWith(` (${reason === "unknown" ? phase : reason})`), line);
     }
   }
+  for (const reason of reasons.filter((name) => name !== "unknown" && name !== "approval_required")) {
+    for (const phase of ["failed", "blocked"]) {
+      assert.notEqual(research.turnLine(turn(phase, reason)), `The master stopped. (${reason})`, `${phase} ${reason} says why the master stopped`);
+    }
+  }
   for (const code of turnCodes) {
     assert.match(research.turnLine(turn("failed", "unknown", code)), new RegExp(`^The master stopped.*\\. \\(${code}\\)$`), code);
   }
