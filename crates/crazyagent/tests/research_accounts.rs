@@ -366,3 +366,81 @@ fn a_rate_limited_research_run_pauses_its_account_in_the_shared_pause_without_sp
         AccountPick::Account { .. }
     ));
 }
+
+#[test]
+fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_paused() {
+    use crazyagent::research::accounts::SettingsResolver;
+    use crazyagent::research::runner::ResearchHarness;
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let root = runtime.root.clone();
+    let global = root.join("research-global.toml");
+    let project = root.join("research-project.toml");
+    std::fs::write(&project, "").unwrap();
+    std::fs::write(
+        &global,
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-local-account\", \"local-account\", \"second-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"second-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"second-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11435/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"anthropic-local-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"second-connection\", \"anthropic-local-connection\"]\nprojects = [\"project-a\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n",
+    )
+    .unwrap();
+    let resolver =
+        SettingsResolver::new(&global, &project, &root.join("projects"), &runtime.database)
+            .unwrap();
+    let pool = CredentialRef::new("local-pool").unwrap();
+    let endpoint = |id: &str, url: &str| AccountPick::Account {
+        connection: CredentialRef::new(id).unwrap(),
+        account: Box::new(ResearchAccount::Endpoint {
+            base_url: url.into(),
+            model: "qwen2.5:0.5b".into(),
+        }),
+    };
+    let anthropic = AccountPick::Account {
+        connection: CredentialRef::new("anthropic-local-connection").unwrap(),
+        account: Box::new(ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen2.5:0.5b".into(),
+        }),
+    };
+    let both = [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
+    assert_eq!(
+        resolver.pool_pick(&pool, &both),
+        endpoint("local-connection", "http://127.0.0.1:11434/v1")
+    );
+    let jobs = crazyagent::research::jobs::ResearchJobs::open(&runtime.database).unwrap();
+    let pause = |connection: &str| {
+        jobs.enqueue("project-a", "market_research", "codex", false)
+            .unwrap();
+        let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
+        let (_, until) = jobs
+            .rate_limited(&held, &CredentialRef::new(connection).unwrap())
+            .unwrap();
+        let cancelled = jobs.request_cancel(held.id).unwrap();
+        assert!(cancelled);
+        until
+    };
+    let first = pause("local-connection");
+    assert_eq!(
+        resolver.pool_pick(&pool, &both),
+        endpoint("second-connection", "http://127.0.0.1:11435/v1")
+    );
+    let second = pause("second-connection");
+    assert!(second >= first);
+    assert_eq!(resolver.pool_pick(&pool, &both), anthropic);
+    assert_eq!(
+        resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
+        AccountPick::Paused { until_ms: first }
+    );
+    let third = pause("anthropic-local-connection");
+    assert!(third >= second);
+    assert_eq!(
+        resolver.pool_pick(
+            &pool,
+            &[ResearchHarness::ClaudeCode, ResearchHarness::Codex]
+        ),
+        AccountPick::Paused { until_ms: first }
+    );
+    assert_eq!(resolver.pool_pick(&pool, &[]), AccountPick::NoUsableAccount);
+    assert_eq!(
+        resolver.pool_pick(&CredentialRef::new("absent-pool").unwrap(), &both),
+        AccountPick::NeedsPool
+    );
+}

@@ -5,15 +5,14 @@ use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
 use super::{Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
+use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
 #[cfg(unix)]
 use crate::research::runner::ReadOnlyEnding;
 #[cfg(unix)]
 use crate::research::runner::ResearchLimits;
-use crate::research::runner::{
-    ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchRunner, RunError,
-};
+use crate::research::runner::{ReadOnlyRun, ResearchHarness, ResearchRunner, RunError};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -102,8 +101,8 @@ struct Claimed {
 
 /// Picks the research account for a pool and the harnesses the runner can
 /// start. Input: the pool reference and the usable harnesses. Output: the
-/// account, or `None` when no pool member fits.
-type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send;
+/// account, or why there is none, such as every fitting member paused.
+type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
 
 /// What the account and graphify lookups resolve to on every step, so a
 /// newly assigned pool member or a newly installed graphify takes effect
@@ -139,7 +138,7 @@ impl OnboardingService {
         tick: Duration,
     ) -> Self
     where
-        A: Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send + 'static,
+        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
         assert!(!tick.is_zero());
@@ -411,7 +410,8 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
 /// Maps the project: collects the bounded evidence, saves the draft the
 /// manifests alone give, then asks a tools-off agent on the pool for an
 /// overview and the remaining fields and merges its answer into the gaps.
-/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with.
+/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with,
+/// and waits while every pool member that fits is paused after a limit.
 /// Returns the step's ending and the draft to keep.
 fn mapping_step(
     work: &Work,
@@ -436,10 +436,10 @@ fn mapping_step(
     if harnesses.is_empty() {
         return (Step::failed(CODEX_MISSING), base);
     }
-    let Some(account) = (work.accounts)(&claimed.pool, &harnesses)
-        .filter(|account| harnesses.contains(&account.harness()))
-    else {
-        return (Step::failed(NO_ACCOUNT), base);
+    let account = match (work.accounts)(&claimed.pool, &harnesses) {
+        AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => *account,
+        AccountPick::Paused { .. } => return (Step::Waiting, base),
+        _ => return (Step::failed(NO_ACCOUNT), base),
     };
     let name = run_name(claimed);
     #[cfg(unix)]

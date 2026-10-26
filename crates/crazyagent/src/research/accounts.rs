@@ -75,29 +75,57 @@ pub fn pick_unpaused(
     if assigned.is_empty() {
         return AccountPick::NeedsPool;
     }
-    let mut earliest: Option<i64> = None;
-    for pool in assigned {
-        for member in &pool.members {
-            let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
-                continue;
-            };
-            let Some(account) = usable(connection, harness, &signed_in) else {
-                continue;
-            };
-            match paused_until(&connection.id) {
-                None => {
-                    return AccountPick::Account {
-                        connection: connection.id.clone(),
-                        account: Box::new(account),
-                    };
-                }
-                Some(until) => earliest = Some(earliest.map_or(until, |end| end.min(until))),
+    members_pick(
+        access,
+        assigned.iter().flat_map(|pool| pool.members.iter()),
+        harness,
+        &signed_in,
+        &paused_until,
+    )
+}
+
+/// Picks the first of `members` that `harness` can use and that is not paused, in
+/// order. Takes the model access, the members, the harness id, the signed-in check for
+/// managed connections and the pause lookup. Returns the account, else
+/// [`AccountPick::Paused`] with the earliest end when only paused members fit, else
+/// [`AccountPick::NoUsableAccount`].
+fn members_pick<'a>(
+    access: &ModelAccess,
+    members: impl IntoIterator<Item = &'a CredentialRef>,
+    harness: &str,
+    signed_in: &impl Fn(&ModelConnection) -> bool,
+    paused_until: &impl Fn(&CredentialRef) -> Option<i64>,
+) -> AccountPick {
+    let mut waiting = AccountPick::NoUsableAccount;
+    for member in members {
+        let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
+            continue;
+        };
+        let Some(account) = usable(connection, harness, signed_in) else {
+            continue;
+        };
+        match paused_until(&connection.id) {
+            None => {
+                return AccountPick::Account {
+                    connection: connection.id.clone(),
+                    account: Box::new(account),
+                };
             }
+            Some(until_ms) => waiting = earlier(waiting, until_ms),
         }
     }
-    earliest.map_or(AccountPick::NoUsableAccount, |until_ms| {
-        AccountPick::Paused { until_ms }
-    })
+    waiting
+}
+
+/// Keeps the earlier of two waits. Takes the wait so far, a non-pause pick for none,
+/// and another pause's end. Returns [`AccountPick::Paused`] with the earlier end.
+fn earlier(waiting: AccountPick, until_ms: i64) -> AccountPick {
+    match waiting {
+        AccountPick::Paused { until_ms: end } => AccountPick::Paused {
+            until_ms: end.min(until_ms),
+        },
+        _ => AccountPick::Paused { until_ms },
+    }
 }
 
 /// Picks the first member of `pool` that `harness` can use, in member order,
@@ -242,20 +270,19 @@ impl SettingsResolver {
     /// The account an agent outside the research queue, such as onboarding's
     /// mapping agent, runs on for `pool`: the pool's first member the first of
     /// `harnesses` can use, else the next harness's, with the same sign-in
-    /// check as [`Self::resolve`]. `harnesses` are the installed ones, Codex
-    /// first. Rereads the settings on every call. Returns `None` for an
-    /// unknown pool, no harness, or a pool with no member they can use.
-    pub fn pool_pick(
-        &self,
-        pool: &CredentialRef,
-        harnesses: &[ResearchHarness],
-    ) -> Option<ResearchAccount> {
-        let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
+    /// check and account pauses as [`Self::resolve`]. `harnesses` are the
+    /// installed ones, Codex first. Rereads the settings on every call. Returns
+    /// [`AccountPick::NeedsPool`] for an unknown pool or unreadable settings,
+    /// [`AccountPick::Paused`] with the earliest end when only paused members
+    /// fit, else [`AccountPick::NoUsableAccount`] when none fits.
+    pub fn pool_pick(&self, pool: &CredentialRef, harnesses: &[ResearchHarness]) -> AccountPick {
+        let Ok(config) = crate::config::resolve_config(&self.global, &self.project) else {
+            return AccountPick::NeedsPool;
+        };
         let access = config.settings.model_access.unwrap_or_default();
-        let chosen = access
-            .pools
-            .iter()
-            .find(|candidate| &candidate.id == pool)?;
+        let Some(chosen) = access.pools.iter().find(|candidate| &candidate.id == pool) else {
+            return AccountPick::NeedsPool;
+        };
         let database = self.engine();
         let signed_in = |connection: &ModelConnection| {
             database
@@ -265,15 +292,32 @@ impl SettingsResolver {
                     Err(code) => code == PROFILE_BUSY,
                 })
         };
-        let picked = harnesses.iter().find_map(|harness| {
-            pool_account(&access, chosen, harness.id(), &signed_in).map(|(_, account)| account)
-        });
-        assert!(
-            picked
+        let paused_until = |connection: &CredentialRef| {
+            database
                 .as_ref()
-                .is_none_or(|account| harnesses.contains(&account.harness()))
-        );
-        picked
+                .and_then(|database| crate::team::paused_until(database, connection).ok())
+                .flatten()
+        };
+        let mut waiting = AccountPick::NoUsableAccount;
+        for harness in harnesses {
+            match members_pick(
+                &access,
+                &chosen.members,
+                harness.id(),
+                &signed_in,
+                &paused_until,
+            ) {
+                pick @ AccountPick::Account { .. } => {
+                    assert!(
+                        matches!(&pick, AccountPick::Account { account, .. } if account.harness() == *harness)
+                    );
+                    return pick;
+                }
+                AccountPick::Paused { until_ms } => waiting = earlier(waiting, until_ms),
+                AccountPick::NeedsPool | AccountPick::NoUsableAccount => {}
+            }
+        }
+        waiting
     }
 
     /// Opens the engine database for one resolve, or `None` when it cannot be
