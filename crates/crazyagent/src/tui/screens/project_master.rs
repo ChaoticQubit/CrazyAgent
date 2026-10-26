@@ -17,7 +17,8 @@ pub(in crate::tui) struct MasterRead<'a> {
 /// Builds the Conversation transcript from the engine's master turns.
 /// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
 /// Returns the transcript: the owner's messages, the master's real replies, a notice per task a reply
-/// handed to the team and a plain notice for a stopped turn.
+/// handed to the team, the engine's note when a turn's edits wait in Changes and a plain notice
+/// for a stopped turn.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -64,6 +65,14 @@ pub(in crate::tui) fn transcript_from(
                 error: false,
             });
         }
+        if let Some(changes) = &turn.changes {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: changes.clone(),
+                error: false,
+            });
+        }
         if let Some(text) = notice(turn, harness, latest) {
             messages.push(Message {
                 speaker: Speaker::Notice,
@@ -73,7 +82,7 @@ pub(in crate::tui) fn transcript_from(
             });
         }
     }
-    assert!(messages.len() <= turns.len() * 3 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
+    assert!(messages.len() <= turns.len() * 4 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
         (Some(MasterSessionPhase::Closing | MasterSessionPhase::Closed), _) => {
@@ -277,6 +286,7 @@ mod tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
             detail: None,
             cause: None,
         }
@@ -686,6 +696,43 @@ mod tests {
                 (Speaker::Master, "I handed it to a sub-agent.", false),
                 (Speaker::Notice, done, false),
                 (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_wait_in_changes_says_so_under_its_reply_and_tasks() {
+        use crate::master_session::{MasterReply, MasterReplyProvenance, MasterTask};
+        let inputs = [entry(3, "Fix the README.")];
+        let mut replied = turn(1, 3, MasterTurnPhase::Succeeded, None);
+        replied.reply = Some(MasterReply {
+            text: "I fixed the README.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-1").unwrap(),
+                runtime_ref: RequestId::new("runtime-1").unwrap(),
+                capture_ref: RequestId::new("capture-1").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        replied.tasks = vec![MasterTask {
+            task: 8,
+            note: None,
+        }];
+        let waiting = "The edits from this turn are waiting for you in Changes.";
+        replied.changes = Some(waiting.into());
+        let quiet = turn(2, 4, MasterTurnPhase::Succeeded, None);
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[replied, quiet],
+            &inputs,
+        );
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Fix the README.", false),
+                (Speaker::Master, "I fixed the README.", false),
+                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+                (Speaker::Notice, waiting, false),
             ]
         );
     }
