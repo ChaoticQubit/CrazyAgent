@@ -343,10 +343,15 @@ impl Installed {
 }
 
 impl Drop for Installed {
+    /// Deletes the launch's files, then releases the home lock on its open file
+    /// description, so a process that shares it, such as a child another thread is
+    /// starting, can never keep the home busy after the launch ends.
     fn drop(&mut self) {
         for path in &self.removals {
             remove(path);
         }
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
     }
 }
 

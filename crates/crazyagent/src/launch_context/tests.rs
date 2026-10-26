@@ -186,6 +186,42 @@ fn the_team_index_stays_within_its_bound_with_many_plugins() {
     assert!(text.ends_with(" more\n"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+    };
+    let installed = context.install("codex", &home, false).unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(installed._lock.try_clone().unwrap())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(
+        context.install("codex", &home, false).unwrap_err().0,
+        "launch_home_busy"
+    );
+
+    drop(installed);
+    let again = context.install("codex", &home, false);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        again.is_ok(),
+        "the ended launch still kept its home busy: {:?}",
+        again.err()
+    );
+}
+
 #[test]
 fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
