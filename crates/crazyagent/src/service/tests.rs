@@ -475,3 +475,32 @@ fn the_current_user_service_follows_the_data_root() {
         );
     }
 }
+
+#[test]
+fn a_linux_or_windows_service_that_is_not_installed_reads_stopped_and_stops_as_a_no_op() {
+    #[cfg(target_os = "macos")]
+    for tool in [SYSTEMCTL, SCHTASKS] {
+        assert_eq!(
+            crate::paths::find_in_path(tool, std::env::var_os("PATH").as_deref()),
+            None,
+            "{tool} exists here, so its missing-tool path is not what this host runs"
+        );
+    }
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::Linux, Platform::Windows] {
+        let mut absent = service(platform);
+        absent.name = format!("crazyagent-test-absent-{}", std::process::id());
+        absent.definition = temp.path().join("not-installed");
+        assert_eq!(
+            absent.status().unwrap(),
+            Status {
+                installed: false,
+                running: false,
+                pid: None,
+            },
+            "{platform:?}"
+        );
+        absent.stop().unwrap();
+        assert!(!absent.definition.exists());
+    }
+}

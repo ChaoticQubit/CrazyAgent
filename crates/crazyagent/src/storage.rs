@@ -1141,6 +1141,23 @@ fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     Ok(EngineLock { file: lock })
 }
 
+/// Says whether no engine holds the database lock of a data folder, so a new engine can
+/// open its database. Input: the data folder. Output: true when the lock file is missing or
+/// free, false while an engine holds it or when it cannot be opened.
+#[cfg(unix)]
+pub fn engine_lock_released(root: &Path) -> bool {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(root.join("engine.db").with_extension("engine-lock"));
+    match lock {
+        Ok(lock) => {
+            rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared).is_ok()
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Releases the engine database lock and reports whether the unlock succeeded.
 /// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
 fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
