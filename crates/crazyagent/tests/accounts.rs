@@ -398,14 +398,6 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
         matches!(pooled.response, OwnerResponse::Applied { ref operation } if operation.result == OwnerResult::Applied),
         "{pooled:?}"
     );
-    assert_eq!(
-        client
-            .remove_account(router.id.clone())
-            .await
-            .unwrap_err()
-            .0,
-        "account_in_pool"
-    );
 
     let listed = all_accounts(&client).await;
     assert_eq!(
@@ -991,5 +983,125 @@ async fn subscription_accounts_start_the_managed_sign_in_and_follow_its_phase() 
         assert_eq!(shown.name, name);
         assert_eq!(shown.status_label, "Not signed in");
     }
+    fixture.stop().await;
+}
+
+async fn pools_page(client: &OwnerClient, id: &str) -> (OwnerReadReply, String, Vec<AccountPool>) {
+    let state = match client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Read {
+                query: OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 16,
+                },
+            },
+        })
+        .await
+        .unwrap()
+        .response
+    {
+        OwnerResponse::Read { state } => state,
+        other => panic!("owner read required: {other:?}"),
+    };
+    let OwnerData::ModelAccessPage {
+        source_hash, items, ..
+    } = &state.data
+    else {
+        panic!("model access page required")
+    };
+    let pools = items
+        .iter()
+        .filter_map(|record| match record {
+            ModelAccessRecord::Pool { pool } => Some(pool.clone()),
+            _ => None,
+        })
+        .collect();
+    (state.clone(), source_hash.clone(), pools)
+}
+
+async fn create_pool(client: &OwnerClient, id: &str, members: Vec<CredentialRef>, project: &str) {
+    let (page, source_hash, _) = pools_page(client, &format!("{id}-read")).await;
+    let created = client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(format!("{id}-create")).unwrap(),
+            expected_revision: page.revision,
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ModelAccess {
+                    expected_config_id: page.config_id,
+                    expected_source_hash: source_hash,
+                    edit: ModelAccessEdit::CreatePool {
+                        pool: AccountPool {
+                            id: CredentialRef::new(id).unwrap(),
+                            name: None,
+                            members,
+                            projects: vec![CredentialRef::new(project).unwrap()],
+                            roles: vec![CredentialRef::new("project_leader").unwrap()],
+                            fallback_allowed: false,
+                            provider_quota_policy: ProviderQuotaPolicy::default(),
+                        },
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(created.response, OwnerResponse::Applied { ref operation } if operation.result == OwnerResult::Applied),
+        "{created:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_an_account_in_pools_takes_it_out_of_them_in_one_operation() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let subscription =
+        |provider, name: &str| draft(provider, SignInMethod::Subscription, name, None, None);
+    let leaving = client
+        .add_account(subscription(Provider::Chatgpt, "Leaving"), None)
+        .await
+        .unwrap();
+    let staying = client
+        .add_account(subscription(Provider::Claude, "Staying"), None)
+        .await
+        .unwrap();
+    create_pool(
+        &client,
+        "shared-pool",
+        vec![leaving.id.clone(), staying.id.clone()],
+        "demo",
+    )
+    .await;
+    create_pool(&client, "solo-pool", vec![leaving.id.clone()], "other").await;
+    client.remove_account(leaving.id.clone()).await.unwrap();
+    let (_, _, pools) = pools_page(&client, "pools-after").await;
+    assert_eq!(pools.len(), 1);
+    assert_eq!(pools[0].id.as_str(), "shared-pool");
+    assert_eq!(pools[0].members, std::slice::from_ref(&staying.id));
+    assert_eq!(pools[0].projects, [CredentialRef::new("demo").unwrap()]);
+    let listed = all_accounts(&client).await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|account| account.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Staying"]
+    );
+    let saved = std::fs::read_to_string(&fixture.global).unwrap();
+    assert!(!saved.contains(leaving.id.as_str()));
+    assert!(!saved.contains("solo-pool"));
+    assert_eq!(
+        client
+            .remove_account(leaving.id.clone())
+            .await
+            .unwrap_err()
+            .0,
+        "account_not_found"
+    );
     fixture.stop().await;
 }

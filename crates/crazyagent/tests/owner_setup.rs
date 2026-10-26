@@ -303,18 +303,6 @@ async fn the_pool_list_reads_plainly_and_pool_limits_hold_in_the_engine() {
         edit(
             &mut controller,
             ModelAccessEdit::RemovePool {
-                id: reference("pool-claude")
-            }
-        )
-        .await,
-        OwnerResult::Rejected {
-            code: "pool_in_use".into()
-        }
-    );
-    assert_eq!(
-        edit(
-            &mut controller,
-            ModelAccessEdit::RemovePool {
                 id: reference("pool-subscriptions")
             }
         )
