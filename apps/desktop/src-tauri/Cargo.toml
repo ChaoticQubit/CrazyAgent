@@ -14,11 +14,17 @@ path = "src/lib.rs"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 native-webdriver = ["dep:tauri-plugin-wdio-webdriver"]
+e2e-bridge = ["tokio/net", "tokio/io-util"]
 
 [[bin]]
 name = "desktop-owner-fixture"
 path = "src/bin/owner_fixture.rs"
 required-features = ["native-webdriver"]
+
+[[bin]]
+name = "desktop-e2e-bridge"
+path = "src/bin/e2e_bridge/main.rs"
+required-features = ["e2e-bridge"]
 
 [build-dependencies]
 tauri-build = "=2.7.3"
