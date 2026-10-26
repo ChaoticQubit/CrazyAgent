@@ -128,9 +128,13 @@ fn a_new_binary_that_does_not_answer_its_version_never_replaces_the_old_one() {
     assert!(leftovers(install.path()).is_empty());
 
     script(&staged.join("crazyagent"), "echo crazyagent 0.0.2");
+    let error = update::swap(install.path(), &staged, VERSION).unwrap_err();
     assert_eq!(
-        code(update::swap(install.path(), &staged, VERSION)),
-        "update_new_version_failed"
+        (error.code, error.message),
+        (
+            "update_new_version_failed",
+            format!("The new crazyagent didn't report version {VERSION}, so it was not installed.")
+        )
     );
     assert_eq!(
         std::fs::read_to_string(install.path().join("crazyagent")).unwrap(),
@@ -191,12 +195,17 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
         "update_archive_invalid"
     );
     std::fs::write(release.path().join("garbage.tar.gz"), b"not an archive").unwrap();
+    let error = update::unpack(
+        &release.path().join("garbage.tar.gz"),
+        &release.path().join("unpacked-2"),
+    )
+    .unwrap_err();
     assert_eq!(
-        code(update::unpack(
-            &release.path().join("garbage.tar.gz"),
-            &release.path().join("unpacked-2")
-        )),
-        "update_archive_invalid"
+        (error.code, error.message.as_str()),
+        (
+            "update_archive_invalid",
+            "The release archive can't be unpacked, so nothing was installed."
+        )
     );
 }
 

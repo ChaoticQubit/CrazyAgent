@@ -86,9 +86,31 @@ pub fn set_channel<R: Runtime>(
     settings(app)
 }
 
+/// Tells a channel with no release apart from a failing server, which the updater plugin both
+/// reports as `ReleaseNotFound`, by asking for the channel's manifest once more with the
+/// system curl. Input: the channel. Output: `update_<channel>_not_published` when the server
+/// answers 404, else `update_check_failed`.
+async fn unpublished(channel: Channel) -> BridgeError {
+    let probe = tauri::async_runtime::spawn_blocking(move || {
+        update::download(
+            channel.desktop_manifest_url(),
+            &mut std::io::sink(),
+            update::MANIFEST_BYTES_MAX,
+            CHECK_TIMEOUT,
+        )
+    });
+    match probe.await {
+        Ok(Err(error)) if error.code == "update_download_missing" => {
+            bridged(update::not_published(channel))
+        }
+        _ => refused("update_check_failed"),
+    }
+}
+
 /// Checks the saved channel's signed manifest for a newer release and keeps what it finds
 /// for Download and install. Inputs: the app and the state. Output: the newer release, None
-/// when this app is current, or `update_check_failed`.
+/// when this app is current, `update_<channel>_not_published` when the channel has no
+/// release yet, or `update_check_failed`.
 pub async fn check<R: Runtime>(
     app: &AppHandle<R>,
     state: &UpdateState,
@@ -104,10 +126,11 @@ pub async fn check<R: Runtime>(
         .endpoints(vec![endpoint])
         .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
         .map_err(|_| refused("update_check_failed"))?;
-    *found = updater
-        .check()
-        .await
-        .map_err(|_| refused("update_check_failed"))?;
+    *found = match updater.check().await {
+        Ok(found) => found,
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => return Err(unpublished(channel).await),
+        Err(_) => return Err(refused("update_check_failed")),
+    };
     Ok(found.as_ref().map(|update| AvailableUpdate {
         version: update.version.clone(),
         current_version: update.current_version.clone(),
@@ -201,7 +224,10 @@ pub async fn install(
 }
 
 /// Links the bundled `crazyagent` onto the owner's PATH through
-/// `crazyagent service link-cli`. Output: the tool's own one-line report.
+/// `crazyagent service link-cli`. Output: the tool's own one-line report, or
+/// `update_link_cli_failed` / `sidecar_missing`.
 pub async fn link_cli() -> Result<String, BridgeError> {
-    service(sidecar()?, "link-cli").await
+    service(sidecar()?, "link-cli")
+        .await
+        .map_err(|_| refused("update_link_cli_failed"))
 }
