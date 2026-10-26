@@ -83,9 +83,18 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
 
 test("onboarding steps and setup states use the engine's tags", () => {
   const client = read("src/engine-client.ts");
-  assert.match(client, /export type OnboardingStep = \{ kind: "waiting" \} \| \{ kind: "running" \} \| \{ kind: "done" \} \| \{ kind: "off" \} \| \{ kind: "failed"; reason: string \};/);
   assert.match(client, /DependencyState =[\s\S]*?\{ state: "found"; version: string \}/);
   assert.match(client, /PackState =[\s\S]*?\{ state: "available" \}/);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/onboarding.rs", import.meta.url), "utf8");
-  assert.match(engine, /#\[serde\(tag = "kind", rename_all = "snake_case", deny_unknown_fields\)\]\s*pub enum Step/);
+  const step = engine.match(/#\[serde\(tag = "kind", rename_all = "snake_case", deny_unknown_fields\)\]\s*pub enum Step \{([^}]*\})?([^}]*)\}/);
+  assert.ok(step, "onboarding.rs declares the tagged Step enum");
+  const tags = [...`${step[1] ?? ""}${step[2]}`.matchAll(/^\s*([A-Z][A-Za-z]*)\b/gm)]
+    .map(([, name]) => name.replace(/(?<=[a-z])([A-Z])/g, "_$1").toLowerCase());
+  assert.ok(tags.includes("waiting") && tags.includes("failed"), `engine Step tags read: ${tags.join(", ")}`);
+  assert.match(engine, /Failed \{ reason: String \}/);
+  const union = client.match(/export type OnboardingStep = ([^;]*(?:; reason: string \})?[^;]*);/);
+  assert.ok(union, "engine-client.ts declares OnboardingStep");
+  const kinds = [...union[1].matchAll(/\{ kind: "([a-z_]+)"/g)].map(([, kind]) => kind);
+  assert.deepEqual([...kinds].sort(), [...tags].sort());
+  assert.match(union[1], /\{ kind: "failed"; reason: string \}/);
 });

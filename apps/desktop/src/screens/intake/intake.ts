@@ -161,8 +161,8 @@ export function stepView(step: OnboardingStep, finished = false): { word: string
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
-    case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." };
-    case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Setup." };
+    case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." };
+    case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
     default: return { word: finished ? "Skipped" : "Waiting", tone: "neutral", line: null };
   }

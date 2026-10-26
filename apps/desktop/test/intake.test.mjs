@@ -135,8 +135,8 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
-  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." });
-  assert.deepEqual(intake.stepView({ kind: "not_installed" }), { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Setup." });
+  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." });
+  assert.deepEqual(intake.stepView({ kind: "not_installed" }), { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." });
 });
 
 test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
@@ -419,7 +419,12 @@ test("the setup review shows the steps, the overview, missing items and a confir
   assert.match(done, /Target platforms[\s\S]*Missing/);
   assert.match(done, /Research is off for existing code/);
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
-  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /graphify isn&#x27;t installed\./);
+  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /<span class="pj-small pj-error">graphify isn&#x27;t installed\.<\/span>/);
+  for (const kind of ["off", "not_installed"]) {
+    const markup = html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind }, mapping: { kind: "running" } })), draft: null });
+    assert.match(markup, /<span class="pj-small pj-secondary">Graphify [^<]*Settings, Pack[^<]*<\/span>/, kind);
+    assert.doesNotMatch(markup, /pj-error/, kind);
+  }
   assert.match(html(OnboardingReviewView, { ...base, view: notReady, draft: null }), /Not ready yet/);
   const stopped = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "failed", reason: "Agent stopped: workspace routing discovery failed" } })), draft });
   assert.match(stopped, /Agent stopped: workspace routing discovery failed/);
