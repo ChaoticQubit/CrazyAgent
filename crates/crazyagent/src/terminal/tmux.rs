@@ -20,6 +20,10 @@ pub const SOCKET: &str = "tmux.sock";
 const HOLDER: &str = "_crazyagent";
 const HOLDER_COMMAND: &str =
     "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"";
+/// The program that runs the POSIX holder command. Given to tmux as separate arguments, it
+/// is started directly, not through `default-shell`, which is the owner's login shell and
+/// may be fish, csh or nushell, none of which can read the holder.
+const HOLDER_SHELL: [&str; 2] = ["/bin/sh", "-c"];
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
@@ -192,16 +196,9 @@ impl Tmux {
             Command::new(executable)
                 .args(["-u", "-f", "/dev/null", "-S"])
                 .arg(&socket)
-                .args([
-                    "-C",
-                    "new-session",
-                    "-A",
-                    "-s",
-                    SESSION,
-                    "-n",
-                    HOLDER,
-                    HOLDER_COMMAND,
-                ])
+                .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
+                .args(HOLDER_SHELL)
+                .arg(HOLDER_COMMAND)
                 .env_clear()
                 .env("PATH", SERVER_PATH)
                 .current_dir(&self.folder)

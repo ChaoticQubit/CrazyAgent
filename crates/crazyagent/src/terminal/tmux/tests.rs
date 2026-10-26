@@ -187,3 +187,99 @@ fn show_environment_replies_name_only_the_variables_still_set() {
     assert_eq!(variable_names(&reply), ["PATH", "GH_TOKEN", "EMPTY"]);
     assert!(variable_names(&[b"-REMOVED".to_vec()]).is_empty());
 }
+
+#[cfg(target_os = "macos")]
+struct Server {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = crate::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let config = home.path().join("owner.conf");
+    std::fs::write(&config, "set-option -g default-shell /bin/csh\n").unwrap();
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let started = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .args(["-u", "-f"])
+            .arg(&config)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["new-session", "-d", "-s", "owner", "/bin/sleep", "60"])
+            .env_clear()
+            .env("PATH", SERVER_PATH)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(started.success());
+    let shell = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["show-options", "-gv", "default-shell"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&shell.stdout).trim(), "/bin/csh");
+
+    assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "30".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let windows = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["list-windows", "-t", SESSION, "-F", "#{window_name}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&windows.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![HOLDER, "team-1"]
+    );
+    assert_eq!(host.alive().unwrap(), vec![agent]);
+}
