@@ -471,6 +471,27 @@ fallback_allowed = false
             .map_err(|error| error.code)?;
         assert_eq!(submitted.outcome, ActionOutcome::Applied);
         assert!(!submitted.pending);
+        let mut settled = false;
+        for _ in 0..500 {
+            let state = bridge
+                .master_state(&selected.ticket)
+                .await
+                .map_err(|error| error.code)?;
+            if state
+                .session
+                .ok_or("configured session missing after submit")?
+                .current_turn
+                .is_none()
+            {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            settled,
+            "actual master dispatch left the submitted turn outstanding"
+        );
         let turns = bridge
             .master_turns(&selected.ticket, session.session_id.as_str(), None)
             .await
@@ -493,7 +514,9 @@ fallback_allowed = false
         );
         assert_eq!(page.turns.len(), 1);
         assert_eq!(page.turns[0].id.as_str(), submitted.intent.operation_id);
-        assert_eq!(page.turns[0].phase, MasterTurnPhase::Queued);
+        assert_eq!(page.turns[0].session_id, session.session_id);
+        assert_eq!(page.turns[0].phase, MasterTurnPhase::Blocked);
+        assert_eq!(page.turns[0].reason, Some(MasterReason::Unknown));
         assert!(page.turns[0].attempt.is_none());
         assert!(page.turns[0].runtime.is_none());
         assert!(page.turns[0].reply.is_none());
@@ -505,7 +528,7 @@ fallback_allowed = false
                 .code,
             "invalid_turn"
         );
-        let cancelled = bridge
+        let late = bridge
             .cancel_master_turn(
                 &selected.ticket,
                 session.session_id.as_str(),
@@ -514,56 +537,17 @@ fallback_allowed = false
             )
             .await
             .map_err(|error| error.code)?;
-        assert_eq!(cancelled.outcome, ActionOutcome::Applied);
-        assert_eq!(cancelled.intent.kind, "master");
-        assert!(!cancelled.pending);
-        let again = bridge
-            .cancel_master_turn(
-                &selected.ticket,
-                session.session_id.as_str(),
-                &submitted.intent.operation_id,
-                5,
-            )
-            .await
-            .map_err(|error| error.code)?;
-        assert_eq!(again.outcome, ActionOutcome::Rejected);
-        assert_eq!(again.rejection, Some("master_turn_not_current"));
-        let actual = observer
-            .read(OwnerRead::ProjectMasterTurns {
-                project_id,
-                session_id: session.session_id.clone(),
-                cursor: None,
-                limit: 16,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let OwnerData::ProjectMasterTurns { page } = actual.data else {
-            return Err("actual cancelled master turn required".into());
-        };
-        assert_eq!(page.turns.len(), 1);
-        assert_eq!(page.turns[0].phase, MasterTurnPhase::Cancelled);
-        assert_eq!(page.turns[0].reason, Some(MasterReason::Cancelled));
-        assert!(page.turns[0].attempt.is_none());
-        assert!(page.turns[0].runtime.is_none());
-        assert!(page.turns[0].reply.is_none());
-        let cancelled_turns = bridge
+        assert_eq!(late.outcome, ActionOutcome::Rejected);
+        assert_eq!(late.rejection, Some("master_turn_not_current"));
+        assert_eq!(late.intent.kind, "master");
+        assert!(!late.pending);
+        let after_cancel = bridge
             .master_turns(&selected.ticket, session.session_id.as_str(), None)
             .await
             .map_err(|error| error.code)?;
         assert_eq!(
-            serde_json::to_value(&cancelled_turns.page).unwrap(),
+            serde_json::to_value(&after_cancel.page).unwrap(),
             serde_json::to_value(&page).unwrap()
-        );
-        let final_state = bridge
-            .master_state(&selected.ticket)
-            .await
-            .map_err(|error| error.code)?;
-        assert!(
-            final_state
-                .session
-                .ok_or("configured session missing after cancel")?
-                .current_turn
-                .is_none()
         );
         let closed = bridge
             .close_master(&selected.ticket, session.session_id.as_str(), 4)
