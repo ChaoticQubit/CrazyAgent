@@ -18,6 +18,7 @@ mod agent_copy;
 pub(crate) use agent_copy::AgentCredential;
 mod configured_rcli;
 mod generated_configured_rcli;
+mod renewal;
 mod staging;
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;

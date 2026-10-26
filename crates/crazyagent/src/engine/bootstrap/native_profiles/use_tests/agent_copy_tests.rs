@@ -55,6 +55,10 @@ fn execution(case: &mut UseCase) -> NativeProfileUse {
         .unwrap()
 }
 
+fn no_harness(case: &UseCase) -> PathBuf {
+    case.root.path().join("no-harness")
+}
+
 fn entries(folder: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(folder)
         .unwrap()
@@ -79,7 +83,9 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
     private_file(&source, &codex_auth(expires));
     let agent = agent_home(&case);
     let guard = execution(&mut case);
-    let copy = guard.hand_to_agent(&agent, TURN).unwrap();
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
     let path = agent.join("auth.json");
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     assert!(metadata.is_file());
@@ -107,14 +113,14 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
 }
 
 #[test]
-fn a_copy_that_would_lapse_during_the_turn_is_refused_and_nothing_is_written() {
+fn a_record_lapsing_within_a_minute_that_cannot_be_renewed_is_refused_and_nothing_is_written() {
     let mut case = UseCase::new();
     let agent = agent_home(&case);
-    for expires in [now() + 600, now() - 60] {
+    for expires in [now() + 30, now() - 60] {
         private_file(&case.home().join("auth.json"), &codex_auth(expires));
         let guard = execution(&mut case);
         assert_eq!(
-            refused(guard.hand_to_agent(&agent, TURN)),
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
             "native_profile_credential_expiring"
         );
         assert!(entries(&agent).is_empty());
@@ -128,7 +134,7 @@ fn a_missing_or_unusable_codex_record_is_refused() {
     let source = case.home().join("auth.json");
     let guard = execution(&mut case);
     assert_eq!(
-        refused(guard.hand_to_agent(&agent, TURN)),
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
         "native_profile_credential_unavailable"
     );
     drop(guard);
@@ -144,7 +150,7 @@ fn a_missing_or_unusable_codex_record_is_refused() {
         private_file(&source, &record);
         let guard = execution(&mut case);
         assert_eq!(
-            refused(guard.hand_to_agent(&agent, TURN)),
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
             "native_profile_credential_unavailable"
         );
         assert!(entries(&agent).is_empty());
@@ -162,7 +168,9 @@ fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
     symlink(&outside, agent.join("auth.json")).unwrap();
     private_file(&source, &codex_auth(expires));
     let guard = execution(&mut case);
-    let copy = guard.hand_to_agent(&agent, TURN).unwrap();
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
     assert!(
         std::fs::symlink_metadata(agent.join("auth.json"))
             .unwrap()
@@ -180,7 +188,7 @@ fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
     symlink(&elsewhere, &source).unwrap();
     let guard = execution(&mut case);
     assert_eq!(
-        refused(guard.hand_to_agent(&agent, TURN)),
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
         "native_profile_credential_unavailable"
     );
     drop(guard);
@@ -188,7 +196,7 @@ fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
     std::fs::hard_link(&elsewhere, &source).unwrap();
     let guard = execution(&mut case);
     assert_eq!(
-        refused(guard.hand_to_agent(&agent, TURN)),
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
         "native_profile_credential_unavailable"
     );
     assert!(entries(&agent).is_empty());
@@ -204,7 +212,7 @@ fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
     let guard = execution(&mut case);
     for home in [&linked, &open] {
         assert_eq!(
-            refused(guard.hand_to_agent(home, TURN)),
+            refused(guard.hand_to_agent(home, TURN, &no_harness(&case))),
             "native_profile_agent_home_unsafe"
         );
     }
@@ -297,7 +305,9 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
     let (keychain, service) = claude_keychain(&home, &claude_record(expires));
     let agent = agent_home(&case);
     let guard = execution(&mut case);
-    let copy = guard.hand_to_agent(&agent, TURN).unwrap();
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
     let path = agent.join(".credentials.json");
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     assert!(metadata.is_file());
@@ -334,13 +344,13 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
     assert!(entries(&agent).is_empty());
     drop(guard);
 
-    let soon = (now() + 600) * 1000;
+    let soon = (now() + 30) * 1000;
     let mut late = UseCase::with_harness("claude-code");
     claude_keychain(&late.home(), &claude_record(soon));
     let agent = agent_home(&late);
     let guard = execution(&mut late);
     assert_eq!(
-        refused(guard.hand_to_agent(&agent, TURN)),
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&late))),
         "native_profile_credential_expiring"
     );
     assert!(entries(&agent).is_empty());
@@ -389,7 +399,9 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
     let agent = agent_home(&case);
     let guard = execution(&mut case);
     let started = std::time::Instant::now();
-    let copy = guard.hand_to_agent(&agent, TURN).unwrap();
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
     let written: Value =
         serde_json::from_slice(&std::fs::read(agent.join(".credentials.json")).unwrap()).unwrap();
@@ -398,3 +410,6 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
     assert!(written.get("mcpOAuth").is_none());
     drop(copy);
 }
+
+#[cfg(target_os = "macos")]
+mod renewal_tests;

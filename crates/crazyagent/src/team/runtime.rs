@@ -2549,7 +2549,7 @@ fn per_turn(
             return Some("The agent was given a turn without its signed-in account".into());
         };
         let Grant { profile, context } = *grant;
-        let credential = match profile.hand_to_agent(home, turn_time) {
+        let credential = match profile.hand_to_agent(home, turn_time, &plan.executable) {
             Ok(credential) => credential,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
