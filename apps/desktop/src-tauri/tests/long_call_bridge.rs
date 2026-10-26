@@ -11,8 +11,8 @@ async fn flow(root: &std::path::Path) -> TestResult<()> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     bridge.connect().await?;
     let spec = ServerSpec::Stdio {
-        command: "/bin/sleep".into(),
-        args: vec!["30".into()],
+        command: "/usr/bin/env".into(),
+        args: vec!["sleep".into(), "30".into()],
     };
     let server = bridge
         .add_mcp_server(Scope::Global, "silent".into(), spec.clone(), Vec::new())
