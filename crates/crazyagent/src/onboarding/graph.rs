@@ -142,7 +142,7 @@ pub(crate) fn update(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
+    let mut running = AgentProcess::spawn(&mut command)?;
     let counted = Arc::new(AtomicU64::new(0));
     let streams = [
         (

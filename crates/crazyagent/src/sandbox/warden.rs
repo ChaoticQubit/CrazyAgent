@@ -208,6 +208,17 @@ impl Warden {
     }
 }
 
+/// Fires a run's warden, when it has one, for up to [`FIRE_TIME`] and reports on stderr when
+/// the warden does not confirm that it stopped the run's sandbox. Inputs: the warden and the
+/// label of the run's owner, such as `harness`. Output: nothing.
+pub fn fire_reported(warden: Option<Warden>, owner: &str) {
+    if let Some(warden) = warden
+        && let Err(code) = warden.fire(FIRE_TIME)
+    {
+        eprintln!("{owner}_warden_unconfirmed cause={code}");
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod fixture;
 #[cfg(all(test, target_os = "macos"))]

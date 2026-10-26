@@ -11,6 +11,7 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
 use std::fmt;
@@ -790,7 +791,7 @@ impl ResearchRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert!(!carries_secret(&command, &context));
-        let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
+        let mut running = AgentProcess::spawn(&mut command)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
         let limited = Arc::new(AtomicBool::new(false));
@@ -1188,7 +1189,7 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
+        let mut running = AgentProcess::spawn(&mut command)?;
         let counted = Arc::new(AtomicU64::new(0));
         let mut drains = Vec::with_capacity(2);
         let streams = [
@@ -1889,22 +1890,35 @@ fn stop_timed_out(child: &mut Child) {
 
 /// A running agent and the process group it leads. Stopping it, which also
 /// happens when it is dropped while a panic unwinds or a launch step fails,
-/// kills the whole group, reaps the agent and waits until the group is empty,
-/// so no agent process outlives the run that started it. Its [`Lifeline`]
-/// kills the group if the engine itself dies first.
+/// kills the whole group, reaps the agent, waits until the group is empty and
+/// then has the agent's warden, where its sandbox gives one, stop every process
+/// left in that sandbox, those that left the group included, so no agent
+/// process outlives the run that started it. If the engine itself dies first,
+/// its [`Lifeline`] kills the group and the warden stops the sandbox.
 pub(crate) struct AgentProcess {
     pub(crate) child: Child,
     pub(crate) group: u32,
     #[cfg(unix)]
     lifeline: Lifeline,
+    warden: Option<Warden>,
     stopped: bool,
 }
 
 impl AgentProcess {
-    /// Takes a just spawned agent that leads its own process group and starts
-    /// its lifeline. Returns the guard, or the error that kept the lifeline from
-    /// starting, after stopping the agent's group.
-    pub(crate) fn new(child: Child) -> io::Result<Self> {
+    /// Starts an agent command that leads its own process group, with the warden
+    /// [`crate::sandbox::warden::spawn`] gives a sandboxed one, and starts its
+    /// lifeline. Takes the command. Returns the guard, or the error that kept the
+    /// agent or its lifeline from starting, after stopping what had started.
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+        let (child, warden) = crate::sandbox::warden::spawn(command)?;
+        Self::new(child, warden)
+    }
+
+    /// Takes a just spawned agent that leads its own process group and its
+    /// warden, if any, and starts its lifeline. Returns the guard, or the error
+    /// that kept the lifeline from starting, after stopping the agent's group
+    /// and sandbox.
+    pub(crate) fn new(child: Child, warden: Option<Warden>) -> io::Result<Self> {
         let group = child.id();
         assert!(group > 1);
         #[cfg(unix)]
@@ -1915,6 +1929,7 @@ impl AgentProcess {
                 stop_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
+                crate::sandbox::warden::fire_reported(warden, "agent");
                 return Err(error);
             }
         };
@@ -1923,6 +1938,7 @@ impl AgentProcess {
             group,
             #[cfg(unix)]
             lifeline,
+            warden,
             stopped: false,
         })
     }
@@ -1937,6 +1953,7 @@ impl AgentProcess {
         stop_group(self.group);
         let _ = self.child.wait();
         await_group_exit(self.group);
+        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
         self.lifeline.release();
         self.stopped = true;
     }
@@ -1950,6 +1967,7 @@ impl AgentProcess {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
         self.stopped = true;
     }
 }
@@ -2774,7 +2792,7 @@ mod tests {
         let group = child.id();
         let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let agent = AgentProcess::new(child).unwrap();
+            let agent = AgentProcess::new(child, None).unwrap();
             let until = Instant::now() + Duration::from_secs(10);
             while group_members(agent.group) < 2 {
                 assert!(Instant::now() < until, "the agent never started its child");
@@ -3212,3 +3230,6 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/warden_tests.rs"]
+mod warden_tests;

@@ -8,9 +8,11 @@ use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
-use research_support::{EngineRuntime, claude, codex, hanging_endpoint};
+use research_support::{EngineRuntime, claude, codex, hanging_endpoint, processes_with};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -749,5 +751,211 @@ fn research_for_a_project_the_engine_does_not_know_fails_without_starting_an_age
     assert!(
         !case.state.join("agents").exists()
             || fs::read_dir(case.state.join("agents")).unwrap().count() == 0
+    );
+}
+
+const RESEARCH_ENGINE_STATE: &str = "CRAZYAGENT_TEST_RESEARCH_ENGINE_STATE";
+const RESEARCH_ENGINE_PROJECT: &str = "CRAZYAGENT_TEST_RESEARCH_ENGINE_PROJECT";
+const RESEARCH_ENGINE_HARNESS: &str = "CRAZYAGENT_TEST_RESEARCH_ENGINE_HARNESS";
+
+/// A private folder under `/tmp` for a test harness. Takes nothing. Returns the folder,
+/// removed when dropped.
+fn harness_folder() -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix("ca-research-harness-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    fs::set_permissions(folder.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    folder
+}
+
+/// Writes a harness standing in for Codex that leaves what a shell tool can leave: a
+/// process in its own session that writes `detached` in the agent's temp folder once its
+/// session has started and then sleeps `seconds`. The harness waits for that file, then
+/// sleeps the same time when it `stays`, or exits. Takes the folder, the seconds and whether
+/// it stays. Returns the harness.
+fn detaching_harness(folder: &Path, seconds: u32, stays: bool) -> PathBuf {
+    let then = if stays {
+        format!("exec /bin/sleep {seconds}")
+    } else {
+        "exit 0".to_owned()
+    };
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(
+        &harness,
+        format!(
+            r#"#!/bin/sh
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "$ENV{{TMPDIR}}/detached") or exit 1; close($file); exec q(/bin/sleep {seconds})' < /dev/null > /dev/null 2>&1 &
+while [ ! -e "$TMPDIR/detached" ]; do /bin/sleep 0.05; done
+{then}
+"#
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// Waits up to 30 s for at least `count` processes to name `needle`. Takes the text and
+/// the count. Returns their ids.
+fn running_naming(needle: &str, count: usize) -> Vec<u32> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let found = processes_with(Path::new(needle));
+        if found.len() >= count {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "{needle}: only {found:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Waits up to `wait` for no process to name `needle`, then kills by id any that still do,
+/// so a failing test leaves nothing behind. Takes the text and the wait. Returns the ids
+/// that outlived the wait.
+fn survivors_naming(needle: &str, wait: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = processes_with(Path::new(needle));
+        if left.is_empty() || Instant::now() >= deadline {
+            for pid in &left {
+                let pid = rustix::process::Pid::from_raw(i32::try_from(*pid).unwrap()).unwrap();
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn cancelling_research_stops_what_its_harness_detached_into_its_own_session() {
+    const SLEEP: &str = "sleep 3301";
+    let case = case("A plain project.");
+    let folder = harness_folder();
+    let harness = detaching_harness(folder.path(), 3301, true);
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let runner = Arc::new(
+        ResearchRunner::new(
+            &case.database,
+            &case.state,
+            &harness,
+            limits(Duration::from_secs(120)),
+        )
+        .unwrap(),
+    );
+    let project_root = case.project.clone();
+    let handle = {
+        let runner = runner.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &project_root,
+                    account: Some(endpoint(9)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    running_naming(SLEEP, 2);
+    assert!(jobs.request_cancel(id).unwrap());
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Cancelled);
+    assert_eq!(
+        survivors_naming(SLEEP, Duration::from_secs(2)),
+        Vec::<u32>::new()
+    );
+}
+
+#[test]
+fn research_whose_harness_exits_stops_what_it_detached_into_its_own_session() {
+    const SLEEP: &str = "sleep 3302";
+    let case = case("A plain project.");
+    let folder = harness_folder();
+    let harness = detaching_harness(folder.path(), 3302, false);
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    jobs.enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let run = ResearchRunner::new(
+        &case.database,
+        &case.state,
+        &harness,
+        limits(Duration::from_secs(60)),
+    )
+    .unwrap()
+    .run_once(&project(&case, Some(endpoint(9))))
+    .unwrap()
+    .unwrap();
+    assert_eq!(run.status, ResearchStatus::Failed);
+    assert_eq!(
+        survivors_naming(SLEEP, Duration::from_secs(2)),
+        Vec::<u32>::new()
+    );
+}
+
+/// Runs the research job in a second engine process, which this test runs again as itself
+/// with the `RESEARCH_ENGINE_*` variables naming the runtime, and kills that engine with
+/// SIGKILL once its harness and the detached process both run.
+#[test]
+fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
+    const SLEEP: &str = "sleep 3303";
+    if let (Some(state), Some(project), Some(harness)) = (
+        std::env::var_os(RESEARCH_ENGINE_STATE),
+        std::env::var_os(RESEARCH_ENGINE_PROJECT),
+        std::env::var_os(RESEARCH_ENGINE_HARNESS),
+    ) {
+        let state = PathBuf::from(state);
+        let database = state.parent().unwrap().join("engine.db");
+        let ran = ResearchRunner::new(
+            &database,
+            &state,
+            Path::new(&harness),
+            limits(Duration::from_secs(120)),
+        )
+        .unwrap()
+        .run_once(&ResearchProject {
+            id: "project-a",
+            root: Path::new(&project),
+            account: Some(endpoint(9)),
+        })
+        .is_ok();
+        panic!("the engine under test was not killed, run ok: {ran}");
+    }
+    let case = case("A plain project.");
+    let folder = harness_folder();
+    let harness = detaching_harness(folder.path(), 3303, true);
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    jobs.enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    assert_eq!(
+        case.database,
+        case.state.parent().unwrap().join("engine.db")
+    );
+    let mut engine = crazyagent::spawn_gate::spawn(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "research_whose_engine_dies_leaves_nothing_its_harness_detached",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RESEARCH_ENGINE_STATE, &case.state)
+            .env(RESEARCH_ENGINE_PROJECT, &case.project)
+            .env(RESEARCH_ENGINE_HARNESS, &harness)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    running_naming(SLEEP, 2);
+    let exited = engine.try_wait().unwrap();
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    assert_eq!(exited, None);
+    assert_eq!(
+        survivors_naming(SLEEP, Duration::from_secs(5)),
+        Vec::<u32>::new()
     );
 }
