@@ -27,6 +27,17 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
+/// The start of a stand-in harness that leaves what a Claude Code Bash tool shell can leave: a
+/// process that started its own session with its own stdio, as each tool shell does, and a
+/// `nohup` command whose shell already exited. It writes their ids into its working folder; a
+/// test appends how the harness itself ends.
+#[cfg(target_os = "macos")]
+pub(in crate::engine) const DETACHING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec "/bin/sh", "-c", q(/usr/bin/nohup /bin/sleep 30 < /dev/null > /dev/null 2>&1 & echo $! > orphan.pid)' < /dev/null > /dev/null 2>&1
+echo $$ > leader.pid
+"#;
+
 /// A real native profile custody in a private engine folder under `/private/tmp`, with a
 /// project folder, for master host tests that need an actual profile lease and sandbox.
 pub(in crate::engine) struct MasterFixture {
@@ -244,5 +255,72 @@ impl Drop for HarnessProcesses {
     fn drop(&mut self) {
         let _ = rustix::process::kill_process(self.descendant, rustix::process::Signal::KILL);
         let _ = rustix::process::kill_process_group(self.leader, rustix::process::Signal::KILL);
+    }
+}
+
+/// The three real processes a [`DETACHING_HARNESS`] started: the harness, the process in its
+/// own session and the `nohup` orphan. Dropping it kills all three, so a failing test leaves
+/// none.
+#[cfg(target_os = "macos")]
+pub(in crate::engine) struct DetachedProcesses {
+    pub(in crate::engine) leader: Pid,
+    pub(in crate::engine) session: Pid,
+    pub(in crate::engine) orphan: Pid,
+}
+
+#[cfg(target_os = "macos")]
+impl DetachedProcesses {
+    /// Waits up to five seconds until the stand-in wrote all three ids into `folder`, then
+    /// checks the two detached ones left the harness group and are alive.
+    /// Takes the stand-in's working folder. Returns the three processes.
+    pub(in crate::engine) fn wait(folder: &Path) -> Self {
+        let read = |name: &str| {
+            fs::read_to_string(folder.join(name))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+                .and_then(Pid::from_raw)
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let (Some(leader), Some(session), Some(orphan)) = (
+                read("leader.pid"),
+                read("descendant.pid"),
+                read("orphan.pid"),
+            ) {
+                let started = Self {
+                    leader,
+                    session,
+                    orphan,
+                };
+                for detached in [session, orphan] {
+                    assert_ne!(rustix::process::getpgid(Some(detached)), Ok(leader));
+                    assert_eq!(rustix::process::test_kill_process(detached), Ok(()));
+                }
+                return started;
+            }
+            assert!(Instant::now() < deadline, "stand-in harness never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Asserts that within one second none of the three processes is left.
+    /// Takes nothing. Panics with the surviving process otherwise.
+    pub(in crate::engine) fn assert_gone(&self) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        for process in [self.leader, self.session, self.orphan] {
+            while rustix::process::test_kill_process(process) != Err(rustix::io::Errno::SRCH) {
+                assert!(Instant::now() < deadline, "process {process:?} survived");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DetachedProcesses {
+    fn drop(&mut self) {
+        for process in [self.session, self.orphan, self.leader] {
+            let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
+        }
     }
 }

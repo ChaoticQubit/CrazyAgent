@@ -17,6 +17,7 @@ use std::process::Command;
 pub mod linux;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
+pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -304,12 +305,14 @@ pub fn agent_env<'a>(
 /// harness program and its arguments. It joins the engine's process group, starts a new
 /// session and replaces itself with the harness, so the agent holds no controlling terminal
 /// and its pid stays its process group. When the session cannot start it exits unstarted.
+/// Handed a [`warden::WARDEN_FD`], it first forks the run's warden (see [`warden::Warden`])
+/// and keeps that descriptor and variable from the harness.
 #[cfg(unix)]
 pub const SESSION_SHIM: [&str; 5] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-e",
-    "setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die \"crazyagent: no new session: $!\\n\"; exec {$ARGV[0]} @ARGV or die \"crazyagent: cannot start $ARGV[0]: $!\\n\"",
+    r#"setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die "crazyagent: no new session: $!\n"; if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
     "--",
 ];
 
