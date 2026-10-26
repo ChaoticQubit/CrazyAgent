@@ -18,15 +18,22 @@ use crazyagent::research::runner::{
     ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
 };
 use crazyagent::setup::PackState;
-use research_support::{claude, codex, hanging_endpoint, processes_with};
+#[cfg(target_os = "macos")]
+use research_support::hanging_endpoint;
+use research_support::{claude, codex, processes_with};
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::Write;
+#[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(target_os = "macos")]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -154,10 +161,12 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
 
 /// The real `crazyagent engine` binary on a runtime folder, started with
 /// writable settings and no `--codex-executable` or `--claude-executable`.
+#[cfg(target_os = "macos")]
 struct EngineProcess {
     child: Child,
 }
 
+#[cfg(target_os = "macos")]
 impl EngineProcess {
     /// Starts the binary and waits up to 20 s for its `ready` line.
     fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
@@ -216,6 +225,7 @@ impl EngineProcess {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for EngineProcess {
     /// Stops an engine a failed test left running, so no step process
     /// outlives the test.
@@ -227,6 +237,7 @@ impl Drop for EngineProcess {
 /// The engine a bench drives: in this test process, or the real binary.
 enum Engine {
     InProcess(Box<EngineService>, watch::Sender<bool>),
+    #[cfg(target_os = "macos")]
     Binary(EngineProcess),
 }
 
@@ -359,6 +370,7 @@ impl Bench {
 
     /// Starts the real engine binary without Codex or Claude Code and
     /// attaches the owner client, retrying for up to 20 s.
+    #[cfg(target_os = "macos")]
     async fn start_binary() -> Self {
         let folders = Folders::new(|_| {});
         let process =
@@ -510,8 +522,10 @@ impl Bench {
             generation,
         } = self;
         drop(owner);
-        let Engine::InProcess(mut service, _stop) = engine else {
-            panic!("a restart needs the in-process engine");
+        let (mut service, _stop) = match engine {
+            Engine::InProcess(service, stop) => (service, stop),
+            #[cfg(target_os = "macos")]
+            Engine::Binary(_) => panic!("a restart needs the in-process engine"),
         };
         service.shutdown().await.unwrap();
         between(&root);
@@ -593,6 +607,7 @@ impl Bench {
         drop(owner);
         match engine {
             Engine::InProcess(mut service, _stop) => service.shutdown().await.unwrap(),
+            #[cfg(target_os = "macos")]
             Engine::Binary(mut process) => {
                 let clean = tokio::task::spawn_blocking(move || process.terminate())
                     .await
@@ -1102,10 +1117,12 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
 }
 
 /// The installed graphify, or a BLOCKED panic naming the missing tool.
+#[cfg(target_os = "macos")]
 fn graphify() -> PathBuf {
     installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_missing() {
     graphify();
@@ -1130,6 +1147,7 @@ async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_miss
     assert!(processes_with(&onboarding_state).is_empty());
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     let graphify = graphify();
@@ -1512,6 +1530,32 @@ async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
     );
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_graph_build_on_linux_stops_with_the_plain_unavailable_line() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        || Some(PathBuf::from("/usr/bin/true")),
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.graph,
+        failed("Graph build is not available on Linux in this version."),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
+    assert!(!bench.repo.join("graphify-out").exists());
+    assert_eq!(agent_runs(&agents, "onboard-g-"), 0);
     bench.stop().await;
 }
 

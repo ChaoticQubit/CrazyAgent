@@ -9,10 +9,10 @@ use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
 #[cfg(unix)]
-use crate::research::runner::ReadOnlyEnding;
-#[cfg(unix)]
 use crate::research::runner::ResearchLimits;
-use crate::research::runner::{ReadOnlyRun, ResearchHarness, ResearchRunner, RunError};
+use crate::research::runner::{
+    ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -465,7 +465,6 @@ fn mapping_step(
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
-        #[cfg(unix)]
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),

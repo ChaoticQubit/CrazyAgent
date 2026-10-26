@@ -1105,7 +1105,6 @@ pub(crate) struct ReadOnlyRun<'a> {
 pub(crate) enum ReadOnlyEnding {
     #[cfg(unix)]
     Answered(String),
-    #[cfg(unix)]
     Failed(String),
     #[cfg(unix)]
     TimedOut,
@@ -1298,11 +1297,11 @@ impl ResearchRunner {
         })
     }
 
-    /// Asks the Windows boundary for a read-only run's network reach before any agent
-    /// state is made. A read-only run always limits the agent to its model endpoint, which
-    /// the AppContainer boundary refuses until its firewall rule exists rather than widen it.
-    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, or the boundary's
-    /// `Unavailable` refusal.
+    /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
+    /// agent there, so the run fails with the owner's plain line. Past that line, the
+    /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
+    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, the plain failure,
+    /// or the boundary's `Unavailable` refusal.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
@@ -1311,6 +1310,9 @@ impl ResearchRunner {
     ) -> Result<ReadOnlyEnding, RunError> {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            return Ok(ReadOnlyEnding::Failed(line.into()));
         }
         let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
         let refusal = crate::sandbox::windows::capabilities(&network)
@@ -3289,6 +3291,43 @@ mod tests {
             "a folder the engine made gets its repository"
         );
         ensure_repository(&created, &home).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_read_only_run_on_windows_stops_with_the_plain_unavailable_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let engine = base.join("engine");
+        fs::create_dir(&engine).unwrap();
+        let database = engine.join("engine.db");
+        let sqlite = rusqlite::Connection::open(&database).unwrap();
+        sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+        sqlite.close().map_err(|(_, error)| error).unwrap();
+        let state = engine.join("research");
+        fs::create_dir(&state).unwrap();
+        let runner =
+            ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "windows-model".into(),
+        };
+        let run = ReadOnlyRun {
+            name: "onboard-m-windows",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+        };
+        assert_eq!(
+            runner.run_read_only(&run, &|| false).unwrap(),
+            ReadOnlyEnding::Failed(
+                "Team agents and research are not available on Windows in this version.".into()
+            )
+        );
+        assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
     }
 }
 
