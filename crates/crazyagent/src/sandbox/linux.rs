@@ -55,6 +55,22 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/sys/fs/cgroup",
 ];
 
+/// The entries of a project's `.git` that the owner's and the engine's git follow to other
+/// repository data, which the Seatbelt profile keeps read-only: no agent writes or plants them.
+/// `objects` is granted entry by entry instead, without its `info` folder.
+const GIT_FOLLOWED: &[&str] = &[
+    "commondir",
+    "config.worktree",
+    "info",
+    "objects",
+    "shallow",
+    "worktrees",
+];
+
+const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
+     neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
+     objects read-only inside the git folders it must write";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -350,9 +366,9 @@ pub enum LinuxBackend {
 
 /// The Linux boundary for one project agent. It keeps the [`ProjectSandbox`] policy on both
 /// backends: the project folder is read-only, its existing entries are writable except the
-/// protected paths and symbolic links, or for a confined agent only its own worktree with that
-/// worktree's git admin folder and the object store, and the agent's home, temp dir and
-/// worktrees are writable. Landlock limits outbound TCP to the model endpoint ports;
+/// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
+/// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
+/// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports;
 /// bubblewrap cannot, so a tools-off agent needs Landlock.
 #[derive(Debug)]
 pub struct LinuxSandbox {
@@ -363,8 +379,12 @@ pub struct LinuxSandbox {
 impl LinuxSandbox {
     /// Binds the policy to one backend. Input: the project policy and the helper or bwrap
     /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
-    /// or `Unavailable` for a network limit on bubblewrap.
+    /// or `Unavailable` for a network limit on bubblewrap or for a policy confined to one
+    /// worktree, whose git denies neither backend can hold.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
+        if sandbox.checkout.is_some() {
+            return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
+        }
         let executable = match &backend {
             LinuxBackend::Landlock { helper } => helper,
             LinuxBackend::Bubblewrap { bwrap } => bwrap,
@@ -511,6 +531,11 @@ impl Grants {
         let git = project.join(".git");
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         let protected = sandbox.protected_paths();
+        let objects = git.join("objects");
+        let objects_info = objects.join("info");
+        let followed: Vec<PathBuf> = GIT_FOLLOWED.iter().map(|name| git.join(name)).collect();
+        let followed: Vec<&PathBuf> = followed.iter().collect();
+        let folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
         let mut write = Vec::new();
         for root in sandbox.writable_roots() {
             if root != project {
@@ -518,12 +543,21 @@ impl Grants {
                 continue;
             }
             writable_children(project, &[&git, &state], &protected, &mut write)?;
-            for folder in [&git, &state] {
-                if fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()) {
-                    writable_children(folder, &[], &protected, &mut write)?;
+            if folder(&git) {
+                writable_children(&git, &followed, &protected, &mut write)?;
+                if folder(&objects) {
+                    writable_children(&objects, &[&objects_info], &protected, &mut write)?;
                 }
             }
+            if folder(&state) {
+                writable_children(&state, &[], &protected, &mut write)?;
+            }
         }
+        assert!(
+            write
+                .iter()
+                .all(|path| !followed.contains(&path) && *path != objects_info)
+        );
         let mut read = vec![project.to_path_buf()];
         read.extend(
             sandbox
