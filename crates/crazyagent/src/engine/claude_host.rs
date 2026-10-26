@@ -41,6 +41,8 @@ const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
 const TOOL_STEPS_MAX: &str = "24";
 #[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
+const NO_SERVERS: &str = "{\"mcpServers\":{}}";
+const MCP_CONFIG_FLAG: &str = "--mcp-config";
 
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
 /// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
@@ -145,7 +147,6 @@ pub(in crate::engine) fn tools_launch_command(
 /// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
 /// executable serving `team-mcp` on the drop file. Input: the tools. Output: the JSON text,
 /// or `claude_host_invalid_launch` for a relative path or one with a control character.
-#[cfg(unix)]
 fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
     let plain = |path: &Path| {
         path.is_absolute()
@@ -176,7 +177,7 @@ fn command_for(
 ) -> Result<Command, EngineError> {
     let servers = match tools {
         Some(tools) => delegate_config(tools)?,
-        None => "{\"mcpServers\":{}}".to_owned(),
+        None => NO_SERVERS.to_owned(),
     };
     if !executable.is_absolute()
         || !project_root.is_absolute()
@@ -239,7 +240,7 @@ fn command_for(
     };
     command.args([
         "--strict-mcp-config",
-        "--mcp-config",
+        MCP_CONFIG_FLAG,
         servers.as_str(),
         "--setting-sources",
         "",
@@ -616,6 +617,43 @@ fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
     Some((PathBuf::from(engine), PathBuf::from(drop)))
 }
 
+/// Confirms a Claude Code master command names exactly the delegate server the engine gave
+/// its turn: with `tools`, one MCP configuration whose only server is that engine executable
+/// serving `team-mcp` on that drop file; without, an empty server list. Input: the command
+/// and the expected tools. Output: Ok, or `master_delegate_unverified`.
+pub(in crate::engine) fn require_delegate(
+    command: &Command,
+    tools: Option<MasterTools<'_>>,
+) -> Result<(), EngineError> {
+    let refused = || failure("master_delegate_unverified");
+    let expected = match tools {
+        Some(tools) => delegate_config(tools).map_err(|_| refused())?,
+        None => NO_SERVERS.to_owned(),
+    };
+    let expected: serde_json::Value = serde_json::from_str(&expected).map_err(|_| refused())?;
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    let inline = format!("{MCP_CONFIG_FLAG}=");
+    if args
+        .iter()
+        .any(|arg| arg.as_encoded_bytes().starts_with(inline.as_bytes()))
+    {
+        return Err(refused());
+    }
+    let mut configs = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| **arg == std::ffi::OsStr::new(MCP_CONFIG_FLAG))
+        .map(|(index, _)| args.get(index + 1).and_then(|config| config.to_str()));
+    let (Some(Some(config)), None) = (configs.next(), configs.next()) else {
+        return Err(refused());
+    };
+    let named: serde_json::Value = serde_json::from_str(config).map_err(|_| refused())?;
+    if named != expected {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 /// Confirms a master command is exactly one the engine builds: tools off, or tools on with
 /// only the engine's delegate server, for this directory, home, model and instruction file.
 /// Input: the command, the profile lease and the turn home. Output: whether the tools are
@@ -651,7 +689,7 @@ fn validate_command(
     let named = if tools {
         let named = args
             .iter()
-            .position(|arg| *arg == OsStr::new("--mcp-config"))
+            .position(|arg| *arg == OsStr::new(MCP_CONFIG_FLAG))
             .and_then(|index| args.get(index + 1))
             .and_then(|config| config.to_str())
             .and_then(named_tools)

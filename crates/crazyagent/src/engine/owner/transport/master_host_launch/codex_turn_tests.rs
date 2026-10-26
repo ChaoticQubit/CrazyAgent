@@ -178,8 +178,12 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert!(command.get_envs().eq(today.get_envs()));
     assert!(settings(&command).contains(&"sandbox_mode=\"read-only\"".to_owned()));
     assert!(settings(&command).contains(&"mcp_servers={}".to_owned()));
-    assert_eq!(require_master_tool_policy(&command, false), Ok(()));
-    assert!(require_master_tool_policy(&command, true).is_err());
+    assert_eq!(require_master_tool_policy(&command, None), Ok(()));
+    let unused = crate::engine::claude_host::MasterTools {
+        engine: &engine,
+        drop: &engine,
+    };
+    assert!(require_master_tool_policy(&command, Some(unused)).is_err());
     assert!(
         sandbox
             .sandbox()
@@ -221,6 +225,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert_eq!(written["tokens"]["refresh_token"], "");
     let record = turn.join("tmp").join(crate::team::tool::DROP_FILE);
     assert_eq!(tool_record.as_deref(), Some(record.as_path()));
+    let tools = crate::engine::claude_host::MasterTools {
+        engine: &engine,
+        drop: &record,
+    };
     let envs: Vec<(String, String)> = command
         .get_envs()
         .map(|(key, value)| {
@@ -281,8 +289,8 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .chain(sandbox.sandbox().read_roots())
             .all(|root| !managed.starts_with(root) && !root.starts_with(&managed))
     );
-    assert_eq!(require_master_tool_policy(&command, true), Ok(()));
-    assert!(require_master_tool_policy(&command, false).is_err());
+    assert_eq!(require_master_tool_policy(&command, Some(tools)), Ok(()));
+    assert!(require_master_tool_policy(&command, None).is_err());
 
     let widened = changed(&command, |args| {
         let server = args
@@ -295,7 +303,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             record.to_str().unwrap()
         );
     });
-    assert!(require_master_tool_policy(&widened, true).is_err());
+    assert!(require_master_tool_policy(&widened, Some(tools)).is_err());
     let relative = changed(&command, |args| {
         let server = args
             .iter()
@@ -305,12 +313,12 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             "mcp_servers={crazyagent-team={command=\"crazyagent\",args=[\"team-mcp\",\"/tmp/x\"]}}"
                 .into();
     });
-    assert!(require_master_tool_policy(&relative, true).is_err());
+    assert!(require_master_tool_policy(&relative, Some(tools)).is_err());
     let shell_off = changed(&command, |args| {
         args.insert(0, "features.shell_tool=false".into());
         args.insert(0, "-c".into());
     });
-    assert!(require_master_tool_policy(&shell_off, true).is_err());
+    assert!(require_master_tool_policy(&shell_off, Some(tools)).is_err());
     let read_only = changed(&command, |args| {
         let sandbox = args
             .iter()
@@ -318,7 +326,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .unwrap();
         args[sandbox] = "sandbox_mode=\"read-only\"".into();
     });
-    assert!(require_master_tool_policy(&read_only, true).is_err());
+    assert!(require_master_tool_policy(&read_only, Some(tools)).is_err());
     let no_server = changed(&command, |args| {
         let server = args
             .iter()
@@ -326,16 +334,149 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .unwrap();
         args.drain(server - 1..=server);
     });
-    assert!(require_master_tool_policy(&no_server, true).is_err());
+    assert!(require_master_tool_policy(&no_server, Some(tools)).is_err());
     let off_with_server = changed(&today, |args| {
         let server = args.iter().position(|arg| arg == "mcp_servers={}").unwrap();
         args[server] = servers[0].clone();
     });
-    assert!(require_master_tool_policy(&off_with_server, false).is_err());
+    assert!(require_master_tool_policy(&off_with_server, None).is_err());
 
+    let link = install.join("crazyagent-link");
+    std::os::unix::fs::symlink(&engine, &link).unwrap();
+    let hard = install.join("crazyagent-hard");
+    std::fs::hard_link(&engine, &hard).unwrap();
+    let other_drop = runtime
+        .join("master-runtime-other")
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let served = |server: &Path, rest: &[&Path]| {
+        let render = |text: &str| toml_edit::Value::from(text).to_string();
+        let setting = format!(
+            "mcp_servers={{crazyagent-team={{command={},args=[{}]}}}}",
+            render(server.to_str().unwrap()),
+            std::iter::once(render("team-mcp"))
+                .chain(rest.iter().map(|arg| render(arg.to_str().unwrap())))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        changed(&command, |args| {
+            let index = args
+                .iter()
+                .position(|arg| arg.starts_with("mcp_servers="))
+                .unwrap();
+            args[index] = setting.clone();
+        })
+    };
+    assert_eq!(
+        require_master_tool_policy(&served(&engine, &[&record]), Some(tools)),
+        Ok(())
+    );
+    for (name, refused) in [
+        (
+            "another executable",
+            served(Path::new("/usr/bin/true"), &[&record]),
+        ),
+        ("a link to the engine", served(&link, &[&record])),
+        ("a hard link to the engine", served(&hard, &[&record])),
+        ("another turn's drop file", served(&engine, &[&other_drop])),
+        (
+            "an extra argument",
+            served(&engine, &[&record, Path::new("--verbose")]),
+        ),
+        (
+            "a second setting in the same flag",
+            changed(&command, |args| {
+                let index = args
+                    .iter()
+                    .position(|arg| arg.starts_with("mcp_servers="))
+                    .unwrap();
+                args[index] = format!("{}\nweb_search=\"live\"", servers[0]);
+            }),
+        ),
+    ] {
+        assert_eq!(
+            require_master_tool_policy(&refused, Some(tools)).map_err(|error| error.0),
+            Err("master_delegate_unverified".to_owned()),
+            "{name}"
+        );
+    }
+
+    let registered = |path: &Path| {
+        crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(path).unwrap()
+    };
+    let turn = MasterTurnLaunch {
+        command,
+        sandbox,
+        home: home.clone(),
+        credential,
+        tool_record,
+    };
+    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+        let engine = engine.map(registered);
+        require_master_delegate(backend, turn, engine.as_ref()).map_err(|error| error.0)
+    };
+    let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(checked(MasterBackend::Codex, &turn, Some(&engine)), Ok(()));
+    assert_eq!(
+        checked(MasterBackend::Codex, &turn, Some(&hard)),
+        unverified
+    );
+    assert_eq!(
+        checked(MasterBackend::Claude, &turn, Some(&engine)),
+        unverified
+    );
+    assert!(checked(MasterBackend::Codex, &turn, None).is_err());
+    assert_eq!(
+        checked(MasterBackend::Rcli, &turn, Some(&engine)),
+        Err("master_runtime_backend_unsupported".to_owned())
+    );
+    let mut turn = turn;
+    let record = turn.tool_record.replace(other_drop.clone());
+    assert_eq!(
+        checked(MasterBackend::Codex, &turn, Some(&engine)),
+        unverified
+    );
+    turn.tool_record = record;
+    assert_eq!(checked(MasterBackend::Codex, &turn, Some(&engine)), Ok(()));
+    let MasterTurnLaunch { credential, .. } = turn;
     drop(credential);
     assert!(!copy.exists());
     drop(tools_folder);
     assert!(!home.exists());
     drop(profile);
+}
+
+#[test]
+fn the_delegate_engine_is_the_registered_executable_at_its_canonical_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path();
+    let real = base.join("real");
+    std::fs::create_dir(&real).unwrap();
+    let engine = real.join("crazyagent");
+    std::fs::write(&engine, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let canonical = std::fs::canonicalize(&engine).unwrap();
+    let registered =
+        crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(&canonical).unwrap();
+    assert_eq!(delegate_engine(&registered), Ok(canonical.as_path()));
+
+    let linked = base.join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let through_link = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(
+        &linked.join("crazyagent"),
+    )
+    .unwrap();
+    assert_eq!(
+        delegate_engine(&through_link).map_err(|error| error.0),
+        Err("master_delegate_unverified".to_owned())
+    );
+
+    std::fs::rename(&real, base.join("moved")).unwrap();
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(&engine, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        delegate_engine(&registered).map_err(|error| error.0),
+        Err("native_auth_host_executable_changed".to_owned())
+    );
 }

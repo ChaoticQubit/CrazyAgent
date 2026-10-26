@@ -150,9 +150,16 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         Some(&engine),
     )
     .unwrap();
-    require_master_tool_policy(&command, true).unwrap();
     assert_ne!(home, managed);
     let record = tool_record.unwrap();
+    require_master_tool_policy(
+        &command,
+        Some(crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &record,
+        }),
+    )
+    .unwrap();
     let mut master = CodexHost::spawn(
         command,
         sandbox,

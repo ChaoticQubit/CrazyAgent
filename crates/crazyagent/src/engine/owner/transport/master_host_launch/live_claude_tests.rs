@@ -187,6 +187,14 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
     )
     .unwrap();
     let record = tool_record.unwrap();
+    crate::engine::claude_host::require_delegate(
+        &command,
+        Some(crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &record,
+        }),
+    )
+    .unwrap();
     let mut master = ClaudeHost::spawn(
         command,
         sandbox,

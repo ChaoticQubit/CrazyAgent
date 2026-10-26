@@ -121,10 +121,7 @@ impl OwnerRuntimeHandle {
         };
         let wall_time =
             Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
-        let engine = engine
-            .as_ref()
-            .map(|engine| engine.verified_path())
-            .transpose()?;
+        let delegate = engine.as_deref().map(delegate_engine).transpose()?;
         let turn = if prepared.session.selection.backend == MasterBackend::Claude {
             claude_master_turn(
                 &place,
@@ -133,7 +130,7 @@ impl OwnerRuntimeHandle {
                 &prepared.attempt.connection,
                 &prepared.instructions,
                 wall_time,
-                engine,
+                delegate,
             )?
         } else {
             codex_master_turn(
@@ -142,9 +139,10 @@ impl OwnerRuntimeHandle {
                 executable.verified_path()?,
                 &prepared.attempt.connection,
                 wall_time,
-                engine,
+                delegate,
             )?
         };
+        require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -152,9 +150,6 @@ impl OwnerRuntimeHandle {
             credential,
             tool_record,
         } = turn;
-        if prepared.session.selection.backend == MasterBackend::Codex {
-            require_master_tool_policy(&command, prepared.tools)?;
-        }
         assert_eq!(tool_record.is_some(), prepared.tools);
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
@@ -249,7 +244,6 @@ pub(super) fn claude_master_turn(
                 .sandbox()
                 .agent_tmp()
                 .join(crate::team::tool::DROP_FILE);
-            let engine = std::fs::canonicalize(engine).map_err(io_error)?;
             let command = crate::engine::claude_host::tools_launch_command(
                 executable,
                 place.worktree,
@@ -257,7 +251,7 @@ pub(super) fn claude_master_turn(
                 &connection.model.id,
                 Some(instructions.as_path()),
                 crate::engine::claude_host::MasterTools {
-                    engine: &engine,
+                    engine,
                     drop: &drop,
                 },
             )?;
@@ -324,14 +318,13 @@ pub(super) fn codex_master_turn(
         .sandbox()
         .agent_tmp()
         .join(crate::team::tool::DROP_FILE);
-    let engine = std::fs::canonicalize(engine).map_err(io_error)?;
     let command = master_command(
         executable,
         &home,
         place.worktree,
         model,
         Some(crate::engine::claude_host::MasterTools {
-            engine: &engine,
+            engine,
             drop: &drop,
         }),
     )?;
@@ -404,12 +397,17 @@ impl Drop for MasterRuntimeFolder {
 /// Confirms a Codex master command keeps the policy of its tools switch. Tools off (DEC-076):
 /// read-only sandbox, approvals never granted, and no shell, patch, web, goal or MCP tools.
 /// Tools on (DEC-093): approvals never granted, no apps, plugins or goals, Codex's own sandbox
-/// off inside the master's, and exactly one MCP server, the engine's `delegate` server. Every
-/// `-c` setting must be one the switch allows. Input: the command and the switch. Output: Ok,
-/// or the unsupported-backend refusal.
-fn require_master_tool_policy(command: &Command, tools: bool) -> Result<(), EngineError> {
+/// off inside the master's, and exactly one MCP server, the engine's `delegate` server served
+/// by exactly the expected engine executable on the turn's own drop file. Every `-c` setting
+/// must be one the switch allows. Input: the command and, for tools on, the expected delegate
+/// server parts. Output: Ok, `master_delegate_unverified` for any other server, or the
+/// unsupported-backend refusal.
+fn require_master_tool_policy(
+    command: &Command,
+    tools: Option<crate::engine::claude_host::MasterTools<'_>>,
+) -> Result<(), EngineError> {
     let refused = || failure("master_runtime_backend_unsupported");
-    let required: &[&str] = if tools {
+    let required: &[&str] = if tools.is_some() {
         &[
             "sandbox_mode=\"danger-full-access\"",
             "approval_policy=\"never\"",
@@ -429,7 +427,7 @@ fn require_master_tool_policy(command: &Command, tools: bool) -> Result<(), Engi
             "mcp_servers={}",
         ]
     };
-    let fixed: &[&str] = if tools {
+    let fixed: &[&str] = if tools.is_some() {
         &MASTER_TOOLS_CONFIG
     } else {
         &MASTER_CONFIG
@@ -450,17 +448,18 @@ fn require_master_tool_policy(command: &Command, tools: bool) -> Result<(), Engi
     }
     let mut servers = 0_usize;
     for setting in &settings {
-        let allowed = if setting.starts_with(DELEGATE_SERVERS) && tools {
-            servers += 1;
-            delegate_only(setting)
-        } else {
-            fixed.contains(setting) || setting.starts_with("model=\"")
-        };
-        if !allowed {
-            return Err(refused());
+        match tools {
+            Some(tools) if setting.starts_with(DELEGATE_SERVERS) => {
+                servers += 1;
+                if !delegate_only(setting, tools) {
+                    return Err(failure("master_delegate_unverified"));
+                }
+            }
+            _ if fixed.contains(setting) || setting.starts_with("model=\"") => {}
+            _ => return Err(refused()),
         }
     }
-    if servers != usize::from(tools)
+    if servers != usize::from(tools.is_some())
         || required.iter().any(|setting| !fixed.contains(setting))
         || fixed.iter().any(|setting| !settings.contains(setting))
     {
@@ -471,9 +470,10 @@ fn require_master_tool_policy(command: &Command, tools: bool) -> Result<(), Engi
 }
 
 /// Checks that a Codex `mcp_servers=` setting names only the engine's `delegate` server: one
-/// `crazyagent-team` entry whose command is an absolute path and whose arguments are the
-/// tool server command and an absolute drop file. Input: the setting. Output: whether it does.
-fn delegate_only(setting: &str) -> bool {
+/// `crazyagent-team` entry whose command is exactly the expected engine executable and whose
+/// arguments are exactly the tool server command and the turn's drop file. Input: the setting
+/// and the expected parts. Output: whether it does.
+fn delegate_only(setting: &str, tools: crate::engine::claude_host::MasterTools<'_>) -> bool {
     let Ok(parsed) = toml::from_str::<toml::Table>(setting) else {
         return false;
     };
@@ -486,20 +486,72 @@ fn delegate_only(setting: &str) -> bool {
     else {
         return false;
     };
-    let absolute = |value: Option<&toml::Value>| {
-        value.and_then(toml::Value::as_str).is_some_and(|path| {
-            Path::new(path).is_absolute() && !path.chars().any(char::is_control)
-        })
+    let named = |value: Option<&toml::Value>, path: &Path| {
+        value
+            .and_then(toml::Value::as_str)
+            .is_some_and(|text| Some(text) == path.to_str())
     };
     let args = server.get("args").and_then(toml::Value::as_array);
-    servers.len() == 1
+    parsed.len() == 1
+        && servers.len() == 1
         && server.len() == 2
-        && absolute(server.get("command"))
+        && named(server.get("command"), tools.engine)
         && args.is_some_and(|args| {
             args.len() == 2
                 && args[0].as_str() == Some(crate::team::tool::SERVER_COMMAND)
-                && absolute(args.get(1))
+                && named(args.get(1), tools.drop)
         })
+}
+
+/// Confirms a built master turn names exactly the delegate server the engine registered: for
+/// tools on, the registered engine executable at its canonical path serving the drop file in
+/// the turn's own sandbox temporary folder, and for tools off no server. Inputs: the backend,
+/// the turn and, for tools on, the registered engine executable. Output: Ok, or the refusal
+/// code of the check that failed.
+fn require_master_delegate(
+    backend: MasterBackend,
+    turn: &MasterTurnLaunch,
+    engine: Option<&crate::engine::native_auth_host::RegisteredNativeAuthHost>,
+) -> Result<(), EngineError> {
+    let drop = turn
+        .sandbox
+        .sandbox()
+        .agent_tmp()
+        .join(crate::team::tool::DROP_FILE);
+    let expected = match engine {
+        Some(engine) => Some(crate::engine::claude_host::MasterTools {
+            engine: delegate_engine(engine)?,
+            drop: &drop,
+        }),
+        None => None,
+    };
+    match backend {
+        MasterBackend::Codex => require_master_tool_policy(&turn.command, expected)?,
+        MasterBackend::Claude => {
+            crate::engine::claude_host::require_delegate(&turn.command, expected)?
+        }
+        MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+    }
+    if turn.tool_record.as_deref() != expected.map(|tools| tools.drop) {
+        return Err(failure("master_delegate_unverified"));
+    }
+    Ok(())
+}
+
+/// Names the engine executable a tools-on master's `delegate` server runs: the path the engine
+/// registered, while the file there is still the one it captured and that path is canonical,
+/// so no link in any component can redirect it. Input: the registered engine executable.
+/// Output: its path, `native_auth_host_executable_changed`, or `master_delegate_unverified`.
+fn delegate_engine(
+    registered: &crate::engine::native_auth_host::RegisteredNativeAuthHost,
+) -> Result<&Path, EngineError> {
+    let path = registered.verified_path()?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| failure("master_delegate_unverified"))?;
+    if canonical != path {
+        return Err(failure("master_delegate_unverified"));
+    }
+    Ok(path)
 }
 
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
@@ -633,7 +685,7 @@ fn delegate_servers(
         toml_edit::Value::from(crate::team::tool::SERVER_COMMAND),
         text(tools.drop)?
     );
-    assert!(delegate_only(&setting));
+    assert!(delegate_only(&setting, *tools));
     Ok(setting)
 }
 
