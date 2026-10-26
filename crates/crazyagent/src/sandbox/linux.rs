@@ -4,7 +4,7 @@ use super::{
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -171,6 +171,10 @@ fn port(value: Option<OsString>) -> Result<u16, String> {
         .ok_or_else(|| "port must be 1 to 65535".to_string())
 }
 
+/// Applies `policy` to the calling process as one Landlock domain, then a second domain that
+/// keeps the agent's signals inside its own domain where the kernel has the signal scope
+/// (Landlock ABI 6, Linux 6.12); an older kernel skips only that scope. Input: the policy.
+/// Output: the status of the policy domain.
 fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(FS_ABI))?;
     if policy.limit_network {
@@ -189,7 +193,12 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
     }
-    created.restrict_self()
+    let status = created.restrict_self()?;
+    Ruleset::default()
+        .scope(Scope::Signal)?
+        .create()?
+        .restrict_self()?;
+    Ok(status)
 }
 
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
