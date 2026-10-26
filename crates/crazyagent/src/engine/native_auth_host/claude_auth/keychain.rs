@@ -132,6 +132,7 @@ pub(super) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::test_keychain::TestKeychain;
 
     fn read(home: &Path, args: &[&str]) -> String {
         let output = crate::spawn_gate::output(
@@ -149,74 +150,51 @@ mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    fn shown(home: &Path, args: &[&str]) -> String {
+        let output = crate::spawn_gate::output(
+            Command::new(SECURITY)
+                .args(args)
+                .env_clear()
+                .env("HOME", home)
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
     #[test]
-    fn private_home_gets_its_own_keychain_and_the_owner_keychain_is_untouched() {
-        let real_home = PathBuf::from(std::env::var_os("HOME").unwrap());
-        let real_default = read(&real_home, &["default-keychain", "-d", "user"]);
+    fn private_home_gets_its_own_keychain_that_no_other_home_sees() {
         let root = tempfile::Builder::new()
             .prefix("ca-keychain-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let home = root.path().join("home");
-        std::fs::create_dir(&home).unwrap();
+        let other = root.path().join("other");
+        for folder in [&home, &other] {
+            std::fs::create_dir(folder).unwrap();
+        }
         let keychain = prepare_profile_keychain(&home).unwrap();
         assert_eq!(keychain, home.join("Library/Keychains/login.keychain-db"));
-        assert!(
-            read(&home, &["default-keychain", "-d", "user"]).contains(keychain.to_str().unwrap())
-        );
-        let stored = crate::spawn_gate::status(
-            Command::new(SECURITY)
-                .args([
-                    "add-generic-password",
-                    "-U",
-                    "-a",
-                    "probe",
-                    "-s",
-                    "crazyagent-keychain-test",
-                    "-w",
-                    "value",
-                ])
-                .env_clear()
-                .env("HOME", &home)
-                .env("PATH", "/usr/bin:/bin"),
-        )
-        .unwrap();
-        assert!(stored.success());
-        assert_eq!(
-            read(
-                &home,
-                &[
-                    "find-generic-password",
-                    "-a",
-                    "probe",
-                    "-s",
-                    "crazyagent-keychain-test",
-                    "-w"
-                ]
-            )
-            .trim(),
-            "value"
-        );
+        let text = keychain.to_str().unwrap().to_owned();
+        assert!(read(&home, &["default-keychain", "-d", "user"]).contains(&text));
+        assert!(read(&home, &["list-keychains", "-d", "user"]).contains(&text));
+        let adopted = TestKeychain::adopt(&home, keychain.clone());
+        adopted.add("probe", "crazyagent-keychain-test", "value");
+        assert_eq!(adopted.find("crazyagent-keychain-test"), "value");
         assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain);
-        assert_eq!(
-            read(
-                &home,
-                &[
-                    "find-generic-password",
-                    "-a",
-                    "probe",
-                    "-s",
-                    "crazyagent-keychain-test",
-                    "-w"
-                ]
-            )
-            .trim(),
-            "value"
-        );
-        assert_eq!(
-            read(&real_home, &["default-keychain", "-d", "user"]),
-            real_default
-        );
+        assert_eq!(adopted.find("crazyagent-keychain-test"), "value");
+        for args in [
+            ["default-keychain", "-d", "user"],
+            ["list-keychains", "-d", "user"],
+        ] {
+            assert!(
+                !shown(&other, &args).contains(&text),
+                "another home sees the profile keychain through {args:?}"
+            );
+        }
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&keychain).unwrap().permissions().mode() & 0o777,

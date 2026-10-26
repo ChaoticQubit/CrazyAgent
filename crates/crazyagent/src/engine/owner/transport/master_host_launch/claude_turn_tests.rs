@@ -1,13 +1,14 @@
 use super::super::Root;
 use super::*;
 use crate::config::{ModelAuthentication, ModelReference};
+use crate::credentials::test_keychain::TestKeychain;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Copies a command with its MCP configuration replaced and arguments appended. Input: the
 /// command, the configuration text and the extra arguments. Output: the new command.
@@ -38,66 +39,17 @@ fn private_directory(path: &Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Runs the system keychain tool against one home only, with secrets passed on stdin.
-/// Inputs: the home, the arguments and the optional stdin text. Output: a panic unless
-/// the tool succeeds.
-fn security(home: &Path, args: &[&str], input: Option<&str>) {
-    let mut child = crate::spawn_gate::spawn(
-        Command::new("/usr/bin/security")
-            .args(args)
-            .env_clear()
-            .env("HOME", home)
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-    )
-    .unwrap();
-    if let Some(input) = input {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "security {args:?} failed");
-}
-
 /// Stores a Claude Code sign-in record where Claude Code keeps it: the managed home's
-/// own login keychain, under the service named after that home.
-/// Inputs: the managed home and the record. Output: the keychain item exists.
-fn claude_keychain(home: &Path, record: &Value) {
-    let folder = home.join("Library/Keychains");
-    std::fs::create_dir_all(&folder).unwrap();
-    for private in [home.join("Library"), folder.clone()] {
-        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let keychain = folder.join("login.keychain-db");
-    let path = keychain.to_str().unwrap();
-    security(home, &["create-keychain", "-p", "", path], None);
+/// own login keychain, a temporary one, under the service named after that home.
+/// Inputs: the managed home and the record. Output: the keychain, deleted on drop.
+fn claude_keychain(home: &Path, record: &Value) -> TestKeychain {
+    let keychain = TestKeychain::create(home);
     let service = format!(
         "Claude Code-credentials-{}",
         &format!("{:x}", Sha256::digest(home.to_str().unwrap().as_bytes()))[..8]
     );
-    let hex: String = record
-        .to_string()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    security(
-        home,
-        &["-i"],
-        Some(&format!(
-            "add-generic-password -a unit -s \"{service}\" -X {hex} \"{path}\"\n"
-        )),
-    );
+    keychain.add("unit", &service, &record.to_string());
+    keychain
 }
 
 #[test]
@@ -172,7 +124,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         },
         "mcpOAuth": {"unit-server": {"accessToken": "mcp-unit-secret"}}
     });
-    claude_keychain(&managed, &record);
+    let _keychain = claude_keychain(&managed, &record);
     let runtime = base.join("runtime");
     private_directory(&runtime);
     let root = Root::open(&runtime).unwrap();

@@ -5,6 +5,12 @@ use crate::github::GitHubMethod;
 #[tokio::test]
 async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     run_case(false, |context| async move {
+        #[cfg(target_os = "macos")]
+        let _keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(&context.state));
+            keychain
+        };
         let (client, _) =
             OwnerClient::discover(&context.state, OwnerClientKind::Tui, Duration::from_secs(2))
                 .await
@@ -42,6 +48,7 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
 mod slow_remote {
     use super::*;
     use crate::client_controller::OwnerController;
+    use crate::credentials::test_keychain::TestKeychain;
     use crate::credentials::{SecretString, Store, platform_store, reference};
     use crate::engine::owner::{OwnerResponse, OwnerResult};
     use crate::github::test_server::{Answer, Server, base64};
@@ -186,6 +193,8 @@ mod slow_remote {
 
             let root = context.state.clone();
             let space = namespace(&root);
+            let mut keychain = TestKeychain::temporary();
+            keychain.serve(&space);
             let store = platform_store(&space)
                 .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
             let _forget = Forget {
@@ -345,6 +354,8 @@ mod slow_remote {
 
             let root = context.state.clone();
             let space = namespace(&root);
+            let mut keychain = TestKeychain::temporary();
+            keychain.serve(&space);
             let store = platform_store(&space)
                 .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
             let kept = Forget {

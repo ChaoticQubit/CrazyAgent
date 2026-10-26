@@ -1,11 +1,14 @@
 #![cfg(target_os = "macos")]
 
+mod keychain_support;
+
 use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError,
     SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
 };
+use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -86,20 +89,6 @@ fn random_hex(bytes: usize) -> String {
     buffer.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn default_keychain() -> PathBuf {
-    let output = crazyagent::spawn_gate::output(
-        Command::new("/usr/bin/security")
-            .args(["default-keychain", "-d", "user"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    PathBuf::from(text.trim().trim_matches('"'))
-}
-
 fn walled(result: Result<ProjectSandbox, SandboxError>) {
     match result {
         Err(SandboxError::Invalid(reason)) => assert_eq!(reason, SECRET_ROOT_REFUSED),
@@ -116,6 +105,7 @@ fn holds(bytes: &[u8], needle: &str) -> bool {
 struct ThrowawayItem {
     store: Keychain,
     service: String,
+    _keychain: TemporaryKeychain,
 }
 
 impl Drop for ThrowawayItem {
@@ -162,9 +152,12 @@ fn agent_profile_denies_the_keychain_daemons_and_the_keychain_files() {
 #[test]
 fn sandboxed_agent_cannot_read_an_engine_keychain_item_through_security() {
     let namespace = format!("dev.crazyagent.test-{}", random_hex(6));
+    let keychain = TemporaryKeychain::create();
+    let keychain_path = keychain.path().to_path_buf();
     let item = ThrowawayItem {
-        store: Keychain::new(&namespace).unwrap(),
+        store: Keychain::at(&namespace, &keychain_path).unwrap(),
         service: format!("{namespace}.github"),
+        _keychain: keychain,
     };
     let secret_text = format!("gho_test{}", random_hex(18));
     let stored = item
@@ -179,8 +172,7 @@ fn sandboxed_agent_cannot_read_an_engine_keychain_item_through_security() {
     let case = case();
     let sandbox = sandbox(&case);
     let profile = case.profiles.join("keychain.sb");
-    let keychain = default_keychain();
-    let keychain_text = keychain.to_str().unwrap();
+    let keychain_text = keychain_path.to_str().unwrap();
     for args in [
         vec![
             "find-generic-password",
@@ -205,16 +197,13 @@ fn sandboxed_agent_cannot_read_an_engine_keychain_item_through_security() {
         assert!(!holds(&output.stdout, &secret_text), "{args:?}");
         assert!(!holds(&output.stderr, &secret_text), "{args:?}");
     }
-    let output = shell(
-        &sandbox,
-        &profile,
-        &format!(
-            "cat {} > /dev/null 2>&1 && exit 10; ls {} > /dev/null 2>&1 && exit 11; exit 0",
-            quoted(&keychain),
-            quoted(keychain.parent().unwrap())
-        ),
+    let walled = owner_home().join("Library").join("Keychains");
+    let output = shell(&sandbox, &profile, &format!("ls -d {}", quoted(&walled)));
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+        "the owner's keychain folder is not walled"
     );
-    assert_eq!(output.status.code(), Some(0));
     assert_eq!(item.store.get(&stored).unwrap().expose(), secret_text);
 }
 

@@ -52,24 +52,10 @@ fn a_lapsed_claude_record_is_renewed_by_the_real_claude_in_the_managed_home_befo
     let home = case.home();
     let record = claude_record((now() - 60) * 1000);
     let (keychain, service) = claude_keychain(&home, &record);
-    let path = keychain.to_str().unwrap();
-    security(&home, &["list-keychains", "-d", "user", "-s", path], None);
-    security(&home, &["default-keychain", "-d", "user", "-s", path], None);
-    let user = std::env::var("USER").unwrap();
-    security(
-        &home,
-        &[
-            "add-generic-password",
-            "-U",
-            "-a",
-            &user,
-            "-s",
-            &service,
-            "-w",
-            &record.to_string(),
-            path,
-        ],
-        None,
+    keychain.add(
+        &std::env::var("USER").unwrap(),
+        &service,
+        &record.to_string(),
     );
     let agent = agent_home(&case);
     let guard = execution(&mut case);

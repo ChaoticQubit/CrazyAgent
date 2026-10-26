@@ -42,6 +42,8 @@ struct Engine {
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
+    #[cfg(target_os = "macos")]
+    _keychain: crate::credentials::test_keychain::TestKeychain,
 }
 
 impl Engine {
@@ -55,6 +57,12 @@ impl Engine {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(target_os = "macos")]
+        let keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(root.path()));
+            keychain
+        };
         let global = root.path().join("global.toml");
         std::fs::write(&global, settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -87,6 +95,8 @@ impl Engine {
             _service: service,
             _stop: stop,
             controller,
+            #[cfg(target_os = "macos")]
+            _keychain: keychain,
         }
     }
 
