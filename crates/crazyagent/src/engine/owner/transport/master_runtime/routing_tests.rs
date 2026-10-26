@@ -271,6 +271,20 @@ fn git(repository: &Path, home: &Path, arguments: &[&str]) {
     }
 }
 
+fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs::File> {
+    let manifest = root
+        .join("native-profiles")
+        .join(format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(profile_ref.as_str().as_bytes())
+        ))
+        .join("identity.json");
+    let file = fs::File::open(manifest).unwrap();
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .ok()
+        .map(|()| file)
+}
+
 fn rows(tx: &Transaction<'_>, table: &str) -> Vec<Vec<Value>> {
     let mut statement = tx
         .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
@@ -1400,13 +1414,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     let database = case.root.path().join("engine.db");
     let mut custody =
         NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
-    let key = format!(
-        "{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
-    );
-    let account_change = custody
-        .hold_released_profile(&case.runtime().identity(), &key)
-        .unwrap()
+    let account_change = exclusive_profile_hold(case.root.path(), &proof.profile_ref)
         .expect("no agent holds the configured profile yet");
     let before = case.snapshot();
     assert_eq!(case.persisted_turn().await.phase, MasterTurnPhase::Prepared);
@@ -1697,18 +1705,8 @@ async fn a_repository_whose_config_runs_a_command_is_refused_with_the_key_and_no
             let tx = db.transaction().unwrap();
             assert!(rows(&tx, "native_auth_fences").is_empty(), "{key}");
         }
-        let database = case.root.path().join("engine.db");
-        let custody =
-            NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
-        let profile = format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
-        );
         assert!(
-            custody
-                .hold_released_profile(&case.runtime().identity(), &profile)
-                .unwrap()
-                .is_some(),
+            exclusive_profile_hold(case.root.path(), &proof.profile_ref).is_some(),
             "the refused turn left the profile held: {key}"
         );
         let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
