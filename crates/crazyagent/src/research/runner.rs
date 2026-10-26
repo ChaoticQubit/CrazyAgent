@@ -6,11 +6,11 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
 };
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
-use crate::protocol::{ProjectId, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
 use std::fmt;
@@ -58,6 +58,9 @@ const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
+const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
+const DRAIN_WAIT: Duration = Duration::from_secs(5);
+const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 const CONTEXT_BUSY: &str = "launch_home_busy";
@@ -277,6 +280,7 @@ enum Ending {
     Overflowed,
     Cancelled,
     Interrupted,
+    RateLimited,
 }
 
 impl ResearchRunner {
@@ -437,19 +441,24 @@ impl ResearchRunner {
         let Some(job) = jobs.claim(project.id, &self.claimer, self.limits.running_max)? else {
             return Ok(None);
         };
-        self.run_claimed(&jobs, job, project).map(Some)
+        self.run_claimed(&jobs, job, project, None).map(Some)
     }
 
     /// Claims every job of `project` for the account's harness that the
     /// per-project limit allows right now, at most `running_max` in one call
-    /// even while runs hand busy jobs back, and runs each on its own thread.
+    /// even while runs hand busy jobs back, and runs each on its own thread. `account` is
+    /// the picked pool account's connection and account; a run refused for a rate or usage
+    /// limit pauses that connection and hands its job back without spending an attempt.
     pub fn spawn_ready(
         self: &Arc<Self>,
         project: String,
         harness: &str,
         root: PathBuf,
-        account: Option<ResearchAccount>,
+        account: Option<(CredentialRef, ResearchAccount)>,
     ) -> Vec<JoinHandle<Result<ResearchRun, RunError>>> {
+        let (member, account) = account.map_or((None, None), |(member, account)| {
+            (Some(member), Some(account))
+        });
         let mut handles = Vec::new();
         let Ok(jobs) = ResearchJobs::open(&self.database) else {
             return handles;
@@ -467,6 +476,7 @@ impl ResearchRunner {
             let project = project.clone();
             let root = root.clone();
             let account = account.clone();
+            let member = member.clone();
             handles.push(std::thread::spawn(move || {
                 let jobs = ResearchJobs::open(&runner.database)?;
                 runner.run_claimed(
@@ -477,6 +487,7 @@ impl ResearchRunner {
                         root: &root,
                         account,
                     },
+                    member.as_ref(),
                 )
             }));
         }
@@ -484,11 +495,16 @@ impl ResearchRunner {
         handles
     }
 
+    /// Runs a claimed job to its end and records how it ended: done with its report,
+    /// failed, cancelled, parked for a pool, or handed back. Takes the job store, the job,
+    /// its project and the pool connection of the project's account, if known; a run
+    /// refused for a rate or usage limit pauses it, else spends an attempt.
     fn run_claimed(
         &self,
         jobs: &ResearchJobs,
         job: ResearchJob,
         project: &ResearchProject<'_>,
+        member: Option<&CredentialRef>,
     ) -> Result<ResearchRun, RunError> {
         assert_eq!(job.status, ResearchStatus::Running);
         assert_eq!(job.project, project.id);
@@ -539,9 +555,14 @@ impl ResearchRunner {
                         .map_or(ResearchStatus::Queued, |job| job.status);
                     return Ok(run(status, None, Some(group)));
                 }
+                if let (Ending::RateLimited, Some(member)) = (&ending, member) {
+                    let (status, _) = jobs.rate_limited(&job, member)?;
+                    return Ok(run(status, None, Some(group)));
+                }
                 let reason = match ending {
                     Ending::TimedOut => "Agent ran out of time",
                     Ending::Overflowed => "Agent output exceeded the limit",
+                    Ending::RateLimited => "The account hit its rate limit",
                     _ => "Agent stopped with an error",
                 };
                 let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
@@ -772,7 +793,9 @@ impl ResearchRunner {
         let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
-        for (stream, name) in [
+        let limited = Arc::new(AtomicBool::new(false));
+        let mut drains = Vec::new();
+        for (stream, name, watch) in [
             (
                 running
                     .child
@@ -780,6 +803,7 @@ impl ResearchRunner {
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 stdout_log,
+                None,
             ),
             (
                 running
@@ -788,19 +812,34 @@ impl ResearchRunner {
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 "stderr.log",
+                (harness == ResearchHarness::Codex).then(|| limited.clone()),
             ),
         ] {
             let Some(stream) = stream else { continue };
             let log = create_private(&agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
-            std::thread::spawn(move || drain(stream, &counted, log, log_max));
+            drains.push(std::thread::spawn(move || {
+                drain_watching(stream, &counted, log, log_max, watch.as_deref())
+            }));
         }
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &mut running, &counted)?;
+        let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
         drop(running);
+        let draining = Instant::now();
+        while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
+            std::thread::sleep(POLL);
+        }
+        #[cfg(unix)]
+        let ending = if matches!(ending, Ending::Exited(false))
+            && refused_for_limit(harness, &agent, &output, self.limits.output_bytes_max)
+        {
+            Ending::RateLimited
+        } else {
+            ending
+        };
         drop(installed);
         drop(credential);
         drop(lease);
@@ -869,16 +908,24 @@ impl ResearchRunner {
         Ok((lease, hold))
     }
 
+    /// Follows a direct agent process until it exits, its stderr shows it waiting out a
+    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes, then
+    /// stops its process group. Takes the job store, the job, the process, its output count
+    /// and the limit flag its stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
+        limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
+            if limited.load(Ordering::SeqCst) {
+                break Ending::RateLimited;
+            }
             if let Some(status) = agent.child.try_wait()? {
                 break Ending::Exited(status.success());
             }
@@ -907,9 +954,9 @@ impl ResearchRunner {
     }
 
     /// Types the research prompt into the agent's pane and follows its session record until
-    /// the turn ends, the job is cancelled, the runner stops or a limit passes. The agent's
-    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
-    /// Returns how the run ended.
+    /// the turn ends or reports a rate or usage limit, the job is cancelled, the runner
+    /// stops or a limit passes. The agent's last reply becomes the report at `output`, as
+    /// `codex exec -o` and `claude -p` give. Returns how the run ended.
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
@@ -948,6 +995,9 @@ impl ResearchRunner {
                     last = text;
                 }
                 Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
+                Ok(Some(LaunchEvent::TurnError { rate_limited: true })) => {
+                    break Ending::RateLimited;
+                }
                 Ok(Some(LaunchEvent::Exited { .. })) => break Ending::Exited(false),
                 Ok(_) => {}
                 Err(problem) => {
@@ -1359,7 +1409,8 @@ fn codex_arguments(
         } else {
             "read-only"
         })
-        .env("CODEX_HOME", home);
+        .env("CODEX_HOME", home)
+        .env("RUST_LOG", CODEX_LOG);
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;
@@ -2000,14 +2051,23 @@ fn await_group_exit(group: u32) {
 
 /// Copies an agent stream into its log, counting every byte read and logging
 /// at most `log_max` bytes, until the stream ends.
-pub(crate) fn drain(
+pub(crate) fn drain(stream: Box<dyn Read + Send>, counted: &AtomicU64, log: File, log_max: u64) {
+    drain_watching(stream, counted, log, log_max, None);
+}
+
+/// Drains like [`drain`]. With `limited`, it sets the flag once a line shows
+/// Codex waiting to retry a request refused for a rate or usage limit; a line
+/// is checked on at most its first 16 KiB.
+fn drain_watching(
     mut stream: Box<dyn Read + Send>,
     counted: &AtomicU64,
     mut log: File,
     log_max: u64,
+    limited: Option<&AtomicBool>,
 ) {
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
+    let mut line = Vec::new();
     while let Ok(read) = stream.read(&mut buffer) {
         if read == 0 {
             break;
@@ -2018,6 +2078,46 @@ pub(crate) fn drain(
             logged += room as u64;
         }
         assert!(logged <= log_max);
+        let Some(limited) = limited else { continue };
+        for &byte in &buffer[..read] {
+            if byte == b'\n' {
+                if codex_retry_limited(&String::from_utf8_lossy(&line)) {
+                    limited.store(true, Ordering::SeqCst);
+                }
+                line.clear();
+            } else if line.len() < LOG_LINE_BYTES_MAX {
+                line.push(byte);
+            }
+        }
+        assert!(line.len() <= LOG_LINE_BYTES_MAX);
+    }
+}
+
+/// Tells whether one Codex log line is Codex waiting to retry a request the provider
+/// refused for a rate or usage limit. Takes the line. Returns true only for the retry
+/// target with a limit cause, never for ids or other targets holding the same digits.
+fn codex_retry_limited(line: &str) -> bool {
+    line.contains("codex_core::responses_retry")
+        && line
+            .split_once("sampling_error=")
+            .is_some_and(|(_, cause)| rate_limited(cause))
+}
+
+/// Tells whether a research agent that exited failing was refused for a rate or usage
+/// limit: Codex's own failure message in its stdout log, or the first line of Claude
+/// Code's printed reply. Takes the harness, the agent state folder, the report path and
+/// the log bound; both are read bounded and never through a link.
+#[cfg(unix)]
+fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max: u64) -> bool {
+    match harness {
+        ResearchHarness::Codex => {
+            rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
+        }
+        ResearchHarness::ClaudeCode => read_bounded(output, max).is_ok_and(|text| {
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(rate_limited)
+        }),
     }
 }
 
@@ -2263,7 +2363,9 @@ fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
     Ok(target)
 }
 
-fn utc_date(time: SystemTime) -> String {
+/// Formats an instant as a UTC minute for plain status text. Takes the instant.
+/// Returns `YYYY-MM-DD HH:MM UTC`; an instant before the epoch reads as the epoch.
+pub(crate) fn utc_date(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2741,6 +2843,26 @@ mod tests {
         assert_eq!(utc_date(instant), "2026-10-23 04:32 UTC");
         let leap = UNIX_EPOCH + Duration::from_secs(951_782_400);
         assert_eq!(utc_date(leap), "2000-02-29 00:00 UTC");
+    }
+
+    /// The retry line is Codex 0.164's own stderr record of a provider 429 in a real
+    /// research run; ids that happen to hold 429 and other log targets never count.
+    #[test]
+    fn a_codex_retry_after_a_limit_counts_as_a_rate_limit_and_its_ids_never_do() {
+        const RETRY: &str = r#"2026-10-26T09:47:31.137351Z  WARN session_loop{thread_id=01a1779b-98a8-72d0-97aa-dd1317b20845}:submission_dispatch{otel.name="op.dispatch.turn_input" submission.id="01a1779b-9a6e-73e0-b67d-9282fb1fdcd6" codex.op="turn_input"}:turn{otel.name="session_task.turn" thread.id=01a1779b-98a8-72d0-97aa-dd1317b20845 turn.id=01a1779b-9a6e-73e0-b67d-9282fb1fdcd6 model=gpt-6.1-sol codex.turn.reasoning_effort=low}: codex_core::responses_retry: stream disconnected - retrying sampling request (1/5 in 102.999894334s)... turn_id=01a1779b-9a6e-73e0-b67d-9282fb1fdcd6 retries=1 max_retries=5 sampling_error=exceeded retry limit, last status: 429 Too Many Requests"#;
+        assert!(codex_retry_limited(RETRY));
+        let other_cause = RETRY
+            .replace(
+                "last status: 429 Too Many Requests",
+                "stream closed before response.completed",
+            )
+            .replace("9282fb1fdcd6", "9282fb1f4296");
+        assert!(other_cause.contains("429"));
+        assert!(!codex_retry_limited(&other_cause));
+        assert!(!codex_retry_limited(
+            &RETRY.replace("codex_core::responses_retry", "codex_core::client")
+        ));
+        assert!(!codex_retry_limited(""));
     }
 
     #[test]

@@ -57,6 +57,10 @@ fn a_real_claude_research_run_on_a_fast_model_is_signed_in_inside_the_research_s
     println!("real claude research run: ending={ending:?} seconds={seconds} report={head:?}");
     assert!(matches!(ending, Ending::Exited(true)), "{errors}");
     assert!(!report.trim().is_empty());
+    assert!(
+        !report.contains("Not logged in") && !report.contains("/login"),
+        "{report}"
+    );
     assert!(!agent.join("home").join(".credentials.json").exists());
     let rules = fs::read_to_string(state.join("profiles").join(format!(
         "{}.sb",

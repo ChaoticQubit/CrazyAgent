@@ -4,7 +4,7 @@ mod research_support;
 
 use crazyagent::config::{ModelAccess, ModelAuthentication, ModelConnection};
 use crazyagent::protocol::CredentialRef;
-use crazyagent::research::accounts::{AccountPick, pick_account};
+use crazyagent::research::accounts::{AccountPick, pick_account, pick_unpaused};
 use crazyagent::research::runner::ResearchAccount;
 use sha2::Digest;
 use std::os::unix::fs::PermissionsExt;
@@ -216,4 +216,153 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
         pick_account(&access, "project-anthropic", "rcli", signed_in),
         AccountPick::NoUsableAccount
     );
+}
+
+#[test]
+fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_first_pause_ends() {
+    let access = access();
+    let local = AccountPick::Account {
+        connection: CredentialRef::new("local-connection").unwrap(),
+        account: Box::new(ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        }),
+    };
+    let codex_paused = |id: &CredentialRef| (id.as_str() == "codex-connection").then_some(2_000);
+    assert_eq!(
+        pick_unpaused(&access, "project-a", "codex", signed_in, codex_paused),
+        local
+    );
+    let both_paused = |id: &CredentialRef| match id.as_str() {
+        "codex-connection" => Some(2_000),
+        "local-connection" => Some(1_000),
+        _ => None,
+    };
+    let pick = pick_unpaused(&access, "project-a", "codex", signed_in, both_paused);
+    assert_eq!(pick, AccountPick::Paused { until_ms: 1_000 });
+    assert_eq!(
+        pick.label(),
+        "Every account in this project's pool that can run this research hit its rate limit"
+    );
+    assert_eq!(
+        pick_unpaused(&access, "project-a", "codex", signed_out, both_paused),
+        AccountPick::Paused { until_ms: 1_000 }
+    );
+    let claude_paused = |id: &CredentialRef| (id.as_str() == "claude-connection").then_some(5_000);
+    assert_eq!(
+        pick_unpaused(
+            &access,
+            "project-claude",
+            "claude",
+            signed_in,
+            claude_paused
+        ),
+        AccountPick::Paused { until_ms: 5_000 }
+    );
+    assert_eq!(
+        pick_unpaused(
+            &access,
+            "project-claude",
+            "claude",
+            signed_out,
+            claude_paused
+        ),
+        AccountPick::NoUsableAccount
+    );
+    assert_eq!(
+        pick_unpaused(&access, "project-claude", "codex", signed_in, claude_paused),
+        AccountPick::NoUsableAccount
+    );
+    assert_eq!(
+        pick_unpaused(
+            &access,
+            "project-unassigned",
+            "codex",
+            signed_in,
+            both_paused
+        ),
+        AccountPick::NeedsPool
+    );
+    assert_eq!(
+        pick_unpaused(&access, "project-a", "codex", signed_in, |_| None),
+        pick_account(&access, "project-a", "codex", signed_in)
+    );
+}
+
+#[test]
+fn a_rate_limited_research_run_pauses_its_account_in_the_shared_pause_without_spending_an_attempt()
+{
+    use crazyagent::research::accounts::SettingsResolver;
+    use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let root = runtime.root.clone();
+    let global = root.join("research-global.toml");
+    let project = root.join("research-project.toml");
+    std::fs::write(&project, "").unwrap();
+    std::fs::write(
+        &global,
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"project-a\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n",
+    )
+    .unwrap();
+    let resolver =
+        SettingsResolver::new(&global, &project, &root.join("projects"), &runtime.database)
+            .unwrap();
+    assert!(matches!(
+        resolver.resolve("project-a", "codex").unwrap().1,
+        AccountPick::Account { .. }
+    ));
+    let jobs = ResearchJobs::open(&runtime.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", false)
+        .unwrap();
+    let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
+    assert_eq!(held.attempts, 1);
+    let local = CredentialRef::new("local-connection").unwrap();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
+    let before = now();
+    let (status, until) = jobs.rate_limited(&held, &local).unwrap();
+    assert_eq!(status, ResearchStatus::Queued);
+    assert!(
+        until >= before + 600_000 && until <= now() + 600_000,
+        "{until}"
+    );
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Queued);
+    assert_eq!(job.attempts, 0);
+    assert_eq!(job.claimer, None);
+    assert_eq!(
+        resolver.resolve("project-a", "codex").unwrap().1,
+        AccountPick::Paused { until_ms: until }
+    );
+    let longer = until + 3_600_000;
+    rusqlite::Connection::open(&runtime.database)
+        .unwrap()
+        .execute(
+            "UPDATE team_paused_accounts SET until_ms=?1 WHERE connection='local-connection'",
+            [longer],
+        )
+        .unwrap();
+    let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
+    assert_eq!(jobs.rate_limited(&held, &local).unwrap().1, longer);
+    assert_eq!(
+        resolver.resolve("project-a", "codex").unwrap().1,
+        AccountPick::Paused { until_ms: longer }
+    );
+    rusqlite::Connection::open(&runtime.database)
+        .unwrap()
+        .execute(
+            "UPDATE team_paused_accounts SET until_ms=?1 WHERE connection='local-connection'",
+            [now() - 1],
+        )
+        .unwrap();
+    assert!(matches!(
+        resolver.resolve("project-a", "codex").unwrap().1,
+        AccountPick::Account { .. }
+    ));
 }
