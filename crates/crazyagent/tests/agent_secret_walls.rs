@@ -647,10 +647,9 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
     let inner = sandbox.command(&profile, Path::new("/bin/sh"));
     let mut command = Command::new("/usr/bin/script");
     command
-        .args(["-q", "/dev/null"])
-        .arg(inner.get_program())
-        .args(inner.get_args())
-        .arg("-c")
+        .args(["-q", "/dev/null", "/usr/bin/sandbox-exec", "-f"])
+        .arg(&profile)
+        .args(["/bin/sh", "-c"])
         .arg(&probe)
         .env_clear()
         .envs(
@@ -678,6 +677,64 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
         "listing=ok",
         "random=ok",
         "stdout=ok",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+}
+
+const ENGINE_TERMINAL: &str = "CRAZYAGENT_TEST_ENGINE_TERMINAL";
+
+fn engine_with_a_terminal() {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .expect("the engine role runs with a controlling terminal");
+    println!("engine=open");
+    let case = case();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("session.sb");
+    let output = shell(
+        &sandbox,
+        &profile,
+        "msg=$( ( exec 3</dev/tty ) 2>&1 ) && msg=opened; echo \"agent=$msg\"\n\
+         /usr/bin/perl -e 'print getpgrp(0) == $ARGV[0] ? \"group=own\\n\" : \"group=other\\n\"' \"$$\"\n",
+    );
+    print!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_headless_agent_cannot_open_the_engine_terminal() {
+    if std::env::var_os(ENGINE_TERMINAL).is_some() {
+        engine_with_a_terminal();
+        return;
+    }
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_headless_agent_cannot_open_the_engine_terminal",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ENGINE_TERMINAL, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    for expected in [
+        "engine=open",
+        "agent=/bin/sh: /dev/tty: Device not configured",
+        "group=own",
+        "test result: ok. 1 passed",
     ] {
         assert!(text.contains(expected), "missing {expected} in {text}");
     }

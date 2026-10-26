@@ -280,11 +280,25 @@ pub fn agent_env<'a>(
     Ok(env)
 }
 
+/// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
+/// harness program and its arguments. It joins the engine's process group, starts a new
+/// session and replaces itself with the harness, so the agent holds no controlling terminal
+/// and its pid stays its process group. When the session cannot start it exits unstarted.
+#[cfg(unix)]
+pub const SESSION_SHIM: [&str; 5] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-e",
+    "setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die \"crazyagent: no new session: $!\\n\"; exec {$ARGV[0]} @ARGV or die \"crazyagent: cannot start $ARGV[0]: $!\\n\"",
+    "--",
+];
+
 /// Builds the one command every sandboxed headless agent process starts from: `-f
-/// <profile> <program>` under `sandbox-exec`, a cleared environment holding exactly
-/// [`agent_env`], and its own process group. Inputs: the installed profile, the absolute
-/// program, the base variables and the harness's variables (None removes one).
-/// Output: the command, or `Invalid` when any variable fails [`agent_variable_allowed`].
+/// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared
+/// environment holding exactly [`agent_env`], and its own process group. Inputs: the
+/// installed profile, the absolute program, the base variables and the harness's variables
+/// (None removes one). Output: the command, or `Invalid` when a variable fails
+/// [`agent_variable_allowed`].
 #[cfg(unix)]
 pub fn agent_command<'a>(
     profile: &Path,
@@ -297,11 +311,16 @@ pub fn agent_command<'a>(
     command
         .arg("-f")
         .arg(profile)
+        .args(SESSION_SHIM)
         .arg(program)
         .env_clear()
         .envs(env.iter().map(|(name, value)| (name, value)))
         .process_group(0);
     assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(
+        command.get_args().nth(2 + SESSION_SHIM.len()),
+        Some(program.as_os_str())
+    );
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
 }

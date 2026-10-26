@@ -605,3 +605,80 @@ fn a_confined_bubblewrap_agent_writes_only_its_own_worktree() {
     .unwrap();
     assert_confined(&sandbox, &checkouts);
 }
+
+const ENGINE_TERMINAL: &str = "CRAZYAGENT_TEST_ENGINE_TERMINAL";
+
+fn engine_with_a_terminal() {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .expect("the engine role runs with a controlling terminal");
+    println!("engine=open");
+    let case = case();
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(matches!(landlock.backend(), LinuxBackend::Landlock { .. }));
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    for (name, sandbox) in [("landlock", &landlock), ("bubblewrap", &bubblewrap)] {
+        let output = run(
+            sandbox,
+            &case,
+            "msg=$( ( exec 3</dev/tty ) 2>&1 ) && msg=opened; echo \"agent=$msg\"",
+        );
+        print!(
+            "{name} {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_headless_linux_agent_cannot_open_the_engine_terminal() {
+    if std::env::var_os(ENGINE_TERMINAL).is_some() {
+        engine_with_a_terminal();
+        return;
+    }
+    let inner = format!(
+        "{} --exact a_headless_linux_agent_cannot_open_the_engine_terminal --nocapture --test-threads=1",
+        quoted(&std::env::current_exe().unwrap())
+    );
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/script")
+            .args(["-q", "-e", "-c"])
+            .arg(&inner)
+            .arg("/dev/null")
+            .env(ENGINE_TERMINAL, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    for expected in [
+        "engine=open",
+        "landlock agent=",
+        "bubblewrap agent=",
+        "test result: ok. 1 passed",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+    assert!(!text.contains("agent=opened"), "{text}");
+    assert_eq!(
+        text.matches("No such device or address").count(),
+        2,
+        "{text}"
+    );
+}

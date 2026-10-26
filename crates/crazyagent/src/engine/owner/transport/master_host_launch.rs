@@ -804,14 +804,10 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(
-            args[..3],
-            [
-                "-f",
-                sandbox.profile().to_str().unwrap(),
-                executable.to_str().unwrap()
-            ]
-        );
+        let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
+        start.extend(crate::sandbox::SESSION_SHIM);
+        start.push(executable.to_str().unwrap());
+        assert_eq!(args[..start.len()], start);
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
@@ -847,14 +843,10 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(
-            claude_args[..3],
-            [
-                "-f",
-                sandbox.profile().to_str().unwrap(),
-                executable.to_str().unwrap()
-            ]
-        );
+        let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
+        start.extend(crate::sandbox::SESSION_SHIM);
+        start.push(executable.to_str().unwrap());
+        assert_eq!(claude_args[..start.len()], start);
         assert!(claude_args.windows(2).any(|pair| pair == ["--tools", ""]));
         assert_eq!(claude.get_current_dir(), Some(worktree.as_path()));
         let claude_environment = claude
