@@ -1097,7 +1097,7 @@ async fn connection_and_action_conflicts_precede_the_shared_alias_lock() {
 }
 
 #[tokio::test]
-async fn full_capacity_preserves_known_ids_before_busy_lock_and_new_profile_effects() {
+async fn full_capacity_keeps_known_ids_and_the_busy_lock_while_a_new_profile_prunes_history() {
     run_case(CATALOG, 90, |case| async move {
         let a = case.basis("connection-a").await;
         let z = case.basis("connection-z").await;
@@ -1135,11 +1135,17 @@ async fn full_capacity_preserves_known_ids_before_busy_lock_and_new_profile_effe
             .await;
         LockProcess::spawn(&case, "probe", b'B').finish(false);
         holder.finish(true);
-        for result in [busy_start, busy_out, new_start, new_out] {
-            assert_error(result, "native_profile_in_use");
-        }
-        assert_eq!(case.stored(), before);
-        assert!(!case.profile("profile-z").exists());
+        assert_error(busy_start, "native_profile_in_use");
+        assert_error(busy_out, "native_profile_in_use");
+        assert_unavailable(&new_start.unwrap(), &z, "capacity-new-start");
+        assert_unavailable(&new_out.unwrap(), &z, "capacity-new-out");
+        let ids: Vec<String> = case.stored().into_iter().map(|row| row.0).collect();
+        assert_eq!(ids.len(), 1024);
+        assert!(
+            !ids.iter()
+                .any(|id| id == "capacity-0" || id == "capacity-1")
+        );
+        assert!(ids.iter().any(|id| id == "capacity-1023"));
     })
     .await;
 }

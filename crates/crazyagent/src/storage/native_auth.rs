@@ -585,8 +585,8 @@ pub(crate) fn begin_native_auth(
     }
     validate_method(connection, &command)?;
     let key = profile_key(connection)?;
-    ensure_idle(&tx, &key)?;
     ensure_capacity(&tx, false)?;
+    ensure_idle(&tx, &key)?;
     tx.commit().map_err(error)?;
     let prepared = prepare_requested_profile(db, config, sources, custody, &host, &command)?;
     let tx = db
@@ -596,8 +596,8 @@ pub(crate) fn begin_native_auth(
     if connection != &prepared.binding().connection {
         return Err(error("native_profile_source_conflict"));
     }
-    ensure_idle(&tx, &key)?;
     ensure_capacity(&tx, true)?;
+    ensure_idle(&tx, &key)?;
     let generation = next_generation(&tx, &key)?;
     let purpose = if matches!(command, Command::Logout(_)) {
         NativeProfileUsePurpose::Logout

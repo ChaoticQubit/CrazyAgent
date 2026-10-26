@@ -548,6 +548,67 @@ fn a_busy_host_at_capacity_refuses_before_preparation_and_preserves_known_replay
 }
 
 #[test]
+fn capacity_prunes_only_an_older_finished_operation_of_the_same_profile() {
+    let mut case = HostCase::new();
+    let (_, work) = fresh_work(case.begin(case.start("kept-0", "connection-a")).unwrap());
+    case.finish(work).unwrap();
+    let (request, fact): (Vec<u8>, Vec<u8>) = case
+        .observer()
+        .query_row(
+            "SELECT request,fact FROM native_auth_operations WHERE id='kept-0'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    for index in 1..1024 {
+        case.db
+            .execute(
+                "INSERT INTO native_auth_operations(id,profile_key,generation,request,fact,phase)
+                 VALUES(?1,?2,1,?3,?4,'unavailable')",
+                rusqlite::params![
+                    format!("filler-{index}"),
+                    format!("{index:064x}"),
+                    request,
+                    fact
+                ],
+            )
+            .unwrap();
+    }
+    let before = case.snapshot();
+    assert_eq!(before.0.len(), 1024);
+    assert_code(
+        case.begin(case.start("over-capacity", "connection-z")),
+        "native_auth_operation_capacity",
+    );
+    assert_eq!(
+        case.snapshot(),
+        before,
+        "the newest operation of every profile stays"
+    );
+    assert!(!case.profile("profile-z").exists());
+
+    case.db
+        .execute(
+            "UPDATE native_auth_operations SET profile_key=?1,generation=2 WHERE id='filler-2'",
+            [format!("{:064x}", 1)],
+        )
+        .unwrap();
+    let (started, _work) = fresh_work(
+        case.begin(case.start("over-capacity", "connection-z"))
+            .unwrap(),
+    );
+    assert_eq!(started.operation_id.as_str(), "over-capacity");
+    let ids: Vec<String> = case.snapshot().0.into_iter().map(|row| row.id).collect();
+    assert_eq!(ids.len(), 1024);
+    assert!(
+        !ids.iter().any(|id| id == "filler-1"),
+        "the older operation of its profile went"
+    );
+    assert!(ids.iter().any(|id| id == "filler-2"));
+    assert!(ids.iter().any(|id| id == "kept-0"));
+}
+
+#[test]
 fn generation_is_shared_by_intent_fence_work_and_actual_guard() {
     let mut case = HostCase::new();
     let (first, work) = fresh_work(
