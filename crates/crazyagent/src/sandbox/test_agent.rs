@@ -20,12 +20,22 @@ pub(crate) struct TestAgent {
 impl TestAgent {
     /// Makes the folders 0700, the engine secret file and the installed profile.
     pub(crate) fn new() -> Self {
+        Self::confined(None)
+    }
+
+    /// Like `new`, with an existing folder as the agent's writable home, the way the team
+    /// runtime gives an agent a managed profile's home. Input: the 0700 home.
+    pub(crate) fn with_home(home: &Path) -> Self {
+        Self::confined(Some(home.canonicalize().unwrap()))
+    }
+
+    fn confined(given: Option<PathBuf>) -> Self {
         let temp = tempfile::tempdir_in("/tmp").unwrap();
         let root = temp.path().canonicalize().unwrap();
         let project = root.join("project");
         let profiles = root.join("profiles");
         let runtime = root.join("runtime");
-        let home = root.join("agents").join("agent-1").join("home");
+        let home = given.unwrap_or_else(|| root.join("agents").join("agent-1").join("home"));
         let tmp = root.join("agents").join("agent-1").join("tmp");
         let peer = root.join("agents").join("agent-2").join("home");
         for folder in [&project, &profiles, &runtime, &home, &tmp, &peer] {
