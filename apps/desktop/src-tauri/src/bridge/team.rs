@@ -1,14 +1,17 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::{TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
-    failure(match code {
-        "project_setup_missing" => "project_setup_missing",
-        "project_missing" => "project_missing",
-        _ => "owner_read_failed",
-    })
+    caused(
+        match code {
+            "project_setup_missing" => "project_setup_missing",
+            "project_missing" => "project_missing",
+            _ => "owner_read_failed",
+        },
+        code,
+    )
 }
 
 fn project(id: &str) -> Result<ProjectId, BridgeError> {
@@ -145,7 +148,7 @@ impl NativeBridge {
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::Team { action }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 }

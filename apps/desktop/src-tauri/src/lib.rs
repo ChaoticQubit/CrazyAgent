@@ -52,19 +52,23 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     if window.label() != "main" {
         return Err(BridgeError {
             code: "window_denied",
+            cause: None,
         });
     }
     Ok(())
 }
 
 fn lock(state: &NativeState) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
-    state.0.try_lock().map_err(|_| BridgeError { code: "busy" })
+    state.0.try_lock().map_err(|_| BridgeError {
+        code: "busy",
+        cause: None,
+    })
 }
 
 const SOCKET_OVERRIDE: &str = "CRAZYAGENT_DESKTOP_SOCKET";
 
 fn engine_failure(code: &'static str) -> BridgeError {
-    BridgeError { code }
+    BridgeError { code, cause: None }
 }
 
 /// The `crazyagent` executable bundled beside this app's own executable as a sidecar.
@@ -1209,10 +1213,14 @@ async fn desktop_configure_account_profile(
         .transpose()
         .map_err(|_| BridgeError {
             code: "account_secret_invalid",
+            cause: None,
         })?;
     let mut bridge = Arc::clone(&state.0)
         .try_lock_owned()
-        .map_err(|_| BridgeError { code: "busy" })?;
+        .map_err(|_| BridgeError {
+            code: "busy",
+            cause: None,
+        })?;
     tauri::async_runtime::spawn(async move {
         bridge
             .configure_account_profile(&ticket, secret, generation)
@@ -1221,6 +1229,7 @@ async fn desktop_configure_account_profile(
     .await
     .map_err(|_| BridgeError {
         code: "account_profile_outcome_unknown_read_same_request",
+        cause: None,
     })?
 }
 
@@ -1673,13 +1682,17 @@ async fn desktop_submit_claude_auth_code(
     let secret = NativeBridge::claude_auth_secret(code)?;
     let mut bridge = Arc::clone(&state.0)
         .try_lock_owned()
-        .map_err(|_| BridgeError { code: "busy" })?;
+        .map_err(|_| BridgeError {
+            code: "busy",
+            cause: None,
+        })?;
     tauri::async_runtime::spawn(
         async move { bridge.submit_claude_auth_code(&ticket, secret).await },
     )
     .await
     .map_err(|_| BridgeError {
         code: "native_auth_claude_input_outcome_unknown",
+        cause: None,
     })?
 }
 

@@ -211,13 +211,16 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         let state = self.controller()?.read(query).await.map_err(|error| {
-            failure(match error.0.as_str() {
-                "settings_source_conflict" => "settings_source_conflict",
-                "settings_publication_pending" => "settings_publication_pending",
-                "model_access_record_not_found" => "model_access_record_not_found",
-                "owner_revoked" => "owner_revoked",
-                _ => "owner_read_failed",
-            })
+            caused(
+                match error.0.as_str() {
+                    "settings_source_conflict" => "settings_source_conflict",
+                    "settings_publication_pending" => "settings_publication_pending",
+                    "model_access_record_not_found" => "model_access_record_not_found",
+                    "owner_revoked" => "owner_revoked",
+                    _ => "owner_read_failed",
+                },
+                &error.0,
+            )
         })?;
         assert!(self.generation > 0);
         assert!(self.controller()?.view().is_some());
@@ -305,7 +308,7 @@ impl NativeBridge {
         };
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.model_access = None;
         self.model_access_next = None;
         assert!(self.status().pending);

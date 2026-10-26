@@ -42,6 +42,8 @@ const PROJECTION_BYTES_MAX: usize = 65_536;
 #[derive(Debug, Serialize)]
 pub struct BridgeError {
     pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 impl std::fmt::Display for BridgeError {
@@ -58,7 +60,19 @@ pub type Unlocked<T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, BridgeError>> + Send>>;
 
 fn failure(code: &'static str) -> BridgeError {
-    BridgeError { code }
+    BridgeError { code, cause: None }
+}
+
+/// A bridge failure that keeps the engine code behind it, so the window names it after its
+/// own sentence instead of hiding it. Inputs: the bridge code and the raw engine code.
+/// Output: the error; the cause is the engine code made plain by `plain_code`, absent when
+/// it equals the bridge code.
+fn caused(code: &'static str, engine: &str) -> BridgeError {
+    let cause = crazyagent::protocol::plain_code(engine);
+    BridgeError {
+        code,
+        cause: (cause != code).then(|| cause.to_owned()),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -207,7 +221,7 @@ pub struct IntentReceipt {
     pub intent: PendingIntent,
     pub outcome: ActionOutcome,
     pub pending: bool,
-    pub rejection: Option<&'static str>,
+    pub rejection: Option<String>,
 }
 
 struct ProjectSelection {
@@ -263,7 +277,7 @@ impl NativeBridge {
             .as_ref()
             .ok_or_else(|| failure("not_configured"))?;
         let client = Client::new(socket.clone(), Duration::from_secs(5))
-            .map_err(|_| failure("owner_unavailable"))?;
+            .map_err(|error| caused("owner_unavailable", &error.0))?;
         let ordinary = if let Some(controller) = self.controller.as_mut() {
             controller
                 .reattach_configured(client)
@@ -273,7 +287,7 @@ impl NativeBridge {
             let (ordinary, controller) =
                 OwnerController::attach_configured(client, OwnerClientKind::Desktop)
                     .await
-                    .map_err(|_| failure("owner_unavailable"))?;
+                    .map_err(|error| caused("owner_unavailable", &error.0))?;
             self.controller = Some(controller);
             ordinary
         };
@@ -312,7 +326,7 @@ impl NativeBridge {
             .controller()?
             .read_page(OwnerView::Baselines, cursor, Some(PAGE_SIZE))
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::Page { items, next } = state.data else {
             return Err(failure("resync_required"));
         };
@@ -347,7 +361,7 @@ impl NativeBridge {
                 baseline_id: baseline_id.clone(),
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::Baseline {
             draft,
             approved,
@@ -404,7 +418,7 @@ impl NativeBridge {
         let generation = selected.generation;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.selected = None;
         self.next = None;
         assert!(self.status().pending);
@@ -651,7 +665,7 @@ impl NativeBridge {
             .controller()?
             .read_page(OwnerView::Projects, cursor, Some(PAGE_SIZE))
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::Page { items, next } = state.data else {
             return Err(failure("resync_required"));
         };
@@ -725,7 +739,7 @@ impl NativeBridge {
                 OwnerMutation::CreateProject { project_id, spec },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
     }
@@ -744,7 +758,7 @@ impl NativeBridge {
                 project_id: project_id.clone(),
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::CurrentBrief {
             project_id: actual,
             brief,
@@ -802,7 +816,7 @@ impl NativeBridge {
                 limit: 1,
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::ConversationHistory { page } = state.data else {
             return Err(failure("resync_required"));
         };
@@ -879,7 +893,7 @@ impl NativeBridge {
         };
         self.controller()?
             .begin_mutation(OwnerMutation::Conversation { mutation }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.selected = None;
         assert!(self.status().pending);
         Ok(())
@@ -918,119 +932,11 @@ fn conversation_row(entry: ConversationEntry) -> ConversationRow {
     }
 }
 
-/// Team refusal codes the engine returns to the owner, passed to the window as they are
-/// so it can show the plain sentence for each.
-const TEAM_CODES: [&str; 16] = [
-    "team_task_missing",
-    "team_task_invalid",
-    "team_message_invalid",
-    "team_engine_not_ready",
-    "team_account_left_pool",
-    "team_harness_cannot_run",
-    "team_has_no_sub_agents",
-    "team_harness_not_in_plan",
-    "team_queue_full",
-    "team_task_limit",
-    "team_conversation_full",
-    "team_plan_step_missing",
-    "team_plan_step_handed",
-    "team_state_unavailable",
-    "team_state_not_canonical",
-    "team_state_not_private",
-];
-
-/// Master conversation refusal codes the engine returns for an owner start, send, stop or
-/// end, passed to the window as they are so it can say what happened and recover.
-const MASTER_CODES: [&str; 12] = [
-    "master_source_conflict",
-    "master_session_active",
-    "master_session_capacity",
-    "master_session_missing",
-    "master_session_not_active",
-    "master_turn_outstanding",
-    "master_turn_capacity",
-    "master_input_too_large",
-    "master_scope_or_budget_denied",
-    "master_pool_missing",
-    "master_backend_account_denied",
-    "rcli_profile_identity_changed",
-];
-
-fn rejection_code(code: &str) -> &'static str {
-    match code {
-        "settings_source_conflict" => "settings_source_conflict",
-        "settings_source_replaced" => "settings_source_replaced",
-        "settings_publication_pending" => "settings_publication_pending",
-        "account_exists" => "account_exists",
-        "connection_exists" => "connection_exists",
-        "pool_exists" => "pool_exists",
-        "account_not_found" => "account_not_found",
-        "connection_not_found" => "connection_not_found",
-        "pool_not_found" => "pool_not_found",
-        "settings_read_only" => "settings_read_only",
-        "settings_source_changed" => "settings_source_changed",
-        "settings_project_changed" => "settings_project_changed",
-        "settings_pending" => "settings_pending",
-        "stale_config" => "stale_config",
-        "invalid_model_access" => "invalid_model_access",
-        "model_access_duplicate" => "model_access_duplicate",
-        "model_access_missing" => "model_access_missing",
-        "model_access_referenced" => "model_access_referenced",
-        "model_access_edit_bounds" => "model_access_edit_bounds",
-        "pool_member_limit" => "pool_member_limit",
-        "pool_in_use" => "pool_in_use",
-        "pool_name_bounds" => "pool_name_bounds",
-        "owner_profile_name" => "owner_profile_name",
-        "owner_profile_role" => "owner_profile_role",
-        "owner_profile_bio" => "owner_profile_bio",
-        "owner_profile_stack" => "owner_profile_stack",
-        "owner_profile_bounds" => "owner_profile_bounds",
-        "stale_brief_version" => "stale_brief_version",
-        "conversation_capacity" => "conversation_capacity",
-        "project_missing" => "project_missing",
-        "stale_revision" => "stale_revision",
-        "owner_revoked" => "owner_revoked",
-        "project_exists" => "project_exists",
-        "project_folder_exists" => "project_folder_exists",
-        "project_folder_unwritable" => "project_folder_unwritable",
-        "pool_missing" => "pool_missing",
-        "document_not_found" => "document_not_found",
-        "document_not_a_regular_file" => "document_not_a_regular_file",
-        "document_type_not_allowed" => "document_type_not_allowed",
-        "document_too_large" => "document_too_large",
-        "document_name_duplicate" => "document_name_duplicate",
-        "document_name_invalid" => "document_name_invalid",
-        "document_unreadable" => "document_unreadable",
-        "document_changed_while_copying" => "document_changed_while_copying",
-        "documents_too_many" => "documents_too_many",
-        "project_documents_too_large" => "project_documents_too_large",
-        "project_setup_missing" => "project_setup_missing",
-        "research_report_missing" => "research_report_missing",
-        "research_section_missing" => "research_section_missing",
-        "memory_text_too_long" => "memory_text_too_long",
-        "memory_text_hidden" => "memory_text_hidden",
-        "invalid_knowledge_text" => "invalid_knowledge_text",
-        "memory_entry_exists" => "memory_entry_exists",
-        "project_folder_missing" => "project_folder_missing",
-        "context_item_protected" => "context_item_protected",
-        "context_item_missing" => "context_item_missing",
-        "context_path_invalid" => "context_path_invalid",
-        "context_item_unreadable" => "context_item_unreadable",
-        "master_turn_not_current" => "master_turn_not_current",
-        "knowledge_entry_missing" => "knowledge_entry_missing",
-        "knowledge_version_conflict" => "knowledge_version_conflict",
-        "invalid_project" => "invalid_project",
-        "project_master_open" => "project_master_open",
-        "research_job_missing" => "research_job_missing",
-        "research_job_finished" => "research_job_finished",
-        "research_job_not_retryable" => "research_job_not_retryable",
-        _ => intake::intake_code(code)
-            .or_else(|| intake::setup_code(code))
-            .or_else(|| crazyagent::memory::library::known_code(code))
-            .or_else(|| TEAM_CODES.iter().copied().find(|known| *known == code))
-            .or_else(|| MASTER_CODES.iter().copied().find(|known| *known == code))
-            .unwrap_or("owner_rejected"),
-    }
+/// The refusal code the window reads for an owner change: the engine's code itself when it is
+/// plain, else a fixed code, so every refusal is named and no error text passes.
+/// Input: the engine's refusal code. Output: the code to show.
+fn rejection_code(code: &str) -> String {
+    crazyagent::protocol::plain_code(code).to_owned()
 }
 
 fn baseline_row(value: OwnerSummary) -> Result<BaselineRow, BridgeError> {
@@ -1145,31 +1051,73 @@ mod tests {
     }
 
     #[test]
-    fn every_code_the_engine_refuses_an_owner_master_action_with_reaches_the_window() {
+    fn every_code_the_engine_refuses_an_owner_change_with_reaches_the_window_by_name() {
+        fn sources(folder: &std::path::Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if name != "tui" && name != "tests" {
+                        sources(&path, found);
+                    }
+                } else if name.ends_with(".rs")
+                    && name != "tests.rs"
+                    && !name.ends_with("_tests.rs")
+                {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let production = text
+                        .find("#[cfg(test)]\nmod tests {")
+                        .or_else(|| text.find("#[cfg(all(test, unix))]\nmod tests {"))
+                        .map_or(text.as_str(), |end| &text[..end]);
+                    found.push(production.split_whitespace().collect::<Vec<_>>().join(" "));
+                }
+            }
+        }
+        fn quoted_after(text: &str, mark: &str, codes: &mut Vec<String>) {
+            for (at, _) in text.match_indices(mark) {
+                let rest = text[at + mark.len()..].trim_start();
+                if let Some(rest) = rest.strip_prefix('"') {
+                    codes.push(rest[..rest.find('"').unwrap()].to_owned());
+                }
+            }
+        }
         let engine =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../crates/crazyagent/src");
-        let storage = std::fs::read_to_string(engine.join("storage/master_session.rs")).unwrap();
+        let mut files = Vec::new();
+        sources(&engine, &mut files);
+        let mut codes: Vec<String> = Vec::new();
+        for text in &files {
+            for mark in ["reject(", "rejected(", "Rejected { code:"] {
+                quoted_after(text, mark, &mut codes);
+            }
+        }
         let selection = std::fs::read_to_string(engine.join("master_session.rs")).unwrap();
         let start = selection.find("pub(crate) fn validate_selection(").unwrap();
         let end = start + selection[start..].find("\n}\n").unwrap();
-        let mut codes: Vec<String> = vec!["rcli_profile_identity_changed".into()];
-        for (text, mark) in [
-            (storage.as_str(), "reject(\""),
-            (storage.as_str(), "rejected(\""),
-            (&selection[start..end], "error(\""),
-        ] {
-            for (at, _) in text.match_indices(mark) {
-                let rest = &text[at + mark.len()..];
-                codes.push(rest[..rest.find('"').unwrap()].to_owned());
-            }
-        }
+        quoted_after(&selection[start..end], "error(", &mut codes);
+        let transport = std::fs::read_to_string(engine.join("engine/owner/transport.rs")).unwrap();
+        let frame = transport.find("fn owner_reply_frame(").unwrap();
+        let known = &transport[frame..frame + transport[frame..].find("let response").unwrap()];
+        codes.extend(known.split('"').skip(1).step_by(2).map(str::to_owned));
         codes.sort();
         codes.dedup();
-        assert!(codes.len() >= 13, "{codes:?}");
+        assert!(codes.len() >= 100, "{codes:?}");
+        for code in [
+            "master_turn_outstanding",
+            "owner_busy",
+            "asset_source_missing",
+            "knowledge_entry_exists",
+        ] {
+            assert!(codes.iter().any(|found| found == code), "{code}");
+        }
         for code in &codes {
             assert_eq!(rejection_code(code), code.as_str(), "{code}");
         }
-        assert_eq!(rejection_code("made_up_code"), "owner_rejected");
+        assert_eq!(rejection_code("made_up_code"), "made_up_code");
+        assert_eq!(
+            rejection_code("open /Users/mira/.codex/auth.json: denied"),
+            crazyagent::protocol::TEXT_WITHHELD
+        );
     }
 
     #[cfg(target_os = "macos")]

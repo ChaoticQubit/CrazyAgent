@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, bounded, failure, native_random_id};
+use super::{BridgeError, NativeBridge, bounded, caused, failure, native_random_id};
 use crazyagent::config::{
     AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
     ProviderQuotaPolicy,
@@ -342,45 +342,53 @@ fn profile_id() -> Result<RequestId, BridgeError> {
 }
 
 fn profile_error(error: EngineError) -> BridgeError {
-    failure(match error.0.as_str() {
-        "controller_disconnected" => "not_connected",
-        "owner_revoked" => "owner_revoked",
-        "account_secret_invalid" => "account_secret_invalid",
-        "account_profile_config_changed" => "account_profile_config_changed",
-        "account_profile_connection_changed" => "account_profile_connection_changed",
-        "account_profile_auth_unsupported" => "account_profile_auth_unsupported",
-        "account_profile_harness_unsupported" => "account_profile_harness_unsupported",
-        "account_profile_endpoint_unsupported" => "invalid_account_endpoint",
-        "native_auth_host_unavailable" => "native_auth_host_unavailable",
-        "native_profile_in_use" => "native_profile_in_use",
-        "account_profile_outcome_unknown" => "account_profile_outcome_unknown_read_same_request",
-        "account_profile_request_conflict" => "account_profile_request_conflict",
-        "account_profile_record_invalid" => "account_profile_record_invalid",
-        "account_profile_secret_required_or_unexpected" => {
-            "account_profile_secret_required_or_unexpected"
-        }
-        "account_profile_operations_full" => "account_profile_operations_full",
-        "account_profile_reservation_missing" => "account_profile_reservation_missing",
-        "account_profile_actor_changed" => "account_profile_actor_changed",
-        "account_profile_config_invalid" => "account_profile_config_invalid",
-        "rcli_private_key_writer_unavailable" => "rcli_private_key_writer_unavailable",
-        "rcli_profile_binding_conflict" => "rcli_profile_binding_conflict",
-        "rcli_profile_config_changed" => "rcli_profile_config_changed",
-        "rcli_profile_config_unsafe" => "rcli_profile_config_unsafe",
-        "rcli_profile_configuration_invalid" => "rcli_profile_configuration_invalid",
-        "rcli_profile_home_unsafe" => "rcli_profile_home_unsafe",
-        "rcli_profile_identity_changed" => "rcli_profile_identity_changed",
-        "rcli_profile_not_configurable" => "rcli_profile_not_configurable",
-        "account_profile_outcome_unknown_read_same_request" => {
-            "account_profile_outcome_unknown_read_same_request"
-        }
-        _ => {
-            let native = super::native_auth::auth_error(error);
-            return if native.code == "native_auth_outcome_unknown_read_same_operation" {
-                failure("account_profile_rejected_read_same_request")
-            } else {
-                native
-            };
-        }
-    })
+    caused(
+        match error.0.as_str() {
+            "controller_disconnected" => "not_connected",
+            "owner_revoked" => "owner_revoked",
+            "account_secret_invalid" => "account_secret_invalid",
+            "account_profile_config_changed" => "account_profile_config_changed",
+            "account_profile_connection_changed" => "account_profile_connection_changed",
+            "account_profile_auth_unsupported" => "account_profile_auth_unsupported",
+            "account_profile_harness_unsupported" => "account_profile_harness_unsupported",
+            "account_profile_endpoint_unsupported" => "invalid_account_endpoint",
+            "native_auth_host_unavailable" => "native_auth_host_unavailable",
+            "native_profile_in_use" => "native_profile_in_use",
+            "account_profile_outcome_unknown" => {
+                "account_profile_outcome_unknown_read_same_request"
+            }
+            "account_profile_request_conflict" => "account_profile_request_conflict",
+            "account_profile_record_invalid" => "account_profile_record_invalid",
+            "account_profile_secret_required_or_unexpected" => {
+                "account_profile_secret_required_or_unexpected"
+            }
+            "account_profile_operations_full" => "account_profile_operations_full",
+            "account_profile_reservation_missing" => "account_profile_reservation_missing",
+            "account_profile_actor_changed" => "account_profile_actor_changed",
+            "account_profile_config_invalid" => "account_profile_config_invalid",
+            "rcli_private_key_writer_unavailable" => "rcli_private_key_writer_unavailable",
+            "rcli_profile_binding_conflict" => "rcli_profile_binding_conflict",
+            "rcli_profile_config_changed" => "rcli_profile_config_changed",
+            "rcli_profile_config_unsafe" => "rcli_profile_config_unsafe",
+            "rcli_profile_configuration_invalid" => "rcli_profile_configuration_invalid",
+            "rcli_profile_home_unsafe" => "rcli_profile_home_unsafe",
+            "rcli_profile_identity_changed" => "rcli_profile_identity_changed",
+            "rcli_profile_not_configurable" => "rcli_profile_not_configurable",
+            "account_profile_outcome_unknown_read_same_request" => {
+                "account_profile_outcome_unknown_read_same_request"
+            }
+            _ => {
+                let native = super::native_auth::auth_error(error);
+                return if native.code == "native_auth_outcome_unknown_read_same_operation" {
+                    BridgeError {
+                        code: "account_profile_rejected_read_same_request",
+                        cause: native.cause,
+                    }
+                } else {
+                    native
+                };
+            }
+        },
+        &error.0,
+    )
 }

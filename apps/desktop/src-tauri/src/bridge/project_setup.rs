@@ -1,4 +1,6 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure, native_project_id};
+use super::{
+    BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure, native_project_id,
+};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
@@ -42,17 +44,20 @@ impl From<KnowledgeEntry> for MemoryItem {
 }
 
 fn read_failure(code: &str) -> BridgeError {
-    failure(match code {
-        "pool_missing" => "pool_missing",
-        "research_duplicate" => "research_duplicate",
-        "project_setup_missing" => "project_setup_missing",
-        "context_path_invalid" => "context_path_invalid",
-        "context_item_missing" => "context_item_missing",
-        "context_offset_invalid" => "context_offset_invalid",
-        "project_missing" => "project_missing",
-        "research_job_missing" => "research_job_missing",
-        _ => "owner_read_failed",
-    })
+    caused(
+        match code {
+            "pool_missing" => "pool_missing",
+            "research_duplicate" => "research_duplicate",
+            "project_setup_missing" => "project_setup_missing",
+            "context_path_invalid" => "context_path_invalid",
+            "context_item_missing" => "context_item_missing",
+            "context_offset_invalid" => "context_offset_invalid",
+            "project_missing" => "project_missing",
+            "research_job_missing" => "research_job_missing",
+            _ => "owner_read_failed",
+        },
+        code,
+    )
 }
 
 fn project(id: &str) -> Result<ProjectId, BridgeError> {
@@ -120,7 +125,7 @@ impl NativeBridge {
                 },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
     }
@@ -206,7 +211,7 @@ impl NativeBridge {
                 },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -233,7 +238,7 @@ impl NativeBridge {
                 },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -286,7 +291,7 @@ impl NativeBridge {
                 },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -310,7 +315,7 @@ impl NativeBridge {
                 OwnerMutation::DeleteProjectContext { project_id, path },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -357,7 +362,7 @@ impl NativeBridge {
                 },
                 generation,
             )
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -377,7 +382,7 @@ impl NativeBridge {
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -436,7 +441,7 @@ impl NativeBridge {
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
