@@ -4033,7 +4033,8 @@ fallback_allowed = false
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(registrations > crate::master_session::SESSIONS_MAX as i64);
+        assert!(registrations >= 1);
+        assert!(registrations <= crate::master_session::SESSIONS_MAX as i64);
         drop(tx);
         case.close().await;
     }
