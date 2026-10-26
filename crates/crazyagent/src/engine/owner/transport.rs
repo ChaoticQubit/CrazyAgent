@@ -1384,27 +1384,8 @@ impl OwnerServer {
 
 impl Engine {
     async fn runner_read(&self, command: Command) -> Result<Outcome, EngineError> {
-        if !matches!(
-            &command,
-            Command::CoordinationState { .. } | Command::TaskContext { .. }
-        ) {
-            return Err(failure("runner_read_kind"));
-        }
-        let request_id = RequestId::new(crate::memory::hash(
-            &serde_json::to_vec(&command).map_err(io_error)?,
-        ))
-        .map_err(io_error)?;
-        let request = WireRequest {
-            protocol_version: PROTOCOL_VERSION,
-            client_id: ClientId::new("trusted-runner-host").map_err(io_error)?,
-            request_id,
-            expected_revision: Cursor::new(0),
-            command,
-        };
-        Ok(self
-            .owner_job(|reply| Job::Apply(request, reply))
-            .await?
-            .outcome)
+        self.owner_job(|reply| Job::RunnerRead(command, reply))
+            .await
     }
 
     async fn runner_attempt(&self, attempt: &AttemptRef) -> Result<WorkerBinding, EngineError> {
