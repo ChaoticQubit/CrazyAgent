@@ -2154,3 +2154,63 @@ async fn a_codex_master_turn_is_prepared_with_the_project_s_master_tools_switch(
     drop(prepared);
     case.finish().await;
 }
+
+#[tokio::test]
+async fn a_master_reply_observed_while_another_connection_holds_the_database_is_kept() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let runtime = MasterRuntimeView {
+        runtime_ref: RequestId::new("busy-runtime").unwrap(),
+        artifact_sha256: "a".repeat(64),
+        native_session_id: None,
+    };
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Running {
+                runtime: runtime.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    let reply = MasterReply {
+        text: "The project is a routing fixture with one README.".into(),
+        provenance: MasterReplyProvenance {
+            attempt_id: prepared.attempt.request.id.clone(),
+            runtime_ref: runtime.runtime_ref.clone(),
+            capture_ref: RequestId::new("busy-capture").unwrap(),
+            capture_sequence: 2,
+        },
+    };
+    let holder = case.hold_write_lock(Duration::from_millis(600));
+    let observed = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Response {
+                reply: reply.clone(),
+                delegations: vec![],
+            },
+        )
+        .await
+        .map(|turn| turn.phase);
+    holder.join().unwrap();
+    drop(hold);
+    drop(profile);
+    let persisted = case.persisted_turn().await;
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(observed, Ok(MasterTurnPhase::Succeeded));
+    assert_eq!(persisted.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(persisted.reply, Some(reply));
+}

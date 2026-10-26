@@ -424,7 +424,7 @@ const DETACHED_ENGINE_BASE: &str = "CRAZYAGENT_LB46_ENGINE_BASE";
 /// held profile and the owner root.
 struct DetachingMaster {
     master: ClaudeHost,
-    _credential: Option<crate::engine::bootstrap::AgentCredential>,
+    _credential: crate::engine::bootstrap::AgentCredential,
     _folder: MasterRuntimeFolder,
     _signed_in: SignedIn,
     _root: Root,

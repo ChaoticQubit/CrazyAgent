@@ -1169,10 +1169,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             "unreadable"
         ]
     );
-    assert_eq!(
-        diagnostic.tail(),
-        "\n{\"type\":\"system\",\"subtype\":\"task_"
-    );
+    assert_eq!(diagnostic.frames(), ["cut 8158", "unfinished 33"]);
     assert!(
         matches!(
             kinds.last(),
@@ -1203,7 +1200,7 @@ exit 0
 "#;
 
 #[tokio::test]
-async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_a_redacted_tail() {
+async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_frames_without_content() {
     use crate::engine::master_host_fixture::MasterFixture;
 
     let mut fixture = MasterFixture::new("claude");
@@ -1230,31 +1227,23 @@ async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_a_reda
     );
     assert_eq!(diagnostic.message.as_deref(), Some("assistant"));
     assert_eq!(diagnostic.late_lines, 0);
-    let tail = diagnostic.tail();
-    assert!(tail.contains("\"uuid\":\"early-1\""), "{tail}");
-    assert!(tail.contains("sk-ant-[redacted]"), "{tail}");
-    assert!(!tail.contains("notarealtoken"), "{tail}");
+    assert_eq!(diagnostic.frames(), ["assistant 247"]);
 }
 
 #[test]
-fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
+fn a_stream_diagnostic_names_its_last_frames_by_kind_and_size_after_a_cut() {
     let mut diagnostic = diagnostic::StreamDiagnostic::default();
-    let mut stream = b"{\"text\":\"sk-ant-oat01-SECRETPART\"}\n".to_vec();
-    let cut = stream.len() - "PART\"}\n".len();
-    stream.extend(std::iter::repeat_n(
-        b'b',
-        diagnostic::TAIL_BYTES - (stream.len() - cut),
-    ));
+    let stream = b"{\"type\":\"assistant\"}\n".repeat(400);
     for chunk in stream.chunks(4096) {
         diagnostic.keep(chunk);
     }
-    let tail = diagnostic.tail();
-    assert!(!tail.contains("SECRET") && !tail.contains("PART"), "{tail}");
-    assert!(tail.starts_with("\"}\n"), "{tail}");
-    assert_eq!(tail.len(), diagnostic::TAIL_BYTES - "PART".len());
+    let frames = diagnostic.frames();
+    assert_eq!(frames.len(), 391);
+    assert_eq!(frames[0], "cut 1");
+    assert!(frames[1..].iter().all(|frame| frame == "assistant 20"));
     let mut whole = diagnostic::StreamDiagnostic::default();
     whole.keep(b"{\"text\":\"sk-ant-ort01-SECRET_PART-2\"}\n");
-    assert_eq!(whole.tail(), "{\"text\":\"sk-ant-[redacted]\"}\n");
+    assert_eq!(whole.frames(), ["unreadable 37"]);
     whole.late(b"{\"type\":\"sk-ant-oat01-SECRET\"}");
     whole.late(b"{\"type\":\"system\",\"subtype\":\"Task Notification\"}");
     for _ in 0..20 {
@@ -1269,16 +1258,23 @@ fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
 }
 
 #[test]
-fn a_stream_tail_redacts_openai_keys_and_tokens_but_keeps_plain_words() {
+fn a_stream_frame_is_named_by_its_protocol_kind_and_never_by_free_text() {
     let mut diagnostic = diagnostic::StreamDiagnostic::default();
     diagnostic.keep(
-        b"{\"key\":\"sk-proj-AbC_12-x\",\"access_token\":\"eyJhbGci.eyJzdWIi.c2ln-_x\",\
-\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ\"}\n",
+        b"{\"method\":\"item/agentMessage/delta\",\"params\":{}}\n{\"id\":3,\"result\":{}}\n\
+{\"id\":3,\"error\":{\"code\":1}}\n{\"method\":\"ghp_0123456789abcdef\",\"params\":{}}\n\
+{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"sk-ant-oat01-SECRET\"}\n",
     );
     assert_eq!(
-        diagnostic.tail(),
-        "{\"key\":\"sk-[redacted]\",\"access_token\":\"eyJ[redacted]\",\
-\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ[redacted]\"}\n"
+        diagnostic.frames(),
+        [
+            "item/agentMessage/delta 48",
+            "response 20",
+            "error 27",
+            "unreadable 45",
+            "system/init 34",
+            "unreadable 30"
+        ]
     );
 }
 

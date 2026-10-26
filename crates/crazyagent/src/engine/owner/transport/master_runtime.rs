@@ -40,7 +40,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: std::path::PathBuf,
-    pub(super) credential: Option<crate::engine::bootstrap::AgentCredential>,
+    pub(super) credential: crate::engine::bootstrap::AgentCredential,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
@@ -380,23 +380,28 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Stores what a running master turn did, writing the same observation again while
+    /// another engine connection holds the database, so a reply already in hand is never
+    /// lost to a busy write (CR2-22). Inputs: the prepared turn, its id and the observation.
+    /// Output: the stored turn, or `storage_busy` when the lock never freed.
     pub(super) async fn observe_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         observation: MasterRuntimeObservation,
     ) -> Result<MasterTurnView, EngineError> {
-        match self
-            .master_runtime_command(MasterRuntimeCommand::Observe {
+        let observed = when_storage_frees(|| {
+            self.master_runtime_command(MasterRuntimeCommand::Observe {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
                 session_id: prepared.session.session_id.clone(),
                 turn_id: turn_id.clone(),
                 attempt_id: prepared.attempt.request.id.clone(),
-                observation,
+                observation: observation.clone(),
             })
-            .await?
-        {
+        })
+        .await?;
+        match observed {
             MasterRuntimeResult::Turn(turn) => Ok(*turn),
             _ => Err(failure("master_runtime_result")),
         }
@@ -810,8 +815,9 @@ impl OwnerRuntimeHandle {
 }
 
 /// Appends a master turn's stream diagnostic to the engine log
-/// `logs/master-stream.log` (0600, rotated, credentials redacted) so a failed turn or one
-/// whose harness kept talking after its result can be explained later. Input: the engine
+/// `logs/master-stream.log` (0600, rotated; frame kinds and sizes, never stream content) so a
+/// failed turn or one whose harness kept talking after its result can be explained later
+/// without copying tool output or credentials into the log (CR2-24). Input: the engine
 /// root, the conversation, turn, runtime, diagnostic and the turn's error code when it
 /// failed. Output: an error code when the log could not be written safely.
 fn keep_stream_diagnostic(
@@ -836,7 +842,7 @@ fn keep_stream_diagnostic(
         "message": diagnostic.message,
         "late_lines": diagnostic.late_lines,
         "late": diagnostic.late,
-        "tail": diagnostic.tail(),
+        "frames": diagnostic.frames(),
     });
     crate::engine::claude_host::diagnostic::append(
         &crate::paths::Layout::new(root.to_path_buf())
@@ -1168,11 +1174,66 @@ mod tests {
             entry["late"],
             serde_json::json!(["system/task_notification"])
         );
-        assert_eq!(
-            entry["tail"],
-            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
-        );
+        assert_eq!(entry["frames"], serde_json::json!(["result/success 37"]));
         assert!(entry["at_ms"].as_u64().is_some_and(|at| at > 0));
+    }
+
+    #[test]
+    fn a_master_stream_diagnostic_logs_frame_kinds_and_sizes_and_never_stream_content() {
+        let root = tempfile::Builder::new()
+            .prefix("crazyagent-stream-log")
+            .tempdir()
+            .unwrap();
+        let secrets = [
+            "ghp_0123456789abcdefABCDEF0123456789abcd",
+            "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+            "AKIAIOSFODNN7EXAMPLE",
+            "sk-proj-AbC_12-x",
+        ];
+        let claude = format!(
+            "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\
+\"content\":\"GITHUB_TOKEN=x\\n{}\\t{}\\n{}\\n{}\"}}]}}}}\n",
+            secrets[0], secrets[1], secrets[2], secrets[3]
+        );
+        let codex = format!(
+            "{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\
+\"aggregatedOutput\":\"\\n{}\"}}}}}}\n",
+            secrets[0]
+        );
+        let mut diagnostic = StreamDiagnostic::default();
+        diagnostic.keep(claude.as_bytes());
+        diagnostic.keep(codex.as_bytes());
+        diagnostic.keep(b"{\"id\":7,\"result\":{}}\n{\"type\":\"assistant\"");
+        let runtime = MasterRuntimeView {
+            runtime_ref: RequestId::new("runtime-1").unwrap(),
+            artifact_sha256: "a".repeat(64),
+            native_session_id: None,
+        };
+        keep_stream_diagnostic(
+            root.path(),
+            &SessionId::new("session-1").unwrap(),
+            &RequestId::new("turn-1").unwrap(),
+            &runtime,
+            &diagnostic,
+            Some("claude_host_protocol_invalid_state"),
+        )
+        .unwrap();
+        let text =
+            std::fs::read_to_string(root.path().join("logs").join("master-stream.log")).unwrap();
+        for secret in secrets {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(!text.contains("GITHUB_TOKEN"), "{text}");
+        let entry: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(
+            entry["frames"],
+            serde_json::json!([
+                format!("user {}", claude.len() - 1),
+                format!("item/completed {}", codex.len() - 1),
+                "response 20",
+                "unfinished 19"
+            ])
+        );
     }
 
     struct RuntimeFixture {

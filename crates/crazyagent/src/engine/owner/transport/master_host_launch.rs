@@ -186,7 +186,7 @@ pub(super) struct MasterTurnLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: PathBuf,
-    pub(super) credential: Option<AgentCredential>,
+    pub(super) credential: AgentCredential,
     pub(super) tool_record: Option<PathBuf>,
 }
 
@@ -264,19 +264,21 @@ pub(super) fn claude_master_turn(
         command,
         sandbox,
         home,
-        credential: Some(credential),
+        credential,
         tool_record,
     })
 }
 
-/// Builds one Codex master turn. With tools off it is today's read-only app-server on the
-/// account's managed home. With `engine` its tools are on (DEC-093): a private home in the
-/// turn folder holding a no-refresh copy of the account's credential (DEC-090), shell and
-/// patch tools with Codex's own sandbox off because macOS refuses a Seatbelt profile inside
-/// the master's, which keeps writes to the leased worktree and the turn's own folders, and
-/// only the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
+/// Builds one Codex master turn in a private home in the turn folder holding a no-refresh
+/// copy of the account's credential (DEC-090), so a master never refreshes the managed
+/// home beside other holders of its shared lease (CR2-17). With tools off it is the
+/// read-only app-server. With `engine` its tools are on (DEC-093): shell and patch tools
+/// with Codex's own sandbox off because macOS refuses a Seatbelt profile inside the
+/// master's, which keeps writes to the leased worktree and the turn's own folders, and only
+/// the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
 /// registered executable, the attempt's connection, the turn's wall time and the engine
-/// executable for tools on. Output: the launch parts, or the refusal of the part that failed.
+/// executable for tools on. Output: the launch parts with the copy, or the refusal of the
+/// part that failed.
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -286,8 +288,9 @@ pub(super) fn codex_master_turn(
     engine: Option<&Path>,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
+    let home = master_turn_home(place.root, place.runtime_ref)?;
+    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
     let Some(engine) = engine else {
-        let home = profile.profile_path()?;
         return Ok(MasterTurnLaunch {
             command: master_command(executable, &home, place.worktree, model, None)?,
             sandbox: master_sandbox(
@@ -300,12 +303,10 @@ pub(super) fn codex_master_turn(
                 &connection.endpoint,
             )?,
             home,
-            credential: None,
+            credential,
             tool_record: None,
         });
     };
-    let home = master_turn_home(place.root, place.runtime_ref)?;
-    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
     let sandbox = master_tools_sandbox(
         place.root,
         place.runtime_ref,
@@ -334,7 +335,7 @@ pub(super) fn codex_master_turn(
         command,
         sandbox,
         home,
-        credential: Some(credential),
+        credential,
         tool_record: Some(drop),
     })
 }
@@ -574,7 +575,9 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
         || prepared.attempt.completion.is_some()
         || prepared.attempt.request.project_id != prepared.session.project_id
         || !prepared.attempt_on_current_turn()
-        || prepared.attempt.config_id != prepared.session.config_id
+        || !prepared
+            .session
+            .admits_attempt(&prepared.attempt.config_id, true)
         || binding.connection != prepared.attempt.connection
         || lease.state != LeaseState::Ready
         || lease.project_id != prepared.session.project_id

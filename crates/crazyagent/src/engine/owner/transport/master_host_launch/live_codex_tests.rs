@@ -407,11 +407,11 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
             Err(error) => {
                 let diagnostic = master.diagnostic();
                 println!(
-                    "real codex sub-agents master turn failed: {} fault={:?} message={:?} steps={steps:?}\ntail:\n{}",
+                    "real codex sub-agents master turn failed: {} fault={:?} message={:?} steps={steps:?} frames={:?}",
                     error.0,
                     diagnostic.fault,
                     diagnostic.message,
-                    diagnostic.tail()
+                    diagnostic.frames()
                 );
                 let _ = master.close().await;
                 panic!("{}", error.0);
@@ -447,7 +447,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         reply.text
     );
     if native > 0 {
-        println!("tail:\n{}", master.diagnostic().tail());
+        println!("frames={:?}", master.diagnostic().frames());
     }
     drop(credential);
     drop(folder);

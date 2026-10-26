@@ -118,6 +118,7 @@ pub(crate) enum MasterRuntimeCommand {
     },
 }
 
+#[derive(Clone)]
 pub(crate) enum MasterRuntimeObservation {
     Running {
         runtime: MasterRuntimeView,

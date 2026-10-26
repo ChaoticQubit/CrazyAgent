@@ -62,6 +62,7 @@ mod secret_storage_wait_tests;
 
 const SOCKET: &str = "owner.sock";
 const CLIENTS_MAX: usize = 2;
+const DEFERRED_MAX: usize = 4;
 const HANDSHAKES_MAX: usize = 3;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -463,6 +464,7 @@ struct Authority {
     native_auth_host: Mutex<NativeAuthHostRegistration>,
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
+    deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
 }
@@ -1171,6 +1173,7 @@ impl OwnerServer {
                 native_auth_host: Mutex::new(NativeAuthHostRegistration::default()),
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
+                deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
             });
@@ -1249,7 +1252,12 @@ impl OwnerServer {
             while let Some(result) = tasks.clients.try_join_next() {
                 log_panic(&result, "owner_client_panicked");
             }
-            if tasks.clients.len() >= CLIENTS_MAX {
+            let deferred = self
+                .authority
+                .deferred
+                .load(std::sync::atomic::Ordering::SeqCst);
+            assert!(deferred <= tasks.clients.len());
+            if tasks.clients.len() - deferred >= CLIENTS_MAX {
                 self.refuse_busy(stream, Some((auth, deadline)), &mut tasks.refusals);
                 return;
             }
@@ -1346,7 +1354,13 @@ impl OwnerServer {
                     handshakes.spawn(read_owner_handshake(stream,timeout));
                 }
             }
-            assert!(tasks.clients.len() <= CLIENTS_MAX);
+            assert!(tasks.clients.len() <= CLIENTS_MAX + DEFERRED_MAX);
+            assert!(
+                self.authority
+                    .deferred
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    <= DEFERRED_MAX
+            );
             assert!(handshakes.len() <= HANDSHAKES_MAX);
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
@@ -1793,9 +1807,10 @@ async fn serve_owner(
 
 /// Serves one admitted owner or runner connection. Its handshake deadline bounds the
 /// admission, the frame read and the request, except deferred work, which runs under
-/// its own bounds. A panic in the request is answered `owner_request_failed` and logged
-/// by code only. Inputs: the stream, handshake packet, engine, authority and deadline.
-/// Output: none; the reply is written to the stream and the stream is closed.
+/// its own bounds and is counted as a `Deferral` instead of a client slot. A panic in the
+/// request is answered `owner_request_failed` and logged by code only. Inputs: the stream,
+/// handshake packet, engine, authority and deadline. Output: none; the reply is written to
+/// the stream and the stream is closed.
 async fn serve_authenticated_owner(
     mut stream: UnixStream,
     auth: [u8; 37],
@@ -2075,22 +2090,55 @@ async fn serve_admitted(
             .await
             .map(|()| None)
     };
-    match tokio::time::timeout_at(deadline, exchange).await {
-        Ok(Ok(Some(Deferred::ProjectsHome(a, request)))) => {
+    let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
+        return;
+    };
+    let Some(_deferral) = Deferral::take(&authority.deferred) else {
+        let refused = refuse(stream, auth, frame, "owner_busy");
+        let _ = tokio::time::timeout(engine.timeout, refused).await;
+        return;
+    };
+    match deferred {
+        Deferred::ProjectsHome(a, request) => {
             let _ =
                 projects_home::serve(stream, engine, authority, auth, &a, *request, deadline).await;
         }
-        Ok(Ok(Some(Deferred::GitHub(a)))) => {
+        Deferred::GitHub(a) => {
             let _ = github::serve(stream, engine, authority, auth, &a, body).await;
         }
-        Ok(Ok(Some(Deferred::Accounts(a)))) => {
+        Deferred::Accounts(a) => {
             let _ = accounts::serve(stream, engine, authority, auth, &a, body).await;
         }
-        Ok(Ok(Some(Deferred::Agents(a)))) => {
+        Deferred::Agents(a) => {
             let served = agents::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
         }
-        _ => {}
+    }
+}
+
+/// One owner request served past its exchange. While it runs it is counted apart from
+/// the client slots, so a long clone or check never refuses other clients, and at most
+/// `DEFERRED_MAX` run at once. Input: the server authority's count. Output: the guard, or
+/// none when `DEFERRED_MAX` already run; dropping the guard gives its place back.
+struct Deferral<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> Deferral<'a> {
+    fn take(count: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let before = count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+                (running < DEFERRED_MAX).then_some(running + 1)
+            })
+            .ok()?;
+        assert!(before < DEFERRED_MAX);
+        Some(Self(count))
+    }
+}
+
+impl Drop for Deferral<'_> {
+    fn drop(&mut self) {
+        let before = self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(before > 0 && before <= DEFERRED_MAX);
     }
 }
 

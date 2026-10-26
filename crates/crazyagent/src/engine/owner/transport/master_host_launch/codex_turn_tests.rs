@@ -170,12 +170,23 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         None,
     )
     .unwrap();
-    assert_eq!(home, managed);
-    assert!(credential.is_none());
+    let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
+    assert_eq!(home, off_turn.join("home"));
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(home.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(written["tokens"]["access_token"], access);
+    assert_eq!(written["tokens"]["refresh_token"], "");
     assert!(tool_record.is_none());
-    let today = master_command(&codex, &managed, &worktree, "unit-model", None).unwrap();
+    let today = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
     assert!(command.get_args().eq(today.get_args()));
     assert!(command.get_envs().eq(today.get_envs()));
+    assert!(
+        sandbox
+            .sandbox()
+            .writable_roots()
+            .chain(sandbox.sandbox().read_roots())
+            .all(|root| !managed.starts_with(root) && !root.starts_with(&managed))
+    );
     assert!(settings(&command).contains(&"sandbox_mode=\"read-only\"".to_owned()));
     assert!(settings(&command).contains(&"mcp_servers={}".to_owned()));
     assert_eq!(require_master_tool_policy(&command, None), Ok(()));
@@ -190,6 +201,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .writable_roots()
             .any(|writable| *writable == repository)
     );
+    drop(credential);
     drop(off_folder);
 
     let (tools_ref, _, _) = allocate_master_capture(&root).unwrap();
