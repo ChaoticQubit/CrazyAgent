@@ -393,3 +393,344 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
     drop(credential);
     drop(folder);
 }
+
+/// The command text the LB-46 live tests have the master's shells sleep with: a length no
+/// other process of this user runs, so a process whose command names it is one of theirs.
+const DETACHED_SLEEP: &str = "sleep 2917";
+
+/// The LB-46 turn: one Bash call that leaves a `nohup` sleep and a sleep in its own session,
+/// then a foreground sleep that is still running when the run is ended.
+const DETACHED_TURN: &str = "Do these steps in order. 1. Call your Bash tool once with exactly this command: /usr/bin/nohup /bin/sleep 2917 > /dev/null 2>&1 & /usr/bin/perl -mPOSIX -e 'POSIX::setsid(); sleep 2917' > /dev/null 2>&1 & 2. Then call your Bash tool once with exactly this command: /bin/sleep 2917 3. Reply with exactly the word DONE.";
+
+/// How long one LB-46 live test may run in all, and the wall time its master gets.
+const DETACHED_LIVE_TIME: Duration = Duration::from_secs(180);
+
+/// How long an LB-46 live test waits for the master's shells to start their sleeps.
+const DETACHED_START_TIME: Duration = Duration::from_secs(140);
+
+/// How long it still waits for the foreground sleep once both detached sleeps run.
+const DETACHED_FOREGROUND_TIME: Duration = Duration::from_secs(20);
+
+/// How long a master run's processes may outlive its end.
+const DETACHED_GONE_TIME: Duration = Duration::from_secs(10);
+
+/// Names the private folder of the engine the engine-death test starts and kills; set only
+/// in that engine.
+const DETACHED_ENGINE_BASE: &str = "CRAZYAGENT_LB46_ENGINE_BASE";
+
+/// A real tools-on Claude master on the owner's signed-in profile, given the LB-46 turn,
+/// with what must live as long as it: the turn's credential copy, its runtime folder, the
+/// held profile and the owner root.
+struct DetachingMaster {
+    master: ClaudeHost,
+    _credential: Option<crate::engine::bootstrap::AgentCredential>,
+    _folder: MasterRuntimeFolder,
+    _signed_in: SignedIn,
+    _root: Root,
+}
+
+/// What the LB-46 turn's shells have started, read from this user's processes.
+#[derive(Debug)]
+struct DetachedSeen {
+    setsid: bool,
+    sleeps: usize,
+}
+
+/// A private folder under `/tmp` for one live run. Input: its name prefix. Output: the
+/// folder, removed with everything in it when dropped.
+fn live_folder(prefix: &str) -> tempfile::TempDir {
+    let temporary = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    temporary
+}
+
+/// Starts a real tools-on Claude master in `base` with the engine executable serving its
+/// `delegate` tool, and gives it the LB-46 turn. Inputs: the private folder and a name for
+/// the turn's references. Output: the master and what it needs alive.
+async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
+    let engine = engine_executable();
+    let mut signed_in = SignedIn::claude();
+    let connection = signed_in.connection.clone();
+    let turn = RequestId::new(format!("claude-live-{name}-turn").as_str()).unwrap();
+    let profile = signed_in.acquire(turn.as_str());
+    let root = Root::open(base).unwrap();
+    let repository = base.join("repository");
+    let worktree = base.join("worktrees").join("lease");
+    private_directory(&repository);
+    private_directory(&worktree);
+    let claude = crate::team::runtime::managed_agent::claude();
+    let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let budget = ResourceBudget {
+        wall_time_ms: u64::try_from(DETACHED_LIVE_TIME.as_millis()).unwrap(),
+        ..ResourceBudget::unit()
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record: _,
+    } = claude_master_turn(
+        &place,
+        &profile,
+        &claude,
+        &connection,
+        "You are a test. Follow the user's steps exactly and use your tools for them.",
+        DETACHED_LIVE_TIME,
+        Some(&engine),
+    )
+    .unwrap();
+    let mut master = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: SessionId::new(format!("claude-live-{name}-session").as_str()).unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: signed_in.profile_ref(),
+            worktree_lease: RequestId::new(format!("claude-live-{name}-lease").as_str()).unwrap(),
+        },
+        connection.account_ref.clone(),
+        budget,
+    )
+    .await
+    .unwrap();
+    master.start_turn(turn, DETACHED_TURN).await.unwrap();
+    DetachingMaster {
+        master,
+        _credential: credential,
+        _folder: folder,
+        _signed_in: signed_in,
+        _root: root,
+    }
+}
+
+/// This user's processes whose command line contains `needle`, read with `ps`. Input: the
+/// text. Output: their ids and command lines.
+fn processes_naming(needle: &str) -> Vec<(i32, String)> {
+    let user = rustix::process::getuid().as_raw().to_string();
+    let listing = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(listing.status.success(), "{listing:?}");
+    let own = i32::try_from(std::process::id()).unwrap();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let owner = fields.next()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (owner == user && pid != own && command.contains(needle)).then_some((pid, command))
+        })
+        .collect()
+}
+
+/// Reads what the LB-46 turn's shells have started: the sleep in its own session, and the
+/// plain sleeps, the `nohup` one and then the foreground one. Output: what runs now.
+fn detached_seen() -> DetachedSeen {
+    let found = processes_naming(DETACHED_SLEEP);
+    DetachedSeen {
+        setsid: found
+            .iter()
+            .any(|(_, command)| command.contains("POSIX::setsid")),
+        sleeps: found
+            .iter()
+            .filter(|(_, command)| command.ends_with(DETACHED_SLEEP) && !command.contains("perl"))
+            .count(),
+    }
+}
+
+/// Tells whether to end the run now: both detached sleeps run and the foreground sleep runs
+/// too, or has not started within [`DETACHED_FOREGROUND_TIME`]. Inputs: what runs and when
+/// both detached sleeps were first seen, set here. Output: true to end the run.
+fn detached_ready(seen: &DetachedSeen, since: &mut Option<std::time::Instant>) -> bool {
+    if !seen.setsid || seen.sleeps == 0 {
+        return false;
+    }
+    let since = *since.get_or_insert_with(std::time::Instant::now);
+    seen.sleeps >= 2 || since.elapsed() >= DETACHED_FOREGROUND_TIME
+}
+
+/// Waits until `deadline` for no process of this user to name any of `needles`, then kills
+/// by id whatever still does, so a failing run leaves nothing behind. Inputs: the deadline
+/// and the texts. Output: the processes that outlived it.
+fn detached_survivors(deadline: std::time::Instant, needles: &[&str]) -> Vec<(i32, String)> {
+    loop {
+        let left: Vec<(i32, String)> = needles
+            .iter()
+            .flat_map(|needle| processes_naming(needle))
+            .collect();
+        if left.is_empty() || std::time::Instant::now() >= deadline {
+            for (pid, _) in &left {
+                if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Qualifies LB-46 on a real Claude master with its tools on: its Bash tool leaves a `nohup`
+/// sleep and a sleep in its own session and runs a foreground sleep, the engine cancels the
+/// turn, and within 10 s no process of this user names the sleep or the run's folder.
+/// Bounded by 180 s.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+async fn a_real_claude_master_cancelled_mid_turn_leaves_no_detached_shell() {
+    let temporary = live_folder("ca-live-detached-");
+    let base = temporary.path().canonicalize().unwrap();
+    let folder = base.to_str().unwrap().to_owned();
+    let started = std::time::Instant::now();
+    let run = tokio::time::timeout(DETACHED_LIVE_TIME, async {
+        let mut run = start_detaching_master(&base, "detached").await;
+        let mut tools = Vec::new();
+        let mut since = None;
+        let mut finished = None;
+        let mut fault = None;
+        let seen = loop {
+            let seen = detached_seen();
+            if detached_ready(&seen, &mut since)
+                || finished.is_some()
+                || fault.is_some()
+                || started.elapsed() >= DETACHED_START_TIME
+            {
+                break seen;
+            }
+            match tokio::time::timeout(Duration::from_millis(250), run.master.next_event()).await {
+                Ok(Ok(event)) => match event.kind {
+                    EventKind::ToolUse {
+                        name,
+                        input,
+                        parent_tool_use_id: None,
+                        ..
+                    } => tools.push((name, input.get("command").cloned())),
+                    EventKind::TurnFinished { outcome, .. } => finished = Some(outcome),
+                    _ => {}
+                },
+                Ok(Err(error)) => fault = Some(error.0),
+                Err(_) => {}
+            }
+        };
+        let ended_at = std::time::Instant::now();
+        let ended = if finished.is_some() {
+            run.master.close().await
+        } else {
+            run.master.cancel().await
+        }
+        .map_err(|error| error.0);
+        let survivors =
+            detached_survivors(ended_at + DETACHED_GONE_TIME, &[DETACHED_SLEEP, &folder]);
+        let gone_after = ended_at.elapsed();
+        (
+            seen, tools, finished, fault, ended, survivors, gone_after, run,
+        )
+    })
+    .await;
+    let Ok((seen, tools, finished, fault, ended, survivors, gone_after, run)) = run else {
+        let survivors = detached_survivors(std::time::Instant::now(), &[DETACHED_SLEEP, &folder]);
+        panic!("the live run passed {DETACHED_LIVE_TIME:?}; survivors={survivors:?}");
+    };
+    println!(
+        "real claude detached master turn: seen={seen:?} finished={finished:?} fault={fault:?} ended={ended:?} gone_after={gone_after:?} survivors={survivors:?} tools={tools:?}"
+    );
+    assert_eq!(fault, None);
+    assert!(seen.setsid && seen.sleeps >= 1, "{seen:?} {tools:?}");
+    assert_eq!(ended, Ok(()));
+    assert_eq!(survivors, Vec::<(i32, String)>::new());
+    drop(run);
+}
+
+/// Qualifies LB-46 engine death on a real Claude master with its tools on: the test runs
+/// itself again as the engine, that engine's master gets the same turn, the test kills that
+/// engine with SIGKILL while the sleeps run, and within 10 s no process of this user names
+/// the sleep or the run's folder. Bounded by 180 s.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+async fn a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached_shell() {
+    if let Some(base) = std::env::var_os(DETACHED_ENGINE_BASE) {
+        let mut run = start_detaching_master(Path::new(&base), "engine-killed").await;
+        let deadline = tokio::time::Instant::now() + DETACHED_LIVE_TIME;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, run.master.next_event()).await {
+                Ok(Ok(event)) => {
+                    if let EventKind::ToolUse {
+                        name,
+                        input,
+                        parent_tool_use_id: None,
+                        ..
+                    } = event.kind
+                    {
+                        println!("engine under test: tool {name} {:?}", input.get("command"));
+                    }
+                }
+                Ok(Err(_)) | Err(_) => tokio::time::sleep_until(deadline).await,
+            }
+        }
+        panic!("the engine under test was not killed within {DETACHED_LIVE_TIME:?}");
+    }
+    let temporary = live_folder("ca-live-engine-killed-");
+    let base = temporary.path().canonicalize().unwrap();
+    let folder = base.to_str().unwrap().to_owned();
+    let module = module_path!().split_once("::").unwrap().1;
+    let test = format!(
+        "{module}::a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached_shell"
+    );
+    let started = std::time::Instant::now();
+    let mut engine = crate::spawn_gate::spawn(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                test.as_str(),
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(DETACHED_ENGINE_BASE, &base)
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let mut since = None;
+    let (seen, exited) = loop {
+        let seen = detached_seen();
+        let exited = engine.try_wait().unwrap();
+        if detached_ready(&seen, &mut since)
+            || exited.is_some()
+            || started.elapsed() >= DETACHED_START_TIME
+        {
+            break (seen, exited);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let killed_at = std::time::Instant::now();
+    if exited.is_none() {
+        engine.kill().unwrap();
+        engine.wait().unwrap();
+    }
+    let survivors = detached_survivors(killed_at + DETACHED_GONE_TIME, &[DETACHED_SLEEP, &folder]);
+    let gone_after = killed_at.elapsed();
+    println!(
+        "real claude master engine killed: seen={seen:?} exited_before_kill={exited:?} gone_after={gone_after:?} survivors={survivors:?} total={:?}",
+        started.elapsed()
+    );
+    assert_eq!(exited, None);
+    assert!(seen.setsid && seen.sleeps >= 1, "{seen:?}");
+    assert_eq!(survivors, Vec::<(i32, String)>::new());
+    assert!(started.elapsed() < DETACHED_LIVE_TIME);
+}
