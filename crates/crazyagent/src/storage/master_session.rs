@@ -1467,14 +1467,18 @@ fn allowed_destination(config: &EffectiveConfig, target: &crate::protocol::Crede
         && !config.settings.revoked_destinations.contains(target)
 }
 
+/// Why one pool member cannot run a master turn: the reason the owner sees and the plain
+/// refusal code a blocked turn stores as its cause.
+type Gap = (MasterReason, String);
+
 /// One pool member a master turn may try: its connection, the settings gap that rules it
 /// out before any check (None when settings allow it) and whether the owner chose it.
-type Member<'a> = (&'a ModelConnection, Option<MasterReason>, bool);
+type Member<'a> = (&'a ModelConnection, Option<Gap>, bool);
 
 /// Lists the pool members that may run a native master's turns, the owner's chosen
 /// connection first and then in pool order. Inputs: the settings and the session.
-/// Output: each pool connection of the master harness, ScopeRevoked when settings do not
-/// allow its account or destination, and whether it is the owner's choice.
+/// Output: each pool connection of the master harness, ScopeRevoked with the refusal code
+/// when settings do not allow its destination or account, and whether it is the owner's.
 fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) -> Vec<Member<'a>> {
     let mut members: Vec<_> = pool_connections(config, &session.selection.pool_ref)
         .into_iter()
@@ -1482,19 +1486,22 @@ fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) 
             crate::master_session::backend_member(session.selection.backend, connection)
         })
         .map(|connection| {
-            let allowed = allowed_destination(config, &connection.id)
-                && crate::routing::validate_pool_scope(
-                    config,
-                    &session.selection.pool_ref,
-                    &session.project_id,
-                    &Role::ProjectLeader,
-                    &connection.account_ref,
-                )
-                .is_ok();
+            let scope = crate::routing::validate_pool_scope(
+                config,
+                &session.selection.pool_ref,
+                &session.project_id,
+                &Role::ProjectLeader,
+                &connection.account_ref,
+            );
+            let gap = if !allowed_destination(config, &connection.id) {
+                Some("master_destination_not_allowed".to_owned())
+            } else {
+                scope.err().map(|refusal| cause_code(&refusal.0))
+            };
             let chosen = connection.id == session.selection.target_profile_ref;
             (
                 connection,
-                (!allowed).then_some(MasterReason::ScopeRevoked),
+                gap.map(|code| (MasterReason::ScopeRevoked, code)),
                 chosen,
             )
         })
@@ -1540,19 +1547,21 @@ fn member_request(
 
 /// Names why one pool member cannot run a master turn now.
 /// Input: the failure of that member's launch check. Output: the reason for the turn's
-/// account list, or None when the failure is not about that member and stops the turn.
-fn member_gap(failure: &EngineError) -> Option<MasterReason> {
-    match failure.0.as_str() {
-        "master_authentication_unknown" => Some(MasterReason::ReadinessUnknown),
+/// account list with the failure's code, or None when the failure is not about that
+/// member and stops the turn.
+fn member_gap(failure: &EngineError) -> Option<Gap> {
+    let reason = match failure.0.as_str() {
+        "master_authentication_unknown" => MasterReason::ReadinessUnknown,
         "master_authentication_stale" | "native_profile_identity_changed" => {
-            Some(MasterReason::ReadinessStale)
+            MasterReason::ReadinessStale
         }
-        "native_profile_in_use" => Some(MasterReason::ProfileBusy),
+        "native_profile_in_use" => MasterReason::ProfileBusy,
         "native_profile_connection_missing"
         | "native_profile_not_managed"
-        | "native_profile_binding_conflict" => Some(MasterReason::ConnectionChanged),
-        _ => None,
-    }
+        | "native_profile_binding_conflict" => MasterReason::ConnectionChanged,
+        _ => return None,
+    };
+    Some((reason, cause_code(&failure.0)))
 }
 
 fn fails_over(reason: MasterReason) -> bool {
@@ -1622,13 +1631,16 @@ fn member_auth(
     session: &MasterSessionView,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     member: &ModelConnection,
-    gap: Option<MasterReason>,
-) -> Result<Result<MasterBootstrapAuth, MasterReason>, EngineError> {
-    if let Some(reason) = gap {
-        return Ok(Err(reason));
+    gap: Option<Gap>,
+) -> Result<Result<MasterBootstrapAuth, Gap>, EngineError> {
+    if let Some(gap) = gap {
+        return Ok(Err(gap));
     }
     if paused(tx, &member.id)? {
-        return Ok(Err(MasterReason::CooldownActive));
+        return Ok(Err((
+            MasterReason::CooldownActive,
+            "master_account_paused".to_owned(),
+        )));
     }
     match authenticated(tx, config, host, session, member, custody) {
         Ok(auth) => Ok(Ok(auth)),
@@ -1669,23 +1681,29 @@ fn other_ready(
 /// Blocks a queued turn that no member of its harness can run, naming each member and
 /// why plus the ready accounts of other harnesses. Inputs: the transaction, settings,
 /// host, session, turn and the members' gaps in member order. Output: the blocked turn,
-/// persisted with the owner-chosen member's reason, or ConnectionChanged when it is gone.
+/// persisted with the owner-chosen member's reason and code, or ConnectionChanged with
+/// native_profile_connection_missing when that member is gone.
 fn block_on_gaps(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &mut MasterSessionView,
     turn: &mut MasterTurnView,
-    gaps: &[(&ModelConnection, MasterReason, bool)],
+    gaps: &[(&ModelConnection, Gap, bool)],
 ) -> Result<(), EngineError> {
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
-    let reason = gaps
-        .iter()
-        .find(|(_, _, chosen)| *chosen)
-        .map_or(MasterReason::ConnectionChanged, |(_, reason, _)| *reason);
+    let (reason, cause) = gaps.iter().find(|(_, _, chosen)| *chosen).map_or_else(
+        || {
+            (
+                MasterReason::ConnectionChanged,
+                "native_profile_connection_missing".to_owned(),
+            )
+        },
+        |(_, gap, _)| gap.clone(),
+    );
     let mut accounts: Vec<_> = gaps
         .iter()
-        .map(|(connection, reason, _)| MasterAccountState {
+        .map(|(connection, (reason, _), _)| MasterAccountState {
             account_ref: connection.account_ref.clone(),
             connection: connection.id.clone(),
             harness: connection.harness.clone(),
@@ -1694,8 +1712,10 @@ fn block_on_gaps(
         .collect();
     accounts.extend(other_ready(tx, config, host, session)?);
     assert!(accounts.len() <= crate::config::POOL_MEMBERS_MAX);
+    assert!(!cause.is_empty());
     turn.phase = MasterTurnPhase::Blocked;
     turn.reason = Some(reason);
+    turn.cause = Some(cause);
     turn.accounts = accounts;
     persist_runtime(tx, config, session, turn)
 }
@@ -2131,24 +2151,25 @@ fn prepare_turn(
     for (member, gap, chosen) in candidates(config, session)? {
         let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
             Ok(auth) => auth,
-            Err(reason) => {
-                gaps.push((member, reason, chosen));
+            Err(gap) => {
+                gaps.push((member, gap, chosen));
                 continue;
             }
         };
         let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
         let attempt = match admit(tx, config, session, turn, member, &auth)? {
             Ok(attempt) => attempt,
-            Err(reason) if fails_over(reason) => {
-                if pauses(reason) {
+            Err(gap) if fails_over(gap.0) => {
+                if pauses(gap.0) {
                     pause_member(tx, &member.id)?;
                 }
-                gaps.push((member, reason, chosen));
+                gaps.push((member, gap, chosen));
                 continue;
             }
-            Err(reason) => {
+            Err((reason, cause)) => {
                 turn.phase = MasterTurnPhase::Blocked;
                 turn.reason = Some(reason);
+                turn.cause = Some(cause);
                 persist_runtime(tx, config, session, turn)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
             }
@@ -2185,7 +2206,7 @@ fn prepare_turn(
 
 /// Asks the model gateway to admit a turn on one member, in a savepoint rolled back when
 /// the gateway refuses. Inputs: the transaction, settings, session, turn, member and its
-/// proof. Output: the admitted attempt, or the reason the gateway refused it.
+/// proof. Output: the admitted attempt, or the reason and code the gateway refused with.
 fn admit(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2193,7 +2214,7 @@ fn admit(
     turn: &MasterTurnView,
     member: &ModelConnection,
     auth: &MasterBootstrapAuth,
-) -> Result<Result<Attempt, MasterReason>, EngineError> {
+) -> Result<Result<Attempt, Gap>, EngineError> {
     let (target_profile_ref, route) = member_request(session, member);
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
@@ -2250,7 +2271,7 @@ fn admit(
         Err(failure) => {
             tx.execute_batch("ROLLBACK TO master_admission; RELEASE master_admission")
                 .map_err(error)?;
-            Ok(Err(admission_reason(&failure.0)))
+            Ok(Err((admission_reason(&failure.0), cause_code(&failure.0))))
         }
     }
 }
@@ -2445,7 +2466,7 @@ fn provision_bootstrap(
                 ready = Some(auth);
                 break;
             }
-            Err(reason) => gaps.push((member, reason, chosen)),
+            Err(gap) => gaps.push((member, gap, chosen)),
         }
     }
     let Some(auth) = ready else {

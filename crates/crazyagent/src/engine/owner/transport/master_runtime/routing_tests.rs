@@ -1564,6 +1564,10 @@ async fn a_master_turn_no_account_can_run_names_each_account_and_why() {
         Some(MasterReason::ReadinessUnknown),
     );
     assert_eq!(
+        blocked.cause.as_deref(),
+        Some("master_authentication_unknown")
+    );
+    assert_eq!(
         blocked.accounts,
         vec![
             account(
