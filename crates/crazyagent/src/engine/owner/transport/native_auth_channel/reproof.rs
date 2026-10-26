@@ -70,8 +70,9 @@ impl OwnerRuntimeHandle {
 
     /// Re-proves one earlier sign-in, waiting for the account-check host to be free first
     /// and again until the finished check has released the profile, and checking again when
-    /// the host was busy or could not run the check, all within one bound (LB-26). Inputs:
-    /// the owner's standing admission and the check. Output: the settled phase, or the code.
+    /// the host was busy or could not run the check or the profile was still held, all
+    /// within one bound (LB-26, LB-30). Inputs: the owner's standing admission and the
+    /// check. Output: the settled phase, or the code.
     async fn reprove(
         &self,
         admission: &Admission,
@@ -153,13 +154,14 @@ impl OwnerRuntimeHandle {
     }
 }
 
-/// Tells whether a check failed only because the host was busy or could not run it, which
-/// says nothing about the account. Input: the check's result. Output: true to check again.
+/// Tells whether a check failed only because the host was busy or could not run it, or
+/// another holder still had the profile, which says nothing about the account (LB-30).
+/// Input: the check's result. Output: true to check again.
 fn unrun(settled: &Result<NativeAuthPhase, EngineError>) -> bool {
     settled.as_ref().is_err_and(|error| {
         matches!(
             error.0.as_str(),
-            "native_auth_host_busy" | "native_auth_host_unavailable"
+            "native_auth_host_busy" | "native_auth_host_unavailable" | "native_profile_in_use"
         )
     })
 }

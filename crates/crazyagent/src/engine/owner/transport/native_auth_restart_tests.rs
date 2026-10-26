@@ -24,6 +24,36 @@ roles = ["leader"]
 fallback_allowed = false
 "#;
 
+const TWO: &str = r#"
+timeout_ms = 1000
+[model_access]
+accounts = ["account-y", "account-z"]
+[[model_access.connections]]
+id = "connection-y"
+provider = "provider-y"
+harness = "claude"
+protocol = "native"
+account_ref = "account-y"
+endpoint = { kind = "native" }
+model = { id = "model-y", author = "author-y" }
+auth = { method = "native_managed", profile_ref = "profile-y" }
+[[model_access.connections]]
+id = "connection-z"
+provider = "provider-z"
+harness = "claude"
+protocol = "native"
+account_ref = "account-z"
+endpoint = { kind = "native" }
+model = { id = "model-z", author = "author-z" }
+auth = { method = "native_managed", profile_ref = "profile-z" }
+[[model_access.pools]]
+id = "pool-z"
+members = ["connection-y", "connection-z"]
+projects = ["project-z"]
+roles = ["leader"]
+fallback_allowed = false
+"#;
+
 const CLAUDE: &str = r#"#!/bin/sh
 case "$2" in
 login) exit 0 ;;
@@ -72,13 +102,17 @@ fn custodian() -> PathBuf {
 
 impl Restart {
     fn new() -> Self {
+        Self::with(CATALOG)
+    }
+
+    fn with(catalog: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-rst-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("g.toml");
-        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::write(&global, catalog).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let claude = root.path().join("claude");
         std::fs::write(&claude, CLAUDE).unwrap();
@@ -232,6 +266,10 @@ impl Run {
     }
 
     async fn scope(&self, config_id: ConfigId) -> NativeAuthScope {
+        self.scope_of(config_id, connection()).await
+    }
+
+    async fn scope_of(&self, config_id: ConfigId, id: CredentialRef) -> NativeAuthScope {
         let response = self
             .client()
             .request(OwnerRequest {
@@ -241,7 +279,7 @@ impl Run {
                 operation: OwnerOperation::Read {
                     query: OwnerRead::ModelAccessRecord {
                         collection: ModelAccessCollection::Connections,
-                        id: connection(),
+                        id: id.clone(),
                     },
                 },
             })
@@ -255,18 +293,23 @@ impl Run {
         };
         NativeAuthScope {
             expected_database_instance: self.handle.identity().db_instance,
-            connection: connection(),
+            connection: id,
             expected_config_id: config_id,
             expected_source_hash: source_hash,
         }
     }
 
     async fn sign_in(&self, restart: &Restart) -> NativeAuthFact {
-        let scope = self.scope(restart.config().id).await;
+        self.sign_in_to(restart, connection(), "restart-sign-in")
+            .await
+    }
+
+    async fn sign_in_to(&self, restart: &Restart, id: CredentialRef, name: &str) -> NativeAuthFact {
+        let scope = self.scope_of(restart.config().id, id).await;
         let client = self.client();
         let started = client
             .start_native_auth(NativeAuthStart {
-                request_id: request("restart-sign-in"),
+                request_id: request(name),
                 scope: scope.clone(),
                 method: NativeAuthMethod::ClaudeOfficial,
             })
@@ -275,7 +318,7 @@ impl Run {
         for _ in 0..200 {
             let read = client
                 .read_native_auth(NativeAuthQuery {
-                    request_id: request("restart-sign-in-read"),
+                    request_id: request(&format!("{name}-read")),
                     scope: scope.clone(),
                     operation_id: started.fact.operation_id.clone(),
                 })
@@ -482,4 +525,63 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
     })
     .await
     .expect("the sign-in hold case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_still_in_use_when_the_engine_starts_is_re_proved_once_it_is_free() {
+    let restart = Restart::with(TWO);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        let mut signed = Vec::new();
+        for (id, name) in [("connection-y", "restart-y"), ("connection-z", "restart-z")] {
+            signed.push(
+                first
+                    .sign_in_to(&restart, CredentialRef::new(id).unwrap(), name)
+                    .await,
+            );
+        }
+        let path = restart.root.path().join("engine.db");
+        let mut custody =
+            crate::engine::NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
+                .unwrap();
+        let launch = custody
+            .acquire_use(
+                &first.handle.identity(),
+                &signed[0].binding,
+                &request("restart-earlier-launch"),
+                1,
+                crate::engine::bootstrap::NativeProfileUsePurpose::Execution,
+            )
+            .unwrap();
+        first.stop().await;
+        let second = restart.start().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        drop(launch);
+        let database = rusqlite::Connection::open(&path).unwrap();
+        let mut proved = Vec::new();
+        for _ in 0..300 {
+            proved = database
+                .prepare(
+                    "SELECT COUNT(*) FROM native_auth_operations
+                     WHERE phase='authenticated_observed' GROUP BY profile_key ORDER BY profile_key",
+                )
+                .unwrap()
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            if proved == [2, 2] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            proved,
+            [2, 2],
+            "both earlier sign-ins are re-proved in the new run, the held one once it is free"
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the in-use restart case exceeded 60 seconds");
 }
