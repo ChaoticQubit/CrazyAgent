@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
-const GIT_SAFE: [&str; 10] = [
+pub(crate) const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -1819,7 +1819,7 @@ fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
 /// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
 /// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
 #[cfg(unix)]
-fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
+pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
     let refused = || {
         RunError::Invalid(
             "the repository configures a git filter the engine cannot switch off; name its filters with letters, digits, dots, dashes or underscores".into(),
