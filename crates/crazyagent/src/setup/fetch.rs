@@ -112,10 +112,41 @@ fn head(setup: &Path, checkout: &Path) -> Option<String> {
     ok.then(|| text.trim().to_owned())
 }
 
+/// Tells whether a checkout's files are exactly its commit: no changed, untracked or
+/// ignored file, judged with its own `.git` and folder whatever its config says.
+/// Inputs: the setup folder and the checkout. Output: true only for a clean tree.
+fn pristine(setup: &Path, checkout: &Path) -> bool {
+    let store = checkout.join(".git");
+    let (Some(tree), Some(store)) = (checkout.to_str(), store.to_str()) else {
+        return false;
+    };
+    let git_dir = format!("--git-dir={store}");
+    let work_tree = format!("--work-tree={tree}");
+    matches!(
+        git(
+            setup,
+            setup,
+            &[
+                "--no-optional-locks",
+                &git_dir,
+                &work_tree,
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            GIT_TIME,
+        ),
+        Ok((true, output)) if output.is_empty()
+    )
+}
+
 /// Fetches one pinned git source into `<setup>/pack/<repo key>-<commit>` and checks out
 /// exactly that commit, refusing the source when the commit is missing or the checkout
 /// ends up anywhere else. An existing checkout is reused only when it is still at the
-/// pin. Inputs: the setup folder, repository URL and commit. Output: the checkout folder.
+/// pin with no changed, untracked or ignored file; otherwise it is fetched again.
+/// Inputs: the setup folder, repository URL and commit. Output: the checkout folder.
 pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, InstallError> {
     validate_git(repo, commit, None)?;
     let packs = setup.join("pack");
@@ -127,7 +158,7 @@ pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, Inst
         .collect();
     let target = packs.join(format!("{key}-{commit}"));
     if std::fs::symlink_metadata(&target).is_ok() {
-        if head(setup, &target).as_deref() == Some(commit) {
+        if head(setup, &target).as_deref() == Some(commit) && pristine(setup, &target) {
             return Ok(target);
         }
         std::fs::remove_dir_all(&target).map_err(|_| InstallError("setup_store_unavailable"))?;
