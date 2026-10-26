@@ -14,6 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
+mod agent_copy;
 mod configured_rcli;
 mod generated_configured_rcli;
 mod staging;
@@ -303,6 +304,21 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
     })
 }
 
+/// An exclusive lock one custody step holds on a profile file, taken through its own
+/// duplicate of the open file description and unlocked when dropped, so a child that
+/// another thread is starting, and that briefly shares the description, cannot keep it.
+/// Holds the duplicate. Dropping it ends the lock for every descriptor of the file.
+#[must_use = "the lock ends as soon as this guard is dropped"]
+struct HeldLock(File);
+
+impl Drop for HeldLock {
+    /// Unlocks the open file description through the guard's duplicate, ending the lock
+    /// for every descriptor that shares it. Input: the guard being dropped. Output: none.
+    fn drop(&mut self) {
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
 /// The sign-in lock of one native profile, taken while a stale sign-in is settled so no
 /// custodian can start on that profile meanwhile. Holds no file when the profile does not
 /// exist. Dropping it unlocks the open file description.
@@ -464,9 +480,10 @@ impl NativeProfileCustody {
         )
     }
 
-    /// Names the home directory of a native managed profile without taking it, so a
-    /// sandbox can allow it before the first turn. Input: the profile reference.
-    /// Output: the path; only a held `NativeProfileUse` proves it is signed in and free.
+    /// Names the home directory of a native managed profile without taking it, for tests
+    /// that check which home a lease or launch uses; no agent sandbox is given this home.
+    /// Input: the profile reference. Output: the path.
+    #[cfg(test)]
     pub(crate) fn profile_home(&self, profile_ref: &CredentialRef) -> std::path::PathBuf {
         self.anchor
             .path

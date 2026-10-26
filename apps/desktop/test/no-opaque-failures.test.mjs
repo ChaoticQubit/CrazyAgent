@@ -69,25 +69,25 @@ test("the engine scan finds each owner path's codes", () => {
 });
 
 test("a code without its own sentence shows the plain fallback and the code name, never alone", () => {
-  assert.equal(api.plainError("made_up_code"), `${FALLBACK} (code: made_up_code)`);
-  assert.equal(api.plainError("raw text <b>"), `${FALLBACK} (code: unknown)`);
+  assert.equal(api.plainError("made_up_code"), `${FALLBACK} (made_up_code)`);
+  assert.equal(api.plainError("raw text <b>"), `${FALLBACK} (unknown)`);
   assert.equal(api.plainError("engine_unreachable"), "CrazyAgent's engine isn't running.");
-  assert.equal(projects.failureCopy("made_up_code"), `${FALLBACK} (code: made_up_code)`);
-  assert.equal(client.errorMessage({ code: "made_up_code" }), "The owner request failed. Refresh before continuing. (code: made_up_code)");
-  assert.equal(updateMessage("something_new"), "Something went wrong with the update. Try again. (code: something_new)");
-  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again. (code: made_up_code)");
+  assert.equal(projects.failureCopy("made_up_code"), `${FALLBACK} (made_up_code)`);
+  assert.equal(client.errorMessage({ code: "made_up_code" }), "The owner request failed. Refresh before continuing. (made_up_code)");
+  assert.equal(updateMessage("something_new"), "Something went wrong with the update. Try again. (something_new)");
+  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again. (made_up_code)");
 });
 
 test("a bridge failure keeps its own sentence and names the engine code behind it", () => {
   const failed = api.classifyFailure({ code: "owner_read_failed", cause: "project_missing" });
   assert.equal(failed.code, "owner_read_failed");
   assert.equal(failed.cause, "project_missing");
-  assert.equal(failed.message, `${api.plainError("owner_read_failed")} (code: project_missing)`);
-  assert.equal(projects.failureCopy(failed), `${projects.failureCopy("owner_read_failed")} (code: project_missing)`);
-  assert.equal(api.classifyFailure({ code: "owner_read_failed", cause: "C:\\Users\\mira" }).message, `${api.plainError("owner_read_failed")} (code: unknown)`);
+  assert.equal(failed.message, `${api.plainError("owner_read_failed")} (project_missing)`);
+  assert.equal(projects.failureCopy(failed), `${projects.failureCopy("owner_read_failed")} (project_missing)`);
+  assert.equal(api.classifyFailure({ code: "owner_read_failed", cause: "C:\\Users\\mira" }).message, `${api.plainError("owner_read_failed")} (unknown)`);
   assert.equal(api.classifyFailure({ code: "owner_read_failed", cause: "owner_read_failed" }).message, api.plainError("owner_read_failed"));
-  assert.equal(api.classifyFailure("some raw panic text with /Users/secret/path").message, `${FALLBACK} (code: unknown)`);
-  assert.equal(api.classifyFailure({ code: "made_up_code", cause: "engine_detail" }).message, `${FALLBACK} (code: engine_detail)`);
+  assert.equal(api.classifyFailure("some raw panic text with /Users/secret/path").message, `${FALLBACK} (unknown)`);
+  assert.equal(api.classifyFailure({ code: "made_up_code", cause: "engine_detail" }).message, `${FALLBACK} (engine_detail)`);
 });
 
 test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
@@ -95,15 +95,15 @@ test("every sign-in failure the engine records reads as a sentence, and an unkno
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
   for (const code of facts) {
     const { text } = signInFailure(code, "chatgpt");
-    assert.doesNotMatch(text, /\(code: |_/, `${code}: ${text}`);
+    assert.doesNotMatch(text, / \([a-z0-9_]+\)$|_/, `${code}: ${text}`);
   }
-  assert.equal(signInFailure("native_auth_made_up", "claude").text, "Sign-in didn't finish. Try again. (code: native_auth_made_up)");
+  assert.equal(signInFailure("native_auth_made_up", "claude").text, "Sign-in didn't finish. Try again. (native_auth_made_up)");
 });
 
 test("every refusal the engine can give an owner change reads as a sentence or names its code", () => {
   for (const code of refusals) {
     const line = projects.failureCopy(code);
-    assert.ok(line === `${FALLBACK} (code: ${code})` || !line.includes(FALLBACK), `${code}: ${line}`);
+    assert.ok(line === `${FALLBACK} (${code})` || !line.includes(FALLBACK), `${code}: ${line}`);
     assert.notEqual(line, FALLBACK, code);
   }
 });
@@ -112,32 +112,33 @@ test("every refusal of a master send reads as Couldn't send plus a sentence or t
   for (const code of sendCodes) {
     const line = research.sendFailureLine(code);
     assert.notEqual(line, "Couldn't send. Try again.", code);
-    assert.ok(line === `Couldn't send. Try again. (code: ${code})` || line === `Couldn't send. ${projects.failureCopy(code)}`, `${code}: ${line}`);
+    assert.ok(line === `Couldn't send. Try again. (${code})` || line === `Couldn't send. ${projects.failureCopy(code)}`, `${code}: ${line}`);
   }
 });
 
-test("every master stop reason has a sentence and a turn names the engine code it stopped on", () => {
-  const turn = (phase, reason, reason_code) => ({ id: "t", ordinal: 1, phase, reason, reply: null, ...(reason_code ? { reason_code } : {}) });
+test("every master stop reads as a sentence that ends with the code the turn stopped on", () => {
+  const turn = (phase, reason, cause) => ({ id: "t", ordinal: 1, phase, reason, reply: null, ...(cause ? { cause } : {}) });
   for (const reason of reasons) {
     for (const phase of ["failed", "blocked"]) {
       const line = research.turnLine(turn(phase, reason));
-      assert.doesNotMatch(line, /_/, `${phase} ${reason}: ${line}`);
-      if (reason.includes("_")) assert.doesNotMatch(line, new RegExp(reason.replaceAll("_", " ")), `${phase} ${reason} reads as its enum name: ${line}`);
-      assert.match(line, /^[A-Z].*(\.|\(code: unknown\))$/, line);
+      const sentence = line.slice(0, line.lastIndexOf(" ("));
+      assert.doesNotMatch(sentence, /_/, `${phase} ${reason}: ${line}`);
+      if (reason.includes("_")) assert.doesNotMatch(sentence, new RegExp(reason.replaceAll("_", " ")), `${phase} ${reason} reads as its enum name: ${line}`);
+      assert.match(line, /^[A-Z].*\. \([a-z0-9_]+\)$/, line);
+      assert.ok(line.endsWith(` (${reason === "unknown" ? phase : reason})`), line);
     }
   }
   for (const code of turnCodes) {
-    assert.match(research.turnLine(turn("failed", "unknown", code)), new RegExp(`^The master stopped.* \\(code: ${code}\\)$`), code);
+    assert.match(research.turnLine(turn("failed", "unknown", code)), new RegExp(`^The master stopped.*\\. \\(${code}\\)$`), code);
   }
-  assert.equal(research.turnLine(turn("failed", "unknown")), "The master stopped for a reason this window doesn't know. (code: unknown)");
-  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped for a reason this window doesn't know. (code: provider_error)");
+  assert.equal(research.turnLine(turn("failed", "unknown")), "The master stopped. (failed)");
   assert.equal(research.turnLine(turn("blocked", "readiness_unknown", "master_authentication_unknown")),
-    "Not signed in. Sign in again in Settings, Accounts, then send again. (code: master_authentication_unknown)");
+    "Not signed in. Sign in again in Settings, Accounts, then send again. (master_authentication_unknown)");
 });
 
 test("a team agent or task that closed on a launch code shows the engine line with its code", () => {
-  const closed = "The agent process closed (code: launch_protocol_failed)";
-  const stopped = "The sub-agent stopped unexpectedly (code: launch_input_closed)";
+  const closed = "The agent process closed. (launch_protocol_failed)";
+  const stopped = "The sub-agent stopped unexpectedly. (launch_input_closed)";
   const agent = { id: 2, role: "sub", harness: "codex", tools: false, account: null, worktree: null, status: "failed", status_label: "Failed",
     task: null, turns: 0, problem: closed, process_group: null, created_ms: 1, heartbeat_ms: 1, stopped_ms: 2 };
   const task = { id: 7, source: "master", harness: "codex", tools: false, prompt: "Write the page", status: "failed", status_label: "Failed", agent: 2,

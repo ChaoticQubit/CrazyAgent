@@ -272,34 +272,43 @@ export function masterStatus(session: MasterState["session"], turns: MasterTurn[
   return "Stopped";
 }
 
-const STOP_LINES: Record<string, string> = {
-  readiness_unknown: "Not signed in. Sign in again in Settings, Accounts, then send again.",
-  readiness_stale: "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.",
-  connection_changed: "Settings changed since the master started. End the conversation, then send again.",
-  repository_missing: "The master couldn't start: this project has no repository yet.",
-  invalid_authentication: "The master stopped: the provider refused the account's sign-in. Sign in again in Settings, Accounts, then send again.",
-  quota_unknown: "The master stopped: the account's usage limit couldn't be read. Send again shortly.",
-  quota_exhausted: "The master stopped: the account reached its usage limit. Send again later, or add another account to the pool.",
-  rate_limited: "The master stopped: the provider is limiting requests. Send again in a moment.",
-  cooldown_active: "The master stopped: the account is resting after errors. Send again in a moment.",
-  scope_revoked: "The master stopped: its access to this project was withdrawn. End the conversation, then send again.",
-  capacity_unavailable: "The master stopped: another reply is still running. Wait for it, then send again.",
-  budget_exhausted: "The master stopped: it used up the time and resources allowed for this message. Send again.",
-  profile_busy: "The master stopped: the account is busy signing in or out. Send again in a moment.",
-  approval_required: "The master stopped: it needs an approval this window can't give yet.",
-  runtime_unavailable: "The master stopped: its model couldn't run on this computer. Send again.",
-  capture_incomplete: "The master stopped: its reply came back incomplete. Send again.",
-  output_limit: "The master stopped: its reply was longer than allowed.",
-  unsupported_capability: "The master stopped: this account can't run the master. Choose another pool.",
-  cancelled: "The master stopped: the reply was cancelled.",
-};
+const STOPPED_WHY = new Map<string, string>([
+  ["readiness_unknown", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["readiness_stale", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["connection_changed", "its settings changed while it was open"],
+  ["invalid_authentication", "the sign-in was rejected. Sign in again in Settings, Accounts"],
+  ["quota_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["quota_unknown", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["budget_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["rate_limited", "the account is resting after too many requests"],
+  ["cooldown_active", "the account is resting after too many requests"],
+  ["capacity_unavailable", "another turn is still running"],
+  ["profile_busy", "its account is busy signing in or out"],
+  ["scope_revoked", "it no longer has access to this project"],
+  ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
+  ["capture_incomplete", "its reply was cut off"],
+  ["output_limit", "its reply was longer than the limit"],
+  ["unsupported_capability", "it cannot lead a project yet"],
+  ["cancelled", "you stopped this turn"],
+]);
 
-const UNKNOWN_STOP = "The master stopped for a reason this window doesn't know.";
+/** The code a stopped master turn shows: the cause the engine stored, else its reason,
+ * else its phase. Input: the turn. Output: the code, never a bare "unknown". */
+export function stopCode(turn: MasterTurn): string {
+  if (turn.cause) return turn.cause;
+  return turn.reason && turn.reason !== "unknown" ? turn.reason : turn.phase;
+}
 
-/** One plain line for a master turn that has no reply yet or ended without one. A stop names
- * the engine code it came from, and a reason this window has no sentence for is named too.
- * Input: the turn. Output: the line. */
+/** One plain line for a master turn that has no reply yet or ended without one; a stopped
+ * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
+  const code = ` (${stopCode(turn)})`;
+  if (turn.phase === "blocked" && (turn.accounts ?? []).length > 0) return `No account in this master's pool can run it now.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "connection_changed") return `Settings changed since the master started. End the conversation, then send again.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return `The master couldn't start: this project has no repository yet.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_config_refused") return `The master couldn't start: ${turn.detail ?? "a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again."}${code}`;
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking...";
@@ -307,12 +316,33 @@ export function turnLine(turn: MasterTurn): string {
     case "succeeded": return "Replied";
     case "cancelled": return "Stopped";
     case "failed": case "blocked": case "uncertain": {
-      if (turn.reason === null) return "The master stopped.";
-      const line = Object.hasOwn(STOP_LINES, turn.reason) ? STOP_LINES[turn.reason] : undefined;
-      if (line === undefined) return withCode(UNKNOWN_STOP, turn.reason_code ?? turn.reason);
-      return turn.reason_code === undefined ? line : withCode(line, turn.reason_code);
+      const why = turn.reason ? STOPPED_WHY.get(turn.reason) : undefined;
+      return `The master stopped${why ? `: ${why}` : ""}.${code}`;
     }
   }
+}
+
+const accountReasons: Record<string, string> = {
+  readiness_unknown: "not signed in",
+  readiness_stale: "sign-in is out of date",
+  invalid_authentication: "sign-in was rejected",
+  quota_exhausted: "usage limit reached",
+  rate_limited: "rate limited, paused for a few minutes",
+  cooldown_active: "paused for a few minutes",
+  profile_busy: "busy with a sign-in or sign-out",
+  scope_revoked: "not allowed by settings",
+  connection_changed: "settings changed",
+};
+
+/** The account a master turn runs on or, for a turn no account could run, each account
+ * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
+ * lines, empty when the turn has not reached an account yet. */
+export function accountLines(turn: MasterTurn): string[] {
+  const account = turn.attempt?.connection.account_ref;
+  if (account) return [`On account ${account}`];
+  return (turn.accounts ?? []).map((item) => item.reason === null
+    ? `${item.account_ref} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
+    : `${item.account_ref}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
 /** The Thinking line for a master turn, with the time since this window sent the message.

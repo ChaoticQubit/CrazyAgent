@@ -12,8 +12,8 @@ use crate::terminal::{AgentId, TerminalFrame};
 /// A pool change asked for in Settings, Pools or a Project. The engine side
 /// builds the exact pool records, keeping an existing pool's projects and roles.
 /// Input: built by the pool list, the pool editor and the Project screen.
-/// Output: model access edits; `Assign` moves the project out of every other
-/// pool before adding it to the chosen one.
+/// Output: one model access edit; `Assign` gives the project exactly the chosen
+/// pool, or none, and `Remove` also takes the pool off every project using it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
@@ -31,7 +31,7 @@ pub enum PoolChange {
         id: CredentialRef,
     },
     Assign {
-        pool: CredentialRef,
+        pool: Option<CredentialRef>,
         project: ProjectId,
     },
 }

@@ -353,6 +353,50 @@ fn master_lease_primitive_materializes_committed_source_without_task_authority()
 }
 
 #[test]
+fn a_master_lease_whose_worktree_gains_a_config_worktree_is_no_longer_ready() {
+    let mut case = Case::new();
+    let repository = case.repository.to_str().unwrap();
+    let tx = case.db.transaction().unwrap();
+    assert_eq!(
+        worktrees::admit(&tx, &case.session.project_id, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        worktrees::reserve_master_bootstrap(
+            &tx,
+            case.root.path(),
+            &case.session.project_id,
+            &case.session.bootstrap_task_id,
+            &case.session.session_id,
+            repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    worktrees::provision(&case.db, &case.session.bootstrap_task_id, repository).unwrap();
+    let ready = leases(&case.db, &case.session);
+    assert_eq!(ready[0].state, LeaseState::Ready);
+    let pointer = std::fs::read_to_string(Path::new(&ready[0].path).join(".git")).unwrap();
+    let metadata = PathBuf::from(
+        pointer
+            .strip_prefix("gitdir: ")
+            .and_then(|path| path.strip_suffix('\n'))
+            .unwrap(),
+    );
+    assert!(metadata.starts_with(case.repository.join(".git/worktrees")));
+    std::fs::write(
+        metadata.join("config.worktree"),
+        b"[core]\n\thooksPath = /private/tmp\n",
+    )
+    .unwrap();
+    assert_eq!(
+        leases(&case.db, &case.session)[0].state,
+        LeaseState::Uncertain
+    );
+}
+
+#[test]
 fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
     let mut case = Case::new();
     let fact = case.starting_auth();

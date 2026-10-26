@@ -113,7 +113,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
     };
     MasterRuntimeObservation::Failed {
         reason,
-        code: Some(error.0.clone()),
+        cause: error.0.clone(),
     }
 }
 

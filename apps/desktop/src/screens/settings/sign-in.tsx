@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { knownError, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
-import { cancelNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
+import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
@@ -76,6 +76,31 @@ export async function cancelSignIn(accountId: string): Promise<Result<void>> {
     const code = nativeAuthFailureCode(failure);
     const message = cancelError(code);
     return message === undefined ? { kind: "ok", value: undefined } : { kind: "error", code, message };
+  }
+}
+
+/** Signs one subscription account out: reads its sign-in record, asks the engine to log the
+ * harness out and waits up to 10 s for the engine to see it signed out. Input: the account
+ * id. Output: ok once signed out, otherwise the refusal in plain words, such as
+ * `native_profile_in_use` while an agent uses the account. */
+export async function signOut(accountId: string): Promise<Result<void>> {
+  const record = await signInRecord(accountId);
+  if (record.kind !== "ok") return record;
+  try {
+    let view = await logoutNativeAuth(record.value.ticket);
+    for (let tries = 0; ACTIVE_PHASES.includes(view.phase); tries += 1) {
+      if (tries === SETTLE_TRIES) break;
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      const again = await signInRecord(accountId);
+      if (again.kind !== "ok") return again;
+      view = await readNativeAuth(again.value.ticket);
+    }
+    if (view.phase === "unauthenticated_observed") return { kind: "ok", value: undefined };
+    const code = view.code ?? "native_auth_outcome_unknown_read_same_operation";
+    return { kind: "error", code, message: plainError(code) };
+  } catch (failure) {
+    const code = nativeAuthFailureCode(failure);
+    return { kind: "error", code, message: plainError(code) };
   }
 }
 

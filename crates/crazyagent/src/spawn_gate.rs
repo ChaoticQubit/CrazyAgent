@@ -301,5 +301,33 @@ fn nonblocking(listener: &std::net::TcpListener) -> io::Result<bool> {
     Ok(flags.contains(rustix::fs::OFlags::NONBLOCK))
 }
 
+/// Starts short real children through the gate on another thread until the returned flag
+/// is set, the way the engine keeps starting agents while other work runs.
+/// Input: none. Output: the stop flag and the thread, which returns how many it started.
+#[cfg(all(test, unix))]
+pub(crate) fn start_children_until_stopped() -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<u64>,
+) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let starter = std::thread::spawn(move || {
+        let mut started = 0_u64;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let exit = status(
+                Command::new("/usr/bin/true")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .unwrap();
+            assert!(exit.success());
+            started += 1;
+        }
+        started
+    });
+    (stop, starter)
+}
+
 #[cfg(test)]
 mod tests;

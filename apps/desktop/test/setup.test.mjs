@@ -36,7 +36,7 @@ const client = await import("../src/engine-client.ts");
 test("setup and default-pack refusals read as plain sentences", () => {
   assert.equal(client.errorMessage({ code: "setup_busy" }), "Setup is already running.");
   for (const code of ["setup_store_unavailable", "setup_outcome_unknown", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
-    assert.doesNotMatch(client.errorMessage({ code }), /\(code: /, code);
+    assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });
 
@@ -72,6 +72,6 @@ test("every setup command the client calls is a desktop command the bridge maps 
   assert.ok(bridge.includes("fn rejection_code(code: &str) -> String {\n    crazyagent::protocol::plain_code(code).to_owned()\n}"), "owner receipts keep setup codes");
   for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
     assert.ok(setupCodes[1].includes(`"${code}"`), code);
-    assert.doesNotMatch(client.errorMessage({ code }), /\(code: /, code);
+    assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });

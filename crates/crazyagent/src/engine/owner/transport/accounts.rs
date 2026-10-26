@@ -747,7 +747,9 @@ fn base_status(root: &Root, listed: &Listed) -> Result<AccountStatus, EngineErro
     Ok(match &listed.connection.auth {
         ModelAuthentication::NativeManaged { .. } | ModelAuthentication::Oauth { .. } => {
             match listed.sign_in {
-                Some(NativeAuthPhase::AuthenticatedObserved) => AccountStatus::SignedIn,
+                Some(NativeAuthPhase::AuthenticatedObserved) if listed.launchable => {
+                    AccountStatus::SignedIn
+                }
                 Some(
                     NativeAuthPhase::Starting
                     | NativeAuthPhase::AwaitingOwner

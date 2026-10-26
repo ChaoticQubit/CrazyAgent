@@ -6,6 +6,8 @@ pub(crate) mod claude;
 #[cfg(all(test, unix))]
 #[path = "native_auth_channel/rcli_registry_tests.rs"]
 mod rcli_registry_tests;
+#[path = "native_auth_channel/reproof.rs"]
+mod reproof;
 #[cfg(unix)]
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::bootstrap::runner_binding;

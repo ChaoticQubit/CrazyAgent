@@ -585,14 +585,16 @@ impl ResearchRunner {
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
-        let home = match &lease {
-            Some(lease) => lease_home(lease)?,
-            None => {
-                private_directory(&agent)?;
-                let home = agent.join("home");
-                private_directory(&home)?;
-                home
-            }
+        private_directory(&agent)?;
+        let home = agent.join("home");
+        private_directory(&home)?;
+        let credential = match &lease {
+            Some(lease) => Some(
+                lease
+                    .hand_to_agent(&home, self.limits.wall_time)
+                    .map_err(|problem| RunError::Account(problem.0))?,
+            ),
+            None => None,
         };
         let harness = account.harness();
         let installed = context
@@ -677,6 +679,7 @@ impl ResearchRunner {
             let _ = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            drop(credential);
             drop(lease);
             return Ok((ending?, group, output));
         }
@@ -733,6 +736,7 @@ impl ResearchRunner {
         let ending = self.supervise(jobs, job, &mut running, &counted)?;
         drop(running);
         drop(installed);
+        drop(credential);
         drop(lease);
         Ok((ending, group, output))
     }
@@ -824,7 +828,10 @@ impl ResearchRunner {
     ) -> Result<Ending, RunError> {
         let mut last = String::new();
         let mut counted: u64 = 0;
-        if session.send(prompt).is_err() {
+        if let Err(problem) = session.send_or_cancel(prompt, &self.stopping) {
+            if problem.0 == "launch_cancelled" {
+                return Ok(Ending::Interrupted);
+            }
             return Ok(Ending::Exited(false));
         }
         let mut beat = Instant::now();
@@ -984,13 +991,15 @@ impl ResearchRunner {
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
         private_directory(&agent)?;
-        let home = match &lease {
-            Some(lease) => lease_home(lease)?,
-            None => {
-                let home = agent.join("home");
-                private_directory(&home)?;
-                home
-            }
+        let home = agent.join("home");
+        private_directory(&home)?;
+        let credential = match &lease {
+            Some(lease) => Some(
+                lease
+                    .hand_to_agent(&home, run.wall_time)
+                    .map_err(|problem| RunError::Account(problem.0))?,
+            ),
+            None => None,
         };
         let work = agent.join("work");
         private_directory(&work)?;
@@ -1093,6 +1102,7 @@ impl ResearchRunner {
         for handle in drains {
             let _ = handle.join();
         }
+        drop(credential);
         drop(lease);
         if exited_failing {
             return Ok(ReadOnlyEnding::Failed(agent_failure(
@@ -1142,20 +1152,6 @@ fn valid_run_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-/// The agent home a managed launch runs in: the held lease's profile path,
-/// which is a configured profile folder when the owner set one and the
-/// engine-owned `native-profiles/<key>/home` otherwise. Takes the lease.
-/// Returns the canonical home, or an error once the lease no longer verifies.
-fn lease_home(lease: &NativeProfileUse) -> Result<PathBuf, RunError> {
-    let home = lease
-        .profile_path()
-        .map_err(|problem| RunError::Account(problem.0))?;
-    if !home.is_absolute() || home.canonicalize()? != home {
-        return Err(RunError::Invalid("managed home must be canonical".into()));
-    }
-    Ok(home)
 }
 
 /// Lists the folders an agent's sandbox must let it read beyond its home:
@@ -2335,7 +2331,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         for lease in &leases {
-            assert_eq!(lease_home(lease).unwrap(), default_home);
+            assert_eq!(lease.profile_path().unwrap(), default_home);
         }
         let mut sign_in =
             NativeProfileCustody::capture(&root.database, &fs::metadata(&root.database).unwrap())
@@ -2439,8 +2435,11 @@ mod tests {
         let lease = custody
             .acquire_configured_rcli_use(&host, &binding, &profile, &operation, 1)
             .unwrap();
-        assert_eq!(lease_home(&lease).unwrap(), home);
-        assert_ne!(lease_home(&lease).unwrap(), custody.profile_home(&profile));
+        assert_eq!(lease.profile_path().unwrap(), home);
+        assert_ne!(
+            lease.profile_path().unwrap(),
+            custody.profile_home(&profile)
+        );
         drop(lease);
     }
 

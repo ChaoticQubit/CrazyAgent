@@ -85,11 +85,11 @@ fn private_file(path: &Path, bytes: &[u8]) {
     assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o600);
 }
 
-fn connection() -> ModelConnection {
+fn connection_for(harness: &str) -> ModelConnection {
     ModelConnection {
         id: reference("unit-connection"),
         provider: reference("unit-provider"),
-        harness: reference("codex"),
+        harness: reference(harness),
         protocol: reference("native"),
         account_ref: reference("unit-account"),
         endpoint: ModelEndpoint::Native {},
@@ -124,6 +124,10 @@ fn purpose_name(value: &NativeProfileUsePurpose) -> &'static str {
 
 impl UseCase {
     fn new() -> Self {
+        Self::with_harness("codex")
+    }
+
+    fn with_harness(harness: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-pu-unit-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -143,7 +147,7 @@ impl UseCase {
             db_instance: "a".repeat(64),
             engine_epoch: "b".repeat(64),
         };
-        let connection = connection();
+        let connection = connection_for(harness);
         let (custody_id, key) = custody.prepare(&host, &connection).unwrap();
         assert_eq!(key, digest(b"unit-profile"));
         assert_eq!(custody_id.len(), 64);
@@ -1076,3 +1080,5 @@ fn contradictory_epoch_guard_assembly_trips_a_real_internal_assertion() {
     let guard = case.acquire();
     assert!(case.revalidate(&guard).is_ok());
 }
+
+mod agent_copy_tests;

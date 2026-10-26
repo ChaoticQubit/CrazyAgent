@@ -343,14 +343,6 @@ async fn desktop_account_actions_cancel_and_delete_on_the_real_engine() -> TestR
         .await
         .unwrap();
     assert_eq!(receipt.outcome, ActionOutcome::Applied);
-    assert_eq!(
-        bridge
-            .remove_account(pooled.id.as_str())
-            .await
-            .unwrap_err()
-            .code,
-        "account_in_pool"
-    );
 
     for account in [&first, &second] {
         bridge.remove_account(account.id.as_str()).await.unwrap();
@@ -362,6 +354,24 @@ async fn desktop_account_actions_cancel_and_delete_on_the_real_engine() -> TestR
             .collect::<Vec<_>>(),
         vec![pooled.id.clone()],
         "both selected accounts are gone and the pooled one stays"
+    );
+    bridge.remove_account(pooled.id.as_str()).await.unwrap();
+    assert!(
+        bridge
+            .list_accounts(None, 200)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty()
+    );
+    let pools = bridge
+        .model_access_page(ModelAccessCollection::Pools, false)
+        .await
+        .unwrap();
+    assert!(
+        pools.items.is_empty(),
+        "the pool its only account left is deleted with it: {:?}",
+        pools.items
     );
 
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;

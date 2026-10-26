@@ -14,19 +14,20 @@ test("project failures use project copy first, then the app's shared copy", () =
 test("failure copy is plain language and falls back for unknown codes", () => {
   assert.equal(api.failureCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.failureCopy("document_not_a_regular_file"), "Can't add a folder or a shortcut. Choose the original file.");
-  assert.equal(api.failureCopy("made_up_code"), "Something went wrong. Try again. (code: made_up_code)");
+  assert.equal(api.failureCopy("made_up_code"), "Something went wrong. Try again. (made_up_code)");
   for (const code of ["owner_read_failed", "team_agent_range_invalid", "document_type_not_allowed", "project_folder_exists"]) {
     assert.doesNotMatch(api.failureCopy(code), /_|—/);
   }
 });
 
-test("assigning a pool adds the project and master role once and keeps everything else", () => {
-  const pool = { id: "main", members: ["a", "b"], projects: ["other"], roles: ["reviewer"], fallback_allowed: false, provider_quota_policy: "strict" };
-  const assigned = api.assignedPool(pool, "p-1");
-  assert.deepEqual(assigned, { ...pool, projects: ["other", "p-1"], roles: ["reviewer", "project_leader"] });
-  assert.deepEqual(pool.projects, ["other"]);
-  assert.deepEqual(api.assignedPool(assigned, "p-1"), assigned);
-  assert.throws(() => api.assignedPool({ ...pool, projects: Array.from({ length: 64 }, (_, i) => `p${i}`) }, "new"), /64/);
+test("a project has its pool only when exactly the chosen pool lists it, and no pool when none does", () => {
+  const pool = (id, projects) => ({ id, members: ["a"], projects, roles: ["project_leader"], fallback_allowed: false });
+  assert.equal(api.projectPoolIs([pool("main", ["p-1"]), pool("spare", ["p-2"])], "p-1", "main"), true);
+  assert.equal(api.projectPoolIs([pool("main", ["p-1"]), pool("spare", ["p-1"])], "p-1", "main"), false);
+  assert.equal(api.projectPoolIs([pool("main", ["p-2"])], "p-1", "main"), false);
+  assert.equal(api.projectPoolIs([pool("main", ["p-2"])], "p-1", null), true);
+  assert.equal(api.projectPoolIs([pool("main", ["p-1"])], "p-1", null), false);
+  assert.equal(api.failureCopy("master_open_unavailable"), "Pick a pool to start. Choose one in this project's Settings, Pool.");
 });
 
 test("a receipt is applied only when the engine recorded it without rejection", () => {

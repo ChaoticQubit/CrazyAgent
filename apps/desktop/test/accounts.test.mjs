@@ -9,7 +9,7 @@ const { SignInPanel, signInStage, signInFailure, signedInLine, signInRunning } =
 const { methodOptions, providerTiles, defaultAccountName, urlError, nameError, addedLine, TILE_LINES, ProviderTiles, MethodMenu, KeyOrUrlForm } =
   await import("../src/screens/settings/add-account.tsx");
 const { SessionContext, useSession } = await import("../src/state.ts");
-const { removeBody, supportDetails } = await import("../src/screens/settings/account-drawer.tsx");
+const { poolEffect, supportDetails } = await import("../src/screens/settings/account-drawer.tsx");
 const { AccountsView, filterAccounts, accountCount } = await import("../src/screens/settings/accounts.tsx");
 
 const field = (url, key, model) => ({ url, key, model });
@@ -160,7 +160,7 @@ test("sign-in stages come from real reducer states, never from a reply the reduc
   const expired = answered({ phase: "unauthenticated_observed", challenge: null, code: "native_auth_sign_in_expired" });
   assert.deepEqual(signInStage(expired, "chatgpt"), { kind: "failed", text: "This code expired.", hint: "expired" });
   assert.deepEqual(signInStage(answered({ phase: "unavailable", challenge: null, code: null }), "claude").hint, "missing");
-  assert.deepEqual(signInFailure("native_auth_some_new_code", "chatgpt"), { text: "Sign-in didn't finish. Try again. (code: native_auth_some_new_code)", hint: "retry" });
+  assert.deepEqual(signInFailure("native_auth_some_new_code", "chatgpt"), { text: "Sign-in didn't finish. Try again. (native_auth_some_new_code)", hint: "retry" });
   const closing = "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.";
   assert.deepEqual(signInStage(answered({ phase: "uncertain", challenge: null, code: "native_auth_recovery_required" }), "claude"),
     { kind: "failed", text: closing, hint: "check" });
@@ -262,10 +262,12 @@ test("failure panels name the fix: a new code, a key instead of a missing harnes
   assert.match(panel(answered({ phase: "authenticated_observed", challenge: null, account: null })), /Signed in\./);
 });
 
-test("account drawer copy: delete names the pools that still use it, support details carry no ids or keys", () => {
-  assert.equal(removeBody([]), "It isn't in any pool.");
-  assert.equal(removeBody(["Main"]), "It is in Main. Remove it from that pool first.");
-  assert.equal(removeBody(["Main", "Spare", "Night"]), "It is in Main, Spare and Night. Remove it from those pools first.");
+test("account drawer copy: delete names the pools it leaves, support details carry no ids or keys", () => {
+  const holding = (name, ids) => ({ id: `pool-${name}`, name, summary: "", members: ids.map((id) => ({ id, kind: "claude", provider: "claude", status: "signed_in", status_label: "Signed in" })), project_count: 1 });
+  assert.equal(poolEffect(["a"], [holding("Main", ["b"])]), undefined);
+  assert.equal(poolEffect(["a"], [holding("Main", ["a", "b"])]), "It leaves pool Main.");
+  assert.equal(poolEffect(["a"], [holding("Main", ["a", "b"]), holding("Spare", ["a"]), holding("Night", ["a", "c"])]),
+    "It leaves pools Main, Spare and Night. Spare has no other account, so it is deleted too and its projects have no pool.");
   const details = supportDetails(account({ method: "api_key", method_label: "Use an API key", model: "gpt-5", status: "key_saved", status_label: "Key saved" }));
   assert.equal(details, "Account: ChatGPT 1\nProvider: ChatGPT / Codex\nSign-in method: Use an API key\nStatus: Key saved\nModel: gpt-5");
   assert.doesNotMatch(details, /chatgpt-account-1/);

@@ -1063,6 +1063,10 @@ impl EngineService {
     }
 
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), EngineError> {
+        let reproof = self
+            .owner_runtime
+            .as_ref()
+            .map(OwnerRuntimeHandle::reprove_in_background);
         let result = if *shutdown.borrow() {
             Ok(())
         } else {
@@ -1075,6 +1079,10 @@ impl EngineService {
                 }
             }
         };
+        if let Some(reproof) = reproof {
+            reproof.abort();
+            let _ = reproof.await;
+        }
         combine(result, self.shutdown().await)
     }
 

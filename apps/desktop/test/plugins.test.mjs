@@ -40,7 +40,7 @@ test("skill and MCP server refusals read as plain sentences", () => {
   assert.equal(client.errorMessage({ code: "server_command_not_found" }), "Can't start: command not found.");
   assert.equal(client.errorMessage({ code: "server_changed" }), "This server changed. Review it again before approving.");
   for (const code of ["skill_name_taken", "skill_link_outside", "server_url_invalid", "server_secret_invalid", "server_secret_duplicate", "plugin_switch_global_only", "plugins_failed"]) {
-    assert.doesNotMatch(client.errorMessage({ code }), /\(code: /, code);
+    assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });
 

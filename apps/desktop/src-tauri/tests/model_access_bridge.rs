@@ -98,6 +98,7 @@ impl Harness {
             ModelAccessEdit::RemoveConnectedAccount { id } => {
                 (ModelAccessCollection::Connections, Some(id.as_str()))
             }
+            ModelAccessEdit::AssignProjectPool { .. } => (ModelAccessCollection::Pools, None),
         };
         let ticket = if let Some(id) = id {
             self.bridge
@@ -213,19 +214,6 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
         {
             return Err(format!("real dependency rejection required: {rejected:?}").into());
         }
-        let in_use = h
-            .submit(
-                RemovePool {
-                    id: reference("pool"),
-                },
-                6,
-            )
-            .await?;
-        if in_use.outcome != ActionOutcome::Rejected
-            || in_use.rejection.as_deref() != Some("pool_in_use")
-        {
-            return Err(format!("an assigned pool must not be removed: {in_use:?}").into());
-        }
         let mut pool = pool;
         pool.roles = vec![reference("reviewer")];
         pool.projects = vec![];
@@ -281,6 +269,111 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
             .await?;
         if !page.items.is_empty() || page.revision != "8" {
             return Err("eight actual changes required".into());
+        }
+        Ok(())
+    }
+    .await;
+    h.close().await;
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn desktop_project_pool_moves_to_none_and_back_and_a_used_pool_deletes() {
+    use ModelAccessEdit::*;
+    let mut h = Harness::start(true).await.unwrap();
+    let result: TestResult<_> = async {
+        applied(
+            &h.submit(
+                AddAccount {
+                    account_ref: reference("account"),
+                },
+                1,
+            )
+            .await?,
+        )?;
+        applied(
+            &h.submit(
+                CreateConnection {
+                    connection: connection(),
+                },
+                2,
+            )
+            .await?,
+        )?;
+        let pool = AccountPool {
+            id: reference("pool"),
+            name: None,
+            members: vec![reference("connection")],
+            projects: vec![reference("project")],
+            roles: vec![reference("builder")],
+            fallback_allowed: false,
+            provider_quota_policy: crazyagent::config::ProviderQuotaPolicy::BoundedAttempt,
+        };
+        applied(&h.submit(CreatePool { pool }, 3).await?)?;
+        let pools = |h: &Harness| -> TestResult<Vec<AccountPool>> {
+            Ok(resolve_config(
+                &h.root.path().join("global.toml"),
+                &h.root.path().join("project.toml"),
+            )?
+            .settings
+            .model_access
+            .ok_or("real catalog missing")?
+            .pools)
+        };
+        applied(
+            &h.submit(
+                AssignProjectPool {
+                    project: reference("project"),
+                    pool: None,
+                },
+                4,
+            )
+            .await?,
+        )?;
+        if !pools(&h)?[0].projects.is_empty() {
+            return Err("the project must have no pool after None".into());
+        }
+        applied(
+            &h.submit(
+                AssignProjectPool {
+                    project: reference("project"),
+                    pool: Some(reference("pool")),
+                },
+                5,
+            )
+            .await?,
+        )?;
+        let assigned = pools(&h)?;
+        if assigned[0].projects != [reference("project")]
+            || !assigned[0].roles.contains(&reference("project_leader"))
+        {
+            return Err(format!("the project must be back on its pool: {assigned:?}").into());
+        }
+        let missing = h
+            .submit(
+                AssignProjectPool {
+                    project: reference("project"),
+                    pool: Some(reference("gone")),
+                },
+                6,
+            )
+            .await?;
+        if missing.outcome != ActionOutcome::Rejected
+            || missing.rejection.as_deref() != Some("pool_not_found")
+        {
+            return Err(format!("a missing pool must be named: {missing:?}").into());
+        }
+        applied(
+            &h.submit(
+                RemovePool {
+                    id: reference("pool"),
+                },
+                7,
+            )
+            .await?,
+        )?;
+        if !pools(&h)?.is_empty() {
+            return Err("a used pool must delete in one edit".into());
         }
         Ok(())
     }

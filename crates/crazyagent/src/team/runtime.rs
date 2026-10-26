@@ -501,7 +501,7 @@ impl TeamRuntime {
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
         };
-        let hosted = match self.host(&stored, id, role, launch, None) {
+        let hosted = match self.host(&stored, id, role, launch, &connection, None) {
             Ok(hosted) => hosted,
             Err(problem) => return Ok(Err(problem)),
         };
@@ -1610,7 +1610,7 @@ impl TeamRuntime {
                 params![id, worktree],
             )
             .map_err(error)?;
-        let hosted = match self.host(stored, id, role, &plan.harness, again) {
+        let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
                 self.connection
@@ -1731,13 +1731,8 @@ impl TeamRuntime {
                 let remote = model_remote(&endpoint).map_err(|e| plain(&e))?;
                 (own_home, remote, Some(model.clone()))
             }
-            TeamReach::Managed { profile_ref, model } => {
-                let custody = self.custody.as_ref().map_err(|e| e.0.clone())?;
-                (
-                    custody.profile_home(profile_ref),
-                    SandboxRemote::AnyHost(443),
-                    model.clone(),
-                )
+            TeamReach::Managed { model, .. } => {
+                (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
         let context = self.context(&stored.project_id, id, role, tools)?;
@@ -1849,13 +1844,15 @@ impl TeamRuntime {
 
     /// Records one team agent in the engine's agent register, continuing the register
     /// entry of an agent the owner restarted. Takes the setup, the team agent id, its role,
-    /// launch harness and the restart. Returns the register handle, none without a register.
+    /// launch harness, the account it signs in with and the restart. Returns the register
+    /// handle, none without a register.
     fn host(
         &self,
         stored: &StoredSetup,
         id: i64,
         role: AgentRole,
         harness: &str,
+        account: &CredentialRef,
         again: Option<&HostedRestart>,
     ) -> Result<Option<Hosted>, String> {
         let Some(agents) = &self.agents else {
@@ -1875,6 +1872,7 @@ impl TeamRuntime {
             harness: harness.to_owned(),
             host: TEAM_HOST,
             reference: again.map_or_else(|| id.to_string(), |restart| restart.reference.clone()),
+            account: Some(account.clone()),
         };
         agents
             .host(agent, again.map(|restart| restart.id.as_str()))
@@ -2514,14 +2512,20 @@ fn per_turn(
             return Some("The agent was given a turn without its signed-in account".into());
         };
         let Grant { profile, context } = *grant;
-        if profile.profile_path().ok().as_deref() != Some(home) {
-            let _ = reports.send(Report::Finished {
-                text: String::new(),
-                end: TurnEnd::Closed,
-                cause: None,
-            });
-            return Some("The signed-in account changed".into());
-        }
+        let credential = match profile.hand_to_agent(home, turn_time) {
+            Ok(credential) => credential,
+            Err(problem) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                    cause: Some(problem.0.clone()),
+                });
+                return Some(with_code(
+                    "The signed-in account could not reach the agent",
+                    Some(&problem.0),
+                ));
+            }
+        };
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
@@ -2542,6 +2546,7 @@ fn per_turn(
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let _ = session.stop();
+        drop(credential);
         drop(profile);
         let reusable = matches!(
             end,
@@ -2557,12 +2562,15 @@ fn per_turn(
 
 const PROCESS_CLOSED: &str = "The agent process closed";
 
-/// An owner line that names the plain launch code behind it, so a closed or failed agent is
-/// never opaque. Inputs: the sentence and the launch code, if any. Output: "sentence (code: x)"
-/// with x made plain by `plain_code`, or the sentence alone.
+/// An owner line that names the plain code behind it in the style every window uses, so a
+/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
+/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 fn with_code(sentence: &str, cause: Option<&str>) -> String {
     match cause {
-        Some(code) => format!("{sentence} (code: {})", crate::protocol::plain_code(code)),
+        Some(code) => {
+            let stop = if sentence.ends_with('.') { "" } else { "." };
+            format!("{sentence}{stop} ({})", crate::protocol::plain_code(code))
+        }
         None => sentence.to_owned(),
     }
 }
@@ -2587,7 +2595,10 @@ fn turn(
     turn_time: Duration,
 ) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
-    if let Err(problem) = session.send(prompt) {
+    if let Err(problem) = session.send_or_cancel(prompt, cancel) {
+        if problem.0 == "launch_cancelled" {
+            return (String::new(), TurnEnd::Cancelled, None);
+        }
         return (String::new(), TurnEnd::Closed, Some(problem.0));
     }
     let deadline = Instant::now() + turn_time;
@@ -2820,3 +2831,11 @@ pub fn agents(
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/managed_agent.rs"]
+pub(crate) mod managed_agent;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/dec_090_tests.rs"]
+mod dec_090_tests;

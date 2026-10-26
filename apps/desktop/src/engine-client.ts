@@ -191,12 +191,13 @@ export function retry(): Promise<ActionReceipt> {
 
 const PLAIN_CODE = /^[a-z0-9_]{1,96}$/;
 
-/** Names a failure's code after its sentence, the one rule for failures this window has no
- * sentence of its own for. A code that is not 1 to 96 lowercase letters, digits or
- * underscores shows as `unknown`, so raw error text never appears. Inputs: the sentence and
- * the code. Output: "<sentence> (code: <code>)". */
+/** Names a failure's code after its sentence in the style every window uses. A code that is
+ * not 1 to 96 lowercase letters, digits or underscores shows as `unknown`, so raw error text
+ * never appears. Inputs: the sentence and the code. Output: "<Sentence>. (<code>)", with no
+ * second full stop when the sentence already ends with one. */
 export function withCode(sentence: string, code: string): string {
-  return `${sentence} (code: ${PLAIN_CODE.test(code) ? code : "unknown"})`;
+  const stop = sentence.endsWith(".") ? "" : ".";
+  return `${sentence}${stop} (${PLAIN_CODE.test(code) ? code : "unknown"})`;
 }
 
 export function errorMessage(error: unknown): string {
@@ -214,7 +215,8 @@ export function errorMessage(error: unknown): string {
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
-    pool_in_use: "This pool is used by a project. Remove it from the project first.",
+    pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
+    pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
     owner_profile_name: "Enter your name, up to 100 characters.",
     skill_folder_not_found: "That folder was not found.",
@@ -811,7 +813,7 @@ export interface FolderSize {
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 export interface MappingFacts {
   languages: string[];
@@ -1215,7 +1217,7 @@ export function readAccountProfile(): Promise<AccountProfileView> {
 
 export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };
 
-export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool };
+export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool } | { kind: "assign_project_pool"; project: string; pool: string | null };
 
 export interface ModelAccessBasis {
   ticket: string;
@@ -1450,13 +1452,23 @@ export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
   return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
 }
 
+export interface MasterAccount {
+  account_ref: string;
+  connection: string;
+  harness: string;
+  reason: string | null;
+}
+
 export interface MasterTurn {
   id: string;
   ordinal: number;
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
-  reason_code?: string;
   reply: { text: string } | null;
+  attempt?: { connection: { account_ref: string } } | null;
+  accounts?: MasterAccount[];
+  detail?: string | null;
+  cause?: string | null;
 }
 
 export interface MasterState {

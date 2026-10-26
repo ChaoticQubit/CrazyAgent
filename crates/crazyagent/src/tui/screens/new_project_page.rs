@@ -396,7 +396,7 @@ impl NewProjectPage {
                 creation.assigning = true;
                 ctx.request(Request::EditPool {
                     change: PoolChange::Assign {
-                        pool,
+                        pool: Some(pool),
                         project: creation.submission.project_id.clone(),
                     },
                 });

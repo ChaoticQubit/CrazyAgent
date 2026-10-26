@@ -65,7 +65,7 @@ test("a failed download or bad signature shows the error, changes nothing and of
   assert.match(updateMessage("sidecar_missing"), /command line tool/);
   assert.match(updateMessage("update_too_large"), /Nothing changed/);
   assert.notEqual(updateMessage("update_too_large"), updateMessage("something_new"));
-  assert.equal(updateMessage("something_new"), "Something went wrong with the update. Try again. (code: something_new)");
+  assert.equal(updateMessage("something_new"), "Something went wrong with the update. Try again. (something_new)");
   assert.equal(reduceUpdate(failed, { kind: "install_started" }).kind, "installing");
 });
 

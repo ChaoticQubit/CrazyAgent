@@ -288,10 +288,10 @@ impl OwnerRuntimeHandle {
     }
 
     /// Settles a master turn whose dispatch failed before it ran, so it never stays queued.
-    /// Inputs: the turn's project, session and id, and the dispatch failure.
-    /// Output: the turn as stored: blocked (never admitted) or failed (admitted) with the
-    /// failure's reason and code when it was the session's queued or prepared current turn,
-    /// else unchanged.
+    /// Inputs: the turn's project, session and id, and the dispatch error, which names the
+    /// reason the owner sees. Output: the turn as stored: blocked (never admitted) or failed
+    /// (admitted) with the reason when it was the session's queued or prepared current
+    /// turn, else unchanged.
     async fn fail_master_turn(
         &self,
         project_id: &ProjectId,
@@ -306,7 +306,7 @@ impl OwnerRuntimeHandle {
                 session_id: session_id.clone(),
                 turn_id: turn_id.clone(),
                 reason: reason_for_error(cause),
-                code: Some(cause.0.clone()),
+                cause: cause.0.clone(),
             })
             .await?
         {
@@ -354,6 +354,9 @@ impl OwnerRuntimeHandle {
         ) {
             return Ok(routed);
         }
+        if routed.phase == MasterTurnPhase::Queued {
+            self.reprove_sign_ins(Some(session_id.clone())).await;
+        }
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
             .await?
@@ -389,7 +392,10 @@ impl OwnerRuntimeHandle {
                 let observation = if cleanup_uncertain(&error) {
                     MasterRuntimeObservation::Disconnected
                 } else {
-                    failed(&error)
+                    MasterRuntimeObservation::Failed {
+                        reason: reason_for_error(&error),
+                        cause: error.0.clone(),
+                    }
                 };
                 self.observe_master_turn(&prepared, turn_id, observation)
                     .await?;
@@ -681,15 +687,6 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
 
-/// The failed observation for a master dispatch error: the reason the owner reads and the
-/// engine code it came from. Input: the error. Output: `MasterRuntimeObservation::Failed`.
-fn failed(error: &EngineError) -> MasterRuntimeObservation {
-    MasterRuntimeObservation::Failed {
-        reason: reason_for_error(error),
-        code: Some(error.0.clone()),
-    }
-}
-
 fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
@@ -711,9 +708,12 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
-        "native_profile_lock_unavailable" | "master_runtime_host_unavailable" => {
-            MasterReason::RuntimeUnavailable
+        code if code.starts_with("repository_config_refused:") => {
+            MasterReason::RepositoryConfigRefused
         }
+        "native_profile_lock_unavailable"
+        | "master_runtime_host_unavailable"
+        | "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }
@@ -970,6 +970,10 @@ mod tests {
                 MasterReason::ConnectionChanged,
             ),
             ("gateway_health_unknown", MasterReason::ReadinessUnknown),
+            (
+                "repository_config_refused:core_hookspath",
+                MasterReason::RepositoryConfigRefused,
+            ),
             ("gateway_quota_unknown", MasterReason::QuotaUnknown),
             ("gateway_quota_exhausted", MasterReason::QuotaExhausted),
             ("gateway_rate_limited", MasterReason::RateLimited),

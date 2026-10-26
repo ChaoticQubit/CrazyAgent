@@ -286,6 +286,9 @@ impl NativeBridge {
                 ) | (
                     ModelAccessEdit::CreatePool { .. },
                     ModelAccessCollection::Pools
+                ) | (
+                    ModelAccessEdit::AssignProjectPool { .. },
+                    ModelAccessCollection::Pools
                 )
             ) =>
             {

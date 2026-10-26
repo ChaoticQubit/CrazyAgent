@@ -22,7 +22,7 @@ test("accounts that need no harness profile count as ready; other refusals read 
   assert.equal(api.profileNotNeeded("native_profile_in_use"), false);
   for (const code of ["rcli_private_key_writer_unavailable", "native_profile_in_use", "account_profile_operations_full", "account_profile_outcome_unknown_read_same_request"]) {
     const message = api.plainError(code);
-    assert.doesNotMatch(message, /\(code: /, code);
+    assert.doesNotMatch(message, / \([a-z0-9_]+\)$/, code);
     assert.doesNotMatch(message, /_|rcli|profile/i, code);
   }
 });

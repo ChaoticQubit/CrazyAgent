@@ -63,6 +63,28 @@ impl Fixture {
 }
 
 #[test]
+fn settings_source_access_reopens_at_once_while_other_threads_start_children() {
+    let fixture = Fixture::new(true);
+    let (global, project) = fixture.sources.retained_paths();
+    let Fixture {
+        sources,
+        root: _root,
+        ..
+    } = fixture;
+    drop(sources);
+    let (stop, starter) = crate::spawn_gate::start_children_until_stopped();
+    let mut busy = Vec::new();
+    for round in 0..1000 {
+        if let Err(problem) = SettingsSources::open(&global, &project) {
+            busy.push(format!("round {round}: {}", problem.0));
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(starter.join().unwrap() > 0);
+    assert_eq!(busy, Vec::<String>::new());
+}
+
+#[test]
 fn settings_source_access_retained_paths_preserve_order_and_missing_project() {
     let fixture = Fixture::new(false);
     let (global, project) = fixture.sources.retained_paths();

@@ -91,7 +91,8 @@ export function turnStatus(turn: MasterTurn): string {
     return "Blocked: sign-in is out of date. Sign in again in Settings, then send again";
   if (turn.phase === "blocked" && turn.reason === "connection_changed")
     return "Blocked: settings or the engine changed since the master opened. Close it, open it again, then send again";
-  const reason = turn.reason ? ` (${turn.reason.replaceAll("_", " ")})` : "";
+  const code = turn.cause ?? (turn.reason && turn.reason !== "unknown" ? turn.reason.replaceAll("_", " ") : null);
+  const reason = code ? ` (${code})` : "";
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking";

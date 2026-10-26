@@ -288,14 +288,14 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked.clone())
+        ProjectReply::Assign(Some(picked.clone()))
     );
     screen.open(Tab::Settings);
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked)
+        ProjectReply::Assign(Some(picked))
     );
     screen.pool.as_mut().unwrap().assigned = true;
     let drawn = project_screen(&mut screen, 80, 24, &look);

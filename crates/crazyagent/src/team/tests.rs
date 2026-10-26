@@ -1025,14 +1025,14 @@ fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
     for agent in &cold.agents {
         assert_eq!(
             agent.problem.as_deref(),
-            Some("The agent process closed (code: launch_protocol_failed)"),
+            Some("The agent process closed. (launch_protocol_failed)"),
             "{cold:#?}"
         );
     }
     assert!(
         cold.messages
             .iter()
-            .any(|m| m.text.contains("(code: launch_protocol_failed)")),
+            .any(|m| m.text.contains(". (launch_protocol_failed)")),
         "{cold:#?}"
     );
 }

@@ -29,12 +29,14 @@ mod owner_setup;
 pub mod picker;
 mod plugins;
 pub mod project_setup;
+mod queue;
 mod team;
 pub mod terminal;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
 pub use native_auth::NativeAuthView;
+pub use queue::BridgeQueue;
 
 const PAGE_SIZE: u8 = 16;
 const PROJECTION_BYTES_MAX: usize = 65_536;

@@ -10,6 +10,7 @@ use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -194,6 +195,14 @@ impl TerminalSession {
     /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
     /// Input: prompt text. Output: Ok, `launch_busy` while a turn runs, or a refusal code.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
+        self.send_or_cancel(prompt, &AtomicBool::new(false))
+    }
+
+    /// Sends one prompt as [`Self::send`] does, but gives up waiting for the first screen
+    /// as soon as `cancel` is set, so a stop never waits on a harness that does not draw.
+    /// Inputs: prompt text and the cancel flag. Output: Ok, `launch_cancelled` when the
+    /// flag was set before the prompt was typed, or the refusal codes of `send`.
+    pub fn send_or_cancel(&mut self, prompt: &str, cancel: &AtomicBool) -> Result<(), LaunchError> {
         self.require_live()?;
         if self.turn {
             return Err(failure("launch_busy"));
@@ -202,7 +211,7 @@ impl TerminalSession {
             return Err(failure("launch_prompt_too_long"));
         }
         if !self.ready {
-            self.wait_ready()?;
+            self.wait_ready(cancel)?;
         }
         for part in paste(prompt) {
             self.type_bytes(part.as_bytes())?;
@@ -277,12 +286,15 @@ impl TerminalSession {
         self.host.input(&self.agent, bytes).map_err(host_failure)
     }
 
-    fn wait_ready(&mut self) -> Result<(), LaunchError> {
+    fn wait_ready(&mut self, cancel: &AtomicBool) -> Result<(), LaunchError> {
         let mut stream = self.host.attach(&self.agent).map_err(host_failure)?;
         let started = Instant::now();
         let mut drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
         let mut quiet = Instant::now();
         while started.elapsed() < READY_WAIT {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(failure("launch_cancelled"));
+            }
             std::thread::sleep(POLL);
             loop {
                 match stream.chunks.try_recv() {
@@ -438,6 +450,16 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.send(prompt),
             Self::Terminal(session) => session.send(prompt),
+        }
+    }
+
+    /// Sends one prompt, giving up on a pane app's first screen once `cancel` is set.
+    /// Inputs: prompt text and the cancel flag. Output: Ok, `launch_cancelled`, or a plain
+    /// refusal code such as `launch_busy`.
+    pub fn send_or_cancel(&mut self, prompt: &str, cancel: &AtomicBool) -> Result<(), LaunchError> {
+        match self {
+            Self::Piped(session) => session.send(prompt),
+            Self::Terminal(session) => session.send_or_cancel(prompt, cancel),
         }
     }
 

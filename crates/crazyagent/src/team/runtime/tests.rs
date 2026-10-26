@@ -738,6 +738,83 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     assert!(!fanout.with_extension("moved").exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(managed.join("auth.json"), "{}").unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
+        let (_, plan, mode) = runtime
+            .prepare(&fixture.setup, id, role, "codex", true, &account)
+            .unwrap();
+        let own = runtime.agent_folder(id).join("home");
+        match mode {
+            Mode::PerTurn { home } => assert_eq!(home, own),
+            Mode::Kept { .. } => panic!("a managed agent must take its account per turn"),
+        }
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let script = format!(
+            "(echo x > {planted}) 2>/dev/null && echo plant=written || echo plant=refused\n\
+             (cat {credential} > /dev/null) 2>/dev/null && echo read=done || echo read=refused\n\
+             (echo x > {mine}) 2>/dev/null && echo own=written || echo own=refused\n",
+            planted = quoted(&managed.join("AGENTS.md")),
+            credential = quoted(&managed.join("auth.json")),
+            mine = quoted(&own.join("note.txt")),
+        );
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&plan.sandbox_profile)
+                .args(["/bin/sh", "-c", &script])
+                .current_dir(&plan.working_dir)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &own)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "plant=refused\nread=refused\nown=written\n",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!managed.join("AGENTS.md").exists());
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
@@ -857,16 +934,23 @@ fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its
     assert_eq!(end, TurnEnd::Closed);
     assert_eq!(
         with_code(PROCESS_CLOSED, cause.as_deref()),
-        "The agent process closed (code: launch_protocol_failed)"
+        "The agent process closed. (launch_protocol_failed)"
     );
     assert_eq!(
         with_code(
             "The agent could not start",
             Some("No such file: /Users/mira/key")
         ),
-        "The agent could not start (code: engine_text_withheld)"
+        "The agent could not start. (engine_text_withheld)"
     );
     assert_eq!(with_code(PROCESS_CLOSED, None), PROCESS_CLOSED);
+    assert_eq!(
+        with_code(
+            "The master stopped before it replied.",
+            Some("launch_input_closed")
+        ),
+        "The master stopped before it replied. (launch_input_closed)"
+    );
     let fixture = Fixture::new(1);
     let mut team = fixture.runtime();
     fixture
@@ -887,6 +971,91 @@ fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its
         .unwrap();
     assert_eq!(
         problem,
-        "The sub-agent stopped unexpectedly (code: launch_input_closed)"
+        "The sub-agent stopped unexpectedly. (launch_input_closed)"
     );
+}
+
+/// The owner stops a sub-agent while its harness has not drawn its screen yet, which a
+/// slow first launch, an update check or a sign-in screen can make last up to the whole
+/// ready wait. The stop ends the agent, its pane and its process group within one bound,
+/// not after the ready wait.
+#[test]
+fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
+    const STOP_BOUND: Duration = Duration::from_secs(5);
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0);
+    let group = i32::try_from(member.process_group.unwrap()).unwrap();
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    let register = listed[0].id.clone();
+
+    let asked = Instant::now();
+    let stopper = {
+        let agents = agents.clone();
+        std::thread::spawn(move || agents.stop(&register))
+    };
+    while fixture.agent_status(member.id).0 != AgentStatus::Stopped {
+        assert!(
+            asked.elapsed() < STOP_BOUND,
+            "the agent still runs {:?} after the owner's stop: {:#?}",
+            asked.elapsed(),
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stopped = stopper.join().unwrap().unwrap();
+    assert_eq!(stopped.state, RunState::Stopped);
+    assert!(!stopped.can_stop);
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(member.id).unwrap())
+    );
+    assert!(!crate::agents::tests::alive(group));
+    assert!(team.shutdown().unwrap().is_empty());
 }

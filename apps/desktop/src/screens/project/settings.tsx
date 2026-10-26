@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { assignPool, failureCopy, loadProjectCatalog, loadProjects, receiptState, removeProject, updateProjectSetup } from "../../api-projects";
+import { failureCopy, loadProjectCatalog, loadProjects, receiptState, removeProject, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { ProjectCatalog, StoredSetup } from "../../api-projects";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -40,14 +40,20 @@ export function setupOf(setup: Pick<StoredSetup, "about" | "tech_stack" | "platf
   return { about: setup.about, tech_stack: setup.tech_stack, platforms: setup.platforms, research: setup.research, pool: setup.pool, team: wireTeam(team), documents: [] };
 }
 
-/** Plans Save pool: assign the chosen pool when it isn't assigned yet, take the project off the
- * old one, and record the choice in the project details when they name another pool. Inputs: the
- * assigned pool, the pool the details name (undefined without details) and the choice.
- * Output: the steps; nothing to do when the choice is already assigned and recorded. */
-export function poolSteps(assigned: string | null, recorded: string | null | undefined, choice: string | null): { add: boolean; drop: string | null; record: boolean } {
-  if (!choice) return { add: false, drop: null, record: false };
-  const add = choice !== assigned;
-  return { add, drop: add && assigned ? assigned : null, record: recorded !== undefined && recorded !== choice };
+/** The no-pool choice Project Settings offers: the project keeps its settings and waits. */
+export const NO_POOL = { label: "No pool", note: "The master and agents wait and show Pick a pool to start." } as const;
+
+/** Plans Save pool: give the project the chosen pool, or none, when that isn't so yet, and record
+ * the choice in the project details when they name another. Inputs: the assigned pool, the pool
+ * the details name (undefined without details) and the choice (null for none). Output: the steps;
+ * nothing to do when the choice is already assigned and recorded. */
+export function poolSteps(assigned: string | null, recorded: string | null | undefined, choice: string | null): { assign: boolean; record: boolean } {
+  return { assign: choice !== assigned, record: recorded !== undefined && recorded !== choice };
+}
+
+/** The line after Save pool. Input: the chosen pool's name, or null for none. Output: the line. */
+export function poolSaved(name: string | null): string {
+  return name === null ? "This project has no pool now. Pick a pool to start." : `${name} is assigned.`;
 }
 
 function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
@@ -60,28 +66,26 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
   const steps = poolSteps(data.assigned?.pool.id ?? null, setup ? setup.pool : undefined, choice);
 
   async function save() {
-    if (!choice) return;
     setState({ busy: true, error: "" });
-    const label = (id: string) => { const found = valueOf(data.pools)?.find((item) => item.pool.id === id); return found ? poolName(found.pool) : id; };
+    const found = choice === null ? undefined : valueOf(data.pools)?.find((item) => item.pool.id === choice);
+    const name = choice === null ? null : found ? poolName(found.pool) : "The pool";
     let error = "";
-    if (steps.add) {
-      const added = await assignPool(data.id, choice, nextGeneration());
-      error = added.kind !== "ok" ? failureCopy(added.kind === "error" ? added.code : "unknown")
-        : added.value.kind === "rejected" ? failureCopy(added.value)
-          : added.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
-    }
-    if (!error && steps.drop) {
-      const removed = await assignPool(data.id, steps.drop, nextGeneration(), true);
-      if (removed.kind !== "ok" || removed.value.kind !== "applied") error = `${label(choice)} is assigned, but ${label(steps.drop)} still lists this project. Try again.`;
+    if (steps.assign) {
+      const assigned = await setProjectPool(data.id, choice, nextGeneration());
+      error = assigned.kind !== "ok" ? failureCopy(assigned.kind === "error" ? assigned.code : "unknown")
+        : assigned.value.kind === "rejected" ? failureCopy(assigned.value)
+          : assigned.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
     }
     if (!error && steps.record && setup) {
       const recorded = await updateProjectSetup(data.id, { ...setupOf(setup, setup.team), pool: choice }, nextGeneration(), null, setup.revision);
-      if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") error = `${label(choice)} is assigned and research can use it, but the project details still name the old pool. Save again.`;
+      if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") {
+        error = `${choice === null ? "The project has no pool" : `${name} is assigned`}, but the project details still name the old pool. Save again.`;
+      }
     }
     setState({ busy: false, error });
     data.reloadPools();
     data.reload();
-    if (!error) data.notify("Pool saved.");
+    if (!error) data.notify(poolSaved(name));
   }
 
   return <div className="pj-stack">
@@ -91,9 +95,10 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
     {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
-    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries.kind === "ok" ? summaries.value : []} value={choice} later={false} onChange={setChoice} />}
+    {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries.kind === "ok" ? summaries.value : []} value={choice}
+      later laterLabel={NO_POOL.label} laterNote={NO_POOL.note} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
-    <div><button type="button" className="btn primary" disabled={!(steps.add || steps.record) || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
+    <div><button type="button" className="btn primary" disabled={!(steps.assign || steps.record) || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
   </div>;
 }
 

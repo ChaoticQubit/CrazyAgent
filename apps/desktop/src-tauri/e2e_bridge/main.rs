@@ -1,6 +1,6 @@
 mod routes;
 
-use crazyagent_desktop::bridge::{BridgeError, NativeBridge};
+use crazyagent_desktop::bridge::{BridgeError, BridgeQueue, NativeBridge};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -9,14 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::MutexGuard;
 
 const HEAD_BYTES_MAX: usize = 16 * 1024;
 const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 
 /// The one bridge every route shares, as the app's `NativeState` does.
-type Shared = Arc<Mutex<NativeBridge>>;
+type Shared = Arc<BridgeQueue>;
 
 /// What a routed command answers the page's invoke with: its value, its own failure,
 /// Tauri's refusal of its arguments, or no such command.
@@ -27,10 +27,10 @@ enum Routed {
     Unknown,
 }
 
-/// Takes the shared bridge or refuses with `busy` while another command holds it, the
-/// same try-lock the app's commands use. Input: the shared bridge. Output: its guard.
-fn lock(state: &Shared) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
-    state.try_lock().map_err(|_| BridgeError { code: "busy" })
+/// Takes the shared bridge through the same bounded queue the app's commands use.
+/// Input: the shared bridge. Output: its guard, or `busy` past the queue's bounds.
+async fn lock(state: &Shared) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
+    state.enter().await
 }
 
 /// Reads a command's camelCase arguments the way Tauri does, refusing ones that do not fit.
@@ -169,7 +169,9 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
     assert!(address.ip().is_loopback());
-    let state: Shared = Arc::new(Mutex::new(NativeBridge::new(Some(PathBuf::from(socket)))));
+    let state: Shared = Arc::new(BridgeQueue::new(NativeBridge::new(Some(PathBuf::from(
+        socket,
+    )))));
     let token = Arc::new(token);
     std::thread::spawn(|| {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());

@@ -1,6 +1,6 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, inspectModelAccess, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, editModelAccess, masterState, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
@@ -197,7 +197,7 @@ const copy: Record<string, string> = {
   context_item_missing: "This file isn't in the project folder anymore.",
   context_item_unreadable: "This file can't be read.",
   context_path_invalid: "This file can't be opened here.",
-  master_open_unavailable: "This project needs a pool before the master can reply.",
+  master_open_unavailable: "Pick a pool to start. Choose one in this project's Settings, Pool.",
   master_project_mismatch: "The conversation opened for another project. Open this project again.",
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
@@ -234,19 +234,12 @@ export function failureSentence(code: string): string | undefined {
   return Object.hasOwn(copy, code) ? copy[code] : knownError(code);
 }
 
-/** Adds a project and the master role to a pool without changing anything else.
- * Inputs: the saved pool and the project id. Output: the new pool record. */
-export function assignedPool(pool: AccountPool, projectId: string): AccountPool {
-  const projects = pool.projects.includes(projectId) ? [...pool.projects] : [...pool.projects, projectId];
-  const roles = pool.roles.includes("project_leader") ? [...pool.roles] : [...pool.roles, "project_leader"];
-  if (projects.length > 64 || roles.length > 64) throw new Error("A pool allows at most 64 project and 64 role assignments.");
-  return { ...pool, projects, roles };
-}
-
-/** Removes one project from a pool's assignments and keeps everything else.
- * Inputs: the saved pool and the project id. Output: the new pool record. */
-export function unassignedPool(pool: AccountPool, projectId: string): AccountPool {
-  return pool.projects.includes(projectId) ? { ...pool, projects: pool.projects.filter((id) => id !== projectId) } : pool;
+/** Says whether the saved pools give a project exactly the chosen pool, or none.
+ * Inputs: the saved pools, the project id and the chosen pool id (null for none).
+ * Output: true when only the chosen pool lists the project. */
+export function projectPoolIs(pools: readonly AccountPool[], projectId: string, poolId: string | null): boolean {
+  const holding = pools.filter((pool) => pool.projects.includes(projectId)).map((pool) => pool.id);
+  return poolId === null ? holding.length === 0 : holding.length === 1 && holding[0] === poolId;
 }
 
 export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string } | { kind: "unconfirmed" };
@@ -469,22 +462,36 @@ export function loadProjects(): Promise<Result<ProjectPage["items"]>> {
   });
 }
 
-/** Assigns a saved pool to a project as its master pool, or removes that assignment,
- * then reads the saved record back. Inputs: the project id, the pool id, a generation and
- * whether to remove. Output: applied, or why not. */
-export async function assignPool(projectId: string, poolId: string, generation: number, remove = false): Promise<Result<ReceiptState>> {
+/** Names the projects a saved pool serves, for the delete confirm.
+ * Input: the pool id. Output: the project names in engine order; one not listed reads "a project". */
+export function projectsUsing(poolId: string): Promise<Result<string[]>> {
+  return wrap(async () => {
+    const record = (await allRecords("pools")).find((item) => item.kind === "pool" && item.pool.id === poolId);
+    const ids = record?.kind === "pool" ? record.pool.projects : [];
+    if (ids.length === 0) return [];
+    let page = await projects(false);
+    const names = new Map(page.items.map((item) => [item.id, item.name]));
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await projects(true);
+      for (const item of page.items) names.set(item.id, item.name);
+    }
+    return ids.map((id) => names.get(id) ?? "a project");
+  });
+}
+
+/** Gives a project exactly one saved pool, or none, in one engine change, then reads the pools
+ * back. Inputs: the project id, the pool id (null for none) and a generation. Output: applied,
+ * or why not. */
+export async function setProjectPool(projectId: string, poolId: string | null, generation: number): Promise<Result<ReceiptState>> {
   return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
-    const basis = await inspectModelAccess("pools", poolId);
-    if (basis.record.kind !== "pool" || !basis.writable) throw { code: "invalid_pool" };
-    const pool = remove ? unassignedPool(basis.record.pool, projectId) : assignedPool(basis.record.pool, projectId);
-    if (JSON.stringify(pool) === JSON.stringify(basis.record.pool)) return { kind: "applied" } as ReceiptState;
-    const state = receiptState(await editModelAccess(basis.ticket, { kind: "replace_pool", pool }, generation));
+    const page = await modelAccessPage("pools", false);
+    if (!page.writable) throw { code: "settings_read_only" };
+    const state = receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
     if (state.kind !== "applied") return state;
-    const saved = await inspectModelAccess("pools", poolId);
-    if (saved.record.kind !== "pool" || JSON.stringify(saved.record.pool) !== JSON.stringify(pool)) return { kind: "unconfirmed" } as ReceiptState;
-    return state;
+    const saved = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
+    return projectPoolIs(saved, projectId, poolId) ? state : { kind: "unconfirmed" } as ReceiptState;
   });
 }
 

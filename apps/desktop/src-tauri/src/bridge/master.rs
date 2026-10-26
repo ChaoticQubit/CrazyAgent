@@ -516,13 +516,11 @@ fallback_allowed = false
         assert_eq!(page.turns[0].id.as_str(), submitted.intent.operation_id);
         assert_eq!(page.turns[0].session_id, session.session_id);
         assert_eq!(page.turns[0].phase, MasterTurnPhase::Blocked);
-        assert_eq!(page.turns[0].reason, Some(MasterReason::Unknown));
-        let code = page.turns[0]
-            .reason_code
-            .as_deref()
-            .ok_or("an unknown reason reached the window without its engine code")?;
-        assert_eq!(crazyagent::protocol::plain_code(code), code);
-        assert_ne!(code, crazyagent::protocol::TEXT_WITHHELD);
+        assert_eq!(page.turns[0].reason, Some(MasterReason::RuntimeUnavailable));
+        assert_eq!(
+            page.turns[0].cause.as_deref(),
+            Some("rcli_profile_configuration_required")
+        );
         assert!(page.turns[0].attempt.is_none());
         assert!(page.turns[0].runtime.is_none());
         assert!(page.turns[0].reply.is_none());

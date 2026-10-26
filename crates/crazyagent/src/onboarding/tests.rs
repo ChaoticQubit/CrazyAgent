@@ -354,3 +354,20 @@ fn a_setup_folder_swapped_for_a_link_mid_save_is_never_written_through() {
         "a save wrote {leaked:?} into the linked folder after {saves} saves and {swaps} swaps"
     );
 }
+
+#[test]
+fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
+    let system = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let bin = root.path().join("setup/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    symlink(&system, bin.join("graphify")).unwrap();
+    assert_eq!(
+        service::engine_graphify(root.path()),
+        Some(bin.join("graphify"))
+    );
+    std::fs::remove_file(bin.join("graphify")).unwrap();
+    let found = service::engine_graphify(root.path()).expect("the system graphify");
+    assert_eq!(found.canonicalize().unwrap(), system);
+}
